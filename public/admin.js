@@ -9875,7 +9875,7 @@ function renderProductListTable(orgId, products){
       <td class="stack-actions">
         <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products/'+encodeURIComponent(this.dataset.product)+'/edit'">Edit</button>
         <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-visible="${p.visible ? "0" : "1"}" onclick="toggleProductVisible(this.dataset.org, this.dataset.product, this.dataset.visible === '1')" style="margin-top:4px;">${p.visible ? "Hide" : "Show"}</button>
-        ${p.configurable ? "" : `<button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-product-name="${escapeHtml(p.name)}" data-pricing-mode="${escapeHtml(p.pricingMode || "sized")}" data-size-pricing="${escapeHtml(JSON.stringify(p.sizePricing || {}))}" onclick="showStockModal(this.dataset.org, this.dataset.product, this.dataset.productName, this.dataset.pricingMode, JSON.parse(this.dataset.sizePricing))" style="margin-top:4px;" title="Finished stock: pieces already decorated for this shop">Stock</button>`}
+        ${`<button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-product-name="${escapeHtml(p.name)}" data-pricing-mode="${escapeHtml(p.pricingMode || "sized")}" data-size-pricing="${escapeHtml(JSON.stringify(p.sizePricing || {}))}" onclick="showStockModal(this.dataset.org, this.dataset.product, this.dataset.productName, this.dataset.pricingMode, JSON.parse(this.dataset.sizePricing))" style="margin-top:4px;" title="Finished stock: pieces already decorated for this shop">Stock</button>`}
       </td>
     </tr>`;
   // One table per category, with the same column widths so the sections line up.
@@ -10135,12 +10135,103 @@ async function refreshProductList_(orgId){
 // finished pieces at that cost; Correct count records a counted number as a correction. History lists
 // every change, and a manager can void a mistaken make / count / opening entry.
 const FINISHED_KIND_LABELS_ = { opening: "Opening count", make: "Made for stock", sell: "Pulled for an order", return: "Put back from an order", adjust: "Count corrected" };
+// What Make for stock did: the cost per piece, the transfers it used (migrations/0081) and any that went below zero.
+function madeForStockMsg_(qty, r, money) {
+  const t = r.transfers || [];
+  const short = t.filter(x => x.short > 0);
+  return `Made ${qty} for stock at ${money(r.unitCost)} each` + (t.length ? ` — used ${t.map(x => x.used + " × " + x.name).join(", ")} from transfer stock` : "") + "." +
+    (short.length ? ` Transfer stock is now short: ${short.map(x => x.name + " by " + x.short).join(", ")} — receive the sheet when it comes.` : "");
+}
+// Stock window, a product with choices (migrations/0080): pick a combination — color, the graphic (and ink) at each
+// spot, size — to make for stock or enter a count for. The server checks it the way an order's picks are checked.
+function stockNewComboHtml_(f) {
+  const o = f.options || { colors: [], sizes: [], locations: [] };
+  const sel = "padding:5px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;max-width:100%;";
+  return `<div id="fsNew" style="margin-top:14px;padding:10px 12px;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa;">
+    <div style="font-weight:600;font-size:13px;margin-bottom:8px;">Add stock of a combination</div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;font-size:12px;">
+      <label style="display:flex;flex-direction:column;gap:3px;">Color
+        <select id="fsNewColor" style="${sel}">${o.colors.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("")}</select></label>
+      ${o.locations.map(l => `<label style="display:flex;flex-direction:column;gap:3px;">${escapeHtml(l.label)}
+        <span style="display:flex;gap:4px;"><select class="fsNewLoc" data-loc="${escapeHtml(l.key)}" style="${sel}" aria-label="Graphic, ${escapeHtml(l.label)}"></select>
+        <select class="fsNewInk" data-loc="${escapeHtml(l.key)}" style="${sel}display:none;" aria-label="Ink, ${escapeHtml(l.label)}"></select></span></label>`).join("")}
+      ${f.flat ? "" : `<label style="display:flex;flex-direction:column;gap:3px;">Size
+        <select id="fsNewSize" style="${sel}">${o.sizes.map(z => `<option value="${escapeHtml(z)}">${escapeHtml(z)}</option>`).join("")}</select></label>`}
+    </div>
+    <div id="fsNewBlank" style="font-size:12px;color:#555;margin:8px 0;"></div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+      <input type="number" min="1" step="1" id="fsNewQty" placeholder="Qty" style="width:64px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;text-align:right;" aria-label="How many made">
+      <button type="button" class="admin-btn" id="fsNewMake" style="padding:3px 8px;font-size:12px;">Make for stock</button>
+      <span style="color:#999;">or</span>
+      <input type="number" min="0" step="1" id="fsNewCount" placeholder="Count" style="width:64px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;text-align:right;" aria-label="Counted on hand">
+      <button type="button" class="admin-btn" id="fsNewCorrect" style="padding:3px 8px;font-size:12px;background:#fff;color:#333;border:1px solid #ccc;">Enter count</button>
+    </div></div>`;
+}
+function wireStockNewCombo_(ov, f, { orgId, productId, err, money, reload }) {
+  const box = ov.querySelector("#fsNew"); if (!box) return;
+  const o = f.options || { colors: [], sizes: [], locations: [], blocked: [] };
+  const $ = (q) => box.querySelector(q);
+  const color = () => ($("#fsNewColor") || {}).value || "";
+  const size = () => f.flat ? "" : (($("#fsNewSize") || {}).value || "");
+  // A spot's graphics for the color picked: the ones offered on it (not left out by the graphic or by this product).
+  const offered = (loc, c) => loc.graphics.filter(g => !(g.allowedGarmentColors.length && c && !g.allowedGarmentColors.includes(c)) &&
+    !(o.blocked || []).some(b => Number(b.graphicId) === g.id && b.color === c));
+  const drawLocs = () => {
+    box.querySelectorAll(".fsNewLoc").forEach(selEl => {
+      const loc = o.locations.find(l => l.key === selEl.dataset.loc), was = selEl.value;
+      const list = offered(loc, color());
+      selEl.innerHTML = `<option value="">None</option>` + list.map(g => `<option value="${g.id}">${escapeHtml(g.name)}</option>`).join("");
+      if (list.some(g => String(g.id) === was)) selEl.value = was;
+      drawInk(selEl);
+    });
+  };
+  const drawInk = (selEl) => {
+    const loc = o.locations.find(l => l.key === selEl.dataset.loc), g = loc.graphics.find(x => String(x.id) === selEl.value);
+    const ink = box.querySelector(`.fsNewInk[data-loc="${attrSel_(selEl.dataset.loc)}"]`);
+    const inks = g ? g.inkColors : [];
+    ink.innerHTML = inks.map(x => `<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`).join("");
+    ink.style.display = inks.length > 1 ? "" : "none";
+  };
+  const drawBlank = () => {
+    const b = ((f.links || {})[color()] || {})[size()];
+    $("#fsNewBlank").innerHTML = b ? `Made from ${escapeHtml(b.name)}${b.color ? " · " + escapeHtml(b.color) : ""}${b.size && b.size !== "OSFA" ? " · " + escapeHtml(b.size) : ""} — ${b.free} ready to decorate · ${money(b.avgCost)} each`
+      : `<span style="color:#b03a2e;">${escapeHtml(color() || "This color")}${size() ? " " + escapeHtml(size()) : ""} isn't linked to a blank — link it on the product to make it for stock (a count can still be entered).</span>`;
+    $("#fsNewMake").disabled = !b;
+  };
+  const picks = () => [...box.querySelectorAll(".fsNewLoc")].filter(x => x.value).map(x => {
+    const ink = box.querySelector(`.fsNewInk[data-loc="${attrSel_(x.dataset.loc)}"]`);
+    return { location: x.dataset.loc, graphicId: Number(x.value), ink: ink && ink.options.length ? ink.value : "" };
+  });
+  const combo = () => ({ color: color(), picks: picks() });
+  if ($("#fsNewColor")) $("#fsNewColor").onchange = () => { drawLocs(); drawBlank(); };
+  if ($("#fsNewSize")) $("#fsNewSize").onchange = drawBlank;
+  box.querySelectorAll(".fsNewLoc").forEach(x => x.onchange = () => drawInk(x));
+  drawLocs(); drawBlank();
+  $("#fsNewMake").onclick = async () => {
+    const qty = parseInt($("#fsNewQty").value, 10);
+    if (!(qty > 0)) { err.textContent = "Enter how many were made."; return; }
+    const at = await askWhen_(`Make ${qty} for stock?`, { whenLabel: "When were they made?" });
+    if (!at) return;
+    $("#fsNewMake").disabled = true;
+    try { const r = await hoopApi_({ action: "makeForStock", org: orgId, productId, size: size(), qty, occurredAt: at, ...combo() }); showToast(madeForStockMsg_(qty, r, money)); await reload(); }
+    catch (e) { err.textContent = e.message; $("#fsNewMake").disabled = false; }
+  };
+  $("#fsNewCorrect").onclick = async () => {
+    const quantity = parseInt($("#fsNewCount").value, 10);
+    if (!(quantity >= 0)) { err.textContent = "Enter the count on hand (0 or more)."; return; }
+    const at = await askWhen_(`Set the count to ${quantity}?`, { whenLabel: "When was it counted?" });
+    if (!at) return;
+    try { const r = await hoopApi_({ action: "setReadyToShipQty", org: orgId, productId, size: size(), quantity, at, ...combo() }); showToast(r.delta ? "Count entered." : "No change."); await reload(); }
+    catch (e) { err.textContent = e.message; }
+  };
+}
+
 async function showStockModal(orgId, productId, productName, pricingMode, sizePricing) {
   const td = "padding:6px 8px;border-bottom:1px solid #eee;font-size:13px;vertical-align:top;", num = "text-align:right;font-variant-numeric:tabular-nums;";
   const inp = "width:64px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;text-align:right;";
   const money = (n) => "$" + Number(n || 0).toFixed(2);
   const { ov, close } = inventoryModal_("Finished stock — " + escapeHtml(productName || productId), `
-    <div style="font-size:12px;color:#666;margin-bottom:10px;">Pieces already decorated for this shop, ready to sell. <b>Make for stock</b> takes the blanks out of blank inventory at their cost;
+    <div style="font-size:12px;color:#666;margin-bottom:10px;">Pieces already decorated for this shop, ready to sell. <b>Make for stock</b> takes the blanks out of blank inventory — and the transfers each piece carries (printed transfers, the reorder QR, a picked transfer graphic) out of transfer stock — at their cost;
       an order for a stocked size is filled from here automatically (no blanks or making steps), and the pieces are <b>set aside</b> until the order is made.</div>
     <div id="fsBody" style="color:#888;font-size:13px;">Loading…</div>
     <div id="fsErr" role="alert" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
@@ -10162,58 +10253,62 @@ async function showStockModal(orgId, productId, productName, pricingMode, sizePr
     } catch (e) { ov.querySelector("#fsBody").innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
     const f = d.finished;
     if (!f) { ov.querySelector("#fsBody").textContent = "Product not found."; return; }
-    if (f.configurable) {
-      ov.querySelector("#fsBody").innerHTML = `<div style="color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:8px 10px;">This product has color and graphic choices — each finished piece would be one combination, so it can't be stocked yet.</div>`;
-    } else {
-      const rows = f.sizes.map(r => {
-        const label = f.flat ? "One size" : r.size;
-        const made = r.blank
-          ? `<div>${escapeHtml(r.blank.name)}${r.blank.color ? " · " + escapeHtml(r.blank.color) : ""}${r.blank.size && r.blank.size !== "OSFA" ? " · " + escapeHtml(r.blank.size) : ""}</div><div style="color:#777;font-size:11px;" title="Blanks on hand less what's set aside for orders">${r.blank.free} ready to decorate · ${money(r.blank.avgCost)} each</div>`
-          : `<span style="color:#b03a2e;font-size:12px;">Not linked to a blank</span>`;
-        return `<tr data-size="${escapeHtml(r.size)}">
-          <td style="${td}font-weight:600;">${escapeHtml(label)}</td>
-          <td style="${td}${num}">${r.onHand}</td>
-          <td style="${td}${num}" ${r.setAside ? `title="Set aside for ${escapeHtml(r.setAsideOrders.join(", "))}"` : ""}>${r.setAside || "—"}${r.setAside ? `<div style="font-size:10px;color:#777;">${escapeHtml(r.setAsideOrders.join(", "))}</div>` : ""}</td>
-          <td style="${td}${num}font-weight:600;">${r.available}</td>
-          <td style="${td}${num}">${money(r.avgCost)}</td>
-          <td style="${td}${num}">${money(r.value)}</td>
-          <td style="${td}">${made}</td>
-          <td style="${td}white-space:nowrap;">
-            <div style="margin-bottom:4px;"><input type="number" min="1" step="1" class="fsMakeQty" placeholder="Qty" style="${inp}" ${r.blank ? "" : "disabled"} aria-label="How many made, ${escapeHtml(label)}">
-              <button type="button" class="admin-btn fsMake" style="padding:3px 8px;font-size:12px;" ${r.blank ? "" : "disabled title=\"Link this size to a blank on the product first\""}>Make for stock</button></div>
-            <div><input type="number" min="0" step="1" class="fsCount" value="${r.onHand}" style="${inp}" aria-label="Counted on hand, ${escapeHtml(label)}">
-              <button type="button" class="admin-btn fsCorrect" style="padding:3px 8px;font-size:12px;background:#fff;color:#333;border:1px solid #ccc;">Correct count</button></div>
-          </td></tr>`;
-      }).join("");
-      ov.querySelector("#fsBody").innerHTML = `<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;min-width:720px;">
-        <thead><tr style="text-align:left;background:#f3f4f6;font-size:12px;"><th style="padding:6px 8px;">Size</th><th style="padding:6px 8px;${num}">On hand</th><th style="padding:6px 8px;${num}">Set aside</th>
-          <th style="padding:6px 8px;${num}">Available</th><th style="padding:6px 8px;${num}">Avg cost</th><th style="padding:6px 8px;${num}">Value</th><th style="padding:6px 8px;">Made from</th><th style="padding:6px 8px;"></th></tr></thead>
-        <tbody>${rows}</tbody></table></div>`;
-      ov.querySelectorAll(".fsMake").forEach(btn => btn.onclick = async () => {
-        const tr = btn.closest("tr"), qty = parseInt(tr.querySelector(".fsMakeQty").value, 10);
-        if (!(qty > 0)) { err.textContent = "Enter how many were made."; return; }
-        const at = await askWhen_(`Make ${qty} for stock?`, { whenLabel: "When were they made?" });
-        if (!at) return;
-        btn.disabled = true;
-        try { const r = await hoopApi_({ action: "makeForStock", org: orgId, productId, size: tr.dataset.size, qty, occurredAt: at }); showToast(`Made ${qty} for stock at ${money(r.unitCost)} each.`); await load(); }
-        catch (e) { err.textContent = e.message; btn.disabled = false; }
-      });
-      ov.querySelectorAll(".fsCorrect").forEach(btn => btn.onclick = async () => {
-        const tr = btn.closest("tr"), quantity = parseInt(tr.querySelector(".fsCount").value, 10);
-        if (!(quantity >= 0)) { err.textContent = "Enter the count on hand (0 or more)."; return; }
-        const at = await askWhen_(`Correct the count to ${quantity}?`, { whenLabel: "When was it counted?" });
-        if (!at) return;
-        btn.disabled = true;
-        try { const r = await hoopApi_({ action: "setReadyToShipQty", org: orgId, productId, size: tr.dataset.size, quantity, at }); showToast(r.delta ? "Count corrected." : "No change."); await load(); }
-        catch (e) { err.textContent = e.message; btn.disabled = false; }
-      });
-    }
+    // One row per size — and, for a product with choices, per combination (migrations/0080): data-variant is its key.
+    const rowHtml = (r, comboLabel) => {
+      const label = f.flat ? "One size" : r.size, aria = (comboLabel ? comboLabel + ", " : "") + label;
+      const made = r.blank
+        ? `<div>${escapeHtml(r.blank.name)}${r.blank.color ? " · " + escapeHtml(r.blank.color) : ""}${r.blank.size && r.blank.size !== "OSFA" ? " · " + escapeHtml(r.blank.size) : ""}</div><div style="color:#777;font-size:11px;" title="Blanks on hand less what's set aside for orders">${r.blank.free} ready to decorate · ${money(r.blank.avgCost)} each</div>`
+        : `<span style="color:#b03a2e;font-size:12px;">Not linked to a blank</span>`;
+      return `<tr data-size="${escapeHtml(r.size)}" data-variant="${escapeHtml(r.variant || "")}">
+        ${f.configurable ? `<td style="${td}">${escapeHtml(comboLabel || "")}</td>` : ""}
+        <td style="${td}font-weight:600;">${escapeHtml(label)}</td>
+        <td style="${td}${num}">${r.onHand}</td>
+        <td style="${td}${num}" ${r.setAside ? `title="Set aside for ${escapeHtml(r.setAsideOrders.join(", "))}"` : ""}>${r.setAside || "—"}${r.setAside ? `<div style="font-size:10px;color:#777;">${escapeHtml(r.setAsideOrders.join(", "))}</div>` : ""}</td>
+        <td style="${td}${num}font-weight:600;">${r.available}</td>
+        <td style="${td}${num}">${money(r.avgCost)}</td>
+        <td style="${td}${num}">${money(r.value)}</td>
+        <td style="${td}">${made}</td>
+        <td style="${td}white-space:nowrap;">
+          <div style="margin-bottom:4px;"><input type="number" min="1" step="1" class="fsMakeQty" placeholder="Qty" style="${inp}" ${r.blank ? "" : "disabled"} aria-label="How many made, ${escapeHtml(aria)}">
+            <button type="button" class="admin-btn fsMake" style="padding:3px 8px;font-size:12px;" ${r.blank ? "" : "disabled title=\"Link this size to a blank on the product first\""}>Make for stock</button></div>
+          <div><input type="number" min="0" step="1" class="fsCount" value="${r.onHand}" style="${inp}" aria-label="Counted on hand, ${escapeHtml(aria)}">
+            <button type="button" class="admin-btn fsCorrect" style="padding:3px 8px;font-size:12px;background:#fff;color:#333;border:1px solid #ccc;">Correct count</button></div>
+        </td></tr>`;
+    };
+    const head = `<thead><tr style="text-align:left;background:#f3f4f6;font-size:12px;">${f.configurable ? `<th style="padding:6px 8px;">Combination</th>` : ""}<th style="padding:6px 8px;">Size</th><th style="padding:6px 8px;${num}">On hand</th><th style="padding:6px 8px;${num}">Set aside</th>
+        <th style="padding:6px 8px;${num}">Available</th><th style="padding:6px 8px;${num}">Avg cost</th><th style="padding:6px 8px;${num}">Value</th><th style="padding:6px 8px;">Made from</th><th style="padding:6px 8px;"></th></tr></thead>`;
+    const rowsHtml = f.configurable ? (f.combinations || []).map(c => c.sizes.map(r => rowHtml(r, c.label)).join("")).join("") : f.sizes.map(r => rowHtml(r, "")).join("");
+    ov.querySelector("#fsBody").innerHTML = (f.configurable ? `<div style="font-size:12px;color:#555;margin-bottom:8px;">This product has color and graphic choices, so stock is kept per <b>combination</b> — an order uses it only when its color, graphics and size match exactly.</div>` : "") +
+      (rowsHtml ? `<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;min-width:${f.configurable ? 860 : 720}px;">${head}<tbody>${rowsHtml}</tbody></table></div>`
+        : `<div style="color:#777;font-size:13px;">No combinations in stock yet.</div>`) +
+      (f.configurable ? stockNewComboHtml_(f) : "");
+    // The combination a row or the new-combination form is about.
+    const comboOf = (tr) => tr && tr.dataset.variant ? { variant: tr.dataset.variant } : {};
+    ov.querySelectorAll("#fsBody tbody .fsMake").forEach(btn => btn.onclick = async () => {
+      const tr = btn.closest("tr"), qty = parseInt(tr.querySelector(".fsMakeQty").value, 10);
+      if (!(qty > 0)) { err.textContent = "Enter how many were made."; return; }
+      const at = await askWhen_(`Make ${qty} for stock?`, { whenLabel: "When were they made?" });
+      if (!at) return;
+      btn.disabled = true;
+      try { const r = await hoopApi_({ action: "makeForStock", org: orgId, productId, size: tr.dataset.size, qty, occurredAt: at, ...comboOf(tr) }); showToast(madeForStockMsg_(qty, r, money)); await load(); }
+      catch (e) { err.textContent = e.message; btn.disabled = false; }
+    });
+    ov.querySelectorAll("#fsBody tbody .fsCorrect").forEach(btn => btn.onclick = async () => {
+      const tr = btn.closest("tr"), quantity = parseInt(tr.querySelector(".fsCount").value, 10);
+      if (!(quantity >= 0)) { err.textContent = "Enter the count on hand (0 or more)."; return; }
+      const at = await askWhen_(`Correct the count to ${quantity}?`, { whenLabel: "When was it counted?" });
+      if (!at) return;
+      btn.disabled = true;
+      try { const r = await hoopApi_({ action: "setReadyToShipQty", org: orgId, productId, size: tr.dataset.size, quantity, at, ...comboOf(tr) }); showToast(r.delta ? "Count corrected." : "No change."); await load(); }
+      catch (e) { err.textContent = e.message; btn.disabled = false; }
+    });
+    if (f.configurable) wireStockNewCombo_(ov, f, { orgId, productId, err, money, reload: load });
     const list = mv.movements || [], canVoid = adminCan_("manager");
     ov.querySelector("#fsHistory").innerHTML = list.length ? `<table style="width:100%;border-collapse:collapse;color:#1a1a1a;">${list.map(m => `
       <tr style="${m.voidedAt ? "text-decoration:line-through;color:#999;" : ""}">
         <td style="padding:3px 6px;white-space:nowrap;">${escapeHtml(String(m.occurredAt).slice(0, 10))}</td>
         <td style="padding:3px 6px;">${escapeHtml(FINISHED_KIND_LABELS_[m.kind] || m.kind)}${m.orderId ? " · " + escapeHtml(m.orderId) : ""}${m.voidedAt ? ` <span style="text-decoration:none;color:#b03a2e;">(voided: ${escapeHtml(m.voidReason)})</span>` : ""}</td>
-        <td style="padding:3px 6px;">${escapeHtml(f.flat ? "" : m.size)}</td>
+        <td style="padding:3px 6px;">${escapeHtml([m.variantLabel, f.flat ? "" : m.size].filter(Boolean).join(" · "))}</td>
         <td style="padding:3px 6px;${num}">${m.qtyDelta > 0 ? "+" : ""}${m.qtyDelta}</td>
         <td style="padding:3px 6px;${num}">${money(m.unitCost)}</td>
         <td style="padding:3px 6px;text-align:right;">${canVoid && !m.voidedAt && ["opening", "make", "adjust"].includes(m.kind) ? `<button type="button" class="admin-btn fsVoid admin-btn-danger" data-id="${m.id}" style="padding:1px 6px;font-size:11px;">Void</button>` : ""}</td>
@@ -14702,6 +14797,7 @@ async function renderInventoryReport(app){
         <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;margin-bottom:6px;max-width:560px;"><table class="cogs-rollforward" style="width:100%;border-collapse:collapse;font-size:14px;"><tbody>
           ${line("Beginning inventory", fmt(rf ? rf.beginning : d.beginning.value), { bold: true })}
           ${line("+ Purchases", fmt(t.purchases))}
+          ${(t.transfersToFinished || 0) > 0 ? line("+ Transfers pressed onto finished stock <span style='color:#777;font-size:12px;'>(from transfer stock below)</span>", fmt(t.transfersToFinished)) : ""}
           ${t.corrections ? line("± Count corrections and opening balances", fmt(t.corrections)) : ""}
           ${line("− Cost of goods sold", fmt(t.cogs))}
           ${line("blanks used on orders", fmt(t.cogsBlanks || 0), { sub: true })}
@@ -14740,6 +14836,7 @@ async function renderInventoryReport(app){
           ${card("+ Purchases", fmt(d.transfers.totals.purchases))}
           ${card("− COGS", fmt(d.transfers.totals.cogs))}
           ${card("− Write-offs", fmt(d.transfers.totals.writeoffs))}
+          ${(d.transfers.totals.toFinished || 0) > 0 ? card("− Into finished stock", fmt(d.transfers.totals.toFinished)) : ""}
           ${card("Ending", fmt(d.transfers.ending.value), d.transfers.ending.units + " on hand")}
         </div>
         <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:13px;">

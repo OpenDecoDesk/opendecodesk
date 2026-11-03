@@ -202,6 +202,26 @@ const CATALOG_ADMIN_ACTIONS = new Set([
 //   staff    everything else: orders, payments and refunds, shipping, production, inventory,
 //            catalog content, equipment lists, expenses, reports, design files — plus the few
 //            settings their screens read (package sizes, machine settings, the shop list)
+// The combination a Stock window action is about (migrations/0080): `color` + `picks` [{location, graphicId, ink}],
+// or `variant` (the key of one already in stock). db.js checks the picks against the product, as an order's are.
+function stockComboArgs_(b) {
+  const args = {};
+  if (b.variant != null) { if (typeof b.variant !== "string" || b.variant.length > 2000) return { error: "That combination isn't valid." }; args.variant = b.variant; }
+  if (b.color != null) { if (typeof b.color !== "string" || b.color.length > 60) return { error: "Pick a garment color." }; args.color = b.color; }
+  if (b.picks != null) {
+    if (!Array.isArray(b.picks) || b.picks.length > 20) return { error: "Pick the graphics of the pieces." };
+    const picks = [];
+    for (const x of b.picks) {
+      if (!x || typeof x.location !== "string" || x.location.length > 60) return { error: "Pick the graphics of the pieces." };
+      const gid = x.graphicId == null || x.graphicId === "" ? null : Number(x.graphicId);
+      if (gid != null && !(Number.isInteger(gid) && gid > 0)) return { error: "Pick the graphics of the pieces." };
+      picks.push({ location: x.location, graphicId: gid, ink: typeof x.ink === "string" ? x.ink.slice(0, 60) : "" });
+    }
+    args.picks = picks;
+  }
+  return { args };
+}
+
 // The product's pricing-awareness numbers (migrations/0067), each optional: minutes to make one item (0–1440),
 // an extra DTF / transfer cost and a shop-supplies override per item ($0–$1,000). Blank / null clears it.
 function checkCosting_(b) {
@@ -4924,7 +4944,7 @@ export async function onRequestPost(context) {
       // Transfer-sheet inventory is a parallel section (migrations/0036), same beginning/purchases −
       // COGS − write-offs = ending shape as blanks.
       const transfers = { beginning: tBeginning, ending: tEnding, cogs: tCogs,
-        totals: { cogs: tsum("cogs"), purchases: tsum("purchases"), writeoffs: tsum("writeoffs") } };
+        totals: { cogs: tsum("cogs"), purchases: tsum("purchases"), writeoffs: tsum("writeoffs"), toFinished: tsum("toFinished") } };
       // The three inventory groups (migrations/0060): blanks for sale, blanks for testing / shop use, and
       // finished stock. Their roll-forward — beginning + purchases + corrections − COGS (on blanks and
       // finished stock; estimates have no stock movement, so they're left out) − write-offs = ending. Blanks
@@ -4935,8 +4955,10 @@ export async function onRequestPost(context) {
         writeoffsDamagedLost: sum("writeoffsDamagedLost"), writeoffsOther: sum("writeoffsOther"), toFinished: sum("toFinished"), corrections: sum("corrections") };
       const c = (x) => Math.round(Number(x || 0) * 100);
       const begAll = c(beginning.value) + c(fBeginning.value), endAll = c(ending.value) + c(fEnding.value);
+      // Transfers used making finished stock (migrations/0081) come INTO this roll-forward from the transfer section.
+      totals.transfersToFinished = transfers.totals.toFinished;
       const rollForward = { beginning: begAll / 100, ending: endAll / 100,
-        check: (begAll + c(totals.purchases) + c(totals.corrections) - c(totals.cogsBlanks) - c(totals.cogsFinished) - c(totals.writeoffs) - endAll) / 100 };
+        check: (begAll + c(totals.purchases) + c(totals.corrections) + c(totals.transfersToFinished) - c(totals.cogsBlanks) - c(totals.cogsFinished) - c(totals.writeoffs) - endAll) / 100 };
       const groups = {
         forSale: { beginning: beginning.groups.forSale, ending: ending.groups.forSale },
         testing: { beginning: beginning.groups.testing, ending: ending.groups.testing },
@@ -5038,7 +5060,9 @@ export async function onRequestPost(context) {
     }
 
     // Stock window → Correct count: the counted number, recorded as a correction (setFinishedCount).
+    // A product with choices names its combination: `color` + `picks`, or `variant` (one already in stock).
     if (body.action === "setReadyToShipQty") {
+      const combo = stockComboArgs_(body); if (combo.error) return jsonResponse({ status: "error", message: combo.error }, 400);
       const { org, productId, size, quantity } = body;
       if (!org || !productId) return jsonResponse({ status: "error", message: "org, productId required" }, 400);
       if (quantity == null || !Number.isInteger(Number(quantity)) || Number(quantity) < 0) return jsonResponse({ status: "error", message: "Enter a whole count of 0 or more" }, 400);
@@ -5046,15 +5070,16 @@ export async function onRequestPost(context) {
       if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
       { const locked = await periodGuard(body); if (locked) return locked; }
       let r;
-      try { r = await setFinishedCount(env.DB, { orgId: org, productId: String(productId), size: size ?? "", quantity: Number(quantity), note: body.note, at: when ? when.at : null }); }
+      try { r = await setFinishedCount(env.DB, { orgId: org, productId: String(productId), size: size ?? "", quantity: Number(quantity), note: body.note, at: when ? when.at : null, ...combo.args }); }
       catch (e) { if (e.userFacing) return jsonResponse({ status: "error", message: e.message }, 409); throw e; }
-      if (r.delta) audit({ orgId: org, orderId: null, action: "inventory.finished_counted", detail: { productId, size: size ?? "", quantity: Number(quantity), delta: r.delta } });
+      if (r.delta) audit({ orgId: org, orderId: null, action: "inventory.finished_counted", detail: { productId, size: size ?? "", ...(r.variantLabel ? { combination: r.variantLabel } : {}), quantity: Number(quantity), delta: r.delta } });
       return jsonResponse({ status: "ok", delta: r.delta });
     }
 
     // Stock window → Make for stock: blanks decorated into finished pieces (makeForStock).
     if (body.action === "makeForStock") {
       const locked = await periodGuard(body); if (locked) return locked;
+      const combo = stockComboArgs_(body); if (combo.error) return jsonResponse({ status: "error", message: combo.error }, 400);
       const { org, productId, size } = body, qty = Number(body.qty);
       if (!org || !productId) return jsonResponse({ status: "error", message: "org, productId required" }, 400);
       if (!Number.isInteger(qty) || qty <= 0 || qty > 10000) return jsonResponse({ status: "error", message: "Enter how many were made" }, 400);
@@ -5063,11 +5088,12 @@ export async function onRequestPost(context) {
       if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
       const occurredAt = when ? when.at : undefined;
       let r;
-      try { r = await makeForStock(env.DB, { orgId: org, productId: String(productId), size: size ?? "", qty, occurredAt }); }
+      try { r = await makeForStock(env.DB, { orgId: org, productId: String(productId), size: size ?? "", qty, occurredAt, ...combo.args }); }
       catch (e) { if (e.userFacing) return jsonResponse({ status: "error", message: e.message }, 409); throw e; }
       if (!r.claimed) return jsonResponse({ status: "error", message: "Those blanks were just used by something else — reopen the Stock window and try again." }, 409);
-      audit({ orgId: org, orderId: null, action: "inventory.made_for_stock", detail: { productId, size: size ?? "", qty, unitCost: r.unitCost, blank: r.blank } });
-      return jsonResponse({ status: "ok", unitCost: r.unitCost, blank: r.blank });
+      audit({ orgId: org, orderId: null, action: "inventory.made_for_stock", detail: { productId, size: size ?? "", ...(r.variantLabel ? { combination: r.variantLabel } : {}), qty, unitCost: r.unitCost, blank: r.blank,
+        ...(r.transfers.length ? { transfers: r.transfers.map(t => ({ transferId: t.transferId, name: t.name, used: t.used })) } : {}) } });
+      return jsonResponse({ status: "ok", unitCost: r.unitCost, blank: r.blank, variant: r.variant, variantLabel: r.variantLabel, transfers: r.transfers });
     }
 
     if (body.action === "getFinishedGoodsMovements") {

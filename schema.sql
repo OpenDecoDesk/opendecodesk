@@ -269,7 +269,9 @@ CREATE TABLE IF NOT EXISTS order_items (
   -- migrations/0048: when this line's transfers were pressed, for a line that is also embroidered.
   transfersAppliedAt  TEXT,
   -- migrations/0060: filled from the shop's finished stock (no blank / design / making steps).
-  fromStock           INTEGER NOT NULL DEFAULT 0 CHECK (fromStock IN (0, 1))
+  fromStock           INTEGER NOT NULL DEFAULT 0 CHECK (fromStock IN (0, 1)),
+  -- migrations/0080: the combination (ready_to_ship.variant) a line filled from stock came from.
+  stockVariant        TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS design_verifications (
@@ -829,7 +831,9 @@ CREATE TABLE IF NOT EXISTS ready_to_ship (
   quantity  INTEGER NOT NULL DEFAULT 0,
   updatedAt TEXT NOT NULL,
   avgCostCents INTEGER NOT NULL DEFAULT 0 CHECK (avgCostCents >= 0),   -- migrations/0060: finished stock's running average cost
-  UNIQUE (orgId, productId, size)
+  variant      TEXT NOT NULL DEFAULT '',   -- migrations/0080: the combination (color + graphics) — '' for a product with no choices
+  variantLabel TEXT NOT NULL DEFAULT '',   -- … said in words
+  UNIQUE (orgId, productId, size, variant)
 );
 -- migrations/0060: every change to finished stock (ready_to_ship.quantity is the cache of their sum).
 CREATE TABLE IF NOT EXISTS finished_goods_movements (
@@ -849,9 +853,11 @@ CREATE TABLE IF NOT EXISTS finished_goods_movements (
   occurredAt      TEXT    NOT NULL,
   createdAt       TEXT    NOT NULL,
   voidedAt        TEXT,
-  voidReason      TEXT    NOT NULL DEFAULT ''
+  voidReason      TEXT    NOT NULL DEFAULT '',
+  variant         TEXT    NOT NULL DEFAULT '',   -- migrations/0080: see ready_to_ship.variant
+  variantLabel    TEXT    NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_fgm_item ON finished_goods_movements (orgId, productId, size, occurredAt);
+CREATE INDEX IF NOT EXISTS idx_fgm_item ON finished_goods_movements (orgId, productId, size, variant, occurredAt);
 CREATE INDEX IF NOT EXISTS idx_fgm_occurred ON finished_goods_movements (occurredAt);
 
 
@@ -872,7 +878,7 @@ CREATE INDEX IF NOT EXISTS idx_inventory_type  ON inventory(productType, size);
 CREATE INDEX IF NOT EXISTS idx_blanks_type     ON blanks(productType);
 CREATE INDEX IF NOT EXISTS idx_prod_blank_link ON product_blank_links(orgId, productId);
 CREATE INDEX IF NOT EXISTS idx_rts_org         ON ready_to_ship(orgId, productId);
-CREATE INDEX IF NOT EXISTS idx_items_from_stock ON order_items (orgId, productId, size) WHERE fromStock = 1;
+CREATE INDEX IF NOT EXISTS idx_items_from_stock ON order_items (orgId, productId, size, stockVariant) WHERE fromStock = 1;
 
 -- Default global settings
 INSERT OR IGNORE INTO global_settings (key, value)
@@ -1203,8 +1209,11 @@ CREATE TABLE IF NOT EXISTS transfer_movements (
   receiptKey    TEXT NOT NULL DEFAULT '',
   receiptName   TEXT NOT NULL DEFAULT '',
   voidedAt      TEXT,
-  voidReason    TEXT NOT NULL DEFAULT ''
+  voidReason    TEXT NOT NULL DEFAULT '',
+  reason        TEXT NOT NULL DEFAULT '',   -- 0080: 'finished' = used making finished stock (not cost of goods)
+  finishedMovementId INTEGER                -- 0080: the finished_goods_movements make it went into
 );
+CREATE INDEX IF NOT EXISTS idx_transfer_mv_finished ON transfer_movements (finishedMovementId) WHERE finishedMovementId IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_item     ON transfer_movements(transferId, occurredAt);
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_occurred ON transfer_movements(occurredAt);
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_order    ON transfer_movements(orderId);

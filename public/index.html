@@ -2135,11 +2135,25 @@ function cfgOptionsForLocation_(p, org, loc, color){
     .filter(g => (!g.allowedGarmentColors || !g.allowedGarmentColors.length || !color || g.allowedGarmentColors.includes(color)))
     .filter(g => !(color && (p.blockedGraphicColors || []).some(b => Number(b.graphicId) === g.id && b.color === color)));   // this product doesn't offer it on this color
 }
+// The combination key finished stock of a product with choices is kept under (migrations/0080): the garment color +
+// [location, graphicId, ink] per pick, in location order. db.js's stockVariantKey builds the same string — keep them
+// equal (test178). A graphic with inks and none picked counts as its first ink, as the order does. null = the
+// customer's own design (never from stock).
+function stockVariantKey_(color, picks){
+  if((picks || []).some(x => x.custom)) return null;
+  const list = (picks || []).filter(x => x.graphic && Number(x.graphic.id))
+    .map(x => [String(x.location), Number(x.graphic.id), String(x.ink || ((x.graphic.inkColors || [])[0]) || "")])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const c = String(color || "");
+  return !c && !list.length ? "" : JSON.stringify([c, list]);
+}
 // The stock badge for a product in a color + size: pieces already decorated ("N in stock", finished stock —
-// p.stock, keyed by size) win; else the linked blank's free stock ("N ready to decorate" — p.blankStock,
-// keyed by color then size; a plain product's color and a flat product's size are ""). Nothing at 0.
-function readyBadgeHtml_(p, color, size){
-  const done = p && p.stock ? Number(p.stock[size] || 0) : 0;
+// p.stock, keyed by size; a product with choices: p.stockVariants, by the picks' combination `key`, then size) win;
+// else the linked blank's free stock ("N ready to decorate" — p.blankStock, keyed by color then size; a plain
+// product's color and a flat product's size are ""). Nothing at 0.
+function readyBadgeHtml_(p, color, size, key){
+  const done = key ? Number(((p && p.stockVariants && p.stockVariants[key]) || {})[size || ""] || 0)
+    : p && p.stock ? Number(p.stock[size] || 0) : 0;
   if(done > 0) return `<span class="stock-badge">${done} in stock</span>`;
   const bySize = p && p.blankStock ? (p.blankStock[color || ""] || {}) : {};
   const ready = Number(bySize[size || ""] || 0);
@@ -2191,7 +2205,7 @@ function renderConfigurableProduct(p, org){
         <input class="qty-input" type="number" min="1" max="50" step="1" inputmode="numeric" id="qty-${p.id}" value="1" aria-label="Quantity for ${escapeHtml(p.name)}">
         <button class="add-btn" id="cadd-${p.id}" data-action="add" data-pid="${p.id}" disabled>Add to cart</button>
       </div>
-      ${p.blankStock || p.stock ? `<span id="stock-${p.id}" class="stock-badge-wrap"></span>` : ""}
+      ${p.blankStock || p.stock || p.stockVariants ? `<span id="stock-${p.id}" class="stock-badge-wrap"></span>` : ""}
       <div class="card-msg" id="cmsg-${p.id}" role="alert" hidden></div>
       <div class="cfg-hint" id="chint-${p.id}" style="font-size:12px;color:var(--ink-soft);margin-top:6px;">Choose a graphic for at least one location.</div>
     </div>`;
@@ -2219,7 +2233,9 @@ function cfgRefresh_(pid){
     const ink = document.getElementById("ink-" + pid + "-" + loc.key);
     const g = opts.find(x => String(x.id) === sel.value);
     if (ink) {
-      if (g && g.inkColors && g.inkColors.length > 1) { ink.innerHTML = g.inkColors.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join(""); ink.style.display = ""; }
+      // Redrawn on every change, so the ink already picked is kept while the graphic still offers it.
+      const prevInk = ink.value;
+      if (g && g.inkColors && g.inkColors.length > 1) { ink.innerHTML = g.inkColors.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join(""); ink.style.display = ""; if (g.inkColors.includes(prevInk)) ink.value = prevInk; }
       else { ink.innerHTML = ""; ink.style.display = "none"; }
     }
   }
@@ -2274,7 +2290,7 @@ function cfgUpdate_(pid){
   const total = base + addOns + persFee;
   const priceEl = document.getElementById("price-" + pid); if (priceEl) priceEl.textContent = "$" + total.toFixed(2);
   const stockWrap = document.getElementById("stock-" + pid);
-  if (stockWrap) stockWrap.innerHTML = readyBadgeHtml_(p, color, isSized && sizeEl ? sizeEl.value : "");
+  if (stockWrap) stockWrap.innerHTML = readyBadgeHtml_(p, color, isSized && sizeEl ? sizeEl.value : "", stockVariantKey_(color, picks));
   const bd = document.getElementById("cbd-" + pid);
   if (bd) bd.innerHTML = `<div class="cfg-bd-row"><span>Garment${group ? " (" + escapeHtml(color) + ")" : ""}</span><span>$${base.toFixed(2)}</span></div>` +
     picks.map(x => `<div class="cfg-bd-row"><span>${escapeHtml(x.label)}: ${escapeHtml(x.graphic.name)}${x.ink ? " (" + escapeHtml(x.ink) + ")" : ""}</span><span>${x.graphic.addOnCents ? "+$" + (x.graphic.addOnCents / 100).toFixed(2) : "Included"}</span></div>`).join("") +

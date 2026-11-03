@@ -93,7 +93,7 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   ok("the blanks leave as a 'finished' consume — moved into finished stock, not cost of goods", mv.length === 1 && mv[0].reason === "finished" && mv[0].qtyDelta === -6);
   ok("…and a 'make' entry is recorded in finished stock, linked to it", Number(d1.q("SELECT count(*) n FROM finished_goods_movements WHERE kind='make' AND blankMovementId IS NOT NULL")[0].n) === 1);
   r = await call({ action: "makeForStock", productId: "ctee", size: "M", qty: 1 });
-  ok("a product with color / graphic choices can't be stocked", r.status === 409 && /color and graphic choices/.test(r.body.message));
+  ok("a product with color / graphic choices needs its combination named (test178 covers stocking one)", r.status === 409 && /Pick the color and graphics/.test(r.body.message));
   r = await call({ action: "makeForStock", productId: "patch", size: "", qty: 1 });
   ok("…nor one with no blank linked", r.status === 409 && /isn't linked to a blank/.test(r.body.message));
   r = await call({ action: "makeForStock", productId: "tee", size: "M", qty: 15 });

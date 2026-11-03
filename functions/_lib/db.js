@@ -5649,16 +5649,16 @@ async function makeItemPieces_(db, item, fromQty, toQty, at = null) {
   // at its average cost — that's the line's cost of goods — and no blank is used.
   if (item.fromStock && Number(item.fromStock)) {
     const p = await db.prepare("SELECT name, pricingMode FROM products WHERE orgId = ? AND productId = ?").bind(item.orgId, item.productId).first();
-    const sz = stockSize_(p && p.pricingMode, item.size), now = new Date().toISOString(), when = at || now;   // `at`: when it was really made (2026-10)
-    const avgSql = "MAX(0, COALESCE((SELECT avgCostCents FROM ready_to_ship WHERE orgId = ? AND productId = ? AND size = ?), 0))", ab = [item.orgId, item.productId, sz];
+    const sz = stockSize_(p && p.pricingMode, item.size), v = String(item.stockVariant || ""), now = new Date().toISOString(), when = at || now;   // `at`: when it was really made (2026-10)
+    const avgSql = "MAX(0, COALESCE((SELECT avgCostCents FROM ready_to_ship WHERE orgId = ? AND productId = ? AND size = ? AND variant = ?), 0))", ab = [item.orgId, item.productId, sz, v];
     stmts.push(db.prepare(
-      `INSERT INTO finished_goods_movements (orgId, productId, productName, color, size, qtyDelta, unitCostCents, kind, orderId, itemId, note, occurredAt, createdAt)
-       SELECT ?, ?, ?, '', ?, ?, ${avgSql}, 'sell', ?, ?, ?, ?, ? WHERE ${stillAt}`
-    ).bind(item.orgId, item.productId, (p && p.name) || item.productId, sz, -pieces, ...ab, item.orderId, id, ("Pulled for order " + item.orderId).slice(0, 300), when, now, id, fromQty));
+      `INSERT INTO finished_goods_movements (orgId, productId, productName, color, size, variant, variantLabel, qtyDelta, unitCostCents, kind, orderId, itemId, note, occurredAt, createdAt)
+       SELECT ?, ?, ?, '', ?, ?, COALESCE((SELECT variantLabel FROM ready_to_ship WHERE orgId = ? AND productId = ? AND size = ? AND variant = ?), ''), ?, ${avgSql}, 'sell', ?, ?, ?, ?, ? WHERE ${stillAt}`
+    ).bind(item.orgId, item.productId, (p && p.name) || item.productId, sz, v, ...ab, -pieces, ...ab, item.orderId, id, ("Pulled for order " + item.orderId).slice(0, 300), when, now, id, fromQty));
     stmts.push(db.prepare(
       `UPDATE order_items SET cogsCents = (CASE WHEN cogsSource='consumed' THEN COALESCE(cogsCents,0) ELSE 0 END) + ? * ${avgSql}, cogsSource = 'consumed'
        WHERE id = ? AND cancelDate IS NULL AND COALESCE(manufacturedQty,0) = ?`).bind(pieces, ...ab, id, fromQty));
-    stmts.push(db.prepare(`UPDATE ready_to_ship SET quantity = quantity - ?, updatedAt = ? WHERE orgId = ? AND productId = ? AND size = ? AND ${stillAt}`)
+    stmts.push(db.prepare(`UPDATE ready_to_ship SET quantity = quantity - ?, updatedAt = ? WHERE orgId = ? AND productId = ? AND size = ? AND variant = ? AND ${stillAt}`)
       .bind(pieces, now, ...ab, id, fromQty));
     stmts.push(db.prepare("UPDATE order_items SET manufacturedQty = ? WHERE id = ? AND cancelDate IS NULL AND COALESCE(manufacturedQty,0) = ?").bind(toQty, id, fromQty));
     const res = await db.batch(stmts);
@@ -5706,7 +5706,7 @@ function itemColor_(row) {
 export async function consumeBlanksForOrder(db, orderId, at = null) {
   const fs = await hasFromStockColumn_(db);
   const { results: items } = await db.prepare(
-    `SELECT id, orderId, orgId, productId, size, qty, configJson, COALESCE(manufacturedQty,0) AS manufacturedQty${fs ? ", fromStock" : ""}
+    `SELECT id, orderId, orgId, productId, size, qty, configJson, COALESCE(manufacturedQty,0) AS manufacturedQty${fs ? ", fromStock, stockVariant" : ""}
      FROM order_items WHERE orderId = ? AND cancelDate IS NULL`
   ).bind(orderId).all();
   let consumed = 0;
@@ -5729,7 +5729,7 @@ export async function consumeBlanksForOrder(db, orderId, at = null) {
 export async function markItemPieceManufactured(db, orderId, itemId, at = null) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const item = await db.prepare(
-      `SELECT id, orderId, orgId, productId, size, qty, configJson, COALESCE(manufacturedQty,0) AS manufacturedQty, cancelDate${(await hasFromStockColumn_(db)) ? ", fromStock" : ""}
+      `SELECT id, orderId, orgId, productId, size, qty, configJson, COALESCE(manufacturedQty,0) AS manufacturedQty, cancelDate${(await hasFromStockColumn_(db)) ? ", fromStock, stockVariant" : ""}
        FROM order_items WHERE id = ? AND orderId = ?`
     ).bind(Number(itemId), orderId).first();
     if (!item) throw new Error("Line item not found");
@@ -5755,7 +5755,7 @@ export async function markItemPieceManufactured(db, orderId, itemId, at = null) 
 export async function pullStockLines(db, orderId, at = null) {
   if (!(await hasFromStockColumn_(db))) return 0;
   const { results: items } = await db.prepare(
-    `SELECT id, orderId, orgId, productId, size, qty, configJson, COALESCE(manufacturedQty,0) AS manufacturedQty, fromStock
+    `SELECT id, orderId, orgId, productId, size, qty, configJson, COALESCE(manufacturedQty,0) AS manufacturedQty, fromStock, stockVariant
      FROM order_items WHERE orderId = ? AND cancelDate IS NULL AND fromStock = 1`).bind(orderId).all();
   let n = 0;
   for (const it of items) {
@@ -6992,20 +6992,22 @@ export async function getTransferValuation(db, asOf) {
 
 export async function getTransferCogs(db, dateFrom, dateTo) {
   const { results: mv } = await db.prepare(
-    `SELECT substr(occurredAt, 1, 7) AS month, kind, SUM(-qtyDelta * unitCostCents) AS outCents, SUM(qtyDelta * unitCostCents) AS inCents
+    `SELECT substr(occurredAt, 1, 7) AS month, kind, reason, SUM(-qtyDelta * unitCostCents) AS outCents, SUM(qtyDelta * unitCostCents) AS inCents
      FROM transfer_movements WHERE occurredAt >= ? AND occurredAt <= ? AND kind IN ('consume', 'purchase', 'writeoff') AND voidedAt IS NULL
-     GROUP BY month, kind`
+     GROUP BY month, kind, reason`
   ).bind(dateFrom, dateTo).all();
   const months = {};
-  const at = (m) => (months[m] = months[m] || { month: m, cogs: 0, purchases: 0, writeoffs: 0 });
+  const at = (m) => (months[m] = months[m] || { month: m, cogs: 0, purchases: 0, writeoffs: 0, toFinished: 0 });
   for (const r of mv) {
     const m = at(r.month);
-    if (r.kind === "consume") m.cogs += Number(r.outCents);
+    // Used making finished stock (migrations/0081): moved into that piece's cost, counted when it's sold.
+    if (r.kind === "consume" && r.reason === "finished") m.toFinished += Number(r.outCents);
+    else if (r.kind === "consume") m.cogs += Number(r.outCents);
     if (r.kind === "purchase") m.purchases += Number(r.inCents);
     if (r.kind === "writeoff") m.writeoffs += Number(r.outCents);
   }
   return Object.values(months).sort((a, b) => a.month.localeCompare(b.month))
-    .map(m => ({ month: m.month, cogs: fromCents(m.cogs), purchases: fromCents(m.purchases), writeoffs: fromCents(m.writeoffs) }));
+    .map(m => ({ month: m.month, cogs: fromCents(m.cogs), purchases: fromCents(m.purchases), writeoffs: fromCents(m.writeoffs), toFinished: fromCents(m.toFinished) }));
 }
 
 // ---- Graphics / selectable options catalog + tier prices (migrations/0036) ----
@@ -8541,13 +8543,15 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
         .bind(String(f.fileKey), String(f.fileName || "").slice(0, 120), String(f.fileExt || ""), order.placedAt || new Date().toISOString(), order.orderId));
     }
     // Filled from finished stock when enough is available right now (this line isn't counted yet).
+    // A product with choices is filled from the stock of the line's exact combination (migrations/0080).
     const prod = productRow[it.productId];
-    if (fillFromStock && prod && !Number(prod.configurable) && !it.personalized && !it.config && !(Array.isArray(it.customFiles) && it.customFiles.length)) {
-      const sz = stockSize_(prod.pricingMode, it.size), held = setAsideSql_(order.orgId, it.productId, prod.pricingMode, sz);
+    const combo = fillFromStock ? stockVariantForLine_(prod, it) : null;
+    if (combo) {
+      const sz = stockSize_(prod.pricingMode, it.size), held = setAsideSql_(order.orgId, it.productId, prod.pricingMode, sz, combo.key);
       stmts.push(db.prepare(
-        `UPDATE order_items SET fromStock = 1 WHERE id = (SELECT max(id) FROM order_items WHERE orderId = ?)
-           AND COALESCE((SELECT quantity FROM ready_to_ship WHERE orgId = ? AND productId = ? AND size = ?), 0) - ${held.sql} >= ?`
-      ).bind(order.orderId, order.orgId, it.productId, sz, ...held.binds, qty));
+        `UPDATE order_items SET fromStock = 1, stockVariant = ? WHERE id = (SELECT max(id) FROM order_items WHERE orderId = ?)
+           AND COALESCE((SELECT quantity FROM ready_to_ship WHERE orgId = ? AND productId = ? AND size = ? AND variant = ?), 0) - ${held.sql} >= ?`
+      ).bind(combo.key, order.orderId, order.orgId, it.productId, sz, combo.key, ...held.binds, qty));
     }
   }
 
@@ -8992,13 +8996,14 @@ export async function updateOrderItem(db, id, { productId, name, type, size, qty
   if (await hasFromStockColumn_(db)) {
     const row = await db.prepare("SELECT * FROM order_items WHERE id=?").bind(Number(id)).first();
     if (row && Number(row.fromStock) && !Number(row.manufacturedQty)) {
-      await db.prepare("UPDATE order_items SET fromStock = 0 WHERE id = ?").bind(Number(id)).run();
+      await db.prepare("UPDATE order_items SET fromStock = 0, stockVariant = '' WHERE id = ?").bind(Number(id)).run();
       const prod = row.productId ? await db.prepare("SELECT pricingMode, configurable FROM products WHERE orgId=? AND productId=?").bind(row.orgId, row.productId).first() : null;
-      if (prod && !Number(prod.configurable) && !Number(row.personalized) && !row.configJson) {
-        const sz = stockSize_(prod.pricingMode, row.size), held = setAsideSql_(row.orgId, row.productId, prod.pricingMode, sz);
-        await db.prepare(`UPDATE order_items SET fromStock = 1 WHERE id = ?
-            AND COALESCE((SELECT quantity FROM ready_to_ship WHERE orgId = ? AND productId = ? AND size = ?), 0) - ${held.sql} >= ?`)
-          .bind(Number(id), row.orgId, row.productId, sz, ...held.binds, Number(row.qty)).run();
+      const combo = prod ? stockVariantForLine_(prod, { personalized: Number(row.personalized), config: tryParse_(row.configJson, null) }) : null;
+      if (combo) {
+        const sz = stockSize_(prod.pricingMode, row.size), held = setAsideSql_(row.orgId, row.productId, prod.pricingMode, sz, combo.key);
+        await db.prepare(`UPDATE order_items SET fromStock = 1, stockVariant = ? WHERE id = ?
+            AND COALESCE((SELECT quantity FROM ready_to_ship WHERE orgId = ? AND productId = ? AND size = ? AND variant = ?), 0) - ${held.sql} >= ?`)
+          .bind(combo.key, Number(id), row.orgId, row.productId, sz, combo.key, ...held.binds, Number(row.qty)).run();
       }
     }
   }
@@ -11172,60 +11177,116 @@ function parseItem_(row) {
 // A storefront (or local) order line for an in-stock product + size is filled from stock when it's
 // placed (order_items.fromStock); until it's pulled its pieces are SET ASIDE — worked out when read, so a
 // cancel or void releases them with nothing to write. The shop's "N in stock" badge shows what's left.
-// Configurable products (color / graphic pickers) aren't stocked in this version: a finished piece would
-// be one color + graphics combination, and the storefront shows no stock badge for them.
+// A product with color and graphic choices is stocked per COMBINATION (migrations/0080): the garment color + the
+// graphic (and ink) picked at each spot — ready_to_ship.variant, its key (stockVariantKey), with variantLabel saying it
+// in words. A product with no choices keeps the '' combination, so its stock is what it always was. Printed
+// transfers, the reorder QR and other automatic parts of the product aren't picks, so they're not in the key.
 
 // The size finished stock is kept under: '' for a flat-priced product (whose order lines say "OSFA").
 function stockSize_(pricingMode, size) { return pricingMode === "flat" ? "" : String(size || ""); }
-// Pieces SET ASIDE per "orgId|productId|stockSize": still to pull on active lines filled from stock.
+// The combination's key: color + [location, graphicId, ink] per pick, in location order. index.html's
+// stockVariantKey_ builds the same string from the shop page's picks — keep them equal (test178).
+export function stockVariantKey(color, picks) {
+  const list = (picks || []).filter(x => x && x.location && Number(x.graphicId))
+    .map(x => [String(x.location), Number(x.graphicId), String(x.ink || "")])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const c = String(color || "");
+  return !c && !list.length ? "" : JSON.stringify([c, list]);
+}
+// The combination an order line's snapshot is, or null when it can't come from stock (the customer's own design).
+function stockVariantOfConfig_(cfg) {
+  if (!cfg) return { key: "", label: "" };
+  const locs = Array.isArray(cfg.locations) ? cfg.locations : [];
+  if (locs.some(l => l && l.custom)) return null;
+  const picks = locs.filter(l => l && !l.fixed && !l.auto && Number(l.graphicId));
+  const color = cfg.plain ? "" : String(cfg.garmentColor || "");
+  return { key: stockVariantKey(color, picks.map(l => ({ location: l.location, graphicId: l.graphicId, ink: l.ink }))),
+    label: [color, ...picks.map(l => `${l.label || l.location}: ${l.graphicName || "graphic " + l.graphicId}${l.ink ? " (" + l.ink + ")" : ""}`)].filter(Boolean).join(" · ").slice(0, 300) };
+}
+// May this order line be filled from finished stock? Its combination, or null.
+function stockVariantForLine_(prod, line) {
+  if (!prod || line.personalized || (Array.isArray(line.customFiles) && line.customFiles.length)) return null;
+  const cfg = line.config || null;
+  if (Number(prod.configurable)) return cfg && !cfg.plain ? stockVariantOfConfig_(cfg) : null;
+  return !cfg || cfg.plain ? stockVariantOfConfig_(null) : null;
+}
+// Pieces SET ASIDE per heldKey_ (shop + product + stock size + combination): still to pull on active lines filled from stock.
+const heldKey_ = (orgId, productId, size, variant) => JSON.stringify([orgId, productId, size || "", variant || ""]);
 async function finishedSetAside_(db, orgId) {
   if (!(await hasFromStockColumn_(db))) return {};
   const { results } = await db.prepare(
-    `SELECT oi.orgId, oi.productId, CASE WHEN p.pricingMode = 'flat' THEN '' ELSE oi.size END AS size,
+    `SELECT oi.orgId, oi.productId, CASE WHEN p.pricingMode = 'flat' THEN '' ELSE oi.size END AS size, oi.stockVariant AS variant,
             SUM(oi.qty - COALESCE(oi.manufacturedQty, 0)) AS n, group_concat(DISTINCT oi.orderId) AS orderIds
      FROM order_items oi JOIN orders o ON o.orderId = oi.orderId
      LEFT JOIN products p ON p.orgId = oi.orgId AND p.productId = oi.productId
      WHERE oi.fromStock = 1 AND oi.cancelDate IS NULL AND o.voidedAt IS NULL AND COALESCE(oi.manufacturedQty, 0) < oi.qty
        ${orgId ? "AND oi.orgId = ?" : ""}
-     GROUP BY oi.orgId, oi.productId, 3`).bind(...(orgId ? [orgId] : [])).all();
+     GROUP BY oi.orgId, oi.productId, 3, 4`).bind(...(orgId ? [orgId] : [])).all();
   const out = {};
-  for (const r of results) out[[r.orgId, r.productId, r.size].join("|")] = { n: Number(r.n) || 0, orderIds: String(r.orderIds || "").split(",").filter(Boolean) };
+  for (const r of results) out[heldKey_(r.orgId, r.productId, r.size, r.variant)] = { n: Number(r.n) || 0, orderIds: String(r.orderIds || "").split(",").filter(Boolean) };
   return out;
 }
 // SQL (with its binds) for the pieces set aside on one product + stock size — used inside the guarded
 // statements, so it's evaluated at the moment the statement runs.
-function setAsideSql_(orgId, productId, pricingMode, size) {
+function setAsideSql_(orgId, productId, pricingMode, size, variant = "") {
   return pricingMode === "flat"
     ? { sql: `COALESCE((SELECT SUM(x.qty - COALESCE(x.manufacturedQty, 0)) FROM order_items x JOIN orders xo ON xo.orderId = x.orderId
-               WHERE x.fromStock = 1 AND x.cancelDate IS NULL AND xo.voidedAt IS NULL AND x.orgId = ? AND x.productId = ?), 0)`, binds: [orgId, productId] }
+               WHERE x.fromStock = 1 AND x.cancelDate IS NULL AND xo.voidedAt IS NULL AND x.orgId = ? AND x.productId = ? AND x.stockVariant = ?), 0)`, binds: [orgId, productId, variant] }
     : { sql: `COALESCE((SELECT SUM(x.qty - COALESCE(x.manufacturedQty, 0)) FROM order_items x JOIN orders xo ON xo.orderId = x.orderId
-               WHERE x.fromStock = 1 AND x.cancelDate IS NULL AND xo.voidedAt IS NULL AND x.orgId = ? AND x.productId = ? AND x.size = ?), 0)`, binds: [orgId, productId, size] };
+               WHERE x.fromStock = 1 AND x.cancelDate IS NULL AND xo.voidedAt IS NULL AND x.orgId = ? AND x.productId = ? AND x.size = ? AND x.stockVariant = ?), 0)`, binds: [orgId, productId, size, variant] };
 }
 async function stockProduct_(db, orgId, productId) {
-  return db.prepare("SELECT productId, name, pricingMode, configurable, noBlankNeeded FROM products WHERE orgId=? AND productId=?").bind(orgId, productId).first()
-    .catch(() => db.prepare("SELECT productId, name, pricingMode FROM products WHERE orgId=? AND productId=?").bind(orgId, productId).first());
+  return db.prepare("SELECT * FROM products WHERE orgId=? AND productId=?").bind(orgId, productId).first();
 }
-// The blank a product + stock size is made from (a flat product's link is under "OSFA", or '').
-async function stockLink_(db, orgId, productId, pricingMode, size) {
+// A combination of a product with choices, checked the way an order is (priceConfigurable_: an offered color, offered
+// graphics at their spots, a valid ink, at least one graphic unless the product has printed transfers) → {key, label,
+// color}. `picks` = [{location, graphicId, ink}].
+async function stockCombination_(db, orgId, p, size, color, picks) {
+  const { snapshot } = await priceConfigurable_(db, orgId, p, size, { garmentColor: String(color || ""), locations: (picks || []).filter(x => x && x.location) });
+  const v = stockVariantOfConfig_(snapshot);
+  return { key: v.key, label: v.label, color: snapshot.garmentColor || "", snapshot };
+}
+// The transfers one finished piece carries (migrations/0081): a product with choices — the transfer entries of its
+// combination's snapshot (picked transfer graphics, printed transfers, the reorder QR); a product with none — its
+// printed transfers and reorder QR, as priceItem snapshots them. [{transferId, n}] (n = applications per piece).
+async function stockTransfers_(db, orgId, p, combo) {
+  const locs = combo && combo.snapshot ? combo.snapshot.locations || []
+    : [...(await fixedTransferEntries_(db, orgId, p)), await reorderQrEntry_(db, orgId, p.reorderQr)].filter(Boolean);
+  const n = new Map();
+  for (const l of locs) if (l && l.kind === "transfer" && Number(l.transferId)) n.set(Number(l.transferId), (n.get(Number(l.transferId)) || 0) + 1);
+  return [...n].map(([transferId, k]) => ({ transferId, n: k }));
+}
+// The combination a key stands for, from the stock already recorded under it ('' = no choices).
+async function stockVariantRow_(db, orgId, productId, variant) {
+  if (!variant) return { key: "", label: "", color: "" };
+  const r = await db.prepare("SELECT variantLabel FROM ready_to_ship WHERE orgId=? AND productId=? AND variant=? LIMIT 1").bind(orgId, productId, String(variant)).first();
+  if (!r) return null;
+  let color = ""; try { color = String(JSON.parse(variant)[0] || ""); } catch (e) { /* not a key we wrote */ return null; }
+  return { key: String(variant), label: r.variantLabel || "", color };
+}
+// The blank a product + stock size (+ garment color, for a product with choices) is made from (a flat product's link
+// is under "OSFA", or '').
+async function stockLink_(db, orgId, productId, pricingMode, size, color = "") {
   for (const sz of pricingMode === "flat" ? ["OSFA", ""] : [size]) {
     const l = await db.prepare(
       `SELECT l.blankId, l.blankColor, l.blankSize, b.name AS blankName, COALESCE(bs.quantity, 0) AS quantity, COALESCE(bs.purchasePriceCents, 0) AS avg
        FROM product_blank_links l LEFT JOIN blanks b ON b.id = l.blankId
        LEFT JOIN blank_sizes bs ON bs.blankId = l.blankId AND bs.color = l.blankColor AND bs.size = l.blankSize
-       WHERE l.orgId = ? AND l.productId = ? AND l.productColor = '' AND l.productSize = ?`).bind(orgId, productId, sz).first();
+       WHERE l.orgId = ? AND l.productId = ? AND l.productColor = ? AND l.productSize = ?`).bind(orgId, productId, String(color || ""), sz).first();
     if (l && l.blankId != null) return l;
   }
   return null;
 }
 
-// What the storefront badge shows: AVAILABLE pieces (on hand less set aside), per product + size.
+// What the storefront badge shows: AVAILABLE pieces (on hand less set aside), per product + size + combination
+// (variant '' for a product with no choices).
 export async function getReadyToShipByOrg(db, orgId) {
   const { results } = await db.prepare(
-    "SELECT productId, size, quantity FROM ready_to_ship WHERE orgId=? ORDER BY productId, size"
+    "SELECT productId, size, variant, quantity FROM ready_to_ship WHERE orgId=? ORDER BY productId, size"
   ).bind(orgId).all();
   const held = await finishedSetAside_(db, orgId);
-  return results.map(r => ({ productId: r.productId, size: r.size,
-    quantity: Math.max(0, (Number(r.quantity) || 0) - ((held[[orgId, r.productId, r.size].join("|")] || {}).n || 0)) }));
+  return results.map(r => ({ productId: r.productId, size: r.size, variant: r.variant || "",
+    quantity: Math.max(0, (Number(r.quantity) || 0) - ((held[heldKey_(orgId, r.productId, r.size, r.variant)] || {}).n || 0)) }));
 }
 
 // "Ready to decorate": per product + color + size, how many of its linked blank are FREE (on hand less
@@ -11256,45 +11317,99 @@ export async function getBlankReadyByOrg(db, orgId) {
   return out;
 }
 
-// The Stock window: per size on hand / set aside (and by which orders) / available / average cost /
-// value, and what Make for stock would use — the linked blank and how many of it are free.
+// The Stock window: per size (and, for a product with choices, per combination) on hand / set aside (and by which
+// orders) / available / average cost / value, and what Make for stock would use — the linked blank and how many of it
+// are free. A product with choices also gets what can be picked (`options`) and the blank behind each color + size
+// (`links`), for making a new combination.
 export async function getFinishedStock(db, orgId, productId) {
   const p = await stockProduct_(db, orgId, productId);
   if (!p) return null;
-  let rows = [];
-  try { ({ results: rows } = await db.prepare("SELECT size, quantity, avgCostCents FROM ready_to_ship WHERE orgId=? AND productId=? ORDER BY size").bind(orgId, productId).all()); }
-  catch (e) { ({ results: rows } = await db.prepare("SELECT size, quantity, 0 AS avgCostCents FROM ready_to_ship WHERE orgId=? AND productId=? ORDER BY size").bind(orgId, productId).all()); }
+  const configurable = !!Number(p.configurable), flat = p.pricingMode === "flat";
+  const { results: rows } = await db.prepare("SELECT size, variant, variantLabel, quantity, avgCostCents FROM ready_to_ship WHERE orgId=? AND productId=? ORDER BY variantLabel, size").bind(orgId, productId).all();
   const held = await finishedSetAside_(db, orgId), reserved = await getBlankReservations(db);
-  const sizes = p.pricingMode === "flat" ? [""] : Object.keys(tryParse_((await db.prepare("SELECT sizePricingCents FROM products WHERE orgId=? AND productId=?").bind(orgId, productId).first() || {}).sizePricingCents, {}) || {});
+  const sizes = flat ? [""] : Object.keys(tryParse_(p.sizePricingCents, {}) || {});
   for (const r of rows) if (!sizes.includes(r.size)) sizes.push(r.size);
-  const out = [];
-  for (const size of sizes) {
-    const r = rows.find(x => x.size === size) || { quantity: 0, avgCostCents: 0 };
-    const h = held[[orgId, productId, size].join("|")] || { n: 0, orderIds: [] };
-    const link = await stockLink_(db, orgId, productId, p.pricingMode, size);
+  const blankOf = async (size, color) => {
+    const link = await stockLink_(db, orgId, productId, p.pricingMode, size, color);
+    return link ? { blankId: Number(link.blankId), name: link.blankName || "", color: link.blankColor || "", size: link.blankSize || "", avgCost: fromCents(link.avg),
+      free: Math.max(0, Number(link.quantity) - (reserved[[link.blankId, link.blankColor || "", link.blankSize || ""].join("|")] || 0)) } : null;
+  };
+  const sizeRow = async (size, variant, label, color) => {
+    const r = rows.find(x => x.size === size && (x.variant || "") === variant) || { quantity: 0, avgCostCents: 0 };
+    const h = held[heldKey_(orgId, productId, size, variant)] || { n: 0, orderIds: [] };
     const onHand = Number(r.quantity) || 0, avg = Number(r.avgCostCents) || 0;
-    out.push({ size, onHand, setAside: h.n, setAsideOrders: h.orderIds, available: Math.max(0, onHand - h.n), avgCost: fromCents(avg), value: fromCents(Math.max(0, onHand) * avg),
-      blank: link ? { blankId: Number(link.blankId), name: link.blankName || "", color: link.blankColor || "", size: link.blankSize || "", avgCost: fromCents(link.avg),
-        free: Math.max(0, Number(link.quantity) - (reserved[[link.blankId, link.blankColor || "", link.blankSize || ""].join("|")] || 0)) } : null });
+    return { size, variant, label, onHand, setAside: h.n, setAsideOrders: h.orderIds, available: Math.max(0, onHand - h.n), avgCost: fromCents(avg),
+      value: fromCents(Math.max(0, onHand) * avg), blank: await blankOf(size, color) };
+  };
+  const out = { productId, name: p.name || productId, flat, configurable, noBlankNeeded: !!Number(p.noBlankNeeded), sizes: [] };
+  if (!configurable) {
+    for (const size of sizes) out.sizes.push(await sizeRow(size, "", "", ""));
+    return out;
   }
-  return { productId, name: p.name || productId, flat: p.pricingMode === "flat", configurable: !!Number(p.configurable), noBlankNeeded: !!Number(p.noBlankNeeded), sizes: out };
+  // Every combination stock has been recorded for, with each of its sizes that has a row.
+  const combos = [];
+  for (const r of rows) {
+    const v = r.variant || "";
+    let c = combos.find(x => x.variant === v);
+    if (!c) { let color = ""; try { color = String(JSON.parse(v)[0] || ""); } catch (e) { /* '' or not ours */ } combos.push(c = { variant: v, label: r.variantLabel || "", color, sizes: [] }); }
+    c.sizes.push(await sizeRow(r.size, v, c.label, c.color));
+  }
+  out.combinations = combos;
+  // What can be picked, the way the shop page offers it.
+  const colors = tryParse_(p.garmentColorsJson, []) || [];
+  const graphics = await listGraphics(db, orgId);
+  const byId = new Map(graphics.map(g => [Number(g.id), g]));
+  const blocked = tryParse_(p.blockedGraphicColorsJson, []) || [];
+  out.options = { colors, sizes, blocked,
+    locations: (tryParse_(p.locationsJson, []) || []).map(loc => ({ key: String(loc.key), label: loc.label || loc.key,
+      graphics: (loc.graphicIds || []).map(Number).map(id => byId.get(id)).filter(g => g && g.visible)
+        .map(g => ({ id: Number(g.id), name: g.name, inkColors: g.inkColors || [], allowedGarmentColors: g.allowedGarmentColors || [] })) })) };
+  out.links = {};
+  for (const color of colors) { out.links[color] = {}; for (const size of sizes) out.links[color][size] = await blankOf(size, color); }
+  return out;
 }
 
 // Make for stock: `qty` blanks of the size's linked blank are decorated into finished pieces. One
 // guarded batch (makeItemPieces_ style): every statement only applies while the blank still has
 // enough FREE (on hand less set aside for orders), and the claim on blank_sizes runs last — so two
 // requests can't both take the last blanks. Returns {claimed, unitCost}.
-export async function makeForStock(db, { orgId, productId, size, qty, occurredAt }) {
+// A product with choices makes ONE combination: `color` + `picks` ([{location, graphicId, ink}], checked as an order
+// is), or `variant` — the key of a combination already in stock.
+// `strict` (Make for stock): a combination already in stock is checked again against the product as it is now (its
+// transfers are needed); a count can still be corrected for one the product no longer offers.
+async function stockVariantFor_(db, orgId, p, size, { color, picks, variant }, strict = false) {
+  if (!Number(p.configurable)) return { key: "", label: "", color: "" };
+  if (Array.isArray(picks) || color) return stockCombination_(db, orgId, p, size, color, picks || []);
+  const v = await stockVariantRow_(db, orgId, p.productId, variant);
+  if (!v || !v.key) throw pricingError_("Pick the color and graphics of the pieces.");
+  let parsed = null; try { parsed = JSON.parse(v.key); } catch (e) { /* stockVariantRow_ already refused that */ }
+  try {
+    const again = await stockCombination_(db, orgId, p, size, parsed[0], (parsed[1] || []).map(([location, graphicId, ink]) => ({ location, graphicId, ink })));
+    if (again.key === v.key) return again;
+    if (strict) throw pricingError_("This combination isn't offered on the product any more.");
+  } catch (e) { if (strict || !e.userFacing) throw e; }
+  return v;
+}
+export async function makeForStock(db, { orgId, productId, size, qty, occurredAt, color, picks, variant }) {
   const q = Math.floor(Number(qty) || 0);
   if (q <= 0) throw pricingError_("Enter how many were made.");
   const p = await stockProduct_(db, orgId, productId);
   if (!p) throw pricingError_("Product not found.");
-  if (Number(p.configurable)) throw pricingError_("Products with color and graphic choices can't be stocked yet — each finished piece would be one combination.");
-  const sz = stockSize_(p.pricingMode, size);
   // Made with no blank at all (migrations/0057, a patch from shop supplies): no blanks to take out.
   if (Number(p.noBlankNeeded)) throw pricingError_(`${p.name || productId} is made with no blank, so there are no blanks to take out — enter how many you have with Correct count.`);
-  const link = await stockLink_(db, orgId, productId, p.pricingMode, sz);
-  if (!link) throw pricingError_(`${p.name || productId}${sz ? " (" + sz + ")" : ""} isn't linked to a blank — link it on the product first, or enter the count with Correct count.`);
+  const sz = stockSize_(p.pricingMode, size);
+  const combo = await stockVariantFor_(db, orgId, p, sz, { color, picks, variant }, true);
+  const link = await stockLink_(db, orgId, productId, p.pricingMode, sz, combo.color);
+  // Its transfers (migrations/0081) leave transfer stock too, at their average cost — added to each piece's cost.
+  // Like an order's, they aren't refused when short: transfer stock can go below zero until the sheet is received.
+  const transfers = [];
+  for (const t of await stockTransfers_(db, orgId, p, combo)) {
+    const row = await db.prepare("SELECT name, purchasePriceCents, quantity FROM transfers WHERE id=?").bind(t.transferId).first();
+    if (row) transfers.push({ ...t, name: row.name || "", cost: Math.max(0, Number(row.purchasePriceCents) || 0), onHand: Number(row.quantity) || 0 });
+  }
+  const transferCents = transfers.reduce((a, t) => a + t.n * t.cost, 0);
+  const what = `${p.name || productId}${combo.color ? " " + combo.color : ""}${sz ? " (" + sz + ")" : ""}`;
+  if (!link) throw pricingError_(`${what} isn't linked to a blank — link it on the product first, or enter the count with Correct count.`);
   const blankId = Number(link.blankId), bColor = link.blankColor || "", bSize = link.blankSize || "";
   const held = (await getBlankReservations(db))[[blankId, bColor, bSize].join("|")] || 0;
   const free = Number(link.quantity) - held;
@@ -11302,56 +11417,65 @@ export async function makeForStock(db, { orgId, productId, size, qty, occurredAt
   const now = new Date().toISOString(), at = occurredAt || now;
   const G = "(SELECT quantity FROM blank_sizes WHERE blankId = ? AND color = ? AND size = ?) >= ?", gb = [blankId, bColor, bSize, q + held];
   const avgSql = "MAX(0, COALESCE((SELECT purchasePriceCents FROM blank_sizes WHERE blankId = ? AND color = ? AND size = ?), 0))", ab = [blankId, bColor, bSize];
-  const note = `Made for stock — ${p.name || productId}${sz ? " (" + sz + ")" : ""}`.slice(0, 300);
+  const note = `Made for stock — ${p.name || productId}${combo.label ? " · " + combo.label : ""}${sz ? " (" + sz + ")" : ""}`.slice(0, 300);
+  const pieceSql = `(${avgSql} + ${transferCents})`;   // a piece's cost: its blank + its transfers (whole cents)
   const res = await db.batch([
     db.prepare(`INSERT INTO inventory_movements (blankId, blankName, color, size, qtyDelta, unitCostCents, kind, orderId, itemId, vendor, vendorRef, note, occurredAt, createdAt, vendorChargedTax, accountId, paidPersonally, receiptKey, receiptName, reason)
       SELECT ?, ?, ?, ?, ?, ${avgSql}, 'consume', NULL, NULL, '', '', ?, ?, ?, 0, NULL, 0, '', '', 'finished' WHERE ${G}`)
       .bind(blankId, link.blankName || "", bColor, bSize, -q, ...ab, note, at, now, ...gb),
-    db.prepare(`INSERT INTO finished_goods_movements (orgId, productId, productName, color, size, qtyDelta, unitCostCents, kind, blankMovementId, note, occurredAt, createdAt)
-      SELECT ?, ?, ?, '', ?, ?, ${avgSql}, 'make', (SELECT max(id) FROM inventory_movements WHERE blankId = ? AND reason = 'finished'), ?, ?, ? WHERE ${G}`)
-      .bind(orgId, productId, p.name || productId, sz, q, ...ab, blankId, note, at, now, ...gb),
-    db.prepare(`INSERT INTO ready_to_ship (orgId, productId, size, quantity, updatedAt, avgCostCents) SELECT ?, ?, ?, ?, ?, ${avgSql} WHERE ${G}
-      ON CONFLICT(orgId, productId, size) DO UPDATE SET
+    db.prepare(`INSERT INTO finished_goods_movements (orgId, productId, productName, color, size, variant, variantLabel, qtyDelta, unitCostCents, kind, blankMovementId, note, occurredAt, createdAt)
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ${pieceSql}, 'make', (SELECT max(id) FROM inventory_movements WHERE blankId = ? AND reason = 'finished'), ?, ?, ? WHERE ${G}`)
+      .bind(orgId, productId, p.name || productId, combo.color, sz, combo.key, combo.label, q, ...ab, blankId, note, at, now, ...gb),
+    ...transfers.flatMap(t => [
+      db.prepare(`INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt, reason, finishedMovementId)
+        SELECT ?, ?, ?, ?, 'consume', ?, ?, ?, 'finished', (SELECT max(id) FROM finished_goods_movements WHERE orgId = ? AND productId = ? AND kind = 'make') WHERE ${G}`)
+        .bind(t.transferId, t.name, -q * t.n, t.cost, note, at, now, orgId, productId, ...gb),
+      db.prepare(`UPDATE transfers SET quantity = quantity - ?, updatedAt = ? WHERE id = ? AND ${G}`).bind(q * t.n, now, t.transferId, ...gb),
+    ]),
+    db.prepare(`INSERT INTO ready_to_ship (orgId, productId, size, variant, variantLabel, quantity, updatedAt, avgCostCents) SELECT ?, ?, ?, ?, ?, ?, ?, ${pieceSql} WHERE ${G}
+      ON CONFLICT(orgId, productId, size, variant) DO UPDATE SET
         avgCostCents = CAST(ROUND((MAX(ready_to_ship.quantity, 0) * ready_to_ship.avgCostCents + excluded.quantity * excluded.avgCostCents) * 1.0
                                   / (MAX(ready_to_ship.quantity, 0) + excluded.quantity)) AS INTEGER),
-        quantity = ready_to_ship.quantity + excluded.quantity, updatedAt = excluded.updatedAt`)
-      .bind(orgId, productId, sz, q, now, ...ab, ...gb),
+        quantity = ready_to_ship.quantity + excluded.quantity, variantLabel = excluded.variantLabel, updatedAt = excluded.updatedAt`)
+      .bind(orgId, productId, sz, combo.key, combo.label, q, now, ...ab, ...gb),
     db.prepare(`UPDATE blank_sizes SET quantity = quantity - ? WHERE blankId = ? AND color = ? AND size = ? AND quantity >= ?`).bind(q, blankId, bColor, bSize, q + held),
   ]);
   const claimed = Number(res.at(-1) && res.at(-1).meta && res.at(-1).meta.changes) === 1;
-  return { claimed, unitCost: fromCents(Number(link.avg) || 0), blank: { name: link.blankName || "", color: bColor, size: bSize } };
+  return { claimed, unitCost: fromCents((Number(link.avg) || 0) + transferCents), blank: { name: link.blankName || "", color: bColor, size: bSize }, variant: combo.key, variantLabel: combo.label,
+    transfers: transfers.map(t => ({ transferId: t.transferId, name: t.name, used: q * t.n, unitCost: fromCents(t.cost), short: Math.max(0, q * t.n - Math.max(0, t.onHand)) })) };
 }
 
 // Stock window → Correct count: sets the on-hand count to what was counted, as an `adjust` movement for
 // the difference (an increase at the current average cost, or the linked blank's when there's none yet).
 // Refused below what's set aside for orders, and if the count changed since it was read.
-export async function setFinishedCount(db, { orgId, productId, size, quantity, note, at = null }) {
+export async function setFinishedCount(db, { orgId, productId, size, quantity, note, at = null, color, picks, variant }) {
   const want = Math.floor(Number(quantity));
   if (!Number.isFinite(want) || want < 0) throw pricingError_("Enter a count of 0 or more.");
   const p = await stockProduct_(db, orgId, productId);
   if (!p) throw pricingError_("Product not found.");
   const sz = stockSize_(p.pricingMode, size);
-  const cur = await db.prepare("SELECT quantity, avgCostCents FROM ready_to_ship WHERE orgId=? AND productId=? AND size=?").bind(orgId, productId, sz).first();
+  const combo = await stockVariantFor_(db, orgId, p, sz, { color, picks, variant }), v = combo.key;
+  const cur = await db.prepare("SELECT quantity, avgCostCents FROM ready_to_ship WHERE orgId=? AND productId=? AND size=? AND variant=?").bind(orgId, productId, sz, v).first();
   const onHand = cur ? Number(cur.quantity) || 0 : 0, avg = cur ? Number(cur.avgCostCents) || 0 : 0;
-  const held = ((await finishedSetAside_(db, orgId))[[orgId, productId, sz].join("|")] || {}).n || 0;
+  const held = ((await finishedSetAside_(db, orgId))[heldKey_(orgId, productId, sz, v)] || {}).n || 0;
   if (want < held) throw pricingError_(`${held} ${held === 1 ? "is" : "are"} set aside for orders — the count can't go below that.`);
   const delta = want - onHand;
   if (!delta) return { delta: 0 };
   let unit = avg;
-  if (!unit && delta > 0) { const l = await stockLink_(db, orgId, productId, p.pricingMode, sz); unit = l ? Number(l.avg) || 0 : 0; }
+  if (!unit && delta > 0) { const l = await stockLink_(db, orgId, productId, p.pricingMode, sz, combo.color); unit = l ? Number(l.avg) || 0 : 0; }
   const newAvg = delta > 0 ? Math.round((Math.max(0, onHand) * avg + delta * unit) / (Math.max(0, onHand) + delta)) : avg;
   const now = new Date().toISOString(), when = at || now;   // when it was counted
-  const G = "COALESCE((SELECT quantity FROM ready_to_ship WHERE orgId = ? AND productId = ? AND size = ?), 0) = ?", gb = [orgId, productId, sz, onHand];
+  const G = "COALESCE((SELECT quantity FROM ready_to_ship WHERE orgId = ? AND productId = ? AND size = ? AND variant = ?), 0) = ?", gb = [orgId, productId, sz, v, onHand];
   const res = await db.batch([
-    db.prepare(`INSERT INTO finished_goods_movements (orgId, productId, productName, color, size, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
-      SELECT ?, ?, ?, '', ?, ?, ?, 'adjust', ?, ?, ? WHERE ${G}`)
-      .bind(orgId, productId, p.name || productId, sz, delta, unit, String(note || "Count corrected").slice(0, 300), when, now, ...gb),
-    db.prepare(`INSERT INTO ready_to_ship (orgId, productId, size, quantity, updatedAt, avgCostCents) SELECT ?, ?, ?, ?, ?, ? WHERE ${G}
-      ON CONFLICT(orgId, productId, size) DO UPDATE SET quantity = excluded.quantity, avgCostCents = excluded.avgCostCents, updatedAt = excluded.updatedAt`)
-      .bind(orgId, productId, sz, want, now, newAvg, ...gb),
+    db.prepare(`INSERT INTO finished_goods_movements (orgId, productId, productName, color, size, variant, variantLabel, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'adjust', ?, ?, ? WHERE ${G}`)
+      .bind(orgId, productId, p.name || productId, combo.color, sz, v, combo.label, delta, unit, String(note || "Count corrected").slice(0, 300), when, now, ...gb),
+    db.prepare(`INSERT INTO ready_to_ship (orgId, productId, size, variant, variantLabel, quantity, updatedAt, avgCostCents) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${G}
+      ON CONFLICT(orgId, productId, size, variant) DO UPDATE SET quantity = excluded.quantity, avgCostCents = excluded.avgCostCents, variantLabel = excluded.variantLabel, updatedAt = excluded.updatedAt`)
+      .bind(orgId, productId, sz, v, combo.label, want, now, newAvg, ...gb),
   ]);
   if (!(Number(res[0] && res[0].meta && res[0].meta.changes) === 1)) throw pricingError_("The count changed while you were editing — reopen the Stock window and try again.");
-  return { delta, unitCost: fromCents(unit) };
+  return { delta, unitCost: fromCents(unit), variant: v, variantLabel: combo.label };
 }
 
 // Kept for older callers: a typed count is now a recorded correction.
@@ -11361,25 +11485,25 @@ export async function upsertReadyToShipQty(db, orgId, productId, size, quantity)
 
 // Rebuilds one product + size's cached quantity / average cost from its non-voided movements (the
 // same replay as getFinishedGoodsValuation) — after a void, like recomputeBlankSizeFromHistory_.
-async function recomputeFinishedFromHistory_(db, orgId, productId, size) {
+async function recomputeFinishedFromHistory_(db, orgId, productId, size, variant = "") {
   const { results } = await db.prepare(
-    "SELECT qtyDelta, unitCostCents, kind FROM finished_goods_movements WHERE orgId=? AND productId=? AND size=? AND voidedAt IS NULL ORDER BY occurredAt, id"
-  ).bind(orgId, productId, size).all();
+    "SELECT qtyDelta, unitCostCents, kind FROM finished_goods_movements WHERE orgId=? AND productId=? AND size=? AND variant=? AND voidedAt IS NULL ORDER BY occurredAt, id"
+  ).bind(orgId, productId, size, variant || "").all();
   let qty = 0, avg = 0;
   for (const m of results) {
     const d = Number(m.qtyDelta);
     if (d > 0 && m.kind !== "sell") { const on = Math.max(0, qty); avg = Math.round((on * avg + d * Number(m.unitCostCents)) / (on + d)); }
     qty += d;
   }
-  await db.prepare(`INSERT INTO ready_to_ship (orgId, productId, size, quantity, updatedAt, avgCostCents) VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(orgId, productId, size) DO UPDATE SET quantity = excluded.quantity, avgCostCents = excluded.avgCostCents, updatedAt = excluded.updatedAt`)
-    .bind(orgId, productId, size, qty, new Date().toISOString(), avg).run();
+  await db.prepare(`INSERT INTO ready_to_ship (orgId, productId, size, variant, quantity, updatedAt, avgCostCents) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(orgId, productId, size, variant) DO UPDATE SET quantity = excluded.quantity, avgCostCents = excluded.avgCostCents, updatedAt = excluded.updatedAt`)
+    .bind(orgId, productId, size, variant || "", qty, new Date().toISOString(), avg).run();
 }
 
 export async function getFinishedGoodsMovements(db, orgId, productId) {
   const { results } = await db.prepare(
     "SELECT * FROM finished_goods_movements WHERE orgId=? AND productId=? ORDER BY occurredAt DESC, id DESC LIMIT 500").bind(orgId, productId).all();
-  return results.map(r => ({ id: Number(r.id), size: r.size || "", qtyDelta: Number(r.qtyDelta), unitCost: fromCents(r.unitCostCents), kind: r.kind,
+  return results.map(r => ({ id: Number(r.id), size: r.size || "", variant: r.variant || "", variantLabel: r.variantLabel || "", qtyDelta: Number(r.qtyDelta), unitCost: fromCents(r.unitCostCents), kind: r.kind,
     orderId: r.orderId || "", note: r.note || "", occurredAt: r.occurredAt, voidedAt: r.voidedAt || "", voidReason: r.voidReason || "" }));
 }
 
@@ -11390,8 +11514,8 @@ export async function voidFinishedGoodsMovement(db, id, reason) {
   const row = await db.prepare("SELECT * FROM finished_goods_movements WHERE id=?").bind(Number(id)).first();
   if (!row || row.voidedAt) throw pricingError_("That entry isn't there or is already voided.");
   if (!["opening", "make", "adjust"].includes(row.kind)) throw pricingError_("Entries made by an order are corrected on the order.");
-  const cur = await db.prepare("SELECT quantity FROM ready_to_ship WHERE orgId=? AND productId=? AND size=?").bind(row.orgId, row.productId, row.size).first();
-  const held = ((await finishedSetAside_(db, row.orgId))[[row.orgId, row.productId, row.size].join("|")] || {}).n || 0;
+  const cur = await db.prepare("SELECT quantity FROM ready_to_ship WHERE orgId=? AND productId=? AND size=? AND variant=?").bind(row.orgId, row.productId, row.size, row.variant || "").first();
+  const held = ((await finishedSetAside_(db, row.orgId))[heldKey_(row.orgId, row.productId, row.size, row.variant)] || {}).n || 0;
   const after = (cur ? Number(cur.quantity) : 0) - Number(row.qtyDelta);
   if (after < 0) throw pricingError_(`Voiding this would leave ${after} on hand — some of these pieces have already been sold. Use Correct count instead.`);
   if (after < held) throw pricingError_(`Voiding this would leave ${after} on hand, but ${held} ${held === 1 ? "is" : "are"} set aside for orders.`);
@@ -11405,7 +11529,14 @@ export async function voidFinishedGoodsMovement(db, id, reason) {
       await recomputeBlankSizeFromHistory_(db, bm.blankId, bm.color || "", bm.size);
     }
   }
-  await recomputeFinishedFromHistory_(db, row.orgId, row.productId, row.size);
+  if (row.kind === "make") {   // its transfers go back too (migrations/0081)
+    const { results: tm } = await db.prepare("SELECT DISTINCT transferId FROM transfer_movements WHERE finishedMovementId=? AND voidedAt IS NULL").bind(Number(row.id)).all();
+    if (tm.length) {
+      await db.prepare("UPDATE transfer_movements SET voidedAt=?, voidReason=? WHERE finishedMovementId=? AND voidedAt IS NULL").bind(now, ("Finished stock entry voided: " + why).slice(0, 300), Number(row.id)).run();
+      for (const t of tm) await recomputeTransferFromHistory_(db, t.transferId);
+    }
+  }
+  await recomputeFinishedFromHistory_(db, row.orgId, row.productId, row.size, row.variant || "");
   return row;
 }
 
@@ -11415,20 +11546,20 @@ export async function getFinishedGoodsValuation(db, asOf) {
   let results = [];
   try {
     ({ results } = await db.prepare(
-      "SELECT orgId, productId, productName, size, qtyDelta, unitCostCents, kind FROM finished_goods_movements WHERE occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id"
+      "SELECT orgId, productId, productName, size, variant, variantLabel, qtyDelta, unitCostCents, kind FROM finished_goods_movements WHERE occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id"
     ).bind(asOf).all());
   } catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
   const state = new Map();
   for (const m of results) {
-    const key = [m.orgId, m.productId, m.size].join("|");
-    const st = state.get(key) || { orgId: m.orgId, productId: m.productId, name: m.productName, size: m.size || "", qty: 0, avg: 0 };
+    const key = heldKey_(m.orgId, m.productId, m.size, m.variant);
+    const st = state.get(key) || { orgId: m.orgId, productId: m.productId, name: m.productName, size: m.size || "", variant: m.variant || "", label: "", qty: 0, avg: 0 };
     const d = Number(m.qtyDelta);
     if (d > 0 && m.kind !== "sell") { const on = Math.max(0, st.qty); st.avg = Math.round((on * st.avg + d * Number(m.unitCostCents)) / (on + d)); }
-    st.qty += d; st.name = m.productName || st.name;
+    st.qty += d; st.name = m.productName || st.name; st.label = m.variantLabel || st.label;
     state.set(key, st);
   }
   const rows = [...state.values()].filter(r => r.qty !== 0)
-    .map(r => ({ orgId: r.orgId, productId: r.productId, name: r.name, size: r.size, qty: r.qty, avgCost: fromCents(r.avg), value: fromCents(Math.max(0, r.qty) * r.avg) }))
+    .map(r => ({ orgId: r.orgId, productId: r.productId, name: r.label ? r.name + " · " + r.label : r.name, size: r.size, variant: r.variant, qty: r.qty, avgCost: fromCents(r.avg), value: fromCents(Math.max(0, r.qty) * r.avg) }))
     .sort((a, b) => (a.orgId + a.name + a.size).localeCompare(b.orgId + b.name + b.size));
   return { asOf, rows, units: rows.reduce((s, r) => s + r.qty, 0), value: fromCents(rows.reduce((s, r) => s + toCents(r.value), 0)) };
 }
@@ -11441,25 +11572,25 @@ async function returnFinishedStock_(db, orderId, itemId, at = null) {
   const o = await db.prepare("SELECT shippedAt, deliveredAt FROM orders WHERE orderId=?").bind(orderId).first();
   if (!o || o.shippedAt || o.deliveredAt) return 0;
   const { results: lines } = await db.prepare(
-    `SELECT oi.id, oi.orgId, oi.productId, oi.size, oi.manufacturedQty, oi.cogsCents, p.pricingMode, p.name
+    `SELECT oi.id, oi.orgId, oi.productId, oi.size, oi.stockVariant, oi.manufacturedQty, oi.cogsCents, p.pricingMode, p.name
      FROM order_items oi LEFT JOIN products p ON p.orgId = oi.orgId AND p.productId = oi.productId
      WHERE oi.orderId = ? AND oi.fromStock = 1 AND COALESCE(oi.manufacturedQty, 0) > 0 AND COALESCE(oi.cogsCents, 0) > 0 ${itemId ? "AND oi.id = ?" : ""}`
   ).bind(...(itemId ? [orderId, Number(itemId)] : [orderId])).all();
   let n = 0;
   for (const l of lines) {
     const pieces = Number(l.manufacturedQty), cents = Number(l.cogsCents), unit = Math.round(cents / pieces);
-    const sz = stockSize_(l.pricingMode, l.size), now = new Date().toISOString(), when = at || now;
+    const sz = stockSize_(l.pricingMode, l.size), v = l.stockVariant || "", now = new Date().toISOString(), when = at || now;
     const G = "(SELECT COALESCE(cogsCents, 0) FROM order_items WHERE id = ?) = ?", gb = [Number(l.id), cents];
     const res = await db.batch([
-      db.prepare(`INSERT INTO finished_goods_movements (orgId, productId, productName, color, size, qtyDelta, unitCostCents, kind, orderId, itemId, note, occurredAt, createdAt)
-        SELECT ?, ?, ?, '', ?, ?, ?, 'return', ?, ?, ?, ?, ? WHERE ${G}`)
-        .bind(l.orgId, l.productId, l.name || l.productId, sz, pieces, unit, orderId, Number(l.id), ("Put back from order " + orderId).slice(0, 300), when, now, ...gb),
-      db.prepare(`INSERT INTO ready_to_ship (orgId, productId, size, quantity, updatedAt, avgCostCents) SELECT ?, ?, ?, ?, ?, ? WHERE ${G}
-        ON CONFLICT(orgId, productId, size) DO UPDATE SET
+      db.prepare(`INSERT INTO finished_goods_movements (orgId, productId, productName, color, size, variant, variantLabel, qtyDelta, unitCostCents, kind, orderId, itemId, note, occurredAt, createdAt)
+        SELECT ?, ?, ?, '', ?, ?, COALESCE((SELECT variantLabel FROM ready_to_ship WHERE orgId = ? AND productId = ? AND size = ? AND variant = ?), ''), ?, ?, 'return', ?, ?, ?, ?, ? WHERE ${G}`)
+        .bind(l.orgId, l.productId, l.name || l.productId, sz, v, l.orgId, l.productId, sz, v, pieces, unit, orderId, Number(l.id), ("Put back from order " + orderId).slice(0, 300), when, now, ...gb),
+      db.prepare(`INSERT INTO ready_to_ship (orgId, productId, size, variant, quantity, updatedAt, avgCostCents) SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${G}
+        ON CONFLICT(orgId, productId, size, variant) DO UPDATE SET
           avgCostCents = CAST(ROUND((MAX(ready_to_ship.quantity, 0) * ready_to_ship.avgCostCents + excluded.quantity * excluded.avgCostCents) * 1.0
                                     / (MAX(ready_to_ship.quantity, 0) + excluded.quantity)) AS INTEGER),
           quantity = ready_to_ship.quantity + excluded.quantity, updatedAt = excluded.updatedAt`)
-        .bind(l.orgId, l.productId, sz, pieces, now, unit, ...gb),
+        .bind(l.orgId, l.productId, sz, v, pieces, now, unit, ...gb),
       db.prepare("UPDATE order_items SET cogsCents = 0 WHERE id = ? AND COALESCE(cogsCents, 0) = ?").bind(Number(l.id), cents),
     ]);
     if (Number(res.at(-1) && res.at(-1).meta && res.at(-1).meta.changes) === 1) n += pieces;

@@ -386,26 +386,37 @@ embroidery graphic to picture at each location — for pictures only, never the 
 Pieces made ahead — a shop's caps already embroidered and on the shelf — are **finished stock**. On
 Manage catalog → the shop → Products, a product's **Stock** button opens its stock window:
 
-- **Make for stock** takes the linked blanks out of blank stock at their cost and adds the finished
-  pieces at that cost. It isn't cost of goods yet; that's counted when a piece is sold.
+- **Make for stock** takes the linked blanks out of blank stock — and the transfers each piece carries
+  (its printed transfers, the reorder QR, a transfer graphic picked for it) out of transfer stock — and
+  adds the finished pieces at their cost. It isn't cost of goods yet; that's counted when a piece is
+  sold. Transfer stock isn't a limit: it can go below zero until the sheet is received, and the stock
+  window says what's short.
 - **Correct count** sets the number on hand after a count. A product made with no blank (a patch) has
   no blanks to take out, so its count is entered this way.
-- **History** lists every change, and each can be voided (a Make for stock entry puts its blanks back).
+- **History** lists every change, and each can be voided (a Make for stock entry puts its blanks and
+  transfers back).
   Entries in a closed month can't be changed.
 
 An order from the shop page, or a local sale, for a size that's in stock is **filled from stock**
 automatically: it skips the blank, design and making steps, and the order lines say "From stock". The
 pieces are set aside until the order is marked made (a local sale is handed over, so at once), then
 leave stock with their cost. Cancelling or voiding before it ships puts them back, and two orders can't
-both get the last piece. A product with color and graphic choices, a personalized line, or one with
-the customer's own design is always made, never taken from stock. Each version of a product has its
-own stock.
+both get the last piece. A personalized line, or one with the customer's own design, is always made,
+never taken from stock. Each version of a product has its own stock.
+
+A product with color and graphic choices is stocked per **combination**: the garment color, the graphic
+(and ink) at each spot, and the size — "Navy · Left chest: Crest (Gold) · M". The stock window lists
+each combination you have and has **Add stock of a combination** to make or count a new one; it's
+checked the way an order's choices are. An order is filled from stock only when its color, graphics,
+ink and size all match, and the shop page shows "N in stock" once the customer's picks match.
 
 Blanks bought for testing or shop use are marked **For testing / shop use** on the blank (TESTING on
 the Blanks screen); they're used up with Write off → testing. Every write-off records why: testing,
 damaged, lost or other. Reports → **Inventory & COGS** shows the three groups — blanks for sale, blanks
 for testing, finished stock — with cost of goods split into blanks used on orders and finished stock
-sold, write-offs by reason, and a roll-forward that says whether it adds up. Periods & Export's
+sold, write-offs by reason, and a roll-forward that says whether it adds up (transfers pressed onto
+finished stock come into it from the Transfer sheets section, where they're shown as "Into finished
+stock" rather than cost of goods). Periods & Export's
 year-end files carry the same figures, with an "Inventory by group" file.
 
 ## Invoices

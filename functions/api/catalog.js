@@ -249,11 +249,18 @@ export async function onRequestGet(context){
   const enabledPayments = computeEnabledPayments(org, catalogData.globalSettings, !!env.STRIPE_SECRET_KEY);
 
   // Fetch ready-to-ship stock fresh from D1 (not cached — stock changes with every fulfillment).
-  let stockByProduct = {};
+  // stock: {size: n} for a product with no choices; stockVariants: {combination key: {size: n}} for one with
+  // color and graphic choices (migrations/0080 — index.html's stockVariantKey_ builds the key from the picks).
+  let stockByProduct = {}, stockByVariant = {};
   if(env.DB){
     try{
       const stockRows = await getReadyToShipByOrg(env.DB, orgId);
       for(const row of stockRows){
+        if(row.variant){
+          const byKey = (stockByVariant[row.productId] = stockByVariant[row.productId] || {});
+          (byKey[row.variant] = byKey[row.variant] || {})[row.size] = row.quantity;
+          continue;
+        }
         if(!stockByProduct[row.productId]) stockByProduct[row.productId] = {};
         stockByProduct[row.productId][row.size] = row.quantity;
       }
@@ -287,7 +294,8 @@ export async function onRequestGet(context){
       deliveryOptions: (org.deliveryOptions || []).filter(o => carrierShipping || o.type !== "shipping").map(o => ({ id: o.id, type: o.type, label: o.label, fee: o.fee })),
       // The storefront's sections, in the managed order (migrations/0056) — only the ones this shop uses.
       categories: (catalogData.categories || []).filter(c => org.products.some(p => p.type === c.key)).map(c => ({ key: c.key, label: c.label })),
-      products: org.products.map(p => ({ ...toClientProduct(p), stock: stockByProduct[p.productId] || null, blankStock: blankReady[p.productId] || null })),
+      products: org.products.map(p => ({ ...toClientProduct(p), stock: stockByProduct[p.productId] || null,
+        ...(stockByVariant[p.productId] ? { stockVariants: stockByVariant[p.productId] } : {}), blankStock: blankReady[p.productId] || null })),
       // Configurable-product option catalog + tier prices (migrations/0036); only present when the
       // org has configurable products. Image URLs re-normalised on the way out.
       graphics: (org.graphics || []).map(g => ({ ...g, imageUrl: normImageUrl(g.imageUrl), thumbUrl: normImageUrl(g.thumbUrl) })),

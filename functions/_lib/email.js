@@ -319,9 +319,13 @@ function receiptTotals_(order) {
   const shipping = Number(order.shippingCost) || 0;
   const discount = Number(order.discountAmount) || 0;
   const taxAdded = order.taxMode === "exclusive" && !order.taxExempt ? Math.max(0, Number(order.salesTax) || 0) : 0;
-  const total = order.effectiveTotal != null ? Number(order.effectiveTotal) : subtotal + shipping - discount + taxAdded;
-  return { subtotal, shipping, discount, total, taxAdded, tbd: !!order.manualShipping };
+  // Rush (migrations/0082): the fee, or "to follow" — sent separately, so it never makes the total TBD.
+  const rush = order.rushRequested ? Number(order.rushFee) || 0 : 0;
+  const rushPending = !!(order.rushRequested && order.rushFeePending);
+  const total = order.effectiveTotal != null ? Number(order.effectiveTotal) : subtotal + shipping + rush - discount + taxAdded;
+  return { subtotal, shipping, discount, total, taxAdded, rush, rushOn: !!order.rushRequested, rushPending, tbd: !!order.manualShipping };
 }
+const RUSH_FOLLOW_TEXT_ = "to follow — we'll send it separately";
 // The delivery line's label. A shop's own option ("Delivery at practice" — migrations/0045) has a
 // method name but no ship-to address, and reads as itself; a carrier reads "Shipping (USPS Priority)".
 // (No address alone isn't proof — an old or hand-built order can carry "USPS Ground Advantage" without
@@ -334,12 +338,17 @@ function deliveryLabel_(order) {
   if (deliveryIsCustom_(order)) return String(order.shippingMethod);
   return `Shipping${order.shippingMethod ? " (" + order.shippingMethod + ")" : ""}`;
 }
+// "⚡ RUSH · needed by 2026-11-20 · fee to follow" — how the roll-up marks a rush order.
+function rushTag_(o) {
+  return ["⚡ RUSH", o.dueDate ? "needed by " + o.dueDate : "", o.rushFeePending ? "fee to follow" : (Number(o.rushFee) > 0 ? "fee " + fmt$(o.rushFee) : "")].filter(Boolean).join(" · ");
+}
 function receiptTotalsHtml_(order) {
   const t = receiptTotals_(order);
   const row = (label, amount, style = "") => `<tr><td style="${style}">${label}</td><td style="text-align:right;${style}">${amount}</td></tr>`;
   return `<table style="width:100%;font-size:14px;margin-top:8px">
       ${row("Subtotal", fmt$(t.subtotal))}
       ${t.tbd ? row("Shipping", "TBD", "color:#888") : t.shipping > 0 ? row(escHtml(deliveryLabel_(order)), fmt$(t.shipping)) : (deliveryIsCustom_(order) ? row(escHtml(deliveryLabel_(order)), "Free") : "")}
+      ${t.rushPending ? row("Rush fee", RUSH_FOLLOW_TEXT_, "color:#888") : t.rush > 0 ? row("Rush fee", fmt$(t.rush)) : ""}
       ${t.discount > 0 ? row(`Discount${order.discountNote ? " (" + escHtml(order.discountNote) + ")" : ""}`, "−" + fmt$(t.discount), "color:#166534") : ""}
       ${t.taxAdded > 0 ? row(escHtml(taxAddedLabel_(order)), fmt$(t.taxAdded)) : ""}
       ${t.tbd ? "" : row("<strong>Total</strong>", `<strong>${fmt$(t.total)}</strong>`, "border-top:1px solid #ddd;padding-top:4px")}
@@ -348,9 +357,10 @@ function receiptTotalsHtml_(order) {
 }
 function receiptTotalsText_(order) {
   const t = receiptTotals_(order);
+  const rushLine = t.rushPending ? `\nRush fee: ${RUSH_FOLLOW_TEXT_}` : t.rush > 0 ? `\nRush fee: ${fmt$(t.rush)}` : "";
   return `Subtotal: ${fmt$(t.subtotal)}` +
-    (t.tbd ? "\nShipping: TBD — a follow-up email will include the shipping cost, total, and payment options."
-      : (t.shipping > 0 ? `\n${deliveryLabel_(order)}: ${fmt$(t.shipping)}` : (deliveryIsCustom_(order) ? `\n${deliveryLabel_(order)}: Free` : "")) +
+    (t.tbd ? "\nShipping: TBD — a follow-up email will include the shipping cost, total, and payment options." + rushLine
+      : (t.shipping > 0 ? `\n${deliveryLabel_(order)}: ${fmt$(t.shipping)}` : (deliveryIsCustom_(order) ? `\n${deliveryLabel_(order)}: Free` : "")) + rushLine +
         (t.discount > 0 ? `\nDiscount: −${fmt$(t.discount)}` : "") +
         (t.taxAdded > 0 ? `\n${taxAddedLabel_(order)}: ${fmt$(t.taxAdded)}` : "") + `\nTotal: ${fmt$(t.total)}${taxText_(order)}`);
 }
@@ -401,7 +411,7 @@ function maintenanceText_(tasks) {
   });
 }
 
-export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit = [], awaitingPickup = [], awaitingBlanks = [], maintenanceDue = [], adminUrl = adminSiteUrl_(env) } = {}) {
+export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit = [], awaitingPickup = [], awaitingBlanks = [], maintenanceDue = [], rushToSet = [], adminUrl = adminSiteUrl_(env) } = {}) {
   const tz = await timeZone_(env);   // Region setting, else TIMEZONE, else UTC
   const when = (iso) => new Date(iso).toLocaleString("en-US", { timeZone: tz, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
@@ -409,6 +419,7 @@ export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit
     inTransit.length ? n(inTransit.length, "package in transit", "packages in transit") : "",
     awaitingPickup.length ? n(awaitingPickup.length, "label waiting for the carrier", "labels waiting for the carrier") : "",
     awaitingBlanks.length ? n(awaitingBlanks.length, "blank order not yet received", "blank orders not yet received") : "",
+    (rushToSet || []).length ? n(rushToSet.length, "rush fee still to set", "rush fees still to set") : "",
   ].filter(Boolean);
   const since = lastSentAt ? `since the last roll-up on ${when(lastSentAt)}` : "yet";
   const lines = [
@@ -430,8 +441,9 @@ export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit
 // sends sendDigestHeartbeatEmail instead, so a quiet morning still proves the roll-up ran).
 // pickedUp = orders the tracking check just marked shipped (carrier's first scan); awaitingPickup =
 // orders with a label the carrier hasn't scanned yet (listed for the record, never a reason to send).
-export async function sendDailyDigestEmail(env, { orders = [], notices = [], orgNames = {}, security = null, inTransit = [], pickedUp = [], awaitingPickup = [], issues = [], awaitingBlanks = [], priceReminder = null, belowTarget = [], maintenanceDue = [], adminUrl = adminSiteUrl_(env) }) {
+export async function sendDailyDigestEmail(env, { orders = [], notices = [], orgNames = {}, security = null, inTransit = [], pickedUp = [], awaitingPickup = [], issues = [], awaitingBlanks = [], priceReminder = null, belowTarget = [], maintenanceDue = [], rushToSet = [], adminUrl = adminSiteUrl_(env) }) {
   issues = issues || [];
+  rushToSet = rushToSet || [];
   belowTarget = belowTarget || [];
   const pr = priceReminder && ((priceReminder.blanks || []).length || (priceReminder.products || []).length) ? priceReminder : null;
   awaitingBlanks = awaitingBlanks || [];
@@ -476,7 +488,7 @@ export async function sendDailyDigestEmail(env, { orders = [], notices = [], org
   const orderHtml = (o) => `
     <tr style="border-top:1px solid #e5e7eb">
       <td style="padding:6px 8px;vertical-align:top;white-space:nowrap">${escHtml(o.orderId)}<br><span style="color:#666;font-size:12px">${escHtml(when(o.placedAt))}</span></td>
-      <td style="padding:6px 8px;vertical-align:top">${escHtml(o.customerName)}<br><span style="color:#666;font-size:12px">${escHtml(o.contact || "")}</span></td>
+      <td style="padding:6px 8px;vertical-align:top">${escHtml(o.customerName)}<br><span style="color:#666;font-size:12px">${escHtml(o.contact || "")}</span>${o.rushRequested ? `<br><span style="color:#b45309;font-size:12px;font-weight:600">${escHtml(rushTag_(o))}</span>` : ""}</td>
       <td style="padding:6px 8px;vertical-align:top;font-size:13px">${(o.items || []).map(it => escHtml(itemLine(it))).join("<br>")}</td>
       <td style="padding:6px 8px;vertical-align:top;white-space:nowrap">${escHtml(o.paymentMethod || "")}<br><span style="font-size:12px;color:${o.paid ? "#15803d" : "#b45309"}">${o.paid ? "Paid" : "Unpaid"}</span></td>
       <td style="padding:6px 8px;vertical-align:top;text-align:right;white-space:nowrap">${fmt$(o.total)}</td>
@@ -550,6 +562,9 @@ export async function sendDailyDigestEmail(env, { orders = [], notices = [], org
     ${belowTarget.length ? `<h3 style="margin:22px 0 6px;font-size:17px">📉 Products now below your price targets — ${belowTarget.length}</h3>
     <p style="margin:0 0 6px;color:#555;font-size:13px">A blank's cost, a fee or a target changed since the last roll-up. The product's Pricing panel shows what each item costs and leaves.</p>
     <ul style="margin:0;padding-left:18px;font-size:14px">${belowTarget.map(p => `<li><strong>${escHtml(p.name)}</strong> <span style="color:#666">(${escHtml(orgName(p.orgId))})</span><br><span style="font-size:13px;color:#555">${(p.problems || []).map(escHtml).join("<br>")}</span></li>`).join("")}</ul>` : ""}
+    ${rushToSet.length ? `<h3 style="margin:22px 0 6px;font-size:17px">⚡ Rush fees to set — ${rushToSet.length}</h3>
+    <p style="margin:0 0 6px;color:#555;font-size:13px">These rush orders were placed with the fee to follow. Set it on the order (Orders → Rush…) and send the customer an invoice.</p>
+    <ul style="margin:0;padding-left:18px;font-size:14px">${rushToSet.map(x => `<li>${escHtml(x.orderId)} — ${escHtml(x.customerName)} <span style="color:#666">(${escHtml(orgName(x.orgId))})</span>${x.dueDate ? ` · needed by ${escHtml(x.dueDate)}` : ""}</li>`).join("")}</ul>` : ""}
     ${maintenanceDue.length ? `<h3 style="margin:22px 0 6px;font-size:17px">🔧 Machine maintenance due — ${maintenanceDue.length}</h3>
     <ul style="margin:0;padding-left:18px;font-size:14px">${maintenanceText_(maintenanceDue).map(x => `<li>${escHtml(x)}</li>`).join("")}</ul>
     ${adminUrl ? `<p style="margin:6px 0 0;font-size:13px"><a href="${escHtml(adminUrl)}/#maintenance">Machine maintenance</a></p>` : ""}` : ""}
@@ -563,7 +578,7 @@ export async function sendDailyDigestEmail(env, { orders = [], notices = [], org
     urgent.length ? "NEEDS ATTENTION\n" + urgent.map(noticeText).join("\n") : "",
     n ? `${plural(n, "new order")} — ${fmt$(total)}\n\n` + groups.map(g =>
       `${g.name} — ${plural(g.orders.length, "order")}, ${fmt$(g.total / 100)}\n` + g.orders.map(o =>
-        `  ${o.orderId}  ${o.customerName} <${o.contact || ""}>  ${o.paymentMethod || ""} ${o.paid ? "(paid)" : "(unpaid)"}  ${fmt$(o.total)}\n` +
+        `  ${o.orderId}  ${o.customerName} <${o.contact || ""}>  ${o.paymentMethod || ""} ${o.paid ? "(paid)" : "(unpaid)"}  ${fmt$(o.total)}${o.rushRequested ? "  " + rushTag_(o) : ""}\n` +
         (o.items || []).map(it => "    " + itemLine(it)).join("\n")).join("\n")).join("\n\n") : "",
     delivered.length ? `DELIVERED — ${delivered.length}\n` + delivered.map(noticeText).join("\n") : "",
     pickedUp.length ? `PICKED UP BY THE CARRIER (now marked shipped) — ${pickedUp.length}\n` + pickedUp.map(x =>
@@ -578,6 +593,7 @@ export async function sendDailyDigestEmail(env, { orders = [], notices = [], org
     activity.length ? "Payments, refunds & customer responses\n" + activity.map(noticeText).join("\n") : "",
     pr ? priceReminderText_(pr, orgName, tz) : "",
     belowTarget.length ? `PRODUCTS NOW BELOW YOUR PRICE TARGETS — ${belowTarget.length}\n` + belowTarget.map(p => `  ${p.name} (${orgName(p.orgId)})\n` + (p.problems || []).map(x => "    " + x).join("\n")).join("\n") : "",
+    rushToSet.length ? `RUSH FEES TO SET — ${rushToSet.length}\n` + rushToSet.map(x => `  ${x.orderId} (${orgName(x.orgId)})  ${x.customerName}${x.dueDate ? "  needed by " + x.dueDate : ""}`).join("\n") : "",
     maintenanceDue.length ? `MACHINE MAINTENANCE DUE — ${maintenanceDue.length}\n` + maintenanceText_(maintenanceDue).map(x => "  " + x).join("\n") : "",
     adminUrl,
   ].filter(Boolean).join("\n\n");

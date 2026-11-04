@@ -118,6 +118,7 @@ import {
   bumpCatalogVersion, listStockPurchases,
   getAccountRegister, getReceiptRecords, receiptTargets, getRecordReceipt, setReceiptFile, receiptAccountBlockers, setReceiptAccount,
   lineQty, QTY_MESSAGE, zipStates, SHIPPING_QUOTE_PENDING, byId_,
+  getRushSettings, setRushSettings, getRushFeesToSet, rushRuleView, resolveRushRule, rushFeeFor, cleanShopRush, setOrgRushFee, setOrderRushFee,
 } from "../_lib/db.js";
 import {
   sendOrderReceivedEmail,
@@ -160,7 +161,7 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "getBoxPresets", "setBoxPresets",
   "getInventory", "createInventoryItem", "updateInventoryItem", "deleteInventoryItem",
   "getBlanks", "createBlank", "updateBlank", "deleteBlank", "mergeBlanks", "markBlankPricesChecked", "getBlankVendorPriceHistory", "recomputeBlankAverageCosts", "confirmProductPrices",
-  "previewVendorBlanks", "applyVendorBlanks", "copyVendorImage", "getPricingSettings", "updatePricingSettings", "analyzePricing", "previewProductHoopings", "removeBlankImages", "findOrphanImages", "deleteOrphanImages", "suggestColorGroups",
+  "previewVendorBlanks", "applyVendorBlanks", "copyVendorImage", "getPricingSettings", "updatePricingSettings", "getRushSettings", "updateRushSettings", "analyzePricing", "previewProductHoopings", "removeBlankImages", "findOrphanImages", "deleteOrphanImages", "suggestColorGroups",
   "vendorDirectorySearch", "vendorDirectoryEndpoints", "listVendorConnections", "saveVendorConnection", "deleteVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks", "fetchVendorProducts",
   "previewSupplierOrder", "placeSupplierOrder", "listSupplierOrders", "checkSupplierOrderShipments", "cancelSupplierOrder", "listVendorApiLog", "getVendorApiLogEntry",
   "getBrandRules", "updateBrandRules", "listBrandApprovals", "addBrandApproval", "revokeBrandApproval",
@@ -258,8 +259,10 @@ const ADMIN_ONLY_ACTIONS = [
   "updateBrandRules",
   // The domain step (Global settings → Your domain): a Cloudflare key that can change the account's Workers and DNS.
   "getCloudflareSetup", "connectCloudflare",
+  "updateRushSettings",   // rush fees (migrations/0082)
 ];
 const MANAGER_ACTIONS = [
+  "getRushSettings", "setRushFee",                                // rush fees (migrations/0082)
   "getPublishState", "getPreviewLink",                            // publish per shop (migrations/0076)
   "previewDiscardShopChanges", "discardShopChanges",              // Discard changes… (back to the published shop)
   "applyRulePrices",                                              // Brand rules → Show price impact → Apply
@@ -458,7 +461,7 @@ export async function onRequestPost(context) {
     if (a === "writeOffBlanks" && /^\d{4}-\d{2}-\d{2}$/.test(String(b.occurredAt || ""))) months.push(String(b.occurredAt).slice(0, 7));
     if (["receiveTransferSheet", "writeOffTransfers"].includes(a) && /^\d{4}-\d{2}-\d{2}/.test(String(b.receivedAt || b.occurredAt || ""))) months.push(String(b.receivedAt || b.occurredAt).slice(0, 7));
     if (a === "createFromStatementLine" && b.lineId) { const l = await getStatementLine(env.DB, b.lineId); if (l) months.push(String(l.lineDate).slice(0, 7)); }
-    if (["setDiscount", "editOrder", "setShippingInfo", "setShippingPaidAmount", "voidOrder", "deleteOrder", "updateOrderDate"].includes(a) && b.orderId) months.push(await orderMonth(env.DB, String(b.orderId)));
+    if (["setDiscount", "editOrder", "setShippingInfo", "setShippingPaidAmount", "voidOrder", "deleteOrder", "updateOrderDate", "setRushFee"].includes(a) && b.orderId) months.push(await orderMonth(env.DB, String(b.orderId)));
     if (a === "updateOrderDate" && /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || ""))) months.push(String(b.date).slice(0, 7));
     if (["cancelLineItem", "setLineItemRefund"].includes(a) && b.sheetRow) months.push(await itemOrderMonth(env.DB, b.sheetRow));
     if (a === "bulkCancelLineItems" && Array.isArray(b.sheetRows)) for (const id of b.sheetRows) months.push(await itemOrderMonth(env.DB, id));
@@ -701,14 +704,14 @@ export async function onRequestPost(context) {
     const byOrg = {};
     for (const o of allOrgs) {
       byOrg[o.orgId] = { orgId: o.orgId, name: o.name, orderCount: 0,
-        subtotal: 0, discounts: 0, shipping: 0, effectiveTotal: 0, received: 0, balance: 0 };
+        subtotal: 0, discounts: 0, shipping: 0, rushFees: 0, effectiveTotal: 0, received: 0, balance: 0 };
     }
 
     for (const row of rows) {
       const orgId = row.orgId;
       if (!byOrg[orgId]) {
         byOrg[orgId] = { orgId, name: orgId, orderCount: 0,
-          subtotal: 0, discounts: 0, shipping: 0, effectiveTotal: 0, received: 0, balance: 0 };
+          subtotal: 0, discounts: 0, shipping: 0, rushFees: 0, effectiveTotal: 0, received: 0, balance: 0 };
       }
       const entry     = byOrg[orgId];
       const items     = Number(row.itemSubtotal)  || 0;
@@ -720,6 +723,7 @@ export async function onRequestPost(context) {
       entry.subtotal      += items;
       entry.discounts     += discount;
       entry.shipping      += ship;
+      entry.rushFees      += Number(row.rushFee) || 0;   // rush fees (migrations/0082)
       entry.effectiveTotal += effective;
       entry.received      += received;
       entry.balance       += Math.max(0, effective - received);
@@ -731,11 +735,12 @@ export async function onRequestPost(context) {
       acc.subtotal      += o.subtotal;
       acc.discounts     += o.discounts;
       acc.shipping      += o.shipping;
+      acc.rushFees      += o.rushFees;
       acc.effectiveTotal += o.effectiveTotal;
       acc.received      += o.received;
       acc.balance       += o.balance;
       return acc;
-    }, { orderCount: 0, subtotal: 0, discounts: 0, shipping: 0, effectiveTotal: 0, received: 0, balance: 0 });
+    }, { orderCount: 0, subtotal: 0, discounts: 0, shipping: 0, rushFees: 0, effectiveTotal: 0, received: 0, balance: 0 });
 
     return jsonResponse({ status: "ok", orgs, total, dateFrom, dateTo });
   }
@@ -1410,6 +1415,7 @@ export async function onRequestPost(context) {
       awaitingBlanks: (awaitingBlanks || []).map(o => ({ ...o, orgName: names[o.orgId] || o.orgId })),
       orders: orders.map(o => ({ orderId: o.orderId, orgId: o.orgId, orgName: names[o.orgId] || o.orgId, placedAt: o.placedAt,
         customerName: o.customerName, contact: o.contact, paymentMethod: o.paymentMethod, paid: !!o.paid, total: o.total,
+        rushRequested: !!o.rushRequested, rushFee: o.rushFee || 0, rushFeePending: !!o.rushFeePending, dueDate: o.dueDate || "",
         items: (o.items || []).map(it => ({ name: it.name, size: it.size || "", qty: it.qty, personalized: !!it.personalized,
           persName: it.persName || "", cancelled: !!it.cancelDate })) })),
       notices: notices.map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
@@ -1418,7 +1424,9 @@ export async function onRequestPost(context) {
       awaitingPickup: (deliveries.awaitingPickup || []).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
       // Machine maintenance that's due (migrations/0071) — the roll-up lists it.
       maintenanceDue: (await getFeatures(env.DB).catch(() => ({ production: true }))).production
-        ? (await listMaintenanceTasks(env.DB).catch(() => [])).filter(t => t.status === "due") : [] });
+        ? (await listMaintenanceTasks(env.DB).catch(() => [])).filter(t => t.status === "due") : [],
+      // Rush orders whose fee is still to follow (migrations/0082).
+      rushToSet: (await getRushFeesToSet(env.DB).catch(() => [])).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })) });
   }
 
   // ---- sendTestEmail — one test message, and what the email provider said (Communications page) ----
@@ -1514,7 +1522,7 @@ export async function onRequestPost(context) {
     const sum = (k) => Math.round(rows.reduce((a, r) => a + r[k] * 100, 0)) / 100;
     const totals = {
       orders: rows.reduce((a, r) => a + r.orders, 0),
-      grossSales: sum("grossSales"), taxCollected: sum("taxCollected"), netSales: sum("netSales"), shipping: sum("shipping"),
+      grossSales: sum("grossSales"), taxCollected: sum("taxCollected"), netSales: sum("netSales"), shipping: sum("shipping"), rushFees: sum("rushFees"),
       exemptSales: Math.round(rows.filter(r => r.exempt).reduce((a, r) => a + r.netSales * 100, 0)) / 100,
       refunded: Math.round(refunds.reduce((a, r) => a + r.refunded * 100, 0)) / 100,
       taxRefunded: Math.round(refunds.reduce((a, r) => a + r.taxRefunded * 100, 0)) / 100,
@@ -1860,6 +1868,45 @@ export async function onRequestPost(context) {
     return jsonResponse({ status: "ok", orderId,
       discountAmount: updated.discountAmount, discountNote: updated.discountNote,
       effectiveTotal: updated.effectiveTotal, balanceDue: updated.balanceDue });
+  }
+
+  // ---- setRushFee (migrations/0082): rush on or off for one order, its fee or "to follow", and the due date ----
+  // Works on any order, whether or not its shop offers rush. Audited first; a closed month refuses it (periodGuard).
+  if (body.action === "setRushFee") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    if (denied) return denied;
+    { const locked = await periodGuard(body); if (locked) return locked; }
+    const orderId = String(body.orderId || "").trim();
+    if (!orderId || !ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
+    const before = await getOrderById(env.DB, orderId);
+    if (!before) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    if (body.org && before.orgId !== body.org) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    if (before.voidedAt) return jsonResponse({ status: "error", message: "This order is voided." }, 409);
+    const requested = body.requested === true;
+    const pending = requested && body.pending === true;
+    let cents = 0;
+    if (requested && !pending) {
+      const amount = Number(body.amount);
+      if (body.amount === "" || body.amount == null || !Number.isFinite(amount) || amount < 0 || amount > 1000) {
+        return jsonResponse({ status: "error", message: "Enter the rush fee — $0 to $1,000 — or mark it as to follow." }, 400);
+      }
+      cents = Math.round(amount * 100);
+    }
+    let dueDate;
+    if (body.dueDate !== undefined) {
+      dueDate = String(body.dueDate || "");
+      if (dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) return jsonResponse({ status: "error", message: "The due date isn't a date." }, 400);
+    }
+    // The fee's tax follows the setting when rush is first put on an order; after that it keeps its own.
+    const taxable = requested && !before.rushRequested ? (await getRushSettings(env.DB)).taxable : undefined;
+    const auditErr = await auditStrict({ orgId: before.orgId, orderId, action: "order.rush_fee_set",
+      detail: { from: { requested: before.rushRequested, fee: before.rushFee, pending: before.rushFeePending, dueDate: before.dueDate || "" },
+                to: { requested, fee: cents / 100, pending, ...(dueDate !== undefined ? { dueDate } : {}) } } });
+    if (auditErr) return auditErr;
+    await setOrderRushFee(env.DB, orderId, { requested, cents, pending, taxable });
+    if (dueDate !== undefined && dueDate !== (before.dueDate || "")) await setOrderDueDate(env.DB, orderId, dueDate || null);
+    const updated = await getOrderById(env.DB, orderId);
+    return jsonResponse({ status: "ok", orderId, order: updated });
   }
 
   // ---- voidOrder / deleteOrder ------------------------------------------------
@@ -2590,7 +2637,13 @@ export async function onRequestPost(context) {
     const PRODUCT_AUDIT_FIELDS = ["name", "sub", "type", "pricingMode", "flatPrice", "sizePricing", "colorGroups", "personalizationPrice", "noDesignNeeded", "noBlankNeeded", "runMinutes", "transferCost", "suppliesCost",
       "customDesign", "customDesignPrice", "personalizationOptions", "images", "features", "visible", "sortOrder", "weightOz", "taxable", "versionGroup", "versionLabel", "fixedTransfers", "mockupGraphics"];
     const ORG_AUDIT_FIELDS = ["subdomain", "name", "eyebrow", "accent", "desc", "ready", "shippingEnabled", "deliveryOptions", "enabledPayments",
-      "orderDeadline", "closedMessage", "allowOrdersAfterDeadline", "designImageShirt", "designImageCap", "designImageDetail"];
+      "orderDeadline", "closedMessage", "allowOrdersAfterDeadline", "designImageShirt", "designImageCap", "designImageDetail", "rushFee"];
+    // The shop's rush fee (migrations/0082), only when sent: {use: "default" | "off" | "own", rule}. undefined = leave it.
+    const shopRushOf_ = (b) => {
+      if (b.rushFee === undefined) return { skip: true };
+      try { return { value: cleanShopRush(b.rushFee) }; }
+      catch (e) { if (e && e.userFacing) return { error: e.message }; throw e; }
+    };
     const diff_ = (before, after, fields) => {
       const changes = {};
       for (const f of fields) {
@@ -2628,6 +2681,8 @@ export async function onRequestPost(context) {
       }
       if (body.shippingEnabled && (await getLocaleSettings(env.DB)).country !== "US") return jsonResponse({ status: "error", message: NO_CARRIER_SHIPPING_MSG }, 400);
       if (body.shippingEnabled && !featureOn("shipping")) return jsonResponse({ status: "error", message: NO_SHIPPING_FEATURE_MSG }, 400);
+      const newRush = shopRushOf_(body);
+      if (newRush.error) return jsonResponse({ status: "error", message: newRush.error }, 400);
       await createOrg(env.DB, {
         orgId: body.orgId, subdomain: body.subdomain, name: body.name,
         eyebrow: body.eyebrow || "", accent: body.accent || "#2563eb",
@@ -2642,6 +2697,7 @@ export async function onRequestPost(context) {
         designImageDetail: body.designImageDetailUrl || "",
       });
       if (newDelivery) await setOrgDeliveryOptions(env.DB, body.orgId, newDelivery);
+      if (!newRush.skip) await setOrgRushFee(env.DB, body.orgId, newRush.value);
       // Tax exemption is only touched when the form sends it (see setOrgTaxExemption).
       if (body.taxExempt !== undefined) {
         const certificate = String(body.taxExemptCertificate || "").trim().slice(0, 100);
@@ -2707,6 +2763,8 @@ export async function onRequestPost(context) {
         return jsonResponse({ status: "error", message: NO_CARRIER_SHIPPING_MSG }, 400);
       }
       if (body.shippingEnabled && !existingOrg.shippingEnabled && !featureOn("shipping")) return jsonResponse({ status: "error", message: NO_SHIPPING_FEATURE_MSG }, 400);
+      const newRush = shopRushOf_(body);
+      if (newRush.error) return jsonResponse({ status: "error", message: newRush.error }, 400);
       await updateOrg(env.DB, body.orgId, {
         subdomain: body.subdomain,
         name: body.name, eyebrow: body.eyebrow || "", accent: body.accent || "#2563eb",
@@ -2721,6 +2779,7 @@ export async function onRequestPost(context) {
         designImageDetail: body.designImageDetailUrl || "",
       });
       if (newDelivery) await setOrgDeliveryOptions(env.DB, body.orgId, newDelivery);
+      if (!newRush.skip) await setOrgRushFee(env.DB, body.orgId, newRush.value);
       { const changes = diff_(existingOrg, await getOrgById(env.DB, body.orgId), ORG_AUDIT_FIELDS);
         if (Object.keys(changes).length) audit({ orgId: body.orgId, orderId: null, action: "org.updated", detail: { changes } }); }
       // Tax exemption is only touched when the form sends it (see setOrgTaxExemption).
@@ -3166,6 +3225,24 @@ export async function onRequestPost(context) {
     if (body.action === "updateGlobalSettings") {
       await setGlobalSettings(env.DB, body.globalSettings || {});
       return jsonResponse({ status: "ok" });
+    }
+
+    // ---- Rush fees (migrations/0082): the global rule every shop follows unless it has its own, and its tax ----
+    if (body.action === "getRushSettings") {
+      const r = await getRushSettings(env.DB);
+      return jsonResponse({ status: "ok", rush: { rule: rushRuleView(r.rule), taxable: r.taxable } });
+    }
+    if (body.action === "updateRushSettings") {
+      const b = body.rush || {};
+      const before = await getRushSettings(env.DB);
+      let saved;
+      try { saved = await setRushSettings(env.DB, { rule: b.rule, taxable: b.taxable === true }); }
+      catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
+      audit({ orgId: null, orderId: null, action: "settings.rush_fee_set",
+        detail: { from: { ...rushRuleView(before.rule), taxable: before.taxable }, to: { ...rushRuleView(saved.rule), taxable: saved.taxable } } });
+      // Shops show the rule straight away: the catalog the storefront reads moves to a new version.
+      await bumpCatalogVersion(env.DB);
+      return jsonResponse({ status: "ok", rush: { rule: rushRuleView(saved.rule), taxable: saved.taxable } });
     }
 
     // ---- Pricing awareness (migrations/0067): fees, supplies, targets, and the analysis itself ----
@@ -5850,7 +5927,28 @@ export async function onRequestPost(context) {
     serverShippingCost = q.amountCents / 100;
     serverShippingMethod = String(q.method || "").slice(0, 100);
   }
-  const total = subtotal + serverShippingCost;
+  // Rush (migrations/0082): asked for with the order, priced on the server from the shop's rule as published (its own,
+  // else the global one) — never from the request. "To follow" means no fee yet: the shop sets it on the order and
+  // collects it afterwards, so it doesn't hold up paying for the rest.
+  let rush = null;
+  if (body.rush === true) {
+    const rushSettings = await getRushSettings(env.DB);
+    const rule = resolveRushRule(orgRow, rushSettings);
+    if (!rule) return jsonResponse({ status: "error", message: "This shop doesn't offer rush orders — please refresh the page." }, 400);
+    const fee = rushFeeFor(rule, Math.round(Number(subtotal) * 100));
+    rush = { cents: fee.cents, pending: fee.pending, taxable: rushSettings.taxable };
+  }
+  // An optional "needed by" date becomes the order's due date (run queues put it first): today to a year out.
+  let dueDate = "";
+  if (body.neededBy != null && body.neededBy !== "") {
+    const d = String(body.neededBy);
+    const today = new Date().toISOString().slice(0, 10), yearOut = new Date(Date.now() + 366 * 86400000).toISOString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || isNaN(Date.parse(d + "T12:00:00Z")) || d < new Date(Date.now() - 86400000).toISOString().slice(0, 10) || d > yearOut) {
+      return jsonResponse({ status: "error", message: "Please pick a 'needed by' date between today and a year from now." }, 400);
+    }
+    dueDate = d < today ? today : d;
+  }
+  const total = subtotal + serverShippingCost + (rush ? rush.cents / 100 : 0);
 
   // Weight from the catalog, not the client (used later for label purchase).
   let serverWeightOz = 0;
@@ -5870,6 +5968,8 @@ export async function onRequestPost(context) {
     shippingAddress: cleanAddr,
     totalWeightOz: serverWeightOz,
     placedAt: new Date().toISOString(),
+    ...(rush ? { rushRequested: true, rushFee: rush.cents / 100, rushFeePending: rush.pending, rushFeeTaxable: rush.taxable } : {}),
+    ...(dueDate ? { dueDate } : {}),
   };
 
   // What the order comes to, as recorded (insertOrder works the tax out per line; with tax added

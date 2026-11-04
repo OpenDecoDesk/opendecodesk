@@ -101,6 +101,8 @@ async function invoiceView_(env, inv, order, org) {
       detail: lineDetailText(it), unitPrice: it.unitPrice, lineTotal: it.lineTotal })),
     subtotal: Number(order.itemsSubtotal) || 0, discount: Number(order.discountAmount) || 0, discountNote: order.discountNote || "",
     shipping: Number(order.shippingCost) || 0, total: Number(order.effectiveTotal) || 0,
+    // Rush (migrations/0082): the fee, or still to follow — which doesn't stop paying the rest.
+    rushRequested: !!order.rushRequested, rushFee: Number(order.rushFee) || 0, rushFeePending: !!order.rushFeePending,
     received: Number(order.amountReceived) || 0, balanceDue: Number(order.balanceDue) || 0, paid: !!order.paid && Number(order.balanceDue) <= 0,
     salesTax: Number(order.salesTax) || 0, taxRate: Number(order.taxRate) || 0, taxExempt: !!order.taxExempt,
     // Tax in the listed prices or added on top (migrations/0052) — the page shows a tax line for the latter.

@@ -316,6 +316,8 @@ export async function onRequestGet(context){
       // "inclusive": the listed prices include the tax; "exclusive": the cart adds it (the server
       // works out the real figure when the order is placed).
       salesTaxMode: ((catalogData.globalSettings || {}).salesTax || {}).taxMode === "exclusive" ? "exclusive" : "inclusive",
+      // The rush fee this shop offers (migrations/0082): its own rule, else the global one; null = no rush.
+      rush: org.rushOffer || null,
       // Public Turnstile site key (not secret) — only when server-side
       // verification is actually on, so the widget never renders for nothing.
       turnstileSiteKey: (env.TURNSTILE_SECRET_KEY && env.TURNSTILE_SITE_KEY) ? env.TURNSTILE_SITE_KEY : null

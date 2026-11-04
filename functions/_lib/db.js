@@ -105,27 +105,39 @@ export async function setSalesTaxSettings(db, { rateBps, jurisdiction, taxMode }
 //   grossGoodsCents what the customer pays for the goods, tax included, after the discount
 //   shippingCents  shipping actually charged (0 once every line is cancelled)
 //   taxAddedCents  the part of taxCents that is on top of the listed prices (0 when inclusive)
-export function orderAmounts({ itemsCents, itemsTaxCents, shippingCents, discountCents, discountTaxCents, taxMode }) {
+//   rushCents      the rush fee charged (migrations/0082; 0 once every line is cancelled), rushTaxCents the tax
+//                  on it (inside the fee when inclusive, on top of it when exclusive), rushNetCents the fee without tax
+//   workOwedCents  what's owed leaving the rush fee (and its tax) out — an unpaid rush fee doesn't hold up production
+export function orderAmounts({ itemsCents, itemsTaxCents, shippingCents, discountCents, discountTaxCents, taxMode, rushCents, rushTaxCents }) {
   const items = Number(itemsCents) || 0, discount = Number(discountCents) || 0;
+  const exclusive = taxMode_(taxMode) === "exclusive";
   const shipping = items > 0 ? Number(shippingCents) || 0 : 0;
-  const taxCents = Math.max(0, (Number(itemsTaxCents) || 0) - (Number(discountTaxCents) || 0));
-  const taxAddedCents = taxMode_(taxMode) === "exclusive" ? taxCents : 0;
-  const owedCents = Math.max(0, items + shipping - discount + taxAddedCents);
+  const rush = items > 0 ? Number(rushCents) || 0 : 0;
+  const rushTax = rush > 0 ? (exclusive ? Math.max(0, Number(rushTaxCents) || 0) : Math.min(rush, Math.max(0, Number(rushTaxCents) || 0))) : 0;
+  const goodsTax = Math.max(0, (Number(itemsTaxCents) || 0) - (Number(discountTaxCents) || 0));
+  const taxCents = goodsTax + rushTax;
+  const taxAddedCents = exclusive ? taxCents : 0;
+  const goodsTaxAdded = exclusive ? goodsTax : 0;
   return {
-    owedCents,
+    owedCents: Math.max(0, items + shipping + rush - discount + taxAddedCents),
     taxCents,
-    netSalesCents: Math.max(0, items - discount - (taxCents - taxAddedCents)),
-    grossGoodsCents: Math.max(0, items - discount + taxAddedCents),
+    netSalesCents: Math.max(0, items - discount - (goodsTax - goodsTaxAdded)),
+    grossGoodsCents: Math.max(0, items - discount + goodsTaxAdded),
     shippingCents: shipping,
     taxAddedCents,
+    rushCents: rush,
+    rushTaxCents: rushTax,
+    rushNetCents: exclusive ? rush : rush - rushTax,
+    workOwedCents: Math.max(0, items + shipping - discount + goodsTaxAdded),
   };
 }
 // The columns orderAmounts needs, for the order aliased `o` (one row per order).
-const ORDER_AMOUNT_COLS_ = `o.shippingCostCents, o.discountCents, o.discountTaxCents, o.taxMode,
+const ORDER_AMOUNT_COLS_ = `o.shippingCostCents, o.discountCents, o.discountTaxCents, o.rushFeeCents, o.rushFeeTaxCents, o.taxMode,
       COALESCE((SELECT SUM(lineTotalCents) FROM order_items WHERE orderId = o.orderId AND cancelDate IS NULL), 0) AS itemsCents,
       COALESCE((SELECT SUM(taxCents) FROM order_items WHERE orderId = o.orderId AND cancelDate IS NULL), 0) AS itemsTaxCents`;
 const orderAmountsOfRow_ = (row) => orderAmounts({ itemsCents: row.itemsCents, itemsTaxCents: row.itemsTaxCents,
-  shippingCents: row.shippingCostCents, discountCents: row.discountCents, discountTaxCents: row.discountTaxCents, taxMode: row.taxMode });
+  shippingCents: row.shippingCostCents, discountCents: row.discountCents, discountTaxCents: row.discountTaxCents, taxMode: row.taxMode,
+  rushCents: row.rushFeeCents, rushTaxCents: row.rushFeeTaxCents });
 // Runs a query that reads orders.taxMode, written as a function of how to spell that column
 // ("o.taxMode"). On a database from before migrations/0052 the column doesn't exist and every order
 // is inclusive, so the query is retried with that constant instead (tests pin older schemas).
@@ -281,7 +293,7 @@ function stateOf_(shippingAddress) {
 // discount, shipping address.
 async function recomputeOrderTax_(db, orderId) {
   const [o, settings] = await Promise.all([
-    withTaxMode_((tm) => db.prepare(`SELECT o.taxRateBps, o.taxExempt, o.shippingAddress, o.discountCents, ${tm} AS taxMode FROM orders o WHERE o.orderId=?`).bind(orderId).first()),
+    withTaxMode_((tm) => db.prepare(`SELECT o.*, ${tm} AS taxMode FROM orders o WHERE o.orderId=?`).bind(orderId).first()),
     getSalesTaxSettings(db),
   ]);
   if (!o) return;
@@ -301,19 +313,26 @@ async function recomputeOrderTax_(db, orderId) {
   const taxableDisc = gross > 0 ? Math.round(disc * taxableGross / gross) : 0;
   stmts.push(db.prepare("UPDATE orders SET discountTaxCents=? WHERE orderId=?")
     .bind(taxOn_(taxableDisc, orderRate, mode), orderId));
+  // The rush fee (migrations/0082) carries tax only when it was taxable when the order was placed, like a taxable line.
+  if (o.rushFeeCents !== undefined) {
+    stmts.push(db.prepare("UPDATE orders SET rushFeeTaxCents=? WHERE orderId=?")
+      .bind(o.rushFeeTaxable ? taxOn_(Number(o.rushFeeCents) || 0, orderRate, mode) : 0, orderId));
+  }
   await db.batch(stmts);
   // With tax on top, the tax is part of the order's total, so the stored totals move with it
   // (an address change into or out of the home state changes what the customer owes).
   if (mode === "exclusive") await storeOrderTotals_(db, orderId);
 }
 
-// orders.subtotalCents / totalCents: the active lines, and that plus shipping — plus the lines' tax
+// orders.subtotalCents / totalCents: the active lines, and that plus shipping and the rush fee — plus their tax
 // when it's added on top. The total BEFORE any discount; what's owed is orderAmounts.
 async function storeOrderTotals_(db, orderId) {
   const row = await withTaxMode_((tm) => db.prepare(`SELECT ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")} FROM orders o WHERE o.orderId=?`).bind(orderId).first());
   const subtotalCents = row ? Number(row.itemsCents) || 0 : 0;
-  const totalCents = subtotalCents + (row ? Number(row.shippingCostCents) || 0 : 0)
-    + (row && taxMode_(row.taxMode) === "exclusive" ? Number(row.itemsTaxCents) || 0 : 0);
+  const exclusive = !!row && taxMode_(row.taxMode) === "exclusive";
+  // The rush fee (migrations/0082) is part of the total like shipping; with tax on top, so is its tax.
+  const totalCents = subtotalCents + (row ? (Number(row.shippingCostCents) || 0) + (Number(row.rushFeeCents) || 0) : 0)
+    + (exclusive ? (Number(row.itemsTaxCents) || 0) + (Number(row.rushFeeTaxCents) || 0) : 0);
   await db.prepare("UPDATE orders SET subtotalCents=?, totalCents=? WHERE orderId=?").bind(subtotalCents, totalCents, orderId).run();
   return { subtotalCents, totalCents };
 }
@@ -586,6 +605,109 @@ export function cleanDeliveryOptions(list) {
 }
 // Written apart from updateOrg (which overwrites every column it knows), so a caller that has never
 // heard of the list can't clear it. Keeps orgs.shippingEnabled in step with the list.
+// ---- Rush fees (migrations/0082) -------------------------------------------------------------------------------
+// A customer can ask for an order to be rushed. The fee is one of:
+//   off      not offered
+//   fixed    a fixed amount
+//   percent  a % of the merchandise
+//   greater  the fixed amount or the %, whichever is more
+//   follow   to follow — the shop works it out afterwards (expedited shipping, overtime) and sets it on the order;
+//            an optional estimate range is shown to the customer.
+// The global rule (global_settings key 'rushFee') also says whether the fee carries sales tax; a shop follows it
+// ('' in orgs.rushFeeJson), turns rush off ({offer:false}) or has its own rule ({offer:true, …}). Callers pass and
+// get dollars and percent; the JSON is in cents and basis points.
+export const RUSH_MODES = ["off", "fixed", "percent", "greater", "follow"];
+const DEFAULT_RUSH_LABEL = "Rush my order";
+export function cleanRushRule(input) {
+  const r = input || {};
+  const mode = RUSH_MODES.includes(r.mode) ? r.mode : null;
+  if (!mode) throw pricingError_("Pick how the rush fee is worked out.");
+  const money = (v, what, required) => {
+    if (v === null || v === undefined || v === "") { if (required) throw pricingError_(`Enter the rush fee's ${what}.`); return null; }
+    const c = toCents(v);
+    if (!Number.isFinite(c) || c < 0 || c > 100000) throw pricingError_(`The rush fee's ${what} must be between $0 and $1,000.`);
+    return c;
+  };
+  const out = { mode, amountCents: null, pctBps: null, estLowCents: null, estHighCents: null,
+    label: String(r.label || "").trim().slice(0, 40) || DEFAULT_RUSH_LABEL, note: String(r.note || "").trim().slice(0, 300) };
+  if (mode === "fixed" || mode === "greater") out.amountCents = money(r.amount, "amount", true);
+  if (mode === "percent" || mode === "greater") {
+    const v = r.pct;
+    if (v === null || v === undefined || v === "") throw pricingError_("Enter the rush fee's percentage.");
+    const bps = Math.round(Number(v) * 100);
+    if (!Number.isFinite(bps) || bps <= 0 || bps > 10000) throw pricingError_("The rush fee's percentage must be more than 0 and at most 100.");
+    out.pctBps = bps;
+  }
+  if (mode === "follow") {
+    out.estLowCents = money(r.estLow, "lowest estimate", false);
+    out.estHighCents = money(r.estHigh, "highest estimate", false);
+    if (out.estLowCents != null && out.estHighCents != null && out.estLowCents > out.estHighCents) throw pricingError_("The rush fee's lowest estimate is above its highest.");
+  }
+  return out;
+}
+// The stored rule (cents) as callers see it (dollars / percent).
+export function rushRuleView(rule) {
+  if (!rule) return null;
+  const d = (c) => c == null ? null : fromCents(c);
+  return { mode: rule.mode, amount: d(rule.amountCents), pct: rule.pctBps == null ? null : rule.pctBps / 100,
+    estLow: d(rule.estLowCents), estHigh: d(rule.estHighCents), label: rule.label || DEFAULT_RUSH_LABEL, note: rule.note || "" };
+}
+export async function getRushSettings(db) {
+  const row = await db.prepare("SELECT value FROM global_settings WHERE key='rushFee'").first().catch(() => null);
+  const v = row ? tryParse_(row.value, null) : null;
+  return { rule: v && RUSH_MODES.includes(v.mode) ? { ...v } : { mode: "off", amountCents: null, pctBps: null, estLowCents: null, estHighCents: null, label: DEFAULT_RUSH_LABEL, note: "" },
+    taxable: !!(v && v.taxable) };
+}
+// Saves the global rule (dollars in) and whether the fee is taxable. Returns what's stored.
+export async function setRushSettings(db, { rule, taxable }) {
+  const next = { ...cleanRushRule(rule), taxable: !!taxable };
+  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('rushFee', ?)").bind(JSON.stringify(next)).run();
+  return { rule: { ...next }, taxable: next.taxable };
+}
+// A shop's own setting: null = follow the global rule, {offer:false}, or {offer:true, …rule}.
+export function cleanShopRush(input) {
+  if (input === null || input === undefined || input === "" || input.use === "default") return null;
+  if (input.offer === false || input.use === "off") return { offer: false };
+  return { offer: true, ...cleanRushRule(input.rule || input) };
+}
+function parseShopRush_(json) {
+  const v = json ? tryParse_(json, null) : null;
+  if (!v || typeof v !== "object") return null;
+  if (v.offer === false) return { offer: false };
+  return v.offer === true && RUSH_MODES.includes(v.mode) ? v : null;
+}
+export async function setOrgRushFee(db, orgId, shopRush) {
+  await db.prepare("UPDATE orgs SET rushFeeJson=?, updatedAt=? WHERE orgId=?")
+    .bind(shopRush ? JSON.stringify(shopRush) : "", new Date().toISOString(), orgId).run();
+}
+// The rule a shop offers (stored, cents) — its own, else the global one — or null when it doesn't offer rush.
+export function resolveRushRule(org, rushSettings) {
+  const own = org ? org.rushFee : null;
+  const rule = own ? (own.offer === false ? null : own) : (rushSettings && rushSettings.rule);
+  return rule && rule.mode !== "off" && RUSH_MODES.includes(rule.mode) ? rule : null;
+}
+// The fee for `itemsCents` of merchandise under a stored rule: {cents, pending}.
+export function rushFeeFor(rule, itemsCents) {
+  if (!rule || rule.mode === "off") return { cents: 0, pending: false };
+  const items = Math.max(0, Math.round(Number(itemsCents) || 0));
+  const pct = Math.round(items * (Number(rule.pctBps) || 0) / 10000), amt = Number(rule.amountCents) || 0;
+  if (rule.mode === "follow") return { cents: 0, pending: true };
+  if (rule.mode === "fixed") return { cents: amt, pending: false };
+  if (rule.mode === "percent") return { cents: pct, pending: false };
+  return { cents: Math.max(amt, pct), pending: false };
+}
+// Sets an order's rush fee (the admin's Rush… window): asked for or not, and the fee or "to follow". The tax in
+// the fee and the paid flags follow. `taxable` (when given) is the order's tax snapshot for the fee — set when rush
+// is first added to an order, so a later change to the setting doesn't rewrite it.
+export async function setOrderRushFee(db, orderId, { requested, cents, pending, taxable }) {
+  const on = requested ? 1 : 0;
+  const fee = on && !pending ? Math.max(0, Math.round(Number(cents) || 0)) : 0;
+  await db.prepare(`UPDATE orders SET rushRequested=?, rushFeeCents=?, rushFeePending=?${taxable === undefined ? "" : ", rushFeeTaxable=?"} WHERE orderId=?`)
+    .bind(on, fee, on && pending ? 1 : 0, ...(taxable === undefined ? [] : [taxable ? 1 : 0]), orderId).run();
+  await recomputeOrderTax_(db, orderId);
+  await recalcOrderTotals(db, orderId);
+}
+
 export async function setOrgDeliveryOptions(db, orgId, options) {
   await db.prepare("UPDATE orgs SET deliveryOptionsJson=?, shippingEnabled=?, updatedAt=? WHERE orgId=?")
     .bind(JSON.stringify(options), options.some(o => o.type === "shipping") ? 1 : 0, new Date().toISOString(), orgId).run();
@@ -610,6 +732,8 @@ function parseOrg_(row) {
     orderDeadline: row.orderDeadline || null,
     closedMessage: row.closedMessage || null,
     allowOrdersAfterDeadline: row.allowOrdersAfterDeadline !== 0,
+    // Rush fee (migrations/0082): null = the global rule, {offer:false}, or the shop's own rule (cents).
+    rushFee: parseShopRush_(row.rushFeeJson),
     taxExempt: !!row.taxExempt,
     taxExemptCertificate: row.taxExemptCertificate || "",
     taxExemptExpires: row.taxExemptExpires || "",
@@ -2827,20 +2951,26 @@ export function methodFromPaymentMethod(paymentMethod) {
 // receivedAt }. Refunds and lost disputes are NEGATIVE amounts.
 // Returns the new row id, or 0 when it was already recorded.
 // The order's paid flag worked out from the ledger in ONE statement — the same rule as
-// refreshPaidStatus below, orderAmounts' "owed" (items + shipping − discount, plus the sales tax when
-// it's added on top, migrations/0052; test124 checks the two agree) — so it can ride in the same batch
+// refreshPaidStatus below, orderAmounts' "owed" (items + shipping + rush fee − discount, plus the sales tax
+// when it's added on top, migrations/0052; test124 checks the two agree) — so it can ride in the same batch
 // as the payment row it depends on. `tm` spells the order's tax mode (its column, or 'inclusive' on a
 // database from before 0052). Bind: [now, orderId].
 const paidRefreshSql_ = (tm) => {
   const items = "COALESCE((SELECT SUM(lineTotalCents) FROM order_items WHERE orderId = orders.orderId AND cancelDate IS NULL), 0)";
   const itemsTax = "COALESCE((SELECT SUM(taxCents) FROM order_items WHERE orderId = orders.orderId AND cancelDate IS NULL), 0)";
   const taxAdded = `(CASE WHEN ${tm} = 'exclusive' THEN MAX(0, ${itemsTax} - COALESCE(discountTaxCents, 0)) ELSE 0 END)`;
-  const owed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN COALESCE(shippingCostCents, 0) ELSE 0 END) - COALESCE(discountCents, 0) + ${taxAdded})`;
+  // The rush fee (migrations/0082) and, with tax on top, its tax — only while something is on the order.
+  const rush = `(CASE WHEN ${items} > 0 THEN COALESCE(rushFeeCents, 0) + (CASE WHEN ${tm} = 'exclusive' THEN COALESCE(rushFeeTaxCents, 0) ELSE 0 END) ELSE 0 END)`;
+  // What's owed for the work itself — everything but the rush fee (paidForWork) — and in all.
+  const workOwed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN COALESCE(shippingCostCents, 0) ELSE 0 END) - COALESCE(discountCents, 0) + ${taxAdded})`;
+  const owed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN COALESCE(shippingCostCents, 0) ELSE 0 END) + ${rush} - COALESCE(discountCents, 0) + ${taxAdded})`;
   const received = "COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = orders.orderId AND kind = 'payment' AND voidedAt IS NULL), 0)";
   return `UPDATE orders SET
     paidAt = CASE WHEN ${owed} = 0 THEN paidAt
                   WHEN ${received} >= ${owed} THEN (CASE WHEN paid = 1 THEN paidAt ELSE COALESCE((SELECT MAX(receivedAt) FROM order_payments WHERE orderId = orders.orderId AND kind = 'payment' AND voidedAt IS NULL), ?) END)
                   ELSE (CASE WHEN paid = 1 THEN NULL ELSE paidAt END) END,
+    paidForWork = CASE WHEN ${owed} = 0 THEN paid WHEN ${workOwed} = 0 THEN 1
+                       WHEN ${received} >= ${workOwed} THEN 1 ELSE 0 END,
     paid = CASE WHEN ${owed} = 0 THEN paid WHEN ${received} >= ${owed} THEN 1 ELSE 0 END
   WHERE orderId = ?`;
 };
@@ -2952,20 +3082,26 @@ export async function setOrderDiscount(db, orderId, amount, note) {
 // at that moment); it's cleared if the order stops being covered.
 export async function refreshPaidStatus(db, orderId) {
   const row = await withTaxMode_((tm) => db.prepare(`
-    SELECT o.paid, o.paidAt, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
+    SELECT o.paid, o.paidAt, o.paidForWork, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
       COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL), 0) AS receivedCents,
       (SELECT MAX(receivedAt) FROM order_payments WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL) AS lastPaymentAt
     FROM orders o WHERE o.orderId = ?`).bind(orderId).first());
   if (!row) return null;
-  const owed = orderAmountsOfRow_(row).owedCents;
+  const amounts = orderAmountsOfRow_(row);
+  const owed = amounts.owedCents, workOwed = amounts.workOwedCents;
   const received = Number(row.receivedCents) || 0;
-  if (owed === 0) return { paid: !!row.paid, owedCents: 0, receivedCents: received };
-  const paid = received >= owed ? 1 : 0;
-  if (paid !== Number(row.paid)) {
-    await db.prepare("UPDATE orders SET paid = ?, paidAt = ? WHERE orderId = ?")
-      .bind(paid, paid ? (row.lastPaymentAt || new Date().toISOString()) : null, orderId).run();
+  if (owed === 0) {
+    if (Number(row.paidForWork) !== Number(row.paid)) await db.prepare("UPDATE orders SET paidForWork = paid WHERE orderId = ?").bind(orderId).run();
+    return { paid: !!row.paid, paidForWork: !!row.paid, owedCents: 0, receivedCents: received };
   }
-  return { paid: !!paid, owedCents: owed, receivedCents: received };
+  const paid = received >= owed ? 1 : 0;
+  // Paid for everything but the rush fee (migrations/0082): production doesn't wait for an unpaid rush fee.
+  const paidForWork = workOwed === 0 || received >= workOwed ? 1 : 0;
+  if (paid !== Number(row.paid) || paidForWork !== Number(row.paidForWork)) {
+    await db.prepare("UPDATE orders SET paid = ?, paidAt = ?, paidForWork = ? WHERE orderId = ?")
+      .bind(paid, paid ? (paid === Number(row.paid) && row.paidAt ? row.paidAt : (row.lastPaymentAt || new Date().toISOString())) : null, paidForWork, orderId).run();
+  }
+  return { paid: !!paid, paidForWork: !!paidForWork, owedCents: owed, receivedCents: received };
 }
 
 // "Mark as paid": records a ledger payment for whatever is still owed (so the
@@ -2983,7 +3119,7 @@ export async function settleOrderBalance(db, orderId, note, at = null) {
     return fromCents(balance);
   }
   if (state.owedCents === 0) {
-    await db.prepare("UPDATE orders SET paid = 1, paidAt = COALESCE(paidAt, ?) WHERE orderId = ?")
+    await db.prepare("UPDATE orders SET paid = 1, paidForWork = 1, paidAt = COALESCE(paidAt, ?) WHERE orderId = ?")
       .bind(at || new Date().toISOString(), orderId).run();
   }
   return 0;
@@ -4896,7 +5032,7 @@ export async function getProductionQueue(db) {
       SELECT id FROM design_versions WHERE designId = d.id ORDER BY uploadedAt DESC, id DESC LIMIT 1
     )
     WHERE oi.cancelDate IS NULL
-      AND o.paid = 1 AND o.isTest = 0 AND o.voidedAt IS NULL
+      AND (o.paid = 1 OR o.paidForWork = 1) AND o.isTest = 0 AND o.voidedAt IS NULL
       AND (COALESCE(oi.blankReceivedAt, o.blankReceivedAt) IS NOT NULL OR ${nb("oi")})   -- no blank to wait for (0057)
       AND o.manufacturedAt IS NULL
       AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL   -- shipped / delivered / completed: nothing left to make
@@ -5486,7 +5622,7 @@ async function blankShipmentsByOrder_(db, scope) {
 // first, undated after all dated, then oldest-placed. blankReceived lets the UI flag what's ready.
 export async function getPaidUnrunOrders(db) {
   const orders = await loadOrders_(db,
-    `o.paid = 1 AND o.isTest = 0 AND o.voidedAt IS NULL AND o.manufacturedAt IS NULL AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL
+    `(o.paid = 1 OR o.paidForWork = 1) AND o.isTest = 0 AND o.voidedAt IS NULL AND o.manufacturedAt IS NULL AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL
      AND EXISTS (SELECT 1 FROM order_items ai WHERE ai.orderId = o.orderId AND ai.cancelDate IS NULL)`,
     [], "(o.dueDate IS NULL) ASC, o.dueDate ASC, placedAt ASC");
   const orgNames = {};
@@ -7218,7 +7354,7 @@ export async function getTransferQueue(db) {
      LEFT JOIN product_blank_links l ON l.orgId = i.orgId AND l.productId = i.productId AND l.productSize = i.size
             AND l.productColor = (CASE WHEN i.configJson LIKE '{%' THEN COALESCE(json_extract(i.configJson,'$.garmentColor'),'') ELSE '' END)
      LEFT JOIN blanks b ON b.id = l.blankId
-     WHERE i.cancelDate IS NULL AND o.paid = 1 AND o.isTest = 0 AND o.voidedAt IS NULL AND i.configJson <> '' AND NOT ${fs("i")}
+     WHERE i.cancelDate IS NULL AND (o.paid = 1 OR o.paidForWork = 1) AND o.isTest = 0 AND o.voidedAt IS NULL AND i.configJson <> '' AND NOT ${fs("i")}
        -- An order that has shipped, been delivered or been completed has nothing left to press, even if it
        -- was never marked made (production had a delivered + completed order listed with 30 pieces).
        AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL
@@ -7449,7 +7585,7 @@ export async function getBlanksToOrder(db, { includeUnpaid = false } = {}) {
     db.prepare(
       `SELECT oi.id, oi.orderId, oi.orgId, oi.productId, oi.name, oi.size, oi.qty, COALESCE(oi.manufacturedQty, 0) AS made, oi.configJson,
               COALESCE(oi.blankOrderedAt, o.blankOrderedAt) AS orderedAt, COALESCE(oi.blankReceivedAt, o.blankReceivedAt) AS receivedAt,
-              o.paid, o.customerName
+              (o.paid = 1 OR o.paidForWork = 1) AS paid, o.customerName
        FROM order_items oi JOIN orders o ON o.orderId = oi.orderId
        WHERE oi.cancelDate IS NULL AND o.voidedAt IS NULL AND o.isTest = 0 AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL AND o.manufacturedAt IS NULL
          AND NOT ${nb("oi")}   -- made with no blank (migrations/0057): nothing to buy
@@ -8508,21 +8644,34 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   const taxAddedCents = mode === "exclusive" ? taxed.reduce((sum, t) => sum + t.taxCents, 0) : 0;
 
   // orders.taxMode is only named when it isn't the column's default, so an order can still be
-  // written to a database from before migrations/0052 (where everything is inclusive).
+  // written to a database from before migrations/0052 (where everything is inclusive). Likewise a
+  // rush fee (migrations/0082) and a needed-by date go in only when there is one.
+  const extraCols = [], extraBinds = [];
+  if (mode === "exclusive") { extraCols.push("taxMode"); extraBinds.push("exclusive"); }
+  const rushCents = order.rushRequested ? Math.max(0, toCents(order.rushFee || 0)) : 0;
+  let rushTaxCents = 0;
+  if (order.rushRequested) {
+    const rushTaxable = order.rushFeeTaxable ? 1 : 0;
+    rushTaxCents = rushTaxable && lineRateBps ? taxOn_(rushCents, lineRateBps, mode) : 0;
+    extraCols.push("rushRequested", "rushFeeCents", "rushFeePending", "rushFeeTaxable", "rushFeeTaxCents");
+    extraBinds.push(1, rushCents, order.rushFeePending ? 1 : 0, rushTaxable, rushTaxCents);
+  }
+  if (order.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(order.dueDate)) { extraCols.push("dueDate"); extraBinds.push(order.dueDate); }
   stmts.push(db.prepare(`INSERT INTO orders
     (orderId,orgId,customerName,contact,paymentMethod,subtotalCents,shippingCostCents,totalCents,
-     shippingMethod,shippingAddress,totalWeightOz,placedAt,taxExempt,taxRateBps,isTest${mode === "exclusive" ? ",taxMode" : ""})
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?${mode === "exclusive" ? ",'exclusive'" : ""})`)
+     shippingMethod,shippingAddress,totalWeightOz,placedAt,taxExempt,taxRateBps,isTest${extraCols.map(c => "," + c).join("")})
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?${",?".repeat(extraCols.length)})`)
     .bind(
       order.orderId, order.orgId, order.customerName, order.contact,
       order.paymentMethod || "", subtotalCents,
-      shippingCents, subtotalCents + shippingCents + taxAddedCents,
+      shippingCents, subtotalCents + shippingCents + rushCents + taxAddedCents + (mode === "exclusive" ? rushTaxCents : 0),
       order.shippingMethod || "",
       order.shippingAddress ? JSON.stringify(order.shippingAddress) : null,
       order.totalWeightOz || 0, order.placedAt || new Date().toISOString(),
       taxExempt, orderRateBps,
       // Admin test transactions (createTestTransaction) stay out of sales.
-      order.isTest ? 1 : 0
+      order.isTest ? 1 : 0,
+      ...extraBinds
     ));
 
   for (const [n, { it, qty, unitCents, feeCents, lineCents }] of lines.entries()) {
@@ -8716,11 +8865,11 @@ export function stagePrereqError(o, stage) {
   // Nothing on the order uses a blank (every product is "No blank needed", migrations/0057).
   if (["blankOrdered", "blankShipped", "blankReceived"].includes(stage) && o.needsBlanks === false) return "nothing on this order uses a blank";
   const need = {
-    blankOrdered:       [o.paid, "the order isn't paid yet"],
+    blankOrdered:       [o.paidForWork, "the order isn't paid yet"],
     blankShipped:       [o.blankOrderedAt, "the blank hasn't been ordered yet"],
     blankReceived:      [o.blankOrderedAt, "the blank hasn't been ordered yet"],
-    digitizingComplete: [o.paid, "the order isn't paid yet"],
-    designApproved:     [o.needsDigitizing === false ? o.paid : o.digitizingCompleteAt, o.needsDigitizing === false ? "the order isn't paid yet" : "digitizing isn't complete yet"],
+    digitizingComplete: [o.paidForWork, "the order isn't paid yet"],
+    designApproved:     [o.needsDigitizing === false ? o.paidForWork : o.digitizingCompleteAt, o.needsDigitizing === false ? "the order isn't paid yet" : "digitizing isn't complete yet"],
     manufactured:       manufacturedPrereq_(o),
     qaPacked:           [o.manufacturedAt, "it isn't manufactured yet"],
     shipped:            [o.qaPackedAt, "it isn't QA'd and packed yet"],
@@ -9131,7 +9280,7 @@ export async function getOrderForShipping(db, orderId) {
 // rather than trusting the request body).
 export async function getOrderCheckoutState(db, orderId) {
   const row = await withTaxMode_((tm) => db.prepare(`
-    SELECT o.paid, o.orgId, o.voidedAt, o.customerName, o.contact, o.shippingMethod, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
+    SELECT o.paid, o.orgId, o.voidedAt, o.customerName, o.contact, o.shippingMethod, o.rushFeePending, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
       COALESCE((SELECT SUM(amountCents) FROM order_payments
                 WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL), 0) AS receivedCents
     FROM orders o WHERE o.orderId = ?`).bind(orderId).first());
@@ -9145,6 +9294,8 @@ export async function getOrderCheckoutState(db, orderId) {
     customerName: row.customerName || "", contact: row.contact || "",
     // Placed with shipping still to be quoted, and the shop hasn't set it yet (see SHIPPING_QUOTE_PENDING).
     shippingPending: row.shippingMethod === SHIPPING_QUOTE_PENDING && !(Number(row.shippingCostCents) > 0),
+    // A rush fee still to follow (migrations/0082) doesn't stop paying the rest — it's collected afterwards.
+    rushFeePending: !!row.rushFeePending,
   };
 }
 
@@ -9156,8 +9307,14 @@ export async function getOrderTotal(db, orderId) {
 // ---- Catalog data for getCatalogData() --------------------------------
 
 // One shop as the storefront needs it, from its rows (published, or live for a draft preview).
-async function catalogShopFromRows_(db, rows) {
+async function catalogShopFromRows_(db, rows, rushSettings) {
   const org = parseOrg_(rows.org);
+  // The rush fee this shop offers (migrations/0082), resolved here — its own rule, else the global one — as the shop page
+  // needs it (dollars; null = no rush). Never the tax setting.
+  const rushSet = rushSettings || await getRushSettings(db).catch(() => null);
+  const rushView = rushRuleView(resolveRushRule(org, rushSet));
+  // With tax added on top (taxMode "exclusive") the cart's tax estimate needs to know whether the fee is taxed.
+  org.rushOffer = rushView ? { ...rushView, taxable: !!(rushSet && rushSet.taxable) } : rushView;
   const visible = rows.products.filter(p => Number(p.visible)).sort((a, b) => (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0) || String(a.productId).localeCompare(String(b.productId)));
   let products = await productsFromRows_(db, org.orgId, visible);
   // Blank color images (migrations/0037): each product's linked blank colors' images, keyed by the product color the
@@ -9183,19 +9340,20 @@ export async function getDraftCatalogShop(db, orgId) {
 export async function getPublicCatalogData(db) {
   // Each shop as PUBLISHED (migrations/0076): its snapshot rows, or its live rows if never published.
   const shopRows = await Promise.all((await db.prepare("SELECT orgId FROM orgs ORDER BY orgId").all()).results.map(r => publishedShopRows_(db, r.orgId)));
-  const [baseSettings, salesTax, business, locale, features, categories] = await Promise.all([
+  const [baseSettings, salesTax, business, locale, features, categories, rushFee] = await Promise.all([
     getGlobalSettings(db),
     getSalesTaxSettings(db),
     getBusinessProfile(db),
     getLocaleSettings(db),
     getFeatures(db),
     listProductCategories(db),
+    getRushSettings(db),
   ]);
-  const globalSettings = { ...baseSettings, salesTax };
+  const globalSettings = { ...baseSettings, salesTax, rushFee };
 
   // Each shop with its visible products; configurable products also need the shop's visible graphics (option
   // tiles, with the tier add-on resolved) + tier prices (migrations/0036), blank color images (0037) and mockups.
-  const orgsWithProducts = await Promise.all(shopRows.filter(Boolean).map(rows => catalogShopFromRows_(db, rows)));
+  const orgsWithProducts = await Promise.all(shopRows.filter(Boolean).map(rows => catalogShopFromRows_(db, rows, rushFee)));
   // Build subdomainMap: { [subdomain]: orgId } — the published address.
   const subdomainMap = {};
   for (const org of orgsWithProducts) subdomainMap[org.subdomain] = org.orgId;
@@ -9633,7 +9791,7 @@ export async function getAccountantExport(db, dateFrom, dateTo) {
   // Monthly summary, every figure in cents while summing.
   const months = {};
   const M = (m) => (months[m] = months[m] || { month: m, grossSales: 0, taxCollected: 0, netSales: 0, exemptSales: 0,
-    shippingIncome: 0, taxRefunded: 0, refunds: 0, cardReceipts: 0, otherReceipts: 0, stripeFees: 0, postage: 0,
+    shippingIncome: 0, rushFeeIncome: 0, taxRefunded: 0, refunds: 0, cardReceipts: 0, otherReceipts: 0, stripeFees: 0, postage: 0,
     cogs: 0, purchases: 0, writeoffs: 0, testCardCharges: 0, expensesDeductible: 0, capitalPurchases: 0, useTax: 0,
     serviceIncome: 0, otherIncome: 0, interestIncome: 0, ownerContributions: 0, ownerDraws: 0,
     // migrations/0060: where COGS came from, write-offs by reason, blanks decorated into finished stock
@@ -9642,7 +9800,7 @@ export async function getAccountantExport(db, dateFrom, dateTo) {
   for (const r of taxRows) {
     const m = M(r.month);
     m.grossSales += toCents(r.grossSales); m.taxCollected += toCents(r.taxCollected);
-    m.netSales += toCents(r.netSales); m.shippingIncome += toCents(r.shipping);
+    m.netSales += toCents(r.netSales); m.shippingIncome += toCents(r.shipping); m.rushFeeIncome += toCents(r.rushFees || 0);
     if (r.exempt) m.exemptSales += toCents(r.netSales);
   }
   for (const r of refundRows) { const m = M(r.month); m.refunds += toCents(r.refunded); m.taxRefunded += toCents(r.taxRefunded); }
@@ -10862,6 +11020,18 @@ export async function getDigestRun(db) {
 export async function setDigestRun(db, run) {
   await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('dailyDigestRun', ?)").bind(JSON.stringify(run)).run();
 }
+// Rush orders whose fee is still to follow (migrations/0082): the shop has to work it out and set it on the order.
+// Listed in the roll-up, the quiet-morning email and Communications — never a reason to send on their own.
+export async function getRushFeesToSet(db) {
+  try {
+    const { results } = await db.prepare(
+      `SELECT orderId, orgId, customerName, placedAt, dueDate FROM orders
+       WHERE rushRequested = 1 AND rushFeePending = 1 AND voidedAt IS NULL AND isTest = 0 AND completedAt IS NULL
+       ORDER BY (dueDate IS NULL), dueDate, placedAt`).all();
+    return results.map(r => ({ orderId: r.orderId, orgId: r.orgId, customerName: r.customerName || "", placedAt: r.placedAt, dueDate: r.dueDate || "" }));
+  } catch (e) { if (/no such column/i.test(String(e && e.message))) return []; throw e; }
+}
+
 // Real orders not yet reported (test and voided orders are skipped), full detail, plus `cursor` —
 // the fields to save as the new state once the email has gone out.
 //
@@ -11043,7 +11213,8 @@ function parseOrder_(row, items, payments, labels) {
   const taxMode = taxMode_(row.taxMode);
   // parseItem_ doesn't know the order's mode: with tax on top, a line's net is its listed total.
   if (taxMode === "exclusive") for (const it of items) { it.netAmount = it.lineTotal; it.taxIncluded = false; }
-  const amounts = orderAmounts({ itemsCents: activeItemsCents, itemsTaxCents, shippingCents, discountCents, discountTaxCents: row.discountTaxCents, taxMode });
+  const amounts = orderAmounts({ itemsCents: activeItemsCents, itemsTaxCents, shippingCents, discountCents, discountTaxCents: row.discountTaxCents, taxMode,
+    rushCents: row.rushFeeCents, rushTaxCents: row.rushFeeTaxCents });
   const salesTaxCents = amounts.taxCents, netSalesCents = amounts.netSalesCents, effectiveCents = amounts.owedCents;
   const amountReceived = fromCents(receivedCents);
   const discountAmount = fromCents(discountCents);
@@ -11066,6 +11237,14 @@ function parseOrder_(row, items, payments, labels) {
     itemsSubtotal: activeItemsTotal,
     shippingCost,
     shippingPaidAmount,
+    // Rush (migrations/0082): asked for, the fee (0 while still to follow), the tax in it, and "paid for
+    // everything but the rush fee" — production doesn't wait for the rush fee.
+    rushRequested: !!row.rushRequested,
+    rushFee: fromCents(Number(row.rushFeeCents) || 0),
+    rushFeePending: !!row.rushFeePending,
+    rushFeeTaxable: !!row.rushFeeTaxable,
+    rushFeeTax: fromCents(amounts.rushTaxCents),
+    paidForWork: !!row.paid || !!row.paidForWork,   // `paid` covers the work too
     discountAmount,
     discountNote: row.discountNote || "",
     taxExempt: !!row.taxExempt,
@@ -11627,7 +11806,7 @@ export async function getRevenueData(db, dateFrom, dateTo) {
     SELECT
       o.orderId,
       o.orgId,
-      o.discountCents, o.discountTaxCents, o.shippingCostCents, ${tm} AS taxMode,
+      o.discountCents, o.discountTaxCents, o.shippingCostCents, o.rushFeeCents, o.rushFeeTaxCents, ${tm} AS taxMode,
       COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL THEN oi.lineTotalCents ELSE 0 END), 0) AS itemsCents,
       COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL THEN oi.taxCents ELSE 0 END), 0) AS itemsTaxCents,
       -- Net of refunds and lost disputes (negative rows): a refund — e.g. shipping overcharged then
@@ -11644,7 +11823,7 @@ export async function getRevenueData(db, dateFrom, dateTo) {
   return results.map(r => {
     const a = orderAmountsOfRow_(r);
     return { orderId: r.orderId, orgId: r.orgId, itemSubtotal: fromCents(r.itemsCents), discountAmount: fromCents(r.discountCents),
-      shippingCost: fromCents(a.shippingCents), salesTax: fromCents(a.taxCents), effectiveTotal: fromCents(a.owedCents), received: r.received };
+      shippingCost: fromCents(a.shippingCents), rushFee: fromCents(a.rushCents), salesTax: fromCents(a.taxCents), effectiveTotal: fromCents(a.owedCents), received: r.received };
   });
 }
 
@@ -11660,6 +11839,7 @@ export async function getSalesTaxReport(db, dateFrom, dateTo) {
       SELECT o.orderId, substr(o.placedAt, 1, 7) AS month, o.taxExempt AS exempt, ${tm} AS mode,
              COALESCE(o.shipState, '') AS state, o.orgId,
              o.discountCents AS disc, o.discountTaxCents AS discTax, o.shippingCostCents AS ship,
+             o.rushFeeCents AS rush, o.rushFeeTaxCents AS rushTax,
              COALESCE(SUM(CASE WHEN i.cancelDate IS NULL THEN i.lineTotalCents END), 0) AS gross,
              COALESCE(SUM(CASE WHEN i.cancelDate IS NULL THEN i.taxCents END), 0) AS tax
       FROM orders o LEFT JOIN order_items i ON i.orderId = o.orderId
@@ -11673,6 +11853,8 @@ export async function getSalesTaxReport(db, dateFrom, dateTo) {
            SUM(MAX(tax - discTax, 0)) AS taxCents,
            SUM(CASE WHEN mode = 'exclusive' THEN MAX(tax - discTax, 0) ELSE 0 END) AS taxAddedCents,
            SUM(CASE WHEN gross > 0 THEN ship ELSE 0 END) AS shippingCents,
+           SUM(CASE WHEN gross > 0 THEN rush ELSE 0 END) AS rushCents,
+           SUM(CASE WHEN gross > 0 THEN rushTax ELSE 0 END) AS rushTaxCents,
            GROUP_CONCAT(DISTINCT orgId) AS orgs
     FROM per GROUP BY month, exempt, state ORDER BY month, exempt, state
   `).bind(dateFrom, dateTo).all());
@@ -11682,9 +11864,11 @@ export async function getSalesTaxReport(db, dateFrom, dateTo) {
     return {
       month: r.month, exempt: !!r.exempt, state: r.state, orders: Number(r.orders),
       grossSales: fromCents(grossAfterDiscount),              // what customers paid for goods (tax included)
-      taxCollected: fromCents(r.taxCents),
+      taxCollected: fromCents(Number(r.taxCents) + Number(r.rushTaxCents || 0)),   // the goods' tax + any tax in rush fees
       netSales: fromCents(grossAfterDiscount - Number(r.taxCents)), // taxable (or exempt) sales, tax excluded
       shipping: fromCents(r.shippingCents),                   // not taxed
+      rushFees: fromCents(r.rushCents || 0),                  // rush fees (migrations/0082), tax included when taxed
+      rushTax: fromCents(r.rushTaxCents || 0),
       orgs: String(r.orgs || "").split(",").filter(Boolean),
     };
   });
@@ -11701,7 +11885,7 @@ export async function getSalesTaxReturn(db, dateFrom, dateTo) {
   const settings = await getSalesTaxSettings(db);
   const { results: lines } = await withTaxMode_((tm) => db.prepare(`
     SELECT substr(o.placedAt, 1, 7) AS month, o.orderId, o.taxExempt, o.shipState, o.discountCents, o.discountTaxCents,
-           o.shippingCostCents, i.lineTotalCents, i.taxCents, i.taxable, ${tm} AS taxMode
+           o.shippingCostCents, o.rushFeeCents, o.rushFeeTaxCents, i.lineTotalCents, i.taxCents, i.taxable, ${tm} AS taxMode
     FROM orders o JOIN order_items i ON i.orderId = o.orderId
     WHERE o.placedAt >= ? AND o.placedAt <= ? AND o.isTest = 0 AND o.voidedAt IS NULL AND i.cancelDate IS NULL
     ORDER BY o.orderId`).bind(dateFrom, dateTo).all());
@@ -11709,7 +11893,7 @@ export async function getSalesTaxReturn(db, dateFrom, dateTo) {
   // taxable = taxable sales as listed; taxIncl = the tax that is INSIDE that figure (inclusive orders
   // only), so taxable − taxIncl is taxable sales excluding tax whatever the mix of modes.
   const M = (m) => (months[m] = months[m] || { month: m, taxable: 0, tax: 0, taxIncl: 0, exempt: 0, interstate: 0, nonTaxable: 0,
-    shipping: 0, taxRefunded: 0, refunds: 0, useTaxBase: 0, useTax: 0, orders: new Set() });
+    shipping: 0, rush: 0, taxRefunded: 0, refunds: 0, useTaxBase: 0, useTax: 0, orders: new Set() });
   const orderGross = byId_();
   for (const l of lines) orderGross[l.orderId] = (orderGross[l.orderId] || 0) + Number(l.lineTotalCents);
   for (const l of lines) {
@@ -11722,6 +11906,16 @@ export async function getSalesTaxReturn(db, dateFrom, dateTo) {
       if (gross > 0) m.shipping += Number(l.shippingCostCents) || 0;
       m.tax -= Number(l.discountTaxCents) || 0;   // tax taken off with the discount (once per order)
       if (incl) m.taxIncl -= Number(l.discountTaxCents) || 0;
+      // The rush fee (migrations/0082) is a sale too, once per order: taxable when it carries tax, else where the
+      // order's goods would go (exempt shop, shipped out of state) or non-taxable when the setting says so.
+      const rush = gross > 0 ? Number(l.rushFeeCents) || 0 : 0, rushTax = gross > 0 ? Number(l.rushFeeTaxCents) || 0 : 0;
+      if (rush > 0) {
+        m.rush += rush;
+        if (rushTax > 0) { m.taxable += rush; m.tax += rushTax; if (incl) m.taxIncl += rushTax; }
+        else if (l.taxExempt) m.exempt += rush;
+        else if (isOutOfState(l.shipState, settings.jurisdiction)) m.interstate += rush;
+        else m.nonTaxable += rush;
+      }
     }
     if (l.taxExempt) m.exempt += after;
     else if (isOutOfState(l.shipState, settings.jurisdiction)) m.interstate += after;
@@ -11749,11 +11943,11 @@ export async function getSalesTaxReturn(db, dateFrom, dateTo) {
     return { month: m.month, orders: m.orders.size, grossSales: fromCents(gross), taxableSales: fromCents(taxableNet),
       exemptSales: fromCents(m.exempt), interstateSales: fromCents(m.interstate), nonTaxableSales: fromCents(m.nonTaxable),
       taxCollected: fromCents(m.tax), taxRefunded: fromCents(m.taxRefunded), useTaxablePurchases: fromCents(m.useTaxBase),
-      useTax: fromCents(m.useTax), totalDue: fromCents(m.tax - m.taxRefunded + m.useTax), shipping: fromCents(m.shipping) };
+      useTax: fromCents(m.useTax), totalDue: fromCents(m.tax - m.taxRefunded + m.useTax), shipping: fromCents(m.shipping), rushFees: fromCents(m.rush) };
   };
   const rows = Object.values(months).sort((a, b) => a.month.localeCompare(b.month));
-  const total = rows.reduce((t, m) => { for (const k of ["taxable", "tax", "taxIncl", "exempt", "interstate", "nonTaxable", "shipping", "taxRefunded", "refunds", "useTaxBase", "useTax"]) t[k] += m[k];
-    m.orders.forEach(o => t.orders.add(o)); return t; }, { month: "total", taxable: 0, tax: 0, taxIncl: 0, exempt: 0, interstate: 0, nonTaxable: 0, shipping: 0, taxRefunded: 0, refunds: 0, useTaxBase: 0, useTax: 0, orders: new Set() });
+  const total = rows.reduce((t, m) => { for (const k of ["taxable", "tax", "taxIncl", "exempt", "interstate", "nonTaxable", "shipping", "rush", "taxRefunded", "refunds", "useTaxBase", "useTax"]) t[k] += m[k];
+    m.orders.forEach(o => t.orders.add(o)); return t; }, { month: "total", taxable: 0, tax: 0, taxIncl: 0, exempt: 0, interstate: 0, nonTaxable: 0, shipping: 0, rush: 0, taxRefunded: 0, refunds: 0, useTaxBase: 0, useTax: 0, orders: new Set() });
   return { months: rows.map(out), total: out(total), useTaxItems, ratePct: rate / 100, jurisdiction: settings.jurisdiction || "" };
 }
 

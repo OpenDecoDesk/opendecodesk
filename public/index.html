@@ -715,6 +715,14 @@
   .shipping-zip-input::placeholder{color:#6b6a63;}
   .shipping-manual-notice{margin:8px 0 4px;padding:8px 12px;background:#2a2506;border:1px solid #856b00;border-radius:4px;font-size:12px;color:#e6cc5a;line-height:1.5;font-family:'IBM Plex Mono',monospace;}
   .shipping-loading{font-size:11px; color:#8b8a82; font-family:'IBM Plex Mono',monospace;}
+  /* Orders: a rush order's flag (migrations/0082); amber while its fee is still to follow. */
+  .rush-pill{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;background:#fee2e2;color:#991b1b;white-space:nowrap;}
+  .rush-pill-pending{background:#fef3c7;color:#92400e;}
+  /* Rush my order (migrations/0082) */
+  .rush-section .shipping-option{font-weight:600;}
+  .rush-note{font-size:11px; color:#8b8a82; font-family:'IBM Plex Mono',monospace; line-height:1.5; margin:2px 0 6px 24px;}
+  .rush-date{margin:4px 0 2px 24px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+  .rush-date input{font-family:'IBM Plex Mono',monospace; font-size:13px; background:#0f1012; border:1px solid #3a3a38; color:#F6F3EC; padding:5px 8px; border-radius:var(--radius); color-scheme:dark;}
   .ticket-breakdown{padding-top:10px; margin-top:6px; border-top:1px solid #3a3a38;}
   .ticket-breakdown-line{display:flex; justify-content:space-between; font-family:'IBM Plex Mono',monospace; font-size:12px; color:#8b8a82; padding:2px 0;}
 
@@ -1320,6 +1328,8 @@ let shippingManual = false; // true when order doesn't fit a known box — no ra
 // deliveryOptId = the picked pickup/custom option (null = the first one offered); a carrier rate lives
 // in shippingQuote and wins while set; shippingManualPicked = "ship it, quote to follow" is chosen.
 let deliveryOptId = null;
+// Rush (migrations/0082): asked for, and the optional "needed by" date. The fee itself is the server's.
+let rushOn = false, rushNeededBy = "";
 let shippingManualPicked = false;
 function deliveryOptions_(org){
   if(org && Array.isArray(org.deliveryOptions) && org.deliveryOptions.length) return org.deliveryOptions;
@@ -1559,6 +1569,7 @@ function invDraw_(){
         <tr><td>Subtotal</td><td class="num">${invMoney_(v.subtotal)}</td></tr>
         ${v.discount > 0 ? `<tr><td>Discount${v.discountNote ? " (" + escapeHtml(v.discountNote) + ")" : ""}</td><td class="num">−${invMoney_(v.discount)}</td></tr>` : ""}
         ${deliveryRow}
+        ${v.rushRequested ? `<tr><td>Rush fee</td><td class="num">${v.rushFeePending ? "To follow" : invMoney_(v.rushFee)}</td></tr>` : ""}
         ${taxRow}
         <tr class="inv-total"><td>Total</td><td class="num">${invMoney_(v.total)}</td></tr>
         ${v.received > 0 ? `<tr><td>Paid so far</td><td class="num">−${invMoney_(v.received)}</td></tr>` : ""}
@@ -3035,7 +3046,7 @@ function cartSummaryText(){
 // and not at all when the order ships to another state than the shop's (known here from the ZIP
 // typed for shipping rates; pickup and the shop's own delivery options are in state). An estimate
 // for display — the order's real figure is the server's (saveOrder returns it).
-function cartTax_(org, delivery){
+function cartTax_(org, delivery, rushFee){
   const rate = Number(org && org.salesTaxRate) || 0;
   if(!org || org.salesTaxMode !== "exclusive" || !rate) return { added: false, tax: 0, outOfState: false };
   const home = org.salesTaxJurisdiction || "";
@@ -3046,8 +3057,44 @@ function cartTax_(org, delivery){
   const cents = cart.reduce((sum, c) => {
     const p = (org.products || []).find(x => x.id === c.productId);
     return sum + (p && p.taxable === false ? 0 : Math.round(Math.round(c.lineTotal * 100) * bps / 10000));
-  }, 0);
+  }, 0) + (org.rush && org.rush.taxable && rushFee > 0 ? Math.round(Math.round(rushFee * 100) * bps / 10000) : 0);   // a taxed rush fee
   return { added: true, tax: cents / 100, outOfState: false };
+}
+// The rush fee this shop offers (org.rush from /api/catalog: its own rule, else the global one) on
+// `subtotal` dollars of merchandise: {fee, pending, text}. The server works it out the same way.
+function rushQuote_(org, subtotal){
+  const r = org && org.rush;
+  if(!r || r.mode === "off") return null;
+  const money = (n) => "$" + Number(n).toFixed(2).replace(/\.00$/, "");
+  const pctFee = Math.round(Math.max(0, subtotal) * 100 * (Number(r.pct) || 0) / 100) / 100;
+  if(r.mode === "follow"){
+    const est = r.estLow != null && r.estHigh != null ? `usually ${money(r.estLow)}–${money(r.estHigh)}`
+      : r.estLow != null ? `usually from ${money(r.estLow)}` : r.estHigh != null ? `usually up to ${money(r.estHigh)}` : "";
+    return { fee: 0, pending: true, text: "Fee to follow" + (est ? " — " + est : "") + ". We'll confirm it and send it separately." };
+  }
+  if(r.mode === "fixed") return { fee: Number(r.amount) || 0, pending: false, text: "+" + money(r.amount) };
+  if(r.mode === "percent") return { fee: pctFee, pending: false, text: `${Number(r.pct)}% of your items (+${money(pctFee)})` };
+  const fee = Math.max(Number(r.amount) || 0, pctFee);
+  return { fee, pending: false, text: `${money(r.amount)} or ${Number(r.pct)}% of your items, whichever is more (+${money(fee)})` };
+}
+function rushSectionHtml_(org, subtotal){
+  const q = rushQuote_(org, subtotal);
+  if(!q || cart.length === 0) return "";
+  const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  return `
+    <div class="shipping-section rush-section">
+      <div class="shipping-section-label">Need it sooner?</div>
+      <label class="shipping-option"><input type="checkbox" id="rushOrder"${rushOn ? " checked" : ""} onchange="setRush_(this.checked)">
+        <span>${escapeHtml(org.rush.label || "Rush my order")} <small>${escapeHtml(q.text)}</small></span></label>
+      ${org.rush.note ? `<div class="rush-note">${escapeHtml(org.rush.note)}</div>` : ""}
+      ${rushOn ? `<div class="rush-date"><label for="rushNeededBy" class="shipping-zip-label">Needed by (optional)</label>
+        <input type="date" id="rushNeededBy" min="${today}" value="${escapeHtml(rushNeededBy)}" onchange="rushNeededBy=this.value"></div>` : ""}
+    </div>`;
+}
+function setRush_(on){
+  rushOn = !!on;
+  if(!rushOn) rushNeededBy = "";
+  if(currentOrg && currentOrgId) renderTicket(currentOrg, currentOrgId);
 }
 
 function renderTicket(org, orgId){
@@ -3084,8 +3131,11 @@ function renderTicket(org, orgId){
   const cartSubtotal = cart.reduce((s,c) => s+c.lineTotal, 0);
   const delivery = currentDelivery_(org);
   const shippingCost = delivery.fee;
-  const cartTax = cartTax_(org, delivery);
-  const grandTotal   = cartSubtotal + shippingCost + cartTax.tax;
+  const rush = rushOn ? rushQuote_(org, cartSubtotal) : null;
+  if(rushOn && !rush) rushOn = false;      // the shop stopped offering it
+  const rushFee = rush ? rush.fee : 0;
+  const cartTax = cartTax_(org, delivery, rushFee);
+  const grandTotal   = cartSubtotal + shippingCost + rushFee + cartTax.tax;
 
   // Check the currently-selected payment method to decide whether to
   // show the discounted total. Reading from the DOM directly here since
@@ -3115,13 +3165,14 @@ function renderTicket(org, orgId){
 
   // When shipping is active, show a breakdown above the total line so the
   // customer can see merchandise vs. shipping separately.
-  const breakdownHtml = (shippingCost > 0 || cartTax.tax > 0) ? `
+  const breakdownHtml = (shippingCost > 0 || cartTax.tax > 0 || rush) ? `
     <div class="ticket-breakdown">
       <div class="ticket-breakdown-line"><span>Merchandise</span><span>$${cartSubtotal.toFixed(2)}</span></div>
       ${shippingCost > 0 ? `<div class="ticket-breakdown-line">
         <span>${escapeHtml(delivery.label)}</span>
         <span>$${shippingCost.toFixed(2)}</span>
       </div>` : ""}
+      ${rush ? `<div class="ticket-breakdown-line"><span>Rush fee</span><span>${rush.pending ? "to follow" : "$" + rushFee.toFixed(2)}</span></div>` : ""}
       ${cartTax.tax > 0 ? `<div class="ticket-breakdown-line ticket-tax-line"><span>Sales tax (${escapeHtml(String(org.salesTaxRate))}%)</span><span>$${cartTax.tax.toFixed(2)}</span></div>` : ""}
     </div>` : "";
 
@@ -3139,6 +3190,7 @@ function renderTicket(org, orgId){
     <h2>Your order${pieces ? ` <span class="mono" style="font-size:.7em;opacity:.7;">(${pieces} ${pieces === 1 ? "item" : "items"})</span>` : ""}</h2>
     ${cart.length===0 ? '<div class="cart-empty">Nothing added yet.</div>' : lines}
     ${renderShippingSection(org)}
+    ${rushSectionHtml_(org, cartSubtotal)}
     ${breakdownHtml}
     <div class="ticket-total">
       ${totalHtml}
@@ -3282,6 +3334,10 @@ async function placeOrder(orgId){
   const manualNow = delivery.kind === "manual";
 
   const cartSubtotal = cart.reduce((s,c) => s+c.lineTotal, 0);
+  // Rush: asked for here; the server prices it from the shop's rule (this is only what the page showed).
+  const rush = rushOn ? rushQuote_(currentOrg, cartSubtotal) : null;
+  const neededByEl = document.getElementById("rushNeededBy");
+  if(neededByEl) rushNeededBy = neededByEl.value;
   const _orderPrefix = ((orgId || "ORD").replace(/[^A-Za-z0-9]/g, "").slice(0, 4).toUpperCase()) || "ORD";
   const order = {
     orderId: _orderPrefix + "-" + Date.now().toString(36).toUpperCase() + "-" + crypto.getRandomValues(new Uint32Array(1))[0].toString(36).toUpperCase(),
@@ -3303,7 +3359,9 @@ async function placeOrder(orgId){
       return s + ((p && p.weightOz) ? p.weightOz * it.qty : 8 * it.qty);
     }, 0),
     // What the cart showed (the server prices the order itself and ignores this).
-    total: cartSubtotal + orderShippingCost + cartTax_(currentOrg, delivery).tax,
+    total: cartSubtotal + orderShippingCost + (rush ? rush.fee : 0) + cartTax_(currentOrg, delivery, rush ? rush.fee : 0).tax,
+    ...(rush ? { rush: true, rushFee: rush.fee, rushFeePending: rush.pending } : {}),
+    ...(rush && rushNeededBy ? { neededBy: rushNeededBy } : {}),
     placedAt: new Date().toISOString(),
     paid: false
   };
@@ -3372,6 +3430,7 @@ async function placeOrder(orgId){
   }
 
   clearCart_(); saveCart_(); checkoutMsg_ = "";
+  rushOn = false; rushNeededBy = "";
   showConfirmation(orgId, order);
 }
 
@@ -3437,6 +3496,11 @@ function venmoPayLink(order){
 
 // What happens next with payment, in words that fit how the shopper chose to pay.
 function confirmationPaymentText_(order){
+  // A rush fee still to follow is sent separately; it never holds up paying for the rest.
+  const rushLater = order.rush && order.rushFeePending ? " The rush fee will follow — we'll confirm it and send it separately." : "";
+  return confirmationPaymentBase_(order) + rushLater;
+}
+function confirmationPaymentBase_(order){
   const m = order.paymentMethod;
   if(order.manualShipping) return "The shipping cost still has to be worked out — we'll email you the total and how to pay.";
   if(m === "Card") return order.cardStartFailed ? "Your order is saved, but the card payment couldn't be started. Try it again below, or contact the shop to pay another way — there's no need to order again." : "Your order is saved.";
@@ -3449,7 +3513,8 @@ function confirmationSummaryHtml_(order){
   const opt = order.deliveryOptionId ? (deliveryOptions_(currentOrg).find(o => o.id === order.deliveryOptionId) || {}) : null;
   const deliveryLabel = order.manualShipping ? "Shipping — cost to follow" : order.shippingMethod || (opt && opt.label) || (order.shippingAddress ? "Shipping" : "");
   const delivery = deliveryLabel ? `<div class="row"><span>${escapeHtml(deliveryLabel)}</span><span>${order.manualShipping ? "TBD" : Number(order.shippingCost) ? "$" + Number(order.shippingCost).toFixed(2) : "Free"}</span></div>` : "";
-  return `<div class="conf-items">${rows}${delivery}<div class="row total"><span>Total</span><span>$${Number(order.total || 0).toFixed(2)}${order.manualShipping ? " + shipping" : ""}</span></div></div>`;
+  const rush = order.rush ? `<div class="row"><span>Rush fee${order.neededBy ? ` <small>(needed by ${escapeHtml(order.neededBy)})</small>` : ""}</span><span>${order.rushFeePending ? "To follow" : "$" + Number(order.rushFee || 0).toFixed(2)}</span></div>` : "";
+  return `<div class="conf-items">${rows}${delivery}${rush}<div class="row total"><span>Total</span><span>$${Number(order.total || 0).toFixed(2)}${order.manualShipping ? " + shipping" : ""}</span></div></div>`;
 }
 
 function showConfirmation(orgId, order){

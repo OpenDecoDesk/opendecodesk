@@ -3551,9 +3551,21 @@ function adminActionCell(org, o){
 // "⚡ RUSH · needed by 11/20 · fee to follow" on an order's row and card (migrations/0082).
 function rushPill_(o){
   if(!o || !o.rushRequested) return "";
+  // The payment deadline (migrations/0083): passed with money still owed → the rush date isn't guaranteed any more.
+  const late = !!(o.rushPayBy && Number(o.balanceDue) > 0 && rushLocalToday_() > o.rushPayBy);
   const bits = [o.dueDate ? "by " + new Date(o.dueDate + "T00:00:00").toLocaleDateString() : "",
+    o.rushPayBy && !(o.paid && !o.rushFeePending) ? (late ? "PAY-BY PASSED " : "pay by ") + new Date(o.rushPayBy + "T00:00:00").toLocaleDateString() : "",
     o.rushFeePending ? "fee to follow" : (Number(o.rushFee) > 0 ? "$" + Number(o.rushFee).toFixed(2) : "no fee")].filter(Boolean);
-  return ` <span class="rush-pill${o.rushFeePending ? " rush-pill-pending" : ""}" title="${o.rushFeePending ? "Rush — the fee is still to follow: set it with Rush…" : "Rush order"}">⚡ RUSH · ${escapeHtml(bits.join(" · "))}</span>`;
+  const title = late ? "Full payment wasn't received by the pay-by date — the rush date isn't guaranteed" : o.rushFeePending ? "Rush — the fee is still to follow: set it with Rush…" : "Rush order";
+  return ` <span class="rush-pill${late ? " rush-pill-late" : o.rushFeePending ? " rush-pill-pending" : ""}" title="${title}">⚡ RUSH · ${escapeHtml(bits.join(" · "))}</span>`;
+}
+function rushLocalToday_(){ return new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
+// The pay-by date `days` before a due date (YYYY-MM-DD), never before today — the server's rushPayByFor.
+function rushPayBySuggest_(due, days){
+  if(!Number.isInteger(days) || !/^\d{4}-\d{2}-\d{2}$/.test(String(due || ""))) return "";
+  const d = new Date(due + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - days);
+  const day = d.toISOString().slice(0, 10), today = rushLocalToday_();
+  return day < today ? today : day;
 }
 
 // Orders → Rush…: rush on or off for this order, its fee or "to follow", and the due date. Works on any order,
@@ -3571,13 +3583,29 @@ function showRushFeeModal_(orgId, orderId){
       <label style="font-size:13px;display:flex;gap:8px;align-items:center;margin-bottom:6px;cursor:pointer;"><input type="radio" name="rfKind" value="amount" ${o.rushFeePending ? "" : "checked"}> Fee $ <input type="number" id="rfAmount" min="0" max="1000" step="0.01" value="${escapeHtml(fee)}" style="${inp}width:110px;"></label>
       <label style="font-size:13px;display:flex;gap:8px;align-items:center;margin-bottom:10px;cursor:pointer;"><input type="radio" name="rfKind" value="pending" ${o.rushFeePending ? "checked" : ""}> Fee to follow — not worked out yet</label>
       <label style="font-size:13px;display:block;margin-bottom:10px;">Due date <input type="date" id="rfDue" value="${escapeHtml(o.dueDate || "")}" style="${inp}"> <span style="color:#888;font-size:12px;">(puts it first on the run screens)</span></label>
+      <label style="font-size:13px;display:block;margin-bottom:2px;">Full payment received by <input type="date" id="rfPayBy" value="${escapeHtml(o.rushPayBy || "")}" style="${inp}"> <button type="button" class="admin-btn admin-btn-secondary" id="rfPayByClear" style="padding:3px 8px;font-size:12px;">Clear</button></label>
+      <div id="rfPayByNote" style="font-size:12px;color:#666;margin:0 0 10px;">The invoice, its email and the order emails tell the customer that unless full payment arrives by this date, the rush date can't be guaranteed. Leave it empty for no payment deadline.</div>
       <label style="font-size:13px;display:flex;gap:8px;align-items:center;cursor:pointer;"><input type="checkbox" id="rfInvoice"> Email the customer an invoice afterwards</label>
     </div>
     <div id="rfErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;"><button type="button" class="admin-btn admin-btn-secondary" id="rfCancel">Cancel</button><button type="button" class="admin-btn" id="rfSave">Save</button></div>`, 480);
   const on = ov.querySelector("#rfOn"), body = ov.querySelector("#rfBody");
-  const show = () => { body.style.opacity = on.checked ? "" : ".45"; body.querySelectorAll("input").forEach(i => { if(i.id !== "rfDue") i.disabled = !on.checked; }); };
+  const show = () => { body.style.opacity = on.checked ? "" : ".45"; body.querySelectorAll("input, button").forEach(i => { if(i.id !== "rfDue") i.disabled = !on.checked; }); };
   on.onchange = show; show();
+  // Pay-by (migrations/0083): suggested from the rush rule's "days before the due date" while it hasn't been typed in.
+  const dueEl = ov.querySelector("#rfDue"), payEl = ov.querySelector("#rfPayBy"), payNote = ov.querySelector("#rfPayByNote");
+  let payTouched = !!o.rushPayBy, payDays = null;
+  const suggest = () => {
+    if(payTouched || payDays == null) return;
+    const s = rushPayBySuggest_(dueEl.value, payDays);
+    payEl.value = s;
+    if(s) payNote.textContent = `Suggested: ${payDays} day${payDays === 1 ? "" : "s"} before the due date (the rush setting). The customer is told that unless full payment arrives by this date, the rush date can't be guaranteed.`;
+  };
+  payEl.addEventListener("input", () => { payTouched = true; });
+  payEl.addEventListener("change", () => { payTouched = true; });
+  ov.querySelector("#rfPayByClear").onclick = () => { payEl.value = ""; payTouched = true; };
+  dueEl.addEventListener("change", suggest);
+  hoopApi_({ action: "getRushSettings" }).then(r => { const d = r && r.rush && r.rush.rule ? r.rush.rule.payByDays : null; payDays = Number.isInteger(d) ? d : null; suggest(); }).catch(() => {});
   ov.querySelector("#rfAmount").addEventListener("input", () => { ov.querySelector('input[name="rfKind"][value="amount"]').checked = true; });
   ov.querySelector("#rfCancel").onclick = close;
   ov.querySelector("#rfSave").onclick = async () => {
@@ -3588,6 +3616,9 @@ function showRushFeeModal_(orgId, orderId){
     const req = { action: "setRushFee", org: orgId, orderId, requested: on.checked, pending, amount: on.checked && !pending ? Number(amount) : null };
     const due = ov.querySelector("#rfDue").value;
     if((due || "") !== (o.dueDate || "")) req.dueDate = due;
+    const payBy = payEl.value;
+    if(on.checked && payBy && due && payBy > due){ err.textContent = "The 'full payment received by' date is after the due date."; return; }
+    if(on.checked && (payBy || "") !== (o.rushPayBy || "")) req.payBy = payBy;
     btn.disabled = true; err.textContent = "";
     try{
       await hoopApi_(req);
@@ -3645,6 +3676,9 @@ function showSendInvoiceModal(orgId, orderId){
     <div style="font-size:13px;color:#555;margin-bottom:12px;">${adminDesktop_()
       ? `Emails ${escapeHtml(o.customerName && o.customerName !== "Local Sale" ? o.customerName : "the customer")} the invoice for order <b>${escapeHtml(o.orderId)}</b>, with a PDF of it attached: what's owed (<b>$${Number(o.balanceDue).toFixed(2)}</b>) and how to pay, from your Business profile (Venmo, Zelle, a check by mail).`
       : `Emails ${escapeHtml(o.customerName && o.customerName !== "Local Sale" ? o.customerName : "the customer")} a link to a page showing order <b>${escapeHtml(o.orderId)}</b> and what's owed (<b>$${Number(o.balanceDue).toFixed(2)}</b>), where they can pay online.`}</div>
+    ${o.rushRequested ? `<div id="siRush" style="font-size:13px;border:1px solid #fdba74;background:#fff7ed;border-radius:6px;padding:8px 10px;margin-bottom:12px;">⚡ Rush order${o.dueDate ? " — due " + escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : ""}. ${o.rushPayBy
+      ? `The email and invoice page say full payment must be received by <b>${escapeHtml(new Date(o.rushPayBy + "T00:00:00").toLocaleDateString())}</b>, or the rush date can't be guaranteed.`
+      : `No “full payment received by” date is set — set one with <b>Rush…</b> first if the rush date depends on being paid in time.`}</div>` : ""}
     <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Send to<br><input id="siEmail" type="email" value="${escapeHtml(o.contact && o.contact.includes("@") ? o.contact : "")}" placeholder="customer@example.com" style="${inp}"></label>
     <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Note to the customer <span style="font-weight:400;color:#666;">(optional)</span><br><textarea id="siMessage" rows="3" maxlength="3000" style="${inp}font-family:inherit;resize:vertical;"></textarea></label>
     <label style="font-size:13px;display:flex;gap:8px;align-items:flex-start;margin-bottom:6px;cursor:pointer;${adminDesktop_() ? "display:none;" : ""}"><input type="checkbox" id="siDelivery"${adminDesktop_() ? "" : " checked"} style="margin-top:3px;">
@@ -8220,6 +8254,8 @@ function rushRuleFieldsHtml_(prefix, rule, opts = {}){
         <label style="flex:0 0 190px;" data-rush="est">Usually from ($, optional)<input type="number" id="${prefix}EstLow" min="0" max="1000" step="0.01" value="${v(r.estLow)}"></label>
         <label style="flex:0 0 190px;" data-rush="est">Usually up to ($, optional)<input type="number" id="${prefix}EstHigh" min="0" max="1000" step="0.01" value="${v(r.estHigh)}"></label>
       </div>
+      <label style="max-width:420px;">Full payment due — days before the needed-by date (optional)<input type="number" id="${prefix}PayByDays" min="0" max="60" step="1" value="${v(r.payByDays)}" placeholder="e.g. 3" style="max-width:120px;"></label>
+      <div class="admin-note" style="margin:-4px 0 8px;">When a customer gives a needed-by date, the order gets a "full payment received by" date this many days earlier (changeable on the order with Rush…). The invoice and emails say the rush date can't be guaranteed without full payment by then.</div>
       <label>What the customer ticks<input type="text" id="${prefix}Label" maxlength="40" value="${v(r.label || "Rush my order")}" style="max-width:360px;"></label>
       <label>Note shown to the customer (optional)<textarea id="${prefix}Note" maxlength="300" rows="2" placeholder="e.g. We'll move your order to the front of the line and ship it the fastest way.">${v(r.note)}</textarea></label>
       <div class="admin-note" id="${prefix}Example" style="margin:2px 0 8px;"></div>
@@ -8229,7 +8265,8 @@ function readRushRule_(prefix){
   const val = (id) => { const el = document.getElementById(prefix + id); return el ? el.value.trim() : ""; };
   const mode = val("Mode") || "off";
   const num = (x) => x === "" ? null : Number(x);
-  const rule = { mode, amount: num(val("Amount")), pct: num(val("Pct")), estLow: num(val("EstLow")), estHigh: num(val("EstHigh")), label: val("Label"), note: val("Note") };
+  const rule = { mode, amount: num(val("Amount")), pct: num(val("Pct")), estLow: num(val("EstLow")), estHigh: num(val("EstHigh")), label: val("Label"), note: val("Note"), payByDays: num(val("PayByDays")) };
+  if(rule.payByDays != null && !(Number.isInteger(rule.payByDays) && rule.payByDays >= 0 && rule.payByDays <= 60)) return { error: "Full payment due before the needed-by date must be a whole number of days, 0 to 60." };
   if((mode === "fixed" || mode === "greater") && !(rule.amount >= 0 && rule.amount <= 1000)) return { error: "Enter the rush fee — $0 to $1,000." };
   if((mode === "percent" || mode === "greater") && !(rule.pct > 0 && rule.pct <= 100)) return { error: "Enter the rush fee's percentage — more than 0, at most 100." };
   if(mode === "follow" && rule.estLow != null && rule.estHigh != null && rule.estLow > rule.estHigh) return { error: "The rush fee's 'usually from' is above its 'usually up to'." };
@@ -8239,10 +8276,13 @@ function rushExampleText_(rule){
   const m = (n) => "$" + Number(n || 0).toFixed(2);
   if(!rule || rule.mode === "off") return "Customers aren't offered rush.";
   if(rule.mode === "follow") return "The customer asks for rush with no fee yet; you set it on the order." +
-    (rule.estLow != null || rule.estHigh != null ? ` They're told it's usually ${rule.estLow != null ? m(rule.estLow) : ""}${rule.estLow != null && rule.estHigh != null ? "–" : ""}${rule.estHigh != null ? m(rule.estHigh) : ""}.` : "");
+    (rule.estLow != null || rule.estHigh != null ? ` They're told it's usually ${rule.estLow != null ? m(rule.estLow) : ""}${rule.estLow != null && rule.estHigh != null ? "–" : ""}${rule.estHigh != null ? m(rule.estHigh) : ""}.` : "") + rushPayByExample_(rule);
   const pct = (items) => Math.round(items * (Number(rule.pct) || 0)) / 100;
   const fee = (items) => rule.mode === "fixed" ? Number(rule.amount) || 0 : rule.mode === "percent" ? pct(items) : Math.max(Number(rule.amount) || 0, pct(items));
-  return `On a $40 order the rush fee is ${m(fee(40))}; on a $200 order, ${m(fee(200))}.`;
+  return `On a $40 order the rush fee is ${m(fee(40))}; on a $200 order, ${m(fee(200))}.` + rushPayByExample_(rule);
+}
+function rushPayByExample_(rule){
+  return rule && Number.isInteger(rule.payByDays) ? ` Full payment is due ${rule.payByDays === 0 ? "on" : rule.payByDays + " day" + (rule.payByDays === 1 ? "" : "s") + " before"} the needed-by date.` : "";
 }
 function wireRushRule_(prefix){
   const sel = document.getElementById(prefix + "Mode");

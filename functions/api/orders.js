@@ -118,7 +118,7 @@ import {
   bumpCatalogVersion, listStockPurchases,
   getAccountRegister, getReceiptRecords, receiptTargets, getRecordReceipt, setReceiptFile, receiptAccountBlockers, setReceiptAccount,
   lineQty, QTY_MESSAGE, zipStates, SHIPPING_QUOTE_PENDING, byId_,
-  getRushSettings, setRushSettings, getRushFeesToSet, rushRuleView, resolveRushRule, rushFeeFor, cleanShopRush, setOrgRushFee, setOrderRushFee,
+  getRushSettings, setRushSettings, getRushFeesToSet, rushRuleView, resolveRushRule, rushFeeFor, cleanShopRush, setOrgRushFee, setOrderRushFee, rushPayByFor, localToday,
 } from "../_lib/db.js";
 import {
   sendOrderReceivedEmail,
@@ -1415,7 +1415,7 @@ export async function onRequestPost(context) {
       awaitingBlanks: (awaitingBlanks || []).map(o => ({ ...o, orgName: names[o.orgId] || o.orgId })),
       orders: orders.map(o => ({ orderId: o.orderId, orgId: o.orgId, orgName: names[o.orgId] || o.orgId, placedAt: o.placedAt,
         customerName: o.customerName, contact: o.contact, paymentMethod: o.paymentMethod, paid: !!o.paid, total: o.total,
-        rushRequested: !!o.rushRequested, rushFee: o.rushFee || 0, rushFeePending: !!o.rushFeePending, dueDate: o.dueDate || "",
+        rushRequested: !!o.rushRequested, rushFee: o.rushFee || 0, rushFeePending: !!o.rushFeePending, dueDate: o.dueDate || "", rushPayBy: o.rushPayBy || "",
         items: (o.items || []).map(it => ({ name: it.name, size: it.size || "", qty: it.qty, personalized: !!it.personalized,
           persName: it.persName || "", cancelled: !!it.cancelDate })) })),
       notices: notices.map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
@@ -1897,13 +1897,21 @@ export async function onRequestPost(context) {
       dueDate = String(body.dueDate || "");
       if (dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) return jsonResponse({ status: "error", message: "The due date isn't a date." }, 400);
     }
+    // The date full payment must be received by to keep the rush date (migrations/0083): "" clears it.
+    let payBy;
+    if (requested && body.payBy !== undefined) {
+      payBy = String(body.payBy || "");
+      if (payBy && (!/^\d{4}-\d{2}-\d{2}$/.test(payBy) || isNaN(Date.parse(payBy + "T12:00:00Z")))) return jsonResponse({ status: "error", message: "The 'payment received by' date isn't a date." }, 400);
+      const due = dueDate !== undefined ? dueDate : (before.dueDate || "");
+      if (payBy && due && payBy > due) return jsonResponse({ status: "error", message: "Payment has to be due on or before the due date — the 'payment received by' date is after it." }, 400);
+    }
     // The fee's tax follows the setting when rush is first put on an order; after that it keeps its own.
     const taxable = requested && !before.rushRequested ? (await getRushSettings(env.DB)).taxable : undefined;
     const auditErr = await auditStrict({ orgId: before.orgId, orderId, action: "order.rush_fee_set",
-      detail: { from: { requested: before.rushRequested, fee: before.rushFee, pending: before.rushFeePending, dueDate: before.dueDate || "" },
-                to: { requested, fee: cents / 100, pending, ...(dueDate !== undefined ? { dueDate } : {}) } } });
+      detail: { from: { requested: before.rushRequested, fee: before.rushFee, pending: before.rushFeePending, dueDate: before.dueDate || "", payBy: before.rushPayBy || "" },
+                to: { requested, fee: cents / 100, pending, ...(dueDate !== undefined ? { dueDate } : {}), payBy: requested ? (payBy !== undefined ? payBy : before.rushPayBy || "") : "" } } });
     if (auditErr) return auditErr;
-    await setOrderRushFee(env.DB, orderId, { requested, cents, pending, taxable });
+    await setOrderRushFee(env.DB, orderId, { requested, cents, pending, taxable, payBy });
     if (dueDate !== undefined && dueDate !== (before.dueDate || "")) await setOrderDueDate(env.DB, orderId, dueDate || null);
     const updated = await getOrderById(env.DB, orderId);
     return jsonResponse({ status: "ok", orderId, order: updated });
@@ -5936,7 +5944,7 @@ export async function onRequestPost(context) {
     const rule = resolveRushRule(orgRow, rushSettings);
     if (!rule) return jsonResponse({ status: "error", message: "This shop doesn't offer rush orders — please refresh the page." }, 400);
     const fee = rushFeeFor(rule, Math.round(Number(subtotal) * 100));
-    rush = { cents: fee.cents, pending: fee.pending, taxable: rushSettings.taxable };
+    rush = { cents: fee.cents, pending: fee.pending, taxable: rushSettings.taxable, rule };
   }
   // An optional "needed by" date becomes the order's due date (run queues put it first): today to a year out.
   let dueDate = "";
@@ -5949,6 +5957,9 @@ export async function onRequestPost(context) {
     dueDate = d < today ? today : d;
   }
   const total = subtotal + serverShippingCost + (rush ? rush.cents / 100 : 0);
+  // Full payment due by (migrations/0083): the rule's "days before" the needed-by date, never before today
+  // (the business's own day — Region time zone).
+  const rushPayBy = rush && dueDate ? rushPayByFor(rush.rule, dueDate, await localToday(env)) : "";
 
   // Weight from the catalog, not the client (used later for label purchase).
   let serverWeightOz = 0;
@@ -5970,6 +5981,7 @@ export async function onRequestPost(context) {
     placedAt: new Date().toISOString(),
     ...(rush ? { rushRequested: true, rushFee: rush.cents / 100, rushFeePending: rush.pending, rushFeeTaxable: rush.taxable } : {}),
     ...(dueDate ? { dueDate } : {}),
+    ...(rushPayBy ? { rushPayBy } : {}),
   };
 
   // What the order comes to, as recorded (insertOrder works the tax out per line; with tax added

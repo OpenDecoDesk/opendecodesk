@@ -338,9 +338,34 @@ function deliveryLabel_(order) {
   if (deliveryIsCustom_(order)) return String(order.shippingMethod);
   return `Shipping${order.shippingMethod ? " (" + order.shippingMethod + ")" : ""}`;
 }
-// "⚡ RUSH · needed by 2026-11-20 · fee to follow" — how the roll-up marks a rush order.
+// "⚡ RUSH · needed by 2026-11-20 · pay by 2026-11-16 · fee to follow" — how the roll-up marks a rush order.
 function rushTag_(o) {
-  return ["⚡ RUSH", o.dueDate ? "needed by " + o.dueDate : "", o.rushFeePending ? "fee to follow" : (Number(o.rushFee) > 0 ? "fee " + fmt$(o.rushFee) : "")].filter(Boolean).join(" · ");
+  return ["⚡ RUSH", o.dueDate ? "needed by " + o.dueDate : "", o.rushPayBy ? "pay by " + o.rushPayBy : "", o.rushFeePending ? "fee to follow" : (Number(o.rushFee) > 0 ? "fee " + fmt$(o.rushFee) : "")].filter(Boolean).join(" · ");
+}
+// "Monday, November 16, 2026" from YYYY-MM-DD (a calendar day — no time zone shift).
+function longDate_(day) {
+  const d = new Date(String(day) + "T12:00:00Z");
+  return isNaN(d) ? String(day || "") : d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+// A rush order's payment deadline (migrations/0083): the date full payment must be received by to keep the rush
+// date, and plainly that without it the date can't be guaranteed. Null when there's no pay-by date, or nothing is
+// left to pay (a rush fee still to follow is still to pay). {html, text}.
+function rushPayByNotice_(order) {
+  if (!order || !order.rushRequested || !order.rushPayBy) return null;
+  if (order.balanceDue != null && !(Number(order.balanceDue) > 0) && !order.rushFeePending) return null;
+  const pay = longDate_(order.rushPayBy), need = order.dueDate ? longDate_(order.dueDate) : "";
+  const lead = need ? `This is a rush order with a rush delivery date of ${need}.` : "This is a rush order.";
+  const ask = `To keep ${need ? "that date" : "the rush"}, we must receive full payment by ${pay}` +
+    (order.rushFeePending ? " — including the rush fee, which we'll send you separately." : ".") + " A mailed check has to arrive by then.";
+  const warn = `If we have not received full payment by ${pay}, we cannot guarantee the rush delivery date${need ? " of " + need : ""}.`;
+  return {
+    html: `<div style="background:#fff7ed;border:2px solid #ea580c;border-radius:6px;padding:12px 16px;margin:16px 0;font-size:15px;line-height:1.45">
+      <div style="font-size:16px;font-weight:bold;color:#9a3412;margin-bottom:4px">⚡ Rush order — full payment due by ${escHtml(pay)}</div>
+      <div>${escHtml(lead)} ${escHtml(ask)}</div>
+      <div style="margin-top:6px;font-weight:bold;color:#9a3412">${escHtml(warn)}</div>
+    </div>`,
+    text: `RUSH ORDER — FULL PAYMENT DUE BY ${pay.toUpperCase()}\n${lead} ${ask}\n${warn}\n`,
+  };
 }
 function receiptTotalsHtml_(order) {
   const t = receiptTotals_(order);
@@ -368,6 +393,7 @@ function receiptTotalsText_(order) {
 // Sent to customer immediately after a new order is placed.
 export async function sendOrderReceivedEmail(env, order) {
   const subject = `Your order has been received — ${order.orderId}`;
+  const rushNotice = rushPayByNotice_(order);
   const itemsHtml = itemsTable((order.items || []).filter(it => !it.cancelDate));
   const manualShippingNote = order.manualShipping
     ? `<p style="background:#fef9c3;border:1px solid #fde047;border-radius:4px;padding:10px 14px;font-size:14px;margin-top:12px;">
@@ -378,6 +404,7 @@ export async function sendOrderReceivedEmail(env, order) {
   const html = `<div style="font-family:sans-serif;max-width:600px;margin:auto">
     <h2 style="color:#1d4ed8">Order Received</h2>
     <p>Hi ${escHtml(order.customerName)}, we received your order and will be in touch to confirm payment.</p>
+    ${rushNotice ? rushNotice.html : ""}
     <p><strong>Order ID:</strong> ${escHtml(order.orderId)}</p>
     ${itemsHtml}
     ${receiptTotalsHtml_(order)}
@@ -386,7 +413,7 @@ export async function sendOrderReceivedEmail(env, order) {
     <hr/>
     <p style="font-size:12px;color:#666">%%BUSINESS%% — %%SITE%%</p>
   </div>`;
-  const text = `Order Received — ${order.orderId}\n\nHi ${order.customerName},\nWe received your order.\n${receiptTotalsText_(order)}\nPayment: ${order.paymentMethod}\n\n%%BUSINESS%%`;
+  const text = `Order Received — ${order.orderId}\n\nHi ${order.customerName},\nWe received your order.\n${rushNotice ? "\n" + rushNotice.text + "\n" : ""}${receiptTotalsText_(order)}\nPayment: ${order.paymentMethod}\n\n%%BUSINESS%%`;
   return send_(env, { to: order.contact, subject, html, text });
 }
 
@@ -830,7 +857,11 @@ export async function sendShippingPaymentEmail(env, { customerName, customerEmai
 // they'll get the order and pay what's owed. `order` is the saved order (so the totals are the ones on
 // the books); `message` is the shop's optional note.
 export async function sendInvoiceEmail(env, { order, orgName, invoiceUrl, message, allowDelivery }) {
-  const subject = `Invoice for your order — ${order.orderId}`;
+  // A rush order's payment deadline (migrations/0083) goes in the subject and at the top, before anything else.
+  const rushNotice = rushPayByNotice_(order);
+  const subject = rushNotice
+    ? `Invoice for your rush order — ${order.orderId} — full payment due by ${new Date(order.rushPayBy + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`
+    : `Invoice for your order — ${order.orderId}`;
   const name = String(order.customerName || "").trim();
   const hello = name && name !== "Local Sale" ? `Hi ${name},` : "Hello,";
   // No invoice page to link to (the desktop program: it isn't on the web): the email is the invoice,
@@ -847,6 +878,7 @@ export async function sendInvoiceEmail(env, { order, orgName, invoiceUrl, messag
   const html = `<div style="font-family:sans-serif;max-width:600px;margin:auto">
     <h2 style="color:#1d4ed8">Invoice${orgName ? " — " + escHtml(orgName) : ""}</h2>
     <p>${escHtml(hello)} ${escHtml(lead)}${pdf ? " It's also attached as a PDF." : ""}</p>
+    ${rushNotice ? rushNotice.html : ""}
     ${note ? `<p style="background:#f8fafc;border-left:3px solid #1d4ed8;padding:10px 14px;white-space:pre-wrap">${escHtml(note)}</p>` : ""}
     <p><strong>Order ID:</strong> ${escHtml(order.orderId)}</p>
     ${itemsTable(items)}
@@ -855,11 +887,12 @@ export async function sendInvoiceEmail(env, { order, orgName, invoiceUrl, messag
     ${invoiceUrl ? `<div style="margin:24px 0;text-align:center">
       <a href="${escHtml(invoiceUrl)}" style="display:inline-block;background:#1d4ed8;color:#fff;font-size:16px;font-weight:bold;padding:14px 32px;border-radius:6px;text-decoration:none">View &amp; pay invoice &rarr;</a>
     </div>
+    ${rushNotice ? `<p style="font-size:14px;color:#9a3412;font-weight:bold;text-align:center">Reminder: full payment is due by ${escHtml(longDate_(order.rushPayBy))} to keep the rush delivery date.</p>` : ""}
     <p style="font-size:13px;color:#555">If the button doesn't work, copy this link: ${escHtml(invoiceUrl)}</p>` : pay.html}
     <hr/>
     <p style="font-size:12px;color:#666">%%BUSINESS%% — %%SITE%%</p>
   </div>`;
-  const text = `Invoice for order ${order.orderId}\n\n${hello} ${lead}${pdf ? " It's also attached as a PDF." : ""}\n${note ? "\n" + note + "\n" : ""}\n${receiptTotalsText_(order)}\n` +
+  const text = `Invoice for order ${order.orderId}\n\n${hello} ${lead}${pdf ? " It's also attached as a PDF." : ""}\n${rushNotice ? "\n" + rushNotice.text : ""}${note ? "\n" + note + "\n" : ""}\n${receiptTotalsText_(order)}\n` +
     (Number(order.amountReceived) > 0 ? `Paid so far: ${fmt$(order.amountReceived)} · Balance due: ${fmt$(due)}\n` : "") +
     (invoiceUrl ? `\nView and pay: ${invoiceUrl}\n\n%%BUSINESS%%` : `\n${pay.text}\n\n%%BUSINESS%%`);
   return send_(env, { to: order.contact, subject, html, text, ...(pdf ? { pdf } : {}) });

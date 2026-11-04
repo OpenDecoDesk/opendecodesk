@@ -73,7 +73,7 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
     refused({ mode: "fixed" }) && refused({ mode: "percent", pct: 0 }) && refused({ mode: "percent", pct: 101 }) && refused({ mode: "fixed", amount: 1001 }) &&
     refused({ mode: "follow", estLow: 50, estHigh: 10 }) && refused({ mode: "fast" }));
   ok("a label defaults to 'Rush my order' and is cut to 40", R({ mode: "fixed", amount: 1 }).label === "Rush my order" && R({ mode: "fixed", amount: 1, label: "x".repeat(60) }).label.length === 40);
-  ok("rushRuleView gives dollars and percent back", JSON.stringify(lib.rushRuleView(R({ mode: "greater", amount: 15, pct: 20 }))) === JSON.stringify({ mode: "greater", amount: 15, pct: 20, estLow: null, estHigh: null, label: "Rush my order", note: "" }));
+  ok("rushRuleView gives dollars and percent back", JSON.stringify(lib.rushRuleView(R({ mode: "greater", amount: 15, pct: 20 }))) === JSON.stringify({ mode: "greater", amount: 15, pct: 20, estLow: null, estHigh: null, label: "Rush my order", note: "", payByDays: null }));
   ok("with nothing saved, rush is off", (await lib.getRushSettings(d1)).rule.mode === "off");
 
   console.log("\n=== Global settings and a shop's own ===");

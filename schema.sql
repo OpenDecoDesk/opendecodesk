@@ -229,7 +229,8 @@ CREATE TABLE IF NOT EXISTS orders (
   rushFeePending      INTEGER NOT NULL DEFAULT 0 CHECK (rushFeePending IN (0, 1)),
   rushFeeTaxable      INTEGER NOT NULL DEFAULT 0 CHECK (rushFeeTaxable IN (0, 1)),
   rushFeeTaxCents     INTEGER NOT NULL DEFAULT 0 CHECK (rushFeeTaxCents >= 0),
-  paidForWork         INTEGER NOT NULL DEFAULT 0 CHECK (paidForWork IN (0, 1))
+  paidForWork         INTEGER NOT NULL DEFAULT 0 CHECK (paidForWork IN (0, 1)),
+  rushPayBy           TEXT                        -- migrations/0083: full payment due by (YYYY-MM-DD) to keep a rush date
 );
 
 CREATE TABLE IF NOT EXISTS order_items (

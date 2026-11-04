@@ -718,6 +718,7 @@
   /* Orders: a rush order's flag (migrations/0082); amber while its fee is still to follow. */
   .rush-pill{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;background:#fee2e2;color:#991b1b;white-space:nowrap;}
   .rush-pill-pending{background:#fef3c7;color:#92400e;}
+  .rush-pill-late{background:#991b1b;color:#fff;}
   /* Rush my order (migrations/0082) */
   .rush-section .shipping-option{font-weight:600;}
   .rush-note{font-size:11px; color:#8b8a82; font-family:'IBM Plex Mono',monospace; line-height:1.5; margin:2px 0 6px 24px;}
@@ -757,6 +758,13 @@
   .inv-sub{font-size:13px; color:#555; margin-bottom:18px;}
   .inv-note{background:#f8fafc; border-left:3px solid var(--inv-accent,#1d4ed8); padding:10px 14px; white-space:pre-wrap; margin-bottom:16px; font-size:14px;}
   .inv-banner{border-radius:6px; padding:12px 16px; margin-bottom:16px; font-size:14px;}
+  .inv-rush{background:#fff7ed; border:2px solid #ea580c; border-radius:6px; padding:12px 16px; margin-bottom:16px; font-size:15px; line-height:1.45; color:#431407;}
+  .inv-rush .t{display:block; font-size:16px; font-weight:700; color:#9a3412; margin-bottom:4px;}
+  .inv-rush .w{display:block; margin-top:6px; font-weight:700; color:#9a3412;}
+  .inv-rush.passed{background:#fef2f2; border-color:#dc2626; color:#450a0a;}
+  .inv-rush.passed .t, .inv-rush.passed .w{color:#991b1b;}
+  .inv-rush-short{font-size:14px; font-weight:700; color:#9a3412; margin:0 0 10px;}
+  .rush-payby{font-size:13px; font-weight:600; color:#9a3412; margin-top:6px;}
   .inv-ok{background:#dcfce7; border:1px solid #86efac; color:#14532d;}
   .inv-wait{background:#fef9c3; border:1px solid #fde047; color:#713f12;}
   .inv-err{color:#b03a2e; font-size:13px; min-height:18px; margin:8px 0;}
@@ -1502,6 +1510,26 @@ function invDraw_(){
   const taxWhat = "Sales tax" + (v.taxRate ? " (" + v.taxRate + "%" + (v.taxJurisdiction ? " " + escapeHtml(v.taxJurisdiction) : "") + ")" : "");
   const taxRow = taxOnTop && v.salesTax > 0 ? `<tr><td>${taxWhat}</td><td class="num">${invMoney_(v.salesTax)}</td></tr>` : "";
   const taxNote = !taxOnTop && v.salesTax > 0 ? `<div class="inv-tax">Includes ${taxWhat.charAt(0).toLowerCase() + taxWhat.slice(1)} ${invMoney_(v.salesTax)}</div>` : "";
+  // A rush order's payment deadline (migrations/0083): full payment by this date, or the rush date can't be
+  // guaranteed — at the top and again by the pay buttons. Once it's paid in full there's nothing to warn about.
+  const longDay = (day) => { const d = new Date(String(day) + "T12:00:00Z"); return isNaN(d) ? String(day || "") : d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" }); };
+  let rushHtml = "", rushShort = "";
+  if (v.rushRequested && v.rushPayBy && !(v.paid && !v.rushFeePending)) {
+    const pay = longDay(v.rushPayBy), need = v.neededBy ? longDay(v.neededBy) : "";
+    if (v.rushPayByPassed) {
+      rushHtml = `<div class="inv-rush passed" role="alert"><b class="t">⚡ Rush order — the payment date has passed</b>
+        Full payment was due by ${escapeHtml(pay)} to keep the rush delivery date${need ? " of " + escapeHtml(need) : ""}.
+        <b class="w">Because we haven't received full payment, we can no longer guarantee the rush delivery date. Please pay as soon as you can and contact us — we'll do our best.</b></div>`;
+      rushShort = `<p class="inv-rush-short">The rush payment date (${escapeHtml(pay)}) has passed — the rush delivery date can no longer be guaranteed.</p>`;
+    } else {
+      rushHtml = `<div class="inv-rush" role="note"><b class="t">⚡ Rush order — full payment due by ${escapeHtml(pay)}</b>
+        ${need ? `Rush delivery date: <b>${escapeHtml(need)}</b>. To keep that date, we` : "To keep the rush, we"} must receive full payment by <b>${escapeHtml(pay)}</b>${v.rushFeePending ? " — including the rush fee, which we'll send you separately" : ""}. A mailed check has to arrive by then.
+        <b class="w">If we have not received full payment by ${escapeHtml(pay)}, we cannot guarantee the rush delivery date${need ? " of " + escapeHtml(need) : ""}.</b></div>`;
+      rushShort = `<p class="inv-rush-short">Pay in full by ${escapeHtml(pay)} to keep your rush delivery date.</p>`;
+    }
+  } else if (v.rushRequested && v.neededBy) {
+    rushHtml = `<div class="inv-note">⚡ Rush order — rush delivery date ${escapeHtml(longDay(v.neededBy))}.</div>`;
+  }
 
   // Delivery: a choice to make, or (once it can't be changed) just what was chosen.
   let deliveryHtml = "";
@@ -1556,6 +1584,7 @@ function invDraw_(){
     if (!wait && v.payments.includes("Check")) how.push(`<div class="inv-how"><b class="t">Check</b>Make it payable to <b>${escapeHtml(business.legalName || bizName_())}</b>, write <b>${escapeHtml(v.orderId)}</b> in the memo${business.mailingAddress ? ` and mail it to <b>${escapeHtml(business.mailingAddress)}</b>` : " — we'll tell you where to send it"}.</div>`);
     payHtml = `${_inv.paidNote ? `<div class="inv-banner inv-wait" role="status">Thanks — your payment is being confirmed. This page will update in a moment.</div>` : ""}
       ${wait ? `<p class="inv-detail" style="font-size:14px;">Choose how you'd like to get your order above — the total depends on it — then pay here.</p>` : ""}
+      ${rushShort}
       <div class="inv-pay">${how.join("") || `<p>We'll be in touch about payment.</p>`}</div>
       <div class="inv-err" id="invPayErr" role="alert"></div>`;
   }
@@ -1563,6 +1592,7 @@ function invDraw_(){
   app.innerHTML = `<div class="inv" style="--inv-accent:${acc};--inv-accent-ink:${typeof readableInkOn === "function" ? readableInkOn(acc) : "#fff"};">
       <h1>${escapeHtml(v.orgName)}</h1>
       <div class="inv-sub">Invoice for order <b>${escapeHtml(v.orderId)}</b>${v.customerName ? " · " + escapeHtml(v.customerName) : ""}${v.placedAt ? " · " + escapeHtml(new Date(v.placedAt).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })) : ""}</div>
+      ${rushHtml}
       ${v.message ? `<div class="inv-note">${escapeHtml(v.message)}</div>` : ""}
       <table class="inv-items"><thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Amount</th></tr></thead><tbody>${itemRows}</tbody></table>
       <table class="inv-totals"><tbody>
@@ -3088,8 +3118,24 @@ function rushSectionHtml_(org, subtotal){
         <span>${escapeHtml(org.rush.label || "Rush my order")} <small>${escapeHtml(q.text)}</small></span></label>
       ${org.rush.note ? `<div class="rush-note">${escapeHtml(org.rush.note)}</div>` : ""}
       ${rushOn ? `<div class="rush-date"><label for="rushNeededBy" class="shipping-zip-label">Needed by (optional)</label>
-        <input type="date" id="rushNeededBy" min="${today}" value="${escapeHtml(rushNeededBy)}" onchange="rushNeededBy=this.value"></div>` : ""}
+        <input type="date" id="rushNeededBy" min="${today}" value="${escapeHtml(rushNeededBy)}" onchange="rushNeededBy=this.value;renderTicket(currentOrg, currentOrgId)"></div>
+        ${rushPayByHtml_(org, rushNeededBy, today)}` : ""}
     </div>`;
+}
+// With a needed-by date and a rule that sets one (migrations/0083): the date full payment must be received by —
+// the server works it out the same way (rushPayByFor) — and that without it the date can't be guaranteed.
+function rushPayByDate_(org, neededBy, today){
+  const days = org && org.rush ? org.rush.payByDays : null;
+  if(!Number.isInteger(days) || !/^\d{4}-\d{2}-\d{2}$/.test(String(neededBy || ""))) return "";
+  const d = new Date(neededBy + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - days);
+  const day = d.toISOString().slice(0, 10);
+  return today && day < today ? today : day;
+}
+function rushPayByHtml_(org, neededBy, today){
+  const day = rushPayByDate_(org, neededBy, today);
+  if(!day) return "";
+  const nice = new Date(day + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
+  return `<div class="rush-payby" id="rushPayByNote">Full payment must be received by ${escapeHtml(nice)}. If it isn't, we can't guarantee this date.</div>`;
 }
 function setRush_(on){
   rushOn = !!on;

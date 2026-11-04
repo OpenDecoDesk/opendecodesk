@@ -54,6 +54,10 @@ A line of an order is taxed when **all** of these are true:
 Also:
 
 - **Shipping and delivery fees are never taxed.**
+- **A rush fee** is taxed only when Global settings → Rush orders → "Rush fee is taxable" is ticked
+  (kept on each order as it was when the order was placed), and then like a taxable line: not for an
+  exempt shop or an order shipped out of state. The tax is inside the fee when prices include tax, and
+  added on top of it when tax is added on top.
 - **A discount** reduces the tax in proportion to the taxable goods it was taken off.
 - **Cancelled lines** carry no tax.
 - **A refund** takes back its share of the tax, in the month it was refunded. You can say how much

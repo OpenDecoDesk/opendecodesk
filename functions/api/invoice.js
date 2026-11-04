@@ -30,7 +30,7 @@
 
 import { getOrderInvoice, invoiceExpired, markInvoiceViewed, markInvoiceDeliveryChosen, getOrderById, getOrgById,
   getGlobalSettings, getProductsByOrg, productShipWeightOz, cleanShippingAddress, updateOrderShipping, isMonthClosed, insertAuditLog,
-  getLocaleSettings, getFeatures, getSalesTaxSettings, getBoxPresets, getCategoryPackMap } from "../_lib/db.js";
+  getLocaleSettings, getFeatures, getSalesTaxSettings, getBoxPresets, getCategoryPackMap, rushPayByMissed, localToday } from "../_lib/db.js";
 import { selectBox } from "../_lib/boxSize.js";
 import { sendInvoiceDeliveryNotification, lineDetailText } from "../_lib/email.js";
 import { verifyQuote, canonicalItems } from "../_lib/quoteToken.js";
@@ -103,6 +103,10 @@ async function invoiceView_(env, inv, order, org) {
     shipping: Number(order.shippingCost) || 0, total: Number(order.effectiveTotal) || 0,
     // Rush (migrations/0082): the fee, or still to follow — which doesn't stop paying the rest.
     rushRequested: !!order.rushRequested, rushFee: Number(order.rushFee) || 0, rushFeePending: !!order.rushFeePending,
+    // A rush order's needed-by date and the date full payment must be received by to keep it (migrations/0083),
+    // and whether that date has passed with something still owed (the shop's day).
+    neededBy: order.rushRequested ? order.dueDate || "" : "", rushPayBy: order.rushRequested ? order.rushPayBy || "" : "",
+    rushPayByPassed: rushPayByMissed(order, await localToday(env)),
     received: Number(order.amountReceived) || 0, balanceDue: Number(order.balanceDue) || 0, paid: !!order.paid && Number(order.balanceDue) <= 0,
     salesTax: Number(order.salesTax) || 0, taxRate: Number(order.taxRate) || 0, taxExempt: !!order.taxExempt,
     // Tax in the listed prices or added on top (migrations/0052) — the page shows a tax line for the latter.

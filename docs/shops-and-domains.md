@@ -152,6 +152,8 @@ Manage catalog → the shop → **Edit**:
 - **Order deadline** — a date, a message for afterwards, and whether orders are still accepted
   after it.
 - **Sales tax** — tax exemption (see [sales-tax.md](sales-tax.md)).
+- **Rush orders** — use the global rush fee, don't offer rush, or a rule of the shop's own (see
+  "Rush orders" below).
 - **Reorder QR code & option prices** — for configurable products.
 
 ## Product categories
@@ -431,6 +433,47 @@ address. "Shipping — cost to follow" is only offered when no box fits the orde
 changed once the order is paid, shipped or in a closed month, or when the invoice was sent with the
 delivery fixed. Sending again keeps the same link and renews it for 60 days; the customer's choice is
 in the morning roll-up.
+
+## Rush orders
+
+A customer can ask for an order to be rushed. What it costs is a rule, set in Global settings → **Rush
+orders** and followed by every shop unless the shop's own settings turn rush off or give it a rule of
+its own (a shop's rule is part of what Publish snapshots; the global one takes effect at once):
+
+- **Off** — rush isn't offered.
+- **Fixed** — an amount.
+- **% of the items** — a percentage of the merchandise.
+- **The greater of the two** — the amount or the percentage, whichever is more.
+- **Fee to follow** — for costs you can't know up front (overtime, expedited shipping): the customer
+  asks for rush, you work out the fee and set it on the order afterwards. An optional estimate ("usually
+  $15–$40") is shown at checkout.
+
+The rule also has the words the customer ticks, an optional note, and optionally **Full payment due —
+days before the needed-by date**.
+
+At checkout, **Need it sooner?** offers the rule's fee and an optional **Needed by** date, which becomes
+the order's due date (the run queues put it first). The fee is worked out on the server from the shop's
+published rule; nothing about it comes from the browser. When the rule has a number of days, the order
+gets a **full payment received by** date: the needed-by date less those days, never before today (in
+the Region time zone).
+
+On any order, **Rush…** turns rush on or off, sets or changes the fee (or marks it to follow), the due
+date, and the full-payment date (which can't be after the due date). It works whether or not the shop
+offers rush, and every change is in the audit log.
+
+- The fee is part of what's owed. A fee still to follow never holds up paying for the rest; collect it
+  afterwards, for example with Send invoice.
+- **An unpaid rush fee doesn't hold up production.** An order paid for everything except the rush fee
+  goes on to Run Order, Run Transfer Sheets and Blanks to Order; marking it completed still needs it paid
+  in full.
+- With a full-payment date, the invoice email (its subject too), the order-received email and the
+  invoice page say plainly that without full payment by then the rush delivery date can't be
+  guaranteed — and the invoice page says so in red once the date has passed with money still owed. The
+  Orders page flags it too.
+- Rush fees are on the receipts, the invoice page, the reports and exports, and the morning roll-up lists
+  orders whose fee is still to set.
+- A percentage fee is worked out when the order is placed; editing the items later doesn't change it
+  (Rush… does).
 
 ## Customers' own designs
 

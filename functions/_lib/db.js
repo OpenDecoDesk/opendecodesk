@@ -144,10 +144,18 @@ const orderAmountsOfRow_ = (row) => orderAmounts({ itemsCents: row.itemsCents, i
 async function withTaxMode_(run) {
   try { return await run("o.taxMode"); }
   catch (e) {
-    if (!/no such column: (o\.)?taxMode/i.test(String(e && e.message))) throw e;
+    // (A database that old has no rush columns either — migrations/0082 — and SQLite may name one of those first.)
+    if (!/no such column: (o\.)?(taxMode|rushFee\w*|paidForWork)\b/i.test(String(e && e.message))) throw e;
     return run("'inclusive'");
   }
 }
+// A database from before migrations/0052 (withTaxMode_ passes the constant 'inclusive') is from before the
+// rush fee too (migrations/0082): its rush columns read as 0 and paidForWork as `paid`.
+const LEGACY_TAX_MODE_ = "'inclusive'";
+const rushSql_ = (tm, sql) => tm !== LEGACY_TAX_MODE_ ? sql : sql
+  .replace(/o\.(rushFeeCents|rushFeeTaxCents|rushFeePending)(?=\s+AS\b)/g, "0")
+  .replace(/o\.(rushFeeCents|rushFeeTaxCents|rushFeePending)\b/g, "0 AS $1")
+  .replace(/o\.paidForWork\b/g, "o.paid AS paidForWork");
 
 // ---- What's taxed (migrations/0013) ----------------------------------------
 // A line is taxed at the order's snapshotted rate only when (1) its product is
@@ -327,7 +335,7 @@ async function recomputeOrderTax_(db, orderId) {
 // orders.subtotalCents / totalCents: the active lines, and that plus shipping and the rush fee — plus their tax
 // when it's added on top. The total BEFORE any discount; what's owed is orderAmounts.
 async function storeOrderTotals_(db, orderId) {
-  const row = await withTaxMode_((tm) => db.prepare(`SELECT ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")} FROM orders o WHERE o.orderId=?`).bind(orderId).first());
+  const row = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `SELECT ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")} FROM orders o WHERE o.orderId=?`)).bind(orderId).first());
   const subtotalCents = row ? Number(row.itemsCents) || 0 : 0;
   const exclusive = !!row && taxMode_(row.taxMode) === "exclusive";
   // The rush fee (migrations/0082) is part of the total like shipping; with tax on top, so is its tax.
@@ -629,7 +637,13 @@ export function cleanRushRule(input) {
     return c;
   };
   const out = { mode, amountCents: null, pctBps: null, estLowCents: null, estHighCents: null,
-    label: String(r.label || "").trim().slice(0, 40) || DEFAULT_RUSH_LABEL, note: String(r.note || "").trim().slice(0, 300) };
+    label: String(r.label || "").trim().slice(0, 40) || DEFAULT_RUSH_LABEL, note: String(r.note || "").trim().slice(0, 300), payByDays: null };
+  // Full payment is due this many days before the needed-by date (migrations/0083) — optional; blank = no default.
+  if (mode !== "off" && r.payByDays !== null && r.payByDays !== undefined && r.payByDays !== "") {
+    const n = Number(r.payByDays);
+    if (!Number.isInteger(n) || n < 0 || n > 60) throw pricingError_("Payment due before the needed-by date must be a whole number of days, 0 to 60.");
+    out.payByDays = n;
+  }
   if (mode === "fixed" || mode === "greater") out.amountCents = money(r.amount, "amount", true);
   if (mode === "percent" || mode === "greater") {
     const v = r.pct;
@@ -650,7 +664,21 @@ export function rushRuleView(rule) {
   if (!rule) return null;
   const d = (c) => c == null ? null : fromCents(c);
   return { mode: rule.mode, amount: d(rule.amountCents), pct: rule.pctBps == null ? null : rule.pctBps / 100,
-    estLow: d(rule.estLowCents), estHigh: d(rule.estHighCents), label: rule.label || DEFAULT_RUSH_LABEL, note: rule.note || "" };
+    estLow: d(rule.estLowCents), estHigh: d(rule.estHighCents), label: rule.label || DEFAULT_RUSH_LABEL, note: rule.note || "",
+    payByDays: Number.isInteger(rule.payByDays) ? rule.payByDays : null };
+}
+// The date full payment is due to keep a rush order's needed-by date (migrations/0083): `payByDays` before it, never
+// before `today` (YYYY-MM-DD). "" when the rule has no default or there's no needed-by date.
+export function rushPayByFor(rule, neededBy, today) {
+  if (!rule || !Number.isInteger(rule.payByDays) || !/^\d{4}-\d{2}-\d{2}$/.test(String(neededBy || ""))) return "";
+  const d = new Date(neededBy + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() - rule.payByDays);
+  const day = d.toISOString().slice(0, 10);
+  return today && day < today ? today : day;
+}
+// The pay-by date has passed and the order still owes (`today` YYYY-MM-DD, the business's day — localToday).
+export function rushPayByMissed(order, today) {
+  return !!(order && order.rushRequested && order.rushPayBy && today && today > order.rushPayBy && Number(order.balanceDue) > 0);
 }
 export async function getRushSettings(db) {
   const row = await db.prepare("SELECT value FROM global_settings WHERE key='rushFee'").first().catch(() => null);
@@ -699,11 +727,13 @@ export function rushFeeFor(rule, itemsCents) {
 // Sets an order's rush fee (the admin's Rush… window): asked for or not, and the fee or "to follow". The tax in
 // the fee and the paid flags follow. `taxable` (when given) is the order's tax snapshot for the fee — set when rush
 // is first added to an order, so a later change to the setting doesn't rewrite it.
-export async function setOrderRushFee(db, orderId, { requested, cents, pending, taxable }) {
+// `payBy` (migrations/0083): the date full payment is due, "" to clear, undefined to leave it; turning rush off clears it.
+export async function setOrderRushFee(db, orderId, { requested, cents, pending, taxable, payBy }) {
   const on = requested ? 1 : 0;
   const fee = on && !pending ? Math.max(0, Math.round(Number(cents) || 0)) : 0;
-  await db.prepare(`UPDATE orders SET rushRequested=?, rushFeeCents=?, rushFeePending=?${taxable === undefined ? "" : ", rushFeeTaxable=?"} WHERE orderId=?`)
-    .bind(on, fee, on && pending ? 1 : 0, ...(taxable === undefined ? [] : [taxable ? 1 : 0]), orderId).run();
+  const setPayBy = !on || payBy !== undefined;
+  await db.prepare(`UPDATE orders SET rushRequested=?, rushFeeCents=?, rushFeePending=?${taxable === undefined ? "" : ", rushFeeTaxable=?"}${setPayBy ? ", rushPayBy=?" : ""} WHERE orderId=?`)
+    .bind(on, fee, on && pending ? 1 : 0, ...(taxable === undefined ? [] : [taxable ? 1 : 0]), ...(setPayBy ? [on && payBy ? payBy : null] : []), orderId).run();
   await recomputeOrderTax_(db, orderId);
   await recalcOrderTotals(db, orderId);
 }
@@ -2960,7 +2990,8 @@ const paidRefreshSql_ = (tm) => {
   const itemsTax = "COALESCE((SELECT SUM(taxCents) FROM order_items WHERE orderId = orders.orderId AND cancelDate IS NULL), 0)";
   const taxAdded = `(CASE WHEN ${tm} = 'exclusive' THEN MAX(0, ${itemsTax} - COALESCE(discountTaxCents, 0)) ELSE 0 END)`;
   // The rush fee (migrations/0082) and, with tax on top, its tax — only while something is on the order.
-  const rush = `(CASE WHEN ${items} > 0 THEN COALESCE(rushFeeCents, 0) + (CASE WHEN ${tm} = 'exclusive' THEN COALESCE(rushFeeTaxCents, 0) ELSE 0 END) ELSE 0 END)`;
+  const legacy = tm === LEGACY_TAX_MODE_;   // before 0052, so before the rush fee too
+  const rush = legacy ? "0" : `(CASE WHEN ${items} > 0 THEN COALESCE(rushFeeCents, 0) + (CASE WHEN ${tm} = 'exclusive' THEN COALESCE(rushFeeTaxCents, 0) ELSE 0 END) ELSE 0 END)`;
   // What's owed for the work itself — everything but the rush fee (paidForWork) — and in all.
   const workOwed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN COALESCE(shippingCostCents, 0) ELSE 0 END) - COALESCE(discountCents, 0) + ${taxAdded})`;
   const owed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN COALESCE(shippingCostCents, 0) ELSE 0 END) + ${rush} - COALESCE(discountCents, 0) + ${taxAdded})`;
@@ -2969,8 +3000,8 @@ const paidRefreshSql_ = (tm) => {
     paidAt = CASE WHEN ${owed} = 0 THEN paidAt
                   WHEN ${received} >= ${owed} THEN (CASE WHEN paid = 1 THEN paidAt ELSE COALESCE((SELECT MAX(receivedAt) FROM order_payments WHERE orderId = orders.orderId AND kind = 'payment' AND voidedAt IS NULL), ?) END)
                   ELSE (CASE WHEN paid = 1 THEN NULL ELSE paidAt END) END,
-    paidForWork = CASE WHEN ${owed} = 0 THEN paid WHEN ${workOwed} = 0 THEN 1
-                       WHEN ${received} >= ${workOwed} THEN 1 ELSE 0 END,
+    ${legacy ? "" : `paidForWork = CASE WHEN ${owed} = 0 THEN paid WHEN ${workOwed} = 0 THEN 1
+                       WHEN ${received} >= ${workOwed} THEN 1 ELSE 0 END,`}
     paid = CASE WHEN ${owed} = 0 THEN paid WHEN ${received} >= ${owed} THEN 1 ELSE 0 END
   WHERE orderId = ?`;
 };
@@ -2979,7 +3010,7 @@ async function paidRefreshStmt_(db, orderId) {
     try { const { results } = await db.prepare("PRAGMA table_info(orders)").all(); db.__ordersHaveTaxMode = results.some(c => c.name === "taxMode"); }
     catch (e) { db.__ordersHaveTaxMode = false; }
   }
-  return db.prepare(paidRefreshSql_(db.__ordersHaveTaxMode ? "taxMode" : "'inclusive'")).bind(new Date().toISOString(), orderId);
+  return db.prepare(paidRefreshSql_(db.__ordersHaveTaxMode ? "taxMode" : LEGACY_TAX_MODE_)).bind(new Date().toISOString(), orderId);
 }
 
 // Records one ledger row and brings the order's paid flag up to date IN THE SAME TRANSACTION (one
@@ -3081,25 +3112,27 @@ export async function setOrderDiscount(db, orderId, amount, note) {
 // paidAt is the time the ledger first covered the total (the latest payment
 // at that moment); it's cleared if the order stops being covered.
 export async function refreshPaidStatus(db, orderId) {
-  const row = await withTaxMode_((tm) => db.prepare(`
-    SELECT o.paid, o.paidAt, o.paidForWork, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
+  const row = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
+    SELECT o.paid, o.paidAt, o.paidForWork, ${tm === LEGACY_TAX_MODE_ ? 0 : 1} AS hasPaidForWork, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
       COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL), 0) AS receivedCents,
       (SELECT MAX(receivedAt) FROM order_payments WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL) AS lastPaymentAt
-    FROM orders o WHERE o.orderId = ?`).bind(orderId).first());
+    FROM orders o WHERE o.orderId = ?`)).bind(orderId).first());
   if (!row) return null;
+  const hasWork = row.hasPaidForWork !== 0;   // 0 only on a database from before migrations/0082
   const amounts = orderAmountsOfRow_(row);
   const owed = amounts.owedCents, workOwed = amounts.workOwedCents;
   const received = Number(row.receivedCents) || 0;
   if (owed === 0) {
-    if (Number(row.paidForWork) !== Number(row.paid)) await db.prepare("UPDATE orders SET paidForWork = paid WHERE orderId = ?").bind(orderId).run();
+    if (hasWork && Number(row.paidForWork) !== Number(row.paid)) await db.prepare("UPDATE orders SET paidForWork = paid WHERE orderId = ?").bind(orderId).run();
     return { paid: !!row.paid, paidForWork: !!row.paid, owedCents: 0, receivedCents: received };
   }
   const paid = received >= owed ? 1 : 0;
   // Paid for everything but the rush fee (migrations/0082): production doesn't wait for an unpaid rush fee.
   const paidForWork = workOwed === 0 || received >= workOwed ? 1 : 0;
-  if (paid !== Number(row.paid) || paidForWork !== Number(row.paidForWork)) {
-    await db.prepare("UPDATE orders SET paid = ?, paidAt = ?, paidForWork = ? WHERE orderId = ?")
-      .bind(paid, paid ? (paid === Number(row.paid) && row.paidAt ? row.paidAt : (row.lastPaymentAt || new Date().toISOString())) : null, paidForWork, orderId).run();
+  if (paid !== Number(row.paid) || (hasWork && paidForWork !== Number(row.paidForWork))) {
+    const paidAt = paid ? (paid === Number(row.paid) && row.paidAt ? row.paidAt : (row.lastPaymentAt || new Date().toISOString())) : null;
+    if (hasWork) await db.prepare("UPDATE orders SET paid = ?, paidAt = ?, paidForWork = ? WHERE orderId = ?").bind(paid, paidAt, paidForWork, orderId).run();
+    else await db.prepare("UPDATE orders SET paid = ?, paidAt = ? WHERE orderId = ?").bind(paid, paidAt, orderId).run();
   }
   return { paid: !!paid, paidForWork: !!paidForWork, owedCents: owed, receivedCents: received };
 }
@@ -8657,6 +8690,7 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
     extraBinds.push(1, rushCents, order.rushFeePending ? 1 : 0, rushTaxable, rushTaxCents);
   }
   if (order.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(order.dueDate)) { extraCols.push("dueDate"); extraBinds.push(order.dueDate); }
+  if (order.rushRequested && order.rushPayBy && /^\d{4}-\d{2}-\d{2}$/.test(order.rushPayBy)) { extraCols.push("rushPayBy"); extraBinds.push(order.rushPayBy); }
   stmts.push(db.prepare(`INSERT INTO orders
     (orderId,orgId,customerName,contact,paymentMethod,subtotalCents,shippingCostCents,totalCents,
      shippingMethod,shippingAddress,totalWeightOz,placedAt,taxExempt,taxRateBps,isTest${extraCols.map(c => "," + c).join("")})
@@ -9279,11 +9313,11 @@ export async function getOrderForShipping(db, orderId) {
 // the order is voided, and the customer's name/email from the order row (checkout.js uses these
 // rather than trusting the request body).
 export async function getOrderCheckoutState(db, orderId) {
-  const row = await withTaxMode_((tm) => db.prepare(`
+  const row = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
     SELECT o.paid, o.orgId, o.voidedAt, o.customerName, o.contact, o.shippingMethod, o.rushFeePending, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
       COALESCE((SELECT SUM(amountCents) FROM order_payments
                 WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL), 0) AS receivedCents
-    FROM orders o WHERE o.orderId = ?`).bind(orderId).first());
+    FROM orders o WHERE o.orderId = ?`)).bind(orderId).first());
   if (!row) return null;
   const amounts = orderAmountsOfRow_(row);
   const balanceCents = Math.max(0, amounts.owedCents - (Number(row.receivedCents) || 0));
@@ -11244,6 +11278,7 @@ function parseOrder_(row, items, payments, labels) {
     rushFeePending: !!row.rushFeePending,
     rushFeeTaxable: !!row.rushFeeTaxable,
     rushFeeTax: fromCents(amounts.rushTaxCents),
+    rushPayBy: row.rushPayBy || "",   // full payment due by, to keep the rush date (migrations/0083)
     paidForWork: !!row.paid || !!row.paidForWork,   // `paid` covers the work too
     discountAmount,
     discountNote: row.discountNote || "",
@@ -11802,7 +11837,7 @@ export async function setOrderDueDate(db, orderId, dueDate) {
 }
 
 export async function getRevenueData(db, dateFrom, dateTo) {
-  const { results } = await withTaxMode_((tm) => db.prepare(`
+  const { results } = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
     SELECT
       o.orderId,
       o.orgId,
@@ -11818,7 +11853,7 @@ export async function getRevenueData(db, dateFrom, dateTo) {
     WHERE o.placedAt >= ? AND o.placedAt <= ?
       AND o.isTest = 0 AND o.voidedAt IS NULL
     GROUP BY o.orderId
-  `).bind(dateFrom, dateTo).all());
+  `)).bind(dateFrom, dateTo).all());
   // Dollars out; effectiveTotal is what the order comes to (orderAmounts), shipping what it charges.
   return results.map(r => {
     const a = orderAmountsOfRow_(r);
@@ -11834,7 +11869,7 @@ export async function getRevenueData(db, dateFrom, dateTo) {
 // tax mode (the listed prices include the tax, or it was added on top), so a period with both
 // adds up: gross is always what customers paid for goods, net always excludes the tax.
 export async function getSalesTaxReport(db, dateFrom, dateTo) {
-  const { results } = await withTaxMode_((tm) => db.prepare(`
+  const { results } = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
     WITH per AS (
       SELECT o.orderId, substr(o.placedAt, 1, 7) AS month, o.taxExempt AS exempt, ${tm} AS mode,
              COALESCE(o.shipState, '') AS state, o.orgId,
@@ -11857,7 +11892,7 @@ export async function getSalesTaxReport(db, dateFrom, dateTo) {
            SUM(CASE WHEN gross > 0 THEN rushTax ELSE 0 END) AS rushTaxCents,
            GROUP_CONCAT(DISTINCT orgId) AS orgs
     FROM per GROUP BY month, exempt, state ORDER BY month, exempt, state
-  `).bind(dateFrom, dateTo).all());
+  `)).bind(dateFrom, dateTo).all());
   return results.map(r => {
     // Listed prices after the discount, plus the tax that was added on top of them.
     const grossAfterDiscount = Math.max(0, Number(r.grossCents) - Number(r.discountCents)) + (Number(r.taxAddedCents) || 0);
@@ -11883,12 +11918,12 @@ export async function getSalesTaxReport(db, dateFrom, dateTo) {
 // category is use-taxable and whose vendor didn't charge sales tax). Dollars out.
 export async function getSalesTaxReturn(db, dateFrom, dateTo) {
   const settings = await getSalesTaxSettings(db);
-  const { results: lines } = await withTaxMode_((tm) => db.prepare(`
+  const { results: lines } = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
     SELECT substr(o.placedAt, 1, 7) AS month, o.orderId, o.taxExempt, o.shipState, o.discountCents, o.discountTaxCents,
            o.shippingCostCents, o.rushFeeCents, o.rushFeeTaxCents, i.lineTotalCents, i.taxCents, i.taxable, ${tm} AS taxMode
     FROM orders o JOIN order_items i ON i.orderId = o.orderId
     WHERE o.placedAt >= ? AND o.placedAt <= ? AND o.isTest = 0 AND o.voidedAt IS NULL AND i.cancelDate IS NULL
-    ORDER BY o.orderId`).bind(dateFrom, dateTo).all());
+    ORDER BY o.orderId`)).bind(dateFrom, dateTo).all());
   const months = {};
   // taxable = taxable sales as listed; taxIncl = the tax that is INSIDE that figure (inclusive orders
   // only), so taxable − taxIncl is taxable sales excluding tax whatever the mix of modes.

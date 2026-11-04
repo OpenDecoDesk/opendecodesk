@@ -12,7 +12,7 @@ import { timingSafeEqual } from "../_lib/adminAuth.js";
 import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { getDigestState, setDigestState, setDigestRun, getOrdersForDigest, getAllOrgs, getUnsentOwnerNotices, markOwnerNoticesSent,
   getFailedAdminLogins, clearFailedAdminLogins, getSystemIssues, clearSystemIssues, getOrdersAwaitingBlanks, localToday,
-  getBlankPriceReminder, setBlankPriceReminderSent, getNewPricingAlerts, listMaintenanceTasks, getFeatures } from "../_lib/db.js";
+  getBlankPriceReminder, setBlankPriceReminderSent, getNewPricingAlerts, listMaintenanceTasks, getFeatures, getRushFeesToSet } from "../_lib/db.js";
 import { sendDailyDigestEmail, sendDigestHeartbeatEmail } from "../_lib/email.js";
 import { checkShippedDeliveries, checkBlankShipments } from "../_lib/deliveryCheck.js";
 import { checkSupplierShipments } from "../_lib/supplierOrders.js";
@@ -130,6 +130,8 @@ async function runDailyDigestInner_(env, trigger) {
   // (Not while the production feature is switched off.)
   const maintenanceDue = (await getFeatures(env.DB).catch(() => ({ production: true }))).production
     ? (await listMaintenanceTasks(env.DB).catch(() => [])).filter(t => t.status === "due") : [];
+  // Rush orders with the fee still to follow (migrations/0082): listed, never a reason to send on their own.
+  const rushToSet = await getRushFeesToSet(env.DB).catch(() => []);
   const inTransit = deliveries.inTransit || [];
   // Picked up by the carrier (marked shipped this run) is news; a label still waiting for a scan is
   // listed in the email for the record but never a reason to send one on its own.
@@ -146,13 +148,13 @@ async function runDailyDigestInner_(env, trigger) {
     // email problem by send_ and turns up in the next roll-up.
     let heartbeat = "";
     if (trigger === "scheduled") {
-      const ok = await sendDigestHeartbeatEmail(env, { lastSentAt: state ? state.sentAt || "" : "", inTransit, awaitingPickup, awaitingBlanks, maintenanceDue });
+      const ok = await sendDigestHeartbeatEmail(env, { lastSentAt: state ? state.sentAt || "" : "", inTransit, awaitingPickup, awaitingBlanks, maintenanceDue, rushToSet });
       heartbeat = ok ? "sent" : "failed";
     }
     return jsonResponse({ status: "ok", sent: false, heartbeat, orders: 0, notices: 0, delivered: deliveries.delivered.length, inTransit: 0 });
   }
   const orgNames = Object.fromEntries((await getAllOrgs(env.DB)).map(o => [o.orgId, o.name]));
-  const sent = await sendDailyDigestEmail(env, { orders, notices, orgNames, security, inTransit, pickedUp, awaitingPickup, issues, awaitingBlanks, priceReminder, belowTarget, maintenanceDue });
+  const sent = await sendDailyDigestEmail(env, { orders, notices, orgNames, security, inTransit, pickedUp, awaitingPickup, issues, awaitingBlanks, priceReminder, belowTarget, maintenanceDue, rushToSet });
   if (!sent) return jsonResponse({ status: "error", message: "Email could not be sent — will retry next run" }, 502);
   if (priceReminder) await setBlankPriceReminderSent(env.DB).catch((e) => console.error("setBlankPriceReminderSent failed:", e));
   await alerts.commit().catch((e) => console.error("pricing alerts commit failed:", e));

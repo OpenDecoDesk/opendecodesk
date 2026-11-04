@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS orgs (
   -- Delivery / pickup options the customer picks from (migrations/0045); '' = derived from shippingEnabled.
   deliveryOptionsJson  TEXT NOT NULL DEFAULT '',
   -- The shop's default reorder-QR TRANSFER (migrations/0047); reorderQrGraphicId above is the old way.
-  reorderQrTransferId  INTEGER REFERENCES transfers(id)
+  reorderQrTransferId  INTEGER REFERENCES transfers(id),
+  -- Rush fee (migrations/0082): '' = the global rule; {"offer":false} or {"offer":true, …its own rule}.
+  rushFeeJson          TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS products (
@@ -220,7 +222,15 @@ CREATE TABLE IF NOT EXISTS orders (
   dueDate             TEXT,                       -- migrations/0038: optional; prioritizes the run queues
   -- Whether sales tax is included in the listed prices or added on top — a snapshot of the store
   -- setting when the order was placed (migrations/0052).
-  taxMode             TEXT NOT NULL DEFAULT 'inclusive' CHECK (taxMode IN ('inclusive', 'exclusive'))
+  taxMode             TEXT NOT NULL DEFAULT 'inclusive' CHECK (taxMode IN ('inclusive', 'exclusive')),
+  -- Rush fee (migrations/0082): asked for, the fee (0 while still to follow), its tax, and `paid` leaving it out.
+  rushRequested       INTEGER NOT NULL DEFAULT 0 CHECK (rushRequested IN (0, 1)),
+  rushFeeCents        INTEGER NOT NULL DEFAULT 0 CHECK (rushFeeCents >= 0),
+  rushFeePending      INTEGER NOT NULL DEFAULT 0 CHECK (rushFeePending IN (0, 1)),
+  rushFeeTaxable      INTEGER NOT NULL DEFAULT 0 CHECK (rushFeeTaxable IN (0, 1)),
+  rushFeeTaxCents     INTEGER NOT NULL DEFAULT 0 CHECK (rushFeeTaxCents >= 0),
+  paidForWork         INTEGER NOT NULL DEFAULT 0 CHECK (paidForWork IN (0, 1)),
+  rushPayBy           TEXT                        -- migrations/0083: full payment due by (YYYY-MM-DD) to keep a rush date
 );
 
 CREATE TABLE IF NOT EXISTS order_items (

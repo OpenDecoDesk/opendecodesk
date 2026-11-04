@@ -3477,18 +3477,18 @@ async function setLineItemRefund(orgId, sheetRow, defaultAmount, paymentMethod){
 const FULFILLMENT_STAGES = [
   // The blank steps aren't offered when nothing on the order uses a blank (o.needsBlanks false: every
   // product is "No blank needed", migrations/0052) — and Mark manufactured then doesn't wait for one.
-  { stage: "blankOrdered",       label: "Mark blank ordered",        prereqField: "paid",                 prereqCheck: v => v === true, prereq2: o => o.needsBlanks !== false },
+  { stage: "blankOrdered",       label: "Mark blank ordered",        prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => o.paid === true || o.paidForWork === true, prereq2: o => o.needsBlanks !== false },
   // Blanks already on the shelf: marked ordered + received from "In stock" in one go (the server checks
   // the stock covers every waiting line, and says what's short when it doesn't).
-  { stage: "blanksFromStock",    label: "Use blanks from stock",     prereqField: "paid",                 prereqCheck: v => v === true, prereq2: o => o.needsBlanks !== false && !o.blankOrderedAt },
+  { stage: "blanksFromStock",    label: "Use blanks from stock",     prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => o.paid === true || o.paidForWork === true, prereq2: o => o.needsBlanks !== false && !o.blankOrderedAt },
   { stage: "blankShipped",       label: "Mark blank shipped…",       prereqField: "blankOrderedAt",       prereqCheck: v => !!v, prereq2: o => o.needsBlanks !== false },
   { stage: "blankReceived",      label: "Mark blank received",       prereqField: "blankOrderedAt",       prereqCheck: v => !!v, prereq2: o => o.needsBlanks !== false },
   // Digitizing is skipped when every product on the order already has a design (o.needsDigitizing);
   // design approval is only asked for when a line has free-form personalization text
   // (o.needsDesignApproval). Both flags come from the server (stagePrereqError applies the same rules).
-  { stage: "digitizingComplete", label: "Mark digitizing complete",  prereqField: "paid",                 prereqCheck: v => v === true, prereq2: o => o.needsDigitizing !== false },
-  { stage: "designApproved",     label: "Mark design approved",      prereqField: "paid",                 prereqCheck: v => v === true, prereq2: o => o.needsDesignApproval !== false && (o.needsDigitizing === false || !!o.digitizingCompleteAt) },
-  { stage: "manufactured",       label: "Mark manufactured",         prereqField: "blankReceivedAt",      prereqCheck: v => !!v, prereqMet: o => o.needsBlanks === false ? o.paid === true : !!o.blankReceivedAt, prereq2: o => o.needsDesignApproval !== false ? !!o.designApprovedAt : (o.needsDigitizing === false || !!o.digitizingCompleteAt) },
+  { stage: "digitizingComplete", label: "Mark digitizing complete",  prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => o.paid === true || o.paidForWork === true, prereq2: o => o.needsDigitizing !== false },
+  { stage: "designApproved",     label: "Mark design approved",      prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => o.paid === true || o.paidForWork === true, prereq2: o => o.needsDesignApproval !== false && (o.needsDigitizing === false || !!o.digitizingCompleteAt) },
+  { stage: "manufactured",       label: "Mark manufactured",         prereqField: "blankReceivedAt",      prereqCheck: v => !!v, prereqMet: o => o.needsBlanks === false ? (o.paid === true || o.paidForWork === true) : !!o.blankReceivedAt, prereq2: o => o.needsDesignApproval !== false ? !!o.designApprovedAt : (o.needsDigitizing === false || !!o.digitizingCompleteAt) },
   { stage: "qaPacked",           label: "Mark QA and packed",        prereqField: "manufacturedAt",       prereqCheck: v => !!v },
   { stage: "shipped",            label: "Mark shipped",              prereqField: "qaPackedAt",           prereqCheck: v => !!v },
   { stage: "delivered",          label: "Mark delivered",            prereqField: "qaPackedAt",           prereqCheck: v => !!v },
@@ -3509,13 +3509,15 @@ function adminActionCell(org, o){
   }
   const resendLabel = !o.paid ? (o.receivedEmailAt ? "Resend received" : "Send received") :
                       (o.confirmedEmailAt ? "Resend confirmation" : "Send confirmation");
+  const rushBtn = `<button class="admin-btn" ${dataAttrs} onclick="showRushFeeModal_(this.dataset.org,this.dataset.order)" title="Rush this order, or change its rush fee" style="margin-top:4px;">${o.rushRequested ? "Rush…" : "+ Rush…"}</button>`;
 
-  if(!o.paid){
+  // Paid for everything but a rush fee (migrations/0082) counts as paid for the work: the stages go on.
+  if(!o.paid && !o.paidForWork){
     return `<button class="admin-btn" ${dataAttrs} onclick="markOrderPaid(this.dataset.org, this.dataset.order)">Mark as paid</button>` +
       (adminDesktopNoEmail_() ? "" : `<button class="admin-btn" ${dataAttrs} onclick="resendEmail(this.dataset.org, this.dataset.order)" style="margin-top:4px;">${resendLabel}</button>`) +
       invoiceCell_(org, o) +
       `<button class="admin-btn" ${dataAttrs} onclick="editOrder(this.dataset.org,this.dataset.order)" style="margin-top:4px;">Edit items</button>` +
-      paymentsBtn + deleteBtn;
+      rushBtn + paymentsBtn + deleteBtn;
   }
 
   const eligibleAll = FULFILLMENT_STAGES.filter(s => (s.prereqMet ? s.prereqMet(o) : s.prereqCheck(o[s.prereqField])) && (!s.prereq2 || s.prereq2(o)) && !o[FULFILLMENT_FIELD[s.stage]]);
@@ -3541,7 +3543,93 @@ function adminActionCell(org, o){
     : canCompleteOrder(o)
       ? `<button class="admin-btn" ${dataAttrs} onclick="completeOrdersAsk_(this.dataset.org, [this.dataset.order])" title="Delivered and paid in full — close it out" style="margin-top:4px;background:#166534;color:#fff;border-color:#166534;">Mark completed</button>`
       : "";
-  return stageEl + completeBtn + emailBtn + invoiceCell_(org, o) + shipBtn + editBtn + datesBtn + paymentsBtn + deleteBtn;
+  // The rush fee still owed (the rest is paid): Mark as paid settles it.
+  const payRushBtn = !o.paid && Number(o.balanceDue) > 0 ? `<button class="admin-btn" ${dataAttrs} onclick="markOrderPaid(this.dataset.org, this.dataset.order)" title="Record the rest of the balance — the rush fee — as paid" style="margin-top:4px;">Mark as paid</button>` : "";
+  return stageEl + completeBtn + payRushBtn + emailBtn + invoiceCell_(org, o) + shipBtn + editBtn + datesBtn + rushBtn + paymentsBtn + deleteBtn;
+}
+
+// "⚡ RUSH · needed by 11/20 · fee to follow" on an order's row and card (migrations/0082).
+function rushPill_(o){
+  if(!o || !o.rushRequested) return "";
+  // The payment deadline (migrations/0083): passed with money still owed → the rush date isn't guaranteed any more.
+  const late = !!(o.rushPayBy && Number(o.balanceDue) > 0 && rushLocalToday_() > o.rushPayBy);
+  const bits = [o.dueDate ? "by " + new Date(o.dueDate + "T00:00:00").toLocaleDateString() : "",
+    o.rushPayBy && !(o.paid && !o.rushFeePending) ? (late ? "PAY-BY PASSED " : "pay by ") + new Date(o.rushPayBy + "T00:00:00").toLocaleDateString() : "",
+    o.rushFeePending ? "fee to follow" : (Number(o.rushFee) > 0 ? "$" + Number(o.rushFee).toFixed(2) : "no fee")].filter(Boolean);
+  const title = late ? "Full payment wasn't received by the pay-by date — the rush date isn't guaranteed" : o.rushFeePending ? "Rush — the fee is still to follow: set it with Rush…" : "Rush order";
+  return ` <span class="rush-pill${late ? " rush-pill-late" : o.rushFeePending ? " rush-pill-pending" : ""}" title="${title}">⚡ RUSH · ${escapeHtml(bits.join(" · "))}</span>`;
+}
+function rushLocalToday_(){ return new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
+// The pay-by date `days` before a due date (YYYY-MM-DD), never before today — the server's rushPayByFor.
+function rushPayBySuggest_(due, days){
+  if(!Number.isInteger(days) || !/^\d{4}-\d{2}-\d{2}$/.test(String(due || ""))) return "";
+  const d = new Date(due + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - days);
+  const day = d.toISOString().slice(0, 10), today = rushLocalToday_();
+  return day < today ? today : day;
+}
+
+// Orders → Rush…: rush on or off for this order, its fee or "to follow", and the due date. Works on any order,
+// whether or not its shop offers rush. With "Email the customer an invoice" ticked, the invoice window opens next.
+function showRushFeeModal_(orgId, orderId){
+  const caches = window._ordersCache || {};
+  const o = (caches[orgId] || []).find(x => x.orderId === orderId) || Object.values(caches).flat().find(x => x && x.orderId === orderId);
+  if(!o){ showToast("Order not found — refresh the list.", true); return; }
+  const inp = "font-size:14px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;";
+  const fee = o.rushRequested && !o.rushFeePending ? Number(o.rushFee || 0).toFixed(2) : "";
+  const { ov, close } = inventoryModal_(`Rush — ${escapeHtml(orderId)}`, `
+    <div style="font-size:13px;color:#555;margin-bottom:10px;">${escapeHtml(o.customerName || "")} · items $${Number(o.itemsSubtotal || 0).toFixed(2)}. A rush fee is added to what the order comes to; an unpaid one doesn't hold up production.</div>
+    <label style="font-size:13px;display:flex;gap:8px;align-items:center;margin-bottom:10px;cursor:pointer;"><input type="checkbox" id="rfOn" ${o.rushRequested ? "checked" : ""}> <b>Rush this order</b></label>
+    <div id="rfBody">
+      <label style="font-size:13px;display:flex;gap:8px;align-items:center;margin-bottom:6px;cursor:pointer;"><input type="radio" name="rfKind" value="amount" ${o.rushFeePending ? "" : "checked"}> Fee $ <input type="number" id="rfAmount" min="0" max="1000" step="0.01" value="${escapeHtml(fee)}" style="${inp}width:110px;"></label>
+      <label style="font-size:13px;display:flex;gap:8px;align-items:center;margin-bottom:10px;cursor:pointer;"><input type="radio" name="rfKind" value="pending" ${o.rushFeePending ? "checked" : ""}> Fee to follow — not worked out yet</label>
+      <label style="font-size:13px;display:block;margin-bottom:10px;">Due date <input type="date" id="rfDue" value="${escapeHtml(o.dueDate || "")}" style="${inp}"> <span style="color:#888;font-size:12px;">(puts it first on the run screens)</span></label>
+      <label style="font-size:13px;display:block;margin-bottom:2px;">Full payment received by <input type="date" id="rfPayBy" value="${escapeHtml(o.rushPayBy || "")}" style="${inp}"> <button type="button" class="admin-btn admin-btn-secondary" id="rfPayByClear" style="padding:3px 8px;font-size:12px;">Clear</button></label>
+      <div id="rfPayByNote" style="font-size:12px;color:#666;margin:0 0 10px;">The invoice, its email and the order emails tell the customer that unless full payment arrives by this date, the rush date can't be guaranteed. Leave it empty for no payment deadline.</div>
+      <label style="font-size:13px;display:flex;gap:8px;align-items:center;cursor:pointer;"><input type="checkbox" id="rfInvoice"> Email the customer an invoice afterwards</label>
+    </div>
+    <div id="rfErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;"><button type="button" class="admin-btn admin-btn-secondary" id="rfCancel">Cancel</button><button type="button" class="admin-btn" id="rfSave">Save</button></div>`, 480);
+  const on = ov.querySelector("#rfOn"), body = ov.querySelector("#rfBody");
+  const show = () => { body.style.opacity = on.checked ? "" : ".45"; body.querySelectorAll("input, button").forEach(i => { if(i.id !== "rfDue") i.disabled = !on.checked; }); };
+  on.onchange = show; show();
+  // Pay-by (migrations/0083): suggested from the rush rule's "days before the due date" while it hasn't been typed in.
+  const dueEl = ov.querySelector("#rfDue"), payEl = ov.querySelector("#rfPayBy"), payNote = ov.querySelector("#rfPayByNote");
+  let payTouched = !!o.rushPayBy, payDays = null;
+  const suggest = () => {
+    if(payTouched || payDays == null) return;
+    const s = rushPayBySuggest_(dueEl.value, payDays);
+    payEl.value = s;
+    if(s) payNote.textContent = `Suggested: ${payDays} day${payDays === 1 ? "" : "s"} before the due date (the rush setting). The customer is told that unless full payment arrives by this date, the rush date can't be guaranteed.`;
+  };
+  payEl.addEventListener("input", () => { payTouched = true; });
+  payEl.addEventListener("change", () => { payTouched = true; });
+  ov.querySelector("#rfPayByClear").onclick = () => { payEl.value = ""; payTouched = true; };
+  dueEl.addEventListener("change", suggest);
+  hoopApi_({ action: "getRushSettings" }).then(r => { const d = r && r.rush && r.rush.rule ? r.rush.rule.payByDays : null; payDays = Number.isInteger(d) ? d : null; suggest(); }).catch(() => {});
+  ov.querySelector("#rfAmount").addEventListener("input", () => { ov.querySelector('input[name="rfKind"][value="amount"]').checked = true; });
+  ov.querySelector("#rfCancel").onclick = close;
+  ov.querySelector("#rfSave").onclick = async () => {
+    const err = ov.querySelector("#rfErr"), btn = ov.querySelector("#rfSave");
+    const pending = on.checked && ov.querySelector('input[name="rfKind"]:checked').value === "pending";
+    const amount = ov.querySelector("#rfAmount").value.trim();
+    if(on.checked && !pending && !(amount !== "" && Number(amount) >= 0 && Number(amount) <= 1000)){ err.textContent = "Enter the rush fee — $0 to $1,000 — or choose 'to follow'."; return; }
+    const req = { action: "setRushFee", org: orgId, orderId, requested: on.checked, pending, amount: on.checked && !pending ? Number(amount) : null };
+    const due = ov.querySelector("#rfDue").value;
+    if((due || "") !== (o.dueDate || "")) req.dueDate = due;
+    const payBy = payEl.value;
+    if(on.checked && payBy && due && payBy > due){ err.textContent = "The 'full payment received by' date is after the due date."; return; }
+    if(on.checked && (payBy || "") !== (o.rushPayBy || "")) req.payBy = payBy;
+    btn.disabled = true; err.textContent = "";
+    try{
+      await hoopApi_(req);
+      const invoice = on.checked && ov.querySelector("#rfInvoice").checked;
+      close();
+      showToast(on.checked ? (pending ? `${orderId} is a rush order — set the fee once you know it.` : `Rush fee saved for ${orderId}.`) : `${orderId} is no longer a rush order.`);
+      const orgObj = (adminOrgs || []).find(x => x.orgId === orgId);
+      if(orgObj) await refreshOrdersInPlace_(orgObj);
+      if(invoice) showSendInvoiceModal(orgId, orderId);
+    }catch(e){ err.textContent = e.message || "Couldn't save the rush fee."; btn.disabled = false; }
+  };
 }
 
 // The invoice link emailed for an order (migrations/0053): a button to send it — offered while
@@ -3588,6 +3676,9 @@ function showSendInvoiceModal(orgId, orderId){
     <div style="font-size:13px;color:#555;margin-bottom:12px;">${adminDesktop_()
       ? `Emails ${escapeHtml(o.customerName && o.customerName !== "Local Sale" ? o.customerName : "the customer")} the invoice for order <b>${escapeHtml(o.orderId)}</b>, with a PDF of it attached: what's owed (<b>$${Number(o.balanceDue).toFixed(2)}</b>) and how to pay, from your Business profile (Venmo, Zelle, a check by mail).`
       : `Emails ${escapeHtml(o.customerName && o.customerName !== "Local Sale" ? o.customerName : "the customer")} a link to a page showing order <b>${escapeHtml(o.orderId)}</b> and what's owed (<b>$${Number(o.balanceDue).toFixed(2)}</b>), where they can pay online.`}</div>
+    ${o.rushRequested ? `<div id="siRush" style="font-size:13px;border:1px solid #fdba74;background:#fff7ed;border-radius:6px;padding:8px 10px;margin-bottom:12px;">⚡ Rush order${o.dueDate ? " — due " + escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : ""}. ${o.rushPayBy
+      ? `The email and invoice page say full payment must be received by <b>${escapeHtml(new Date(o.rushPayBy + "T00:00:00").toLocaleDateString())}</b>, or the rush date can't be guaranteed.`
+      : `No “full payment received by” date is set — set one with <b>Rush…</b> first if the rush date depends on being paid in time.`}</div>` : ""}
     <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Send to<br><input id="siEmail" type="email" value="${escapeHtml(o.contact && o.contact.includes("@") ? o.contact : "")}" placeholder="customer@example.com" style="${inp}"></label>
     <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Note to the customer <span style="font-weight:400;color:#666;">(optional)</span><br><textarea id="siMessage" rows="3" maxlength="3000" style="${inp}font-family:inherit;resize:vertical;"></textarea></label>
     <label style="font-size:13px;display:flex;gap:8px;align-items:flex-start;margin-bottom:6px;cursor:pointer;${adminDesktop_() ? "display:none;" : ""}"><input type="checkbox" id="siDelivery"${adminDesktop_() ? "" : " checked"} style="margin-top:3px;">
@@ -4355,7 +4446,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         </td>` : ""}
         <td data-date-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${new Date(o.placedAt).toLocaleDateString()} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="editOrderDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Edit date">✎</button></td>
         <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="editOrderDueDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
-        <td>${escapeHtml(o.customerName)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${brandReviewPills_(o)}${catalogDriftPill_(o)}</td>
+        <td>${escapeHtml(o.customerName)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</td>
         <td>${escapeHtml(o.orderId)}</td>
         <td>${escapeHtml(it.name)}</td>
         <td>${itemHasSize_(it) ? escapeHtml(it.size) : "OSFA"}</td>
@@ -4419,8 +4510,10 @@ const ORDER_CARD_STAGES_ = [["blankOrderedAt", "Blank ordered", "blankOrdered"],
 function orderActiveTotal_(o){
   const active = (o.items || []).filter(it => !it.cancelDate);
   const lines = active.reduce((s, it) => s + (Number(it.lineTotal) || 0), 0);
+  // The rush fee (migrations/0082) counts like shipping; with tax on top, so does its tax.
+  const rushTax = o.taxMode === "exclusive" ? Number(o.rushFeeTax) || 0 : 0;
   const taxOnTop = o.taxMode === "exclusive" ? active.reduce((s, it) => s + (Number(it.tax) || 0), 0) : 0;
-  return lines + (lines > 0 ? Number(o.shippingCost) || 0 : 0) + taxOnTop;
+  return lines + (lines > 0 ? (Number(o.shippingCost) || 0) + (Number(o.rushFee) || 0) + rushTax : 0) + taxOnTop;
 }
 
 function orderCardHtml_(o, org, verif, showShop){
@@ -4450,6 +4543,7 @@ function orderCardHtml_(o, org, verif, showShop){
   const moneyLines = [
     o.discountAmount > 0 ? `<div>Discount <span class="oc-num" style="color:#166534;">−${money(o.discountAmount)}</span>${o.discountNote ? ` <span class="oc-dim">${escapeHtml(o.discountNote)}</span>` : ""}</div>` : "",
     (o.shippingMethod || o.shippingCost) ? `<div>Shipping: ${shippingMethodCell(o)}</div>` : "",
+    o.rushRequested ? `<div>Rush fee <span class="oc-num">${o.rushFeePending ? "to follow" : money(o.rushFee)}</span></div>` : "",
     o.balanceDue > 0.005 ? `<div style="color:#b03a2e;font-weight:600;">Balance due ${money(o.balanceDue)}</div>` : "",
   ].join("");
   const tracking = trackingCell(org, o);
@@ -4463,7 +4557,7 @@ function orderCardHtml_(o, org, verif, showShop){
     <div class="oc-head">
       ${!showShop && active.length ? `<input type="checkbox" class="order-select" ${ids} data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" onchange="updateBulkBar(this.dataset.org)" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
       <div class="oc-who">
-        <div class="oc-name">${escapeHtml(o.customerName)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${brandReviewPills_(o)}${catalogDriftPill_(o)}</div>
+        <div class="oc-name">${escapeHtml(o.customerName)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</div>
         <div class="oc-dim">${escapeHtml(o.orderId)} · ${new Date(o.placedAt).toLocaleDateString()} <button type="button" class="oc-icon-btn" ${ids} onclick="editOrderDate(this)" title="Edit date" aria-label="Edit order date">✎</button></div>
         <div class="oc-dim">Due: ${o.dueDate ? escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : "—"} <button type="button" class="oc-icon-btn" ${ids} onclick="editOrderDueDate(this)" title="Set due date" aria-label="Set due date">✎</button></div>
         ${showShop ? `<div class="oc-dim">${escapeHtml(org.name || org.orgId)}</div>` : ""}
@@ -4697,7 +4791,7 @@ function renderOrderBreakdown(orders, blankLinks, blanks){
   // Unpaid orders are excluded — don't order blanks until payment is confirmed.
   const products = {};
   orders.forEach(o => {
-    if(!o.paid) return; // skip unpaid entirely
+    if(!o.paid && !o.paidForWork) return; // skip unpaid entirely (an unpaid rush fee doesn't count — migrations/0082)
     o.items.forEach(it => {
       if(it.cancelDate) return; // exclude canceled line items
       if(it.noBlank) return;    // made with no blank (migrations/0052) — nothing to order for it
@@ -5001,6 +5095,7 @@ async function showPaymentsModal(orgId, orderId) {
         <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px;">
           <tr><td style="padding:3px 0;color:#666;">Subtotal</td><td style="padding:3px 0;text-align:right;">$${Number(o.itemsSubtotal ?? o.subtotal).toFixed(2)}</td></tr>
           ${o.shippingCost > 0 ? `<tr><td style="padding:3px 0;color:#666;">Shipping</td><td style="padding:3px 0;text-align:right;">$${Number(o.shippingCost).toFixed(2)}</td></tr>` : ""}
+          ${o.rushRequested ? `<tr><td style="padding:3px 0;color:#666;">Rush fee</td><td style="padding:3px 0;text-align:right;">${o.rushFeePending ? "to follow" : "$" + Number(o.rushFee || 0).toFixed(2)}</td></tr>` : ""}
           ${discountAmount > 0 ? `<tr><td style="padding:3px 0;color:#166534;">Discount${o.discountNote ? " (" + escapeHtml(o.discountNote) + ")" : ""}</td><td style="padding:3px 0;text-align:right;color:#166534;">−$${discountAmount.toFixed(2)}</td></tr>` : ""}
           ${o.taxMode === "exclusive" && !o.taxExempt ? `<tr><td style="padding:3px 0;color:#666;">Sales tax (${Number(o.taxRate || 0)}%) — added to the prices</td><td style="padding:3px 0;text-align:right;">$${Number(o.salesTax || 0).toFixed(2)}</td></tr>` : ""}
           <tr style="font-weight:600;border-top:1px solid #e5e7eb;"><td style="padding:4px 0;">Amount due</td><td style="padding:4px 0;text-align:right;">$${effectiveTotal.toFixed(2)}</td></tr>
@@ -6131,7 +6226,7 @@ function csvSafe(value){
 function exportCsv(orgId){
   const orders = orderViewFilter_(ordersDateFilter_((window._ordersCache && window._ordersCache[orgId]) || []));
   const verifMap = (window._verifCache && window._verifCache[orgId]) || {};
-  let out = "Date\tCustomer\tContact\tOrder #\tItem\tSize\tQty\tPersonalization\tLine Total\tLine Tax\tLine Net\tCanceled\tCancel Reason\tRefund Date\tRefund Amount\tPayment Method\tOrder Total\tPaid\tReceived Email Sent\tConfirmed Email Sent\tBlank Ordered\tBlank Vendor\tBlank Vendor Order #\tBlank Est. Delivery\tBlank Received\tBlank Condition\tBlank Condition Notes\tManufactured\tDigitizing Complete\tVerif. Sent\tChange Req.\tDesign Approved\tQA & Packed\tShipped\tDelivered\tCompleted\n";
+  let out = "Date\tCustomer\tContact\tOrder #\tItem\tSize\tQty\tPersonalization\tLine Total\tLine Tax\tLine Net\tCanceled\tCancel Reason\tRefund Date\tRefund Amount\tPayment Method\tOrder Total\tRush Fee\tPaid\tReceived Email Sent\tConfirmed Email Sent\tBlank Ordered\tBlank Vendor\tBlank Vendor Order #\tBlank Est. Delivery\tBlank Received\tBlank Condition\tBlank Condition Notes\tManufactured\tDigitizing Complete\tVerif. Sent\tChange Req.\tDesign Approved\tQA & Packed\tShipped\tDelivered\tCompleted\n";
   orders.forEach(o=>{
     const verif = verifMap[o.orderId];
     o.items.forEach(it=>{
@@ -6147,7 +6242,7 @@ function exportCsv(orgId){
         it.cancelReason ? csvSafe(it.cancelReason) : "",
         it.refundDate ? new Date(it.refundDate).toLocaleDateString() : "",
         it.refundAmount !== null && it.refundAmount !== undefined ? Number(it.refundAmount).toFixed(2) : "",
-        csvSafe(o.paymentMethod||""), o.total.toFixed(2), o.paid ? "Y":"N",
+        csvSafe(o.paymentMethod||""), Number(o.effectiveTotal ?? o.total).toFixed(2), o.rushRequested ? (o.rushFeePending ? "to follow" : Number(o.rushFee || 0).toFixed(2)) : "", o.paid ? "Y":"N",
         o.receivedEmailAt||"", o.confirmedEmailAt||"",
         o.blankOrderedAt||"", csvSafe(o.blankVendor||""), csvSafe(o.blankVendorOrderId||""), o.blankEstDelivery||"",
         o.blankReceivedAt||"", csvSafe(o.blankCondition||""), csvSafe(o.blankConditionNote||""), o.manufacturedAt||"",
@@ -8138,6 +8233,76 @@ async function loadSetupStatus_(){
       <td style="padding:4px 6px;"><b>${escapeHtml(i.label)}</b> <span style="color:#888;font-size:11px;">${escapeHtml(i.level)}</span>${i.note ? `<div style="color:#666;">${escapeHtml(i.note)}</div>` : ""}</td>
       <td style="padding:4px 6px;color:#555;">${escapeHtml(i.affects || "")}</td></tr>`).join("")}</table></details>`;
 }
+// ---- Rush fee rule editor (migrations/0082), used by Global settings and a shop's settings ----
+// mode: off | fixed | percent | greater (the fixed amount or the %, whichever is more) | follow (to follow, with an
+// optional estimate shown to the customer). `prefix` keeps the ids apart; the example under it says what a $100
+// order would pay.
+const RUSH_MODE_LABELS_ = { off: "Don't offer rush", fixed: "A fixed fee", percent: "A % of the items",
+  greater: "A fixed fee or a %, whichever is more", follow: "Fee to follow — set it on each order" };
+function rushRuleFieldsHtml_(prefix, rule, opts = {}){
+  const r = rule || { mode: "off" };
+  const v = (x) => x == null ? "" : escapeHtml(String(x));
+  const modes = Object.keys(RUSH_MODE_LABELS_).filter(m => opts.allowOff || m !== "off");
+  return `
+    <label>How the fee is worked out
+      <select id="${prefix}Mode" style="max-width:360px;">${modes.map(m => `<option value="${m}"${(r.mode || "off") === m ? " selected" : ""}>${escapeHtml(RUSH_MODE_LABELS_[m])}</option>`).join("")}</select>
+    </label>
+    <div id="${prefix}Fields">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <label style="flex:0 0 160px;" data-rush="amount">Fee ($)<input type="number" id="${prefix}Amount" min="0" max="1000" step="0.01" value="${v(r.amount)}"></label>
+        <label style="flex:0 0 160px;" data-rush="pct">% of the items<input type="number" id="${prefix}Pct" min="0.01" max="100" step="0.01" value="${v(r.pct)}"></label>
+        <label style="flex:0 0 190px;" data-rush="est">Usually from ($, optional)<input type="number" id="${prefix}EstLow" min="0" max="1000" step="0.01" value="${v(r.estLow)}"></label>
+        <label style="flex:0 0 190px;" data-rush="est">Usually up to ($, optional)<input type="number" id="${prefix}EstHigh" min="0" max="1000" step="0.01" value="${v(r.estHigh)}"></label>
+      </div>
+      <label style="max-width:420px;">Full payment due — days before the needed-by date (optional)<input type="number" id="${prefix}PayByDays" min="0" max="60" step="1" value="${v(r.payByDays)}" placeholder="e.g. 3" style="max-width:120px;"></label>
+      <div class="admin-note" style="margin:-4px 0 8px;">When a customer gives a needed-by date, the order gets a "full payment received by" date this many days earlier (changeable on the order with Rush…). The invoice and emails say the rush date can't be guaranteed without full payment by then.</div>
+      <label>What the customer ticks<input type="text" id="${prefix}Label" maxlength="40" value="${v(r.label || "Rush my order")}" style="max-width:360px;"></label>
+      <label>Note shown to the customer (optional)<textarea id="${prefix}Note" maxlength="300" rows="2" placeholder="e.g. We'll move your order to the front of the line and ship it the fastest way.">${v(r.note)}</textarea></label>
+      <div class="admin-note" id="${prefix}Example" style="margin:2px 0 8px;"></div>
+    </div>`;
+}
+function readRushRule_(prefix){
+  const val = (id) => { const el = document.getElementById(prefix + id); return el ? el.value.trim() : ""; };
+  const mode = val("Mode") || "off";
+  const num = (x) => x === "" ? null : Number(x);
+  const rule = { mode, amount: num(val("Amount")), pct: num(val("Pct")), estLow: num(val("EstLow")), estHigh: num(val("EstHigh")), label: val("Label"), note: val("Note"), payByDays: num(val("PayByDays")) };
+  if(rule.payByDays != null && !(Number.isInteger(rule.payByDays) && rule.payByDays >= 0 && rule.payByDays <= 60)) return { error: "Full payment due before the needed-by date must be a whole number of days, 0 to 60." };
+  if((mode === "fixed" || mode === "greater") && !(rule.amount >= 0 && rule.amount <= 1000)) return { error: "Enter the rush fee — $0 to $1,000." };
+  if((mode === "percent" || mode === "greater") && !(rule.pct > 0 && rule.pct <= 100)) return { error: "Enter the rush fee's percentage — more than 0, at most 100." };
+  if(mode === "follow" && rule.estLow != null && rule.estHigh != null && rule.estLow > rule.estHigh) return { error: "The rush fee's 'usually from' is above its 'usually up to'." };
+  return { rule };
+}
+function rushExampleText_(rule){
+  const m = (n) => "$" + Number(n || 0).toFixed(2);
+  if(!rule || rule.mode === "off") return "Customers aren't offered rush.";
+  if(rule.mode === "follow") return "The customer asks for rush with no fee yet; you set it on the order." +
+    (rule.estLow != null || rule.estHigh != null ? ` They're told it's usually ${rule.estLow != null ? m(rule.estLow) : ""}${rule.estLow != null && rule.estHigh != null ? "–" : ""}${rule.estHigh != null ? m(rule.estHigh) : ""}.` : "") + rushPayByExample_(rule);
+  const pct = (items) => Math.round(items * (Number(rule.pct) || 0)) / 100;
+  const fee = (items) => rule.mode === "fixed" ? Number(rule.amount) || 0 : rule.mode === "percent" ? pct(items) : Math.max(Number(rule.amount) || 0, pct(items));
+  return `On a $40 order the rush fee is ${m(fee(40))}; on a $200 order, ${m(fee(200))}.` + rushPayByExample_(rule);
+}
+function rushPayByExample_(rule){
+  return rule && Number.isInteger(rule.payByDays) ? ` Full payment is due ${rule.payByDays === 0 ? "on" : rule.payByDays + " day" + (rule.payByDays === 1 ? "" : "s") + " before"} the needed-by date.` : "";
+}
+function wireRushRule_(prefix){
+  const sel = document.getElementById(prefix + "Mode");
+  if(!sel) return;
+  const draw = () => {
+    const mode = sel.value;
+    const box = document.getElementById(prefix + "Fields");
+    if(box) box.style.display = mode === "off" ? "none" : "";
+    box && box.querySelectorAll("[data-rush]").forEach(el => {
+      const k = el.dataset.rush;
+      el.style.display = (k === "amount" ? (mode === "fixed" || mode === "greater") : k === "pct" ? (mode === "percent" || mode === "greater") : mode === "follow") ? "" : "none";
+    });
+    const ex = document.getElementById(prefix + "Example");
+    if(ex){ const r = readRushRule_(prefix); ex.textContent = r.error ? "" : rushExampleText_(r.rule); }
+  };
+  sel.onchange = draw;
+  document.getElementById(prefix + "Fields").addEventListener("input", draw);
+  draw();
+}
+
 async function renderGlobalSettings(app){
   adminSetHash("settings");
   document.title = adminTitle_("Global settings");
@@ -8236,6 +8401,8 @@ async function renderGlobalSettings(app){
       const pd = await pr.json();
       if(pr.ok && pd.status === "ok") pricing = pd.pricing;
     }catch(e){}
+    let rush = { rule: { mode: "off" }, taxable: false };   // migrations/0082
+    try{ const rr = await hoopApi_({ action: "getRushSettings" }); if(rr && rr.rush) rush = rr.rush; }catch(e){}
     const pv = (v) => v == null ? "" : escapeHtml(String(v));
     // Desktop: what the program keeps for the Features panels — whether a Shippo key is saved (never
     // the key itself), the mailbox (never its password) and whether supplier connections are on.
@@ -8338,6 +8505,11 @@ async function renderGlobalSettings(app){
           </label>
         </div>
 
+        <h2 style="margin:22px 0 12px;">Rush orders</h2>
+        <div class="admin-note" style="margin-bottom:14px;">What a customer pays to have an order rushed. Every shop uses this unless its own settings say otherwise (Shop settings → Rush orders). A <strong>fee to follow</strong> is for costs you can't know up front, like expedited shipping: the customer asks for rush, you work out the fee and set it on the order (Orders → Rush…), then send an invoice. The fee — known or to follow — can be changed on any order, and an unpaid rush fee never holds up production. Saving takes effect on every shop at once — no need to Publish.</div>
+        <div id="gRushRule">${rushRuleFieldsHtml_("gRush", rush.rule, { allowOff: true })}</div>
+        <label class="checkbox-row"><input type="checkbox" id="gRushTaxable" ${rush.taxable ? "checked" : ""}> Rush fee is taxable — it carries sales tax like the items (inside the fee when prices include tax, added to it when tax is added on top), except on tax-exempt and out-of-state orders</label>
+
         <h2 style="margin:22px 0 12px;">Vendor free shipping</h2>
         <div class="admin-note" style="margin-bottom:14px;">When an order from a vendor reaches its amount (or piece count) it ships free. Blanks to Order shows how far each vendor's order is from it, with <strong>Get me to free shipping</strong>. One row per vendor named on a blank; each change is saved at once.</div>
         <div id="gVendorShipping"><div class="admin-summary">Loading&hellip;</div></div>
@@ -8352,6 +8524,7 @@ async function renderGlobalSettings(app){
         </div>
       </div>
     `;
+    wireRushRule_("gRush");
     loadVendorShippingSettings_();
     wireGlobalFeatures_(ctx);
     try { if (sessionStorage.getItem("oddSettingsSaved")) { sessionStorage.removeItem("oddSettingsSaved"); showToast("Global settings saved."); } } catch (e) {}
@@ -8581,6 +8754,11 @@ async function submitGlobalSettings(){
       if(errEl) errEl.textContent = (priceData && priceData.message) || "Could not save the pricing settings.";
       return;
     }
+    const rushRule = readRushRule_("gRush");
+    if(rushRule.error){ if(errEl) errEl.textContent = rushRule.error; return; }
+    const rushData = await hoopApi_({ action: "updateRushSettings", rush: { rule: rushRule.rule, taxable: document.getElementById("gRushTaxable").checked } })
+      .catch(e => ({ status: "error", message: e.message || "Could not save the rush fee." }));
+    if(rushData.status === "error"){ if(errEl) errEl.textContent = rushData.message || "Could not save the rush fee."; return; }
     // New fees / targets re-check every product: say which are now below a target.
     if((priceData.belowTarget || []).length) setTimeout(() => belowTargetToast_(priceData.belowTarget, "With these settings, "), 1200);
     // The program restarted with new settings: reload, so the menu and pages follow them.
@@ -9282,6 +9460,50 @@ async function renderEditOrgForm(app, orgId){
   renderOrgForm(app, org);
 }
 
+// ---- A shop's rush fee (migrations/0082): follow the global rule, don't offer rush, or its own rule ----
+// org.rushFee is stored in cents ({offer:false} or {offer:true, mode, amountCents, pctBps, …}); null = the global rule.
+function shopRushRuleView_(r){
+  if(!r || r.offer !== true) return null;
+  const d = (c) => c == null ? null : c / 100;
+  return { mode: r.mode, amount: d(r.amountCents), pct: r.pctBps == null ? null : r.pctBps / 100, estLow: d(r.estLowCents),
+    estHigh: d(r.estHighCents), label: r.label || "", note: r.note || "" };
+}
+function setOrgRush_(stored){
+  const box = document.getElementById("orgFormRush");
+  if(!box) return;
+  const use = !stored ? "default" : stored.offer === false ? "off" : "own";
+  const own = shopRushRuleView_(stored) || { mode: "fixed", label: "Rush my order" };
+  box.innerHTML = `
+    <label>This shop
+      <select id="orgRushUse" style="max-width:360px;">
+        <option value="default"${use === "default" ? " selected" : ""}>Uses the global setting</option>
+        <option value="off"${use === "off" ? " selected" : ""}>Doesn't offer rush</option>
+        <option value="own"${use === "own" ? " selected" : ""}>Has its own rush fee</option>
+      </select>
+    </label>
+    <div id="orgRushOwn">${rushRuleFieldsHtml_("orgRush", own)}</div>`;
+  const sel = document.getElementById("orgRushUse");
+  const show = () => { document.getElementById("orgRushOwn").style.display = sel.value === "own" ? "" : "none"; };
+  sel.onchange = show; show();
+  wireRushRule_("orgRush");
+}
+function readOrgRush_(){
+  const sel = document.getElementById("orgRushUse");
+  if(!sel) return undefined;          // the form doesn't have it: leave the shop's setting alone
+  if(sel.value !== "own") return { use: sel.value };
+  const r = readRushRule_("orgRush");
+  return r.error ? { error: r.error } : { use: "own", rule: r.rule };
+}
+// "The global setting is: …" next to the choice, so the default isn't a guess.
+async function loadOrgRushDefault_(){
+  const el = document.getElementById("orgRushDefault");
+  if(!el) return;
+  try{ const r = await hoopApi_({ action: "getRushSettings" });
+    const rule = r.rush && r.rush.rule;
+    el.textContent = "The global setting: " + (rule && rule.mode !== "off" ? RUSH_MODE_LABELS_[rule.mode].toLowerCase() + " — " + rushExampleText_(rule) : "rush isn't offered.");
+  }catch(e){ el.textContent = ""; }
+}
+
 function applyCloneOrg(){
   const orgId = document.getElementById("orgFormCloneFrom").value;
   if(!orgId) return;
@@ -9293,6 +9515,7 @@ function applyCloneOrg(){
   document.getElementById("orgFormDesc").value = src.desc || "";
   document.getElementById("orgFormReady").checked = !!src.ready;
   setOrgDeliveryList_(src.deliveryOptions || [{ type: "pickup" }].concat(src.shippingEnabled ? [{ type: "shipping" }] : []));
+  setOrgRush_(src.rushFee);
 
   const pay = (src.enabledPayments && typeof src.enabledPayments === "object" && !Array.isArray(src.enabledPayments))
     ? src.enabledPayments : {};
@@ -9471,6 +9694,10 @@ function renderOrgForm(app, org){
         ${isEdit ? `<div id="orgTierBox" data-org="${escapeHtml(org.orgId)}" style="margin:0 0 12px;padding:10px 12px;border:1px solid #ddd;border-radius:6px;background:#fff;color:#111;font-size:13px;">Loading&hellip;</div>`
           : `<div class="admin-note">Create the shop first — then come back to Edit to pick its reorder QR code and set its option prices.</div>`}
 
+        <h3 style="margin:18px 0 6px; font-size:14px; font-family:'IBM Plex Mono',monospace; text-transform:uppercase; letter-spacing:.06em; font-weight:600;">Rush orders</h3>
+        <div class="admin-note" style="margin-bottom:6px;">Whether customers can ask for their order to be rushed, and for what fee. <span id="orgRushDefault"></span></div>
+        <div id="orgFormRush"></div>
+
         <h3 style="margin:18px 0 6px; font-size:14px; font-family:'IBM Plex Mono',monospace; text-transform:uppercase; letter-spacing:.06em; font-weight:600;">Sales tax</h3>
         <label class="checkbox-row">
           <input type="checkbox" id="orgFormTaxExempt" ${org && org.taxExempt ? "checked" : ""}>
@@ -9527,6 +9754,8 @@ function renderOrgForm(app, org){
     </div>
   `;
   setOrgDeliveryList_(org && org.deliveryOptions);
+  setOrgRush_(org && org.rushFee);
+  loadOrgRushDefault_();
   window._prodFormDirty = false;
   { const panel = app.querySelector(".admin-panel"); if (panel) { const dirty = () => { window._prodFormDirty = true; }; panel.addEventListener("input", dirty); panel.addEventListener("change", dirty); } }
   // A new shop's ID and web address follow its name until they're typed in by hand.
@@ -9664,6 +9893,7 @@ async function submitOrgForm(isEdit){
     desc: document.getElementById("orgFormDesc").value.trim(),
     ready: document.getElementById("orgFormReady").checked,
     deliveryOptions: readOrgDeliveryList_(),
+    rushFee: readOrgRush_(),
     enabledPayments: {
       card:  document.getElementById("orgFormPayCard").checked,
       venmo: document.getElementById("orgFormPayVenmo").checked,
@@ -9681,6 +9911,7 @@ async function submitOrgForm(isEdit){
     taxExemptExpires: document.getElementById("orgFormTaxExpires").value.trim()
   };
   { const why = orgDeliveryProblem_(body.deliveryOptions); if(why){ errEl.textContent = why; return; } }
+  if(body.rushFee && body.rushFee.error){ errEl.textContent = body.rushFee.error; return; }
   { const why = webAddressProblem_(body.subdomain, isEdit ? body.orgId : null); if(why){ errEl.textContent = why; return; } }
   if(body.accent && !isValidAccent(body.accent)){
     errEl.textContent = "Accent must be a valid CSS color (e.g. #1E7A4C, navy, rgb(30,122,76)).";
@@ -12375,6 +12606,7 @@ async function renderRevenueReport(app) {
               <th style="${th}">Subtotal</th>
               <th style="${th}">Discounts</th>
               <th style="${th}">Shipping</th>
+              <th style="${th}">Rush fees</th>
               <th style="${th}">Total</th>
               <th style="${th}" title="Money received for these orders, less anything refunded">Received (net of refunds)</th>
               <th style="${th}">Balance Due</th>
@@ -12387,6 +12619,7 @@ async function renderRevenueReport(app) {
                 <td style="${cell}">${o.subtotal > 0 ? fmt(o.subtotal) : "—"}</td>
                 <td style="${cell}">${o.discounts > 0 ? "−"+fmt(o.discounts) : "—"}</td>
                 <td style="${cell}">${o.shipping > 0 ? fmt(o.shipping) : "—"}</td>
+                <td style="${cell}">${o.rushFees > 0 ? fmt(o.rushFees) : "—"}</td>
                 <td style="${cell}font-weight:600;">${o.effectiveTotal > 0 ? fmt(o.effectiveTotal) : "—"}</td>
                 <td style="${cell}">${o.received > 0 ? fmt(o.received) : "—"}</td>
                 <td style="${cell}font-weight:600;color:${o.balance>0.005?"#b03a2e":"#111"};">${o.balance > 0.005 ? fmt(o.balance) : "—"}</td>
@@ -12399,6 +12632,7 @@ async function renderRevenueReport(app) {
               <td style="${foot}">${fmt(total.subtotal)}</td>
               <td style="${foot}">${total.discounts > 0 ? "−"+fmt(total.discounts) : "—"}</td>
               <td style="${foot}">${total.shipping > 0 ? fmt(total.shipping) : "—"}</td>
+              <td style="${foot}">${total.rushFees > 0 ? fmt(total.rushFees) : "—"}</td>
               <td style="${foot}font-size:15px;">${fmt(total.effectiveTotal)}</td>
               <td style="${foot}">${fmt(total.received)}</td>
               <td style="${foot}color:${total.balance>0.005?"#b03a2e":"#111"};">${total.balance > 0.005 ? fmt(total.balance) : "—"}</td>
@@ -12665,7 +12899,7 @@ async function renderSalesTaxReport(app) {
             <thead><tr>
               <th style="${thL}">Month</th><th style="${thL}">Ship-to</th><th style="${thL}">Status</th>
               <th style="${th}">Orders</th><th style="${th}">Gross (incl. tax)</th><th style="${th}">Tax</th>
-              <th style="${th}">Net sales</th><th style="${th}">Shipping (untaxed)</th>
+              <th style="${th}">Net sales</th><th style="${th}">Shipping (untaxed)</th><th style="${th}">Rush fees</th>
             </tr></thead>
             <tbody>
               ${d.rows.length ? d.rows.map(r => `<tr>
@@ -12677,12 +12911,13 @@ async function renderSalesTaxReport(app) {
                 <td style="${cell}font-weight:600;">${r.exempt ? "—" : fmt(r.taxCollected)}</td>
                 <td style="${cell}">${fmt(r.netSales)}</td>
                 <td style="${cell}">${r.shipping > 0 ? fmt(r.shipping) : "—"}</td>
-              </tr>`).join("") : `<tr><td colspan="8" style="${cellL}color:#888;">No orders in this period.</td></tr>`}
+                <td style="${cell}" title="${r.rushTax > 0 ? "Includes $" + Number(r.rushTax).toFixed(2) + " sales tax" : "Not taxed"}">${r.rushFees > 0 ? fmt(r.rushFees) : "—"}</td>
+              </tr>`).join("") : `<tr><td colspan="9" style="${cellL}color:#888;">No orders in this period.</td></tr>`}
             </tbody>
             <tfoot><tr>
               <td style="${foot}text-align:left;" colspan="3">Total</td>
               <td style="${foot}">${t.orders}</td><td style="${foot}">${fmt(t.grossSales)}</td>
-              <td style="${foot}">${fmt(t.taxCollected)}</td><td style="${foot}">${fmt(t.netSales)}</td><td style="${foot}">${fmt(t.shipping)}</td>
+              <td style="${foot}">${fmt(t.taxCollected)}</td><td style="${foot}">${fmt(t.netSales)}</td><td style="${foot}">${fmt(t.shipping)}</td><td style="${foot}">${fmt(t.rushFees || 0)}</td>
             </tr></tfoot>
           </table>
         </div>
@@ -16681,7 +16916,7 @@ async function renderBooks(app){
     document.getElementById("expFrom").value = b.dataset.from; document.getElementById("expTo").value = b.dataset.to; });
   const COLUMNS = {
     summary: [["month","Month"],["grossSales","Gross sales (incl. tax)"],["taxCollected","Sales tax collected"],["taxRefunded","Sales tax refunded"],
-      ["netSales","Net sales (excl. tax)"],["exemptSales","Exempt sales"],["shippingIncome","Shipping charged"],["refunds","Refunds & lost disputes"],
+      ["netSales","Net sales (excl. tax)"],["exemptSales","Exempt sales"],["shippingIncome","Shipping charged"],["rushFeeIncome","Rush fees charged"],["refunds","Refunds & lost disputes"],
       ["cardReceipts","Card receipts (Stripe)"],["otherReceipts","Other receipts"],["stripeFees","Stripe fees"],["postage","Postage (labels)"],
       ["cogs","Cost of goods sold"],["cogsBlanks","…blanks used on orders"],["cogsFinished","…finished stock sold"],["purchases","Blank purchases"],
       ["writeoffs","Write-offs"],["writeoffsTesting","…used for testing / shop use"],["writeoffsDamagedLost","…damaged or lost"],["writeoffsOther","…other"],

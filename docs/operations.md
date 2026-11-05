@@ -325,3 +325,21 @@ the whole receipt — every stock line, its R&D / written-off expense and its pe
 step. It's refused when the receipt is matched to a statement line, falls in a reconciled or closed month,
 or would move to Personal funds while a personal draw exists. These are managers' pages, and part of
 Bookkeeping.
+
+## Recurring expenses
+
+A subscription, phone bill, insurance premium or rent that costs the same every period is set up once:
+Finance → Expenses → Add expense → **Repeats** (weekly, every 2 weeks, monthly, every 3 months, every
+6 months, yearly), with an optional **Ends** date. It's **recorded automatically** on each date it comes
+due, as an ordinary expense with a 🔁 tag — at the start of the morning roll-up, whenever the Expenses
+screen opens, and straight away for a first date in the past. Dates count from the first date, so a
+monthly one on the 31st lands on the last day of shorter months and comes back to the 31st.
+
+The **🔁 Recurring expenses** section on the Expenses screen lists them: **Edit…** changes only what's
+still to come (the first date is locked once one has been recorded), **Stop** ends it today, **Delete**
+removes it and keeps what it recorded. Each recorded expense can be edited, deleted or given a receipt
+like any other; a deleted one isn't recorded again. Refused: a Depreciation category, a refund, a first
+date more than a year ahead, and anything that would land in a closed month. A rule paid from an account
+that was made inactive is skipped and reported as a problem in the roll-up until the account is active
+again. The roll-up and Communications list what was recorded. Part of Bookkeeping: nothing is recorded
+while it's switched off.

@@ -23,6 +23,7 @@ async function freshDb(upTo = "9999") {
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt) VALUES ('prime','prime','Example League','t','t');`);
   for (const f of migrationsUpTo(upTo)) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   // Sales tax is unset on a new database; this shop collects 6% (use tax is owed at the same rate).
   d1._raw.exec(`INSERT OR REPLACE INTO global_settings (key, value) VALUES ('salesTax', '{"rateBps":600,"taxShipping":false,"jurisdiction":"OH"}')`);
   return d1;

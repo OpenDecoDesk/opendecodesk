@@ -30,6 +30,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 60));
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   const call = async (body) => {
     const res = await api({ env: { DB: d1 }, waitUntil: (p) => p.then(() => {}, () => {}),
       request: { url: "https://admin.example.com/api/orders", json: async () => Object.assign({ key: "x" }, body), headers: { get: () => null } } });
@@ -93,7 +94,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 60));
   console.log("Mark blank ordered / shipped / received are refused with the reason:",
     ["blankOrdered", "blankShipped", "blankReceived"].every(s => /nothing on this order uses a blank/.test(lib.stagePrereqError(o, s))));
   console.log("Mark manufactured doesn't wait for a blank:", lib.stagePrereqError(o, "manufactured") === "");
-  r = await call({ action: "setFulfillmentStage", org: "club", orderId: "PATCH1", stage: "blankOrdered", vendor: "X" });
+  r = await call({ action: "setFulfillmentStage", org: "club", orderId: "PATCH1", stage: "blankOrdered", vendor: "SanMar" });
   console.log("the API refuses the blank step too (409):", r.status === 409 && /nothing on this order uses a blank/.test(r.body.message));
   o = await lib.getOrderById(d1, "POLO1");
   console.log("an ordinary order still needs its blank:", o.needsBlanks === true && o.blankCounts.total === 1 && /blank hasn't been received/.test(lib.stagePrereqError(o, "manufactured")));

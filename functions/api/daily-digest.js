@@ -12,7 +12,8 @@ import { timingSafeEqual } from "../_lib/adminAuth.js";
 import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { getDigestState, setDigestState, setDigestRun, getOrdersForDigest, getAllOrgs, getUnsentOwnerNotices, markOwnerNoticesSent,
   getFailedAdminLogins, clearFailedAdminLogins, getSystemIssues, clearSystemIssues, getOrdersAwaitingBlanks, localToday,
-  getBlankPriceReminder, setBlankPriceReminderSent, getNewPricingAlerts, listMaintenanceTasks, getFeatures, getRushFeesToSet } from "../_lib/db.js";
+  getBlankPriceReminder, setBlankPriceReminderSent, getNewPricingAlerts, listMaintenanceTasks, getFeatures, getRushFeesToSet,
+  recordDueRecurringExpenses, getRecurringExpensesRecorded, recordSystemIssue, insertAuditLog } from "../_lib/db.js";
 import { sendDailyDigestEmail, sendDigestHeartbeatEmail } from "../_lib/email.js";
 import { checkShippedDeliveries, checkBlankShipments } from "../_lib/deliveryCheck.js";
 import { checkSupplierShipments } from "../_lib/supplierOrders.js";
@@ -93,8 +94,21 @@ async function runDailyDigestInner_(env, trigger) {
     catch (e) { console.error("Blank-shipment check failed — sending the roll-up without it:", e); }
   }
 
+  // Recurring expenses that came due (migrations/0085) are recorded first, so this email lists them. A rule that can't be
+  // recorded (its account was made inactive) is a problem for this roll-up; it's recorded once fixed.
+  // Not while the bookkeeping feature is switched off (the Expenses screen is hidden then).
+  const booksOn = (await getFeatures(env.DB).catch(() => ({ bookkeeping: true }))).bookkeeping !== false;
+  try {
+    const rec = booksOn ? await recordDueRecurringExpenses(env.DB, await localToday(env)) : { recorded: [], skipped: [] };
+    for (const x of rec.recorded) await insertAuditLog(env.DB, { orgId: null, orderId: null, action: "expense.created", actor: "recurring",
+      detail: { id: x.id, recurringId: x.ruleId, date: x.date, amount: x.amount, description: x.description } }).catch(() => {});
+    for (const x of rec.skipped) await recordSystemIssue(env.DB, "recurring_expense_skipped", `${x.description} — ${x.reason}`);
+  } catch (e) { console.error("Recording recurring expenses failed (continuing with the roll-up):", e); }
+
   const state = await getDigestState(env.DB);
   const { orders, cursor } = await getOrdersForDigest(env.DB, state);
+  // Recurring expenses recorded since the last roll-up email: listed, never a reason to send on their own.
+  const recurringRecorded = await getRecurringExpensesRecorded(env.DB, state && state.sentAt ? state.sentAt : new Date(Date.now() - 86400000).toISOString()).catch(() => []);
   const notices = await getUnsentOwnerNotices(env.DB);
   // Failed admin sign-ins ride along with any roll-up; 5+ send one on their own.
   const security = await getFailedAdminLogins(env.DB);
@@ -148,13 +162,13 @@ async function runDailyDigestInner_(env, trigger) {
     // email problem by send_ and turns up in the next roll-up.
     let heartbeat = "";
     if (trigger === "scheduled") {
-      const ok = await sendDigestHeartbeatEmail(env, { lastSentAt: state ? state.sentAt || "" : "", inTransit, awaitingPickup, awaitingBlanks, maintenanceDue, rushToSet });
+      const ok = await sendDigestHeartbeatEmail(env, { lastSentAt: state ? state.sentAt || "" : "", inTransit, awaitingPickup, awaitingBlanks, maintenanceDue, rushToSet, recurringRecorded });
       heartbeat = ok ? "sent" : "failed";
     }
     return jsonResponse({ status: "ok", sent: false, heartbeat, orders: 0, notices: 0, delivered: deliveries.delivered.length, inTransit: 0 });
   }
   const orgNames = Object.fromEntries((await getAllOrgs(env.DB)).map(o => [o.orgId, o.name]));
-  const sent = await sendDailyDigestEmail(env, { orders, notices, orgNames, security, inTransit, pickedUp, awaitingPickup, issues, awaitingBlanks, priceReminder, belowTarget, maintenanceDue, rushToSet });
+  const sent = await sendDailyDigestEmail(env, { orders, notices, orgNames, security, inTransit, pickedUp, awaitingPickup, issues, awaitingBlanks, priceReminder, belowTarget, maintenanceDue, rushToSet, recurringRecorded });
   if (!sent) return jsonResponse({ status: "error", message: "Email could not be sent — will retry next run" }, 502);
   if (priceReminder) await setBlankPriceReminderSent(env.DB).catch((e) => console.error("setBlankPriceReminderSent failed:", e));
   await alerts.commit().catch((e) => console.error("pricing alerts commit failed:", e));

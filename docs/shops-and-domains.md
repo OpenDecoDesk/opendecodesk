@@ -321,15 +321,24 @@ A manager records the supplier's approval on the product's form, with the suppli
 **Order from <supplier>…** refuses a large quantity without one unless an admin gives a reason
 (audited).
 
+**The vendor list:** every vendor box — a blank, Receive order, Import from PDF, Mark blank ordered, a
+transfer sheet, an expense — picks from one list (**Manage…** beside the box, for a manager), so one
+supplier isn't spelled two ways. Each vendor can be **For blanks** (offered where a blank's vendor is
+chosen and in Blanks to Order), carry its free shipping, or be **Hidden** (no longer offered, kept on
+its records). Records keep the vendor's name, so renaming a vendor renames every record that names it;
+a vendor can be deleted only while nothing names it. A name that isn't on the list is refused (the
+expense CSV import leaves it blank, the blank CSV import flags the row). The first upgrade builds the
+list from the names already in use.
+
 **Reorder points and free shipping:** a supplier charges marked-up freight on a small order, so keep
 the blanks you sell most in stock and top each order up to the free-shipping amount. The blank form's
 **Keep** column is a reorder point per color and size ("keep at least N" not set aside); Blanks shows
 a chip and a **Below reorder point** filter, and Blanks to Order adds the restock under each row's
 count, with an **Include restock** box — change a row's restock or leave it out (✕), and ↺ puts the
 suggestion back. Restock you've already ordered (from the Order window, or **Mark as ordered**) isn't
-suggested again until it arrives. Each vendor's free shipping — a dollar amount or a piece count — is
-set on its Blanks to Order block or in Global settings → **Vendor free shipping**; SanMar and S&S
-start at their published $200. **Get me to free shipping** fills an order up to it: reorder
+suggested again until it arrives. Each vendor's free shipping — a dollar amount ($0 = every order ships
+free) or a piece count, or none — is set on the vendor in the vendor list (✎ on its Blanks to Order
+block, or **Manage…** beside any vendor box); SanMar and S&S start at their published $200. **Get me to free shipping** fills an order up to it: reorder
 shortfalls first, then your best sellers (by the last 90 and 365 days), plus anything you add — then
 Copy / CSV, Mark as ordered, or continue to the Order window.
 

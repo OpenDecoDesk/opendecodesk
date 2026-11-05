@@ -14,7 +14,7 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1");
 const dbSrc = strip(read("functions/_lib/db.js"));
 const psSrc = strip(read("functions/_lib/promostandards.js")), credSrc = strip(read("functions/_lib/vendorCredentials.js")) + "\n" + strip(read("functions/_lib/vendorLog.js")), soSrc = strip(read("functions/_lib/supplierOrders.js"));
-const lib = new Function(dbSrc + `\nreturn { createBlank, updateBlank, getAllBlanks, mergeBlanks, createProduct, setBlankLink, insertOrder, getBlanksToOrder, getBlankUsage, vendorShippingFor, getFreeShippingCandidates };`)();
+const lib = new Function(dbSrc + `\nreturn { createBlank, updateBlank, getAllBlanks, mergeBlanks, createProduct, setBlankLink, insertOrder, getBlanksToOrder, getBlankUsage, vendorShippingFor, listVendors, getFreeShippingCandidates };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + psSrc + "\n" + credSrc + "\n" + soSrc + "\n" +
   "const requireAdmin = async (env, host, key, request, msg, role) => { const r = (request.headers.get('x-role') || 'admin'); const rank = { staff: 1, manager: 2, admin: 3 }; return rank[r] >= rank[role === 'staff' || role === 'manager' ? role : 'admin'] ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
   "const adminActor = () => 'owner@test'; const adminUser = () => null; const copyVendorImage = async () => ({ ok: false });\n" +
@@ -54,6 +54,7 @@ const URLS = { product: "https://ws.sanmar.com:8080/promostandards/ProductDataSe
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt, ready) VALUES ('acme','acme','Acme','t','t',1);`);
   d1._raw.exec(`INSERT INTO global_settings (key, value) VALUES ('shipFrom', '{"name":"Shop","street1":"1 Main St","city":"Springfield","state":"IL","zip":"62701","phone":"2175550100","email":"o@x.com"}');`);
   const keyEnv = { VENDOR_CREDENTIALS_KEY: "a-long-random-master-key-for-tests-0123456789" };
@@ -123,20 +124,23 @@ const URLS = { product: "https://ws.sanmar.com:8080/promostandards/ProductDataSe
   d1._raw.run("INSERT INTO inventory_movements (blankId, blankName, color, size, qtyDelta, unitCostCents, kind, occurredAt, createdAt, voidedAt) VALUES (?, 'Core Tee', 'Navy', 'M', -5, 400, 'consume', ?, ?, ?)", [tee, daysAgo(5), daysAgo(5), daysAgo(4)]);
   const u90 = await lib.getBlankUsage(d1, daysAgo(90)), u365 = await lib.getBlankUsage(d1, daysAgo(365));
   ok("usage counts consume movements in the window, voided ones left out", u90.get(`${tee}\u0001Navy\u0001M`) === 10 && !u90.has(`${tee}\u0001Navy\u0001S`) && u365.get(`${tee}\u0001Navy\u0001S`) === 3);
-  const vf = lib.vendorShippingFor;
-  // OpenDecoDesk ships only SanMar's and S&S's published thresholds as defaults; any other vendor is set by the shop.
-  ok("defaults: SanMar and S&S (either name) $200, others none", vf({}, "SanMar").overCents === 20000 && vf({}, "S&S Activewear").overCents === 20000 && vf({}, "S & S").overCents === 20000 &&
-    vf({}, "Otto Cap") === null && vf({}, "Amazon") === null && vf({}, "SanMar").isDefault);
+  // Free shipping is on each vendor in the vendor list (migrations/0084).
+  const vlist = await lib.listVendors(d1), vf = (n) => lib.vendorShippingFor(vlist, n);
+  ok("free shipping comes from the vendor list: SanMar and S&S (either name) $200, Otto Cap 25 pieces, others none", vf("SanMar").overCents === 20000 && vf("S&S Activewear").overCents === 20000 && vf("S & S").overCents === 20000 &&
+    vf("Otto Cap").minQty === 25 && vf("Otto Cap").overCents === null && vf("Amazon") === null && vf("Not a vendor") === null);
   const amazon = (await lib.createBlank(d1, { name: "Canvas Tote", productType: "bag", vendor: "Amazon", sku: "B0TOTE", color: "", colors: [{ color: "Natural", sizes: sizes([["OS", 5, 0]]) }] })).id;
-  r = await call({ action: "setVendorShipping", vendor: "Amazon", over: "25" }, { role: "manager" });
-  ok("a manager sets a vendor's free shipping", r.status === 200 && r.body.freeShipping.overCents === 2500 && !r.body.freeShipping.isDefault);
-  ok("…a worker can't", (await call({ action: "setVendorShipping", vendor: "Amazon", over: "30" }, { role: "staff" })).status === 403);
-  ok("…nonsense is refused", (await call({ action: "setVendorShipping", vendor: "Amazon", over: "-1" })).status === 400);
-  r = await call({ action: "setVendorShipping", vendor: "SanMar", over: "", minQty: "" });
-  ok("0 / empty on both means no free shipping (not the default)", r.body.freeShipping === null && (await call({ action: "getVendorShipping" })).body.vendors.find(v => v.vendor === "SanMar").freeShipping === null);
-  r = await call({ action: "setVendorShipping", vendor: "SanMar", reset: true });
-  ok("Use default brings the default back", r.body.freeShipping.overCents === 20000 && r.body.freeShipping.isDefault);
-  ok("…and every change is audited", d1.q("SELECT COUNT(*) AS n FROM audit_log WHERE action='settings.vendor_shipping'")[0].n >= 3);
+  const amz = vlist.find(v => v.name === "Amazon"), smV = vlist.find(v => v.name === "SanMar");
+  r = await call({ action: "saveVendor", vendor: { id: amz.id, name: "Amazon", forBlanks: true, over: "25" } }, { role: "manager" });
+  ok("a manager sets a vendor's free shipping", r.status === 200 && r.body.vendor.freeShipping.overCents === 2500);
+  ok("…a worker can't", (await call({ action: "saveVendor", vendor: { id: amz.id, name: "Amazon", forBlanks: true, over: "30" } }, { role: "staff" })).status === 403);
+  ok("…nonsense is refused", (await call({ action: "saveVendor", vendor: { id: amz.id, name: "Amazon", forBlanks: true, over: "-1" } })).status === 400);
+  r = await call({ action: "saveVendor", vendor: { id: smV.id, name: "SanMar", forBlanks: true, noFreeShipping: true, over: "200" } });
+  ok("No free shipping: none, whatever amount was typed", r.body.vendor.freeShipping === null && r.body.vendor.noFreeShipping && r.body.vendor.freeShipOverCents === null);
+  r = await call({ action: "saveVendor", vendor: { id: smV.id, name: "SanMar", forBlanks: true, over: "0" } });
+  ok("$0 = every order ships free", r.body.vendor.freeShipping.overCents === 0 && r.body.vendor.freeShipping.minQty === null);
+  r = await call({ action: "saveVendor", vendor: { id: smV.id, name: "SanMar", forBlanks: true, over: "200" } });
+  ok("…back to $200", r.body.vendor.freeShipping.overCents === 20000);
+  ok("…and every change is audited", d1.q("SELECT COUNT(*) AS n FROM audit_log WHERE action='vendor.updated'")[0].n >= 4);
   r = await call({ action: "freeShippingSuggestions", vendor: "SanMar" }, { role: "staff" });
   const m = r.body.candidates.find(c => c.blankId === tee && c.size === "M");
   ok("suggestions: only that vendor's blanks, with price, stock, reorder point and use", r.status === 200 && !r.body.candidates.some(c => c.blankId === amazon) && m.used90 === 10 && m.price === 4 && m.onHand === 2 &&
@@ -197,12 +201,12 @@ const URLS = { product: "https://ws.sanmar.com:8080/promostandards/ProductDataSe
   const sanmar = () => d.querySelector('.bto-supplier[data-supplier="SanMar"]');
   ok("the SanMar block shows its free shipping, how far off it is, and the button", /Free shipping at \$200 — \$\d+\.\d\d to go/.test(sanmar().textContent) && sanmar().querySelector(".bto-free"));
   ok("…the restock shows on its row, as a count you can change", /restock \(keep 6\)/.test(sanmar().textContent) && Number(sanmar().querySelector(".bto-rs-qty").value) > 0);
-  ok("Start an order for… lists every vendor on a blank, with its free shipping", [...d.querySelectorAll("#btoStartVendor option")].some(o => o.value === "Amazon" && /free at \$25/.test(o.textContent)));
-  await call({ action: "setVendorShipping", vendor: "SanMar", over: "10" });
+  ok("Start an order for… lists every vendor for blanks on the list, with its free shipping", [...d.querySelectorAll("#btoStartVendor option")].some(o => o.value === "Amazon" && /free at \$25/.test(o.textContent)));
+  await call({ action: "saveVendor", vendor: { id: smV.id, name: "SanMar", forBlanks: true, over: "10" } });
   d.getElementById("btoRefresh").click();
   await wait(() => sanmar() && /✓ Free shipping/.test(sanmar().textContent));
   ok("over the amount: ✓ Free shipping and no button", /✓ Free shipping/.test(sanmar().textContent) && !sanmar().querySelector(".bto-free"));
-  await call({ action: "setVendorShipping", vendor: "SanMar", reset: true });
+  await call({ action: "saveVendor", vendor: { id: smV.id, name: "SanMar", forBlanks: true, over: "200" } });
   d.getElementById("btoRestock").click();
   await wait(() => !sanmar() || !/restock \(keep/.test(sanmar().textContent));
   ok("Include restock off drops the restock", !sanmar() || !/restock \(keep/.test(sanmar().textContent));

@@ -36,6 +36,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt, ready, shippingEnabled) VALUES ('acme','acme','Acme','t','t',1,1);`);
   await lib.createProduct(d1, "acme", { productId: "tee", type: "shirt", name: "Tee", pricingMode: "sized", sizePricing: { M: 20 }, visible: true, personalizationPrice: 2 });
   const blankId = (await lib.createBlank(d1, { name: "Blank tee", productType: "shirt" }, [{ size: "M", purchasePrice: 4, quantity: 10 }])).id;
@@ -144,7 +145,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   let o = await lib.getOrderById(d1, "FLOW-1");
   ok("it's marked paid", r.status === 200 && o.paid === true);
   ok("no digitizing step and no design upload is asked for", o.needsDigitizing === false && o.orderDesignsMissing === 0);
-  ok("blanks ordered, then received", (await stage("FLOW-1", "blankOrdered", { vendor: "V" })).status === 200 && (await stage("FLOW-1", "blankReceived")).status === 200);
+  ok("blanks ordered, then received", (await stage("FLOW-1", "blankOrdered", { vendor: "SanMar" })).status === 200 && (await stage("FLOW-1", "blankReceived")).status === 200);
   r = await stage("FLOW-1", "manufactured");
   ok("Mark manufactured works straight from the Orders page", r.status === 200 && !!(await lib.getOrderById(d1, "FLOW-1")).manufacturedAt);
   ok("…and uses up the blanks (stock down by the 2 pieces, cost of goods on the line)", stock() === before - 2 &&
@@ -182,7 +183,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   ok("on: a payment dated in the closed month is refused", r.status === 409 && /closed/.test(r.body.message));
 
   await setF({ bookkeeping: false });
-  const bookActions = ["listExpenses", "saveExpense", "deleteExpense", "listExpenseCategories", "getExpenseReport", "importExpenses", "listAccounts", "saveAccount", "listMoney", "saveMoneyEntry", "setPaymentAccount",
+  const bookActions = ["listExpenses", "saveExpense", "deleteExpense", "listExpenseCategories", "getExpenseReport", "importExpenses", "listRecurringExpenses", "saveRecurringExpense", "listAccounts", "saveAccount", "listMoney", "saveMoneyEntry", "setPaymentAccount",
     "getReconciliation", "importStatement", "createFromStatementLine", "reconcileMonth", "listClosedPeriods", "closePeriod", "reopenPeriod", "getAccountantExport"];
   refused.length = 0; for (const a of bookActions) refused.push(off403(await admin({ action: a, month: "2020-03", expense: { date: "2024-01-01" } }), "Bookkeeping"));
   ok("off: expenses, accounts & money, reconcile, periods and the accountant export all answer 403 naming the feature", refused.every(Boolean));
@@ -398,7 +399,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
       "setDesignVersionStitches", "fillDesignStitchCounts",                                                   // design stitch counts
     ],
     bookkeeping: [
-      "listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory", "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses", // Expenses
+      "listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory", "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses", "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense", // Expenses
       "listAccounts", "saveAccount", "saveMoneyDefaults", "listMoney", "saveMoneyEntry", "deleteMoneyEntry", "setPaymentAccount", // Accounts & money
       "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount",                       // Account viewer, Change account…
       "getReconciliation", "importStatement", "autoMatchStatement", "matchStatementLine", "unmatchStatementLine", "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth", "listCashoutPayments", // Reconcile
@@ -428,7 +429,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     "listLocations", "saveLocation", "deleteLocation", "listProductCategories", "saveProductCategory", "deleteProductCategory", "listProductGraphicImages", "setProductGraphicImage", "deleteProductGraphicImage",
     "listGraphics", "saveGraphic", "setProductGraphicColorBlocked", "deleteGraphic", "getTierPrices", "setTierPrices",
     // Inventory — always on in this release: blanks, transfers, stock movements, cost of goods
-    "getInventory", "createInventoryItem", "updateInventoryItem", "deleteInventoryItem", "getBlankReadyCounts", "getBlanks", "createBlank", "updateBlank", "deleteBlank", "mergeBlanks", "importBlanks", "previewVendorBlanks", "applyVendorBlanks", "copyVendorImage", "suggestColorGroups", "analyzePricing", "getPricingSettings", "updatePricingSettings", "getRushSettings", "updateRushSettings", "removeBlankImages", "findOrphanImages", "deleteOrphanImages", "listVendorConnections", "fetchVendorProducts", "vendorDirectorySearch", "vendorDirectoryEndpoints", "saveVendorConnection", "deleteVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks", "previewSupplierOrder", "placeSupplierOrder", "listSupplierOrders", "checkSupplierOrderShipments", "cancelSupplierOrder", "listVendorApiLog", "getVendorApiLogEntry", "getBlanksToOrder", "freeShippingSuggestions", "getVendorShipping", "setVendorShipping", "recordRestockOrder", "cancelRestockOrder", "getPublishState", "getPreviewLink", "previewDiscardShopChanges", "discardShopChanges", "applyRulePrices", "setOrgReady", "getShopWizard", "saveShopWizard", "listShopWizards", "deleteShopWizard", "buildProductFromBlank", "getBrandRules", "updateBrandRules", "listBrandApprovals", "addBrandApproval", "revokeBrandApproval",
+    "getInventory", "createInventoryItem", "updateInventoryItem", "deleteInventoryItem", "getBlankReadyCounts", "getBlanks", "createBlank", "updateBlank", "deleteBlank", "mergeBlanks", "importBlanks", "previewVendorBlanks", "applyVendorBlanks", "copyVendorImage", "suggestColorGroups", "analyzePricing", "getPricingSettings", "updatePricingSettings", "getRushSettings", "updateRushSettings", "removeBlankImages", "findOrphanImages", "deleteOrphanImages", "listVendorConnections", "fetchVendorProducts", "vendorDirectorySearch", "vendorDirectoryEndpoints", "saveVendorConnection", "deleteVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks", "previewSupplierOrder", "placeSupplierOrder", "listSupplierOrders", "checkSupplierOrderShipments", "cancelSupplierOrder", "listVendorApiLog", "getVendorApiLogEntry", "getBlanksToOrder", "freeShippingSuggestions", "listVendors", "saveVendor", "deleteVendor", "recordRestockOrder", "cancelRestockOrder", "getPublishState", "getPreviewLink", "previewDiscardShopChanges", "discardShopChanges", "applyRulePrices", "setOrgReady", "getShopWizard", "saveShopWizard", "listShopWizards", "deleteShopWizard", "buildProductFromBlank", "getBrandRules", "updateBrandRules", "listBrandApprovals", "addBrandApproval", "revokeBrandApproval",
     "receiveBlanks", "receiveBlankOrder", "addBlankSizes", "readInvoiceWithAi", "markBlankPricesChecked", "confirmProductPrices", "recomputeBlankAverageCosts", "getBlankVendorPriceHistory", "writeOffBlanks", "getBlankMovements", "voidInventoryMovement", "restoreInventoryMovement", "previewBlankCatchUp", "applyBlankCatchUp",
     "getBlankLinks", "setBlankLink", "saveBlankLinks", "deleteBlankLink", "getReadyToShip", "setReadyToShipQty", "makeForStock", "getFinishedGoodsMovements", "voidFinishedGoodsMovement",
     "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "getTransferMovements", "voidTransferMovement", "restoreTransferMovement",

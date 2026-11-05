@@ -742,7 +742,15 @@ function maintenanceText_(tasks) {
   });
 }
 
-export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit = [], awaitingPickup = [], awaitingBlanks = [], maintenanceDue = [], rushToSet = [], adminUrl = adminSiteUrl_(env) } = {}) {
+// Recurring expenses recorded automatically (migrations/0085): "Nov 5 · Design software — $29.99 (Monthly, Business card)".
+function recurringText_(list) {
+  return (list || []).map(x => {
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(String(x.date || "")) ? new Date(x.date + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }) : String(x.date || "");
+    return `${d} · ${x.description} — $${Number(x.amount || 0).toFixed(2)} (${[x.frequency, x.paidFrom].filter(Boolean).join(", ")})`;
+  });
+}
+
+export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit = [], awaitingPickup = [], awaitingBlanks = [], maintenanceDue = [], rushToSet = [], recurringRecorded = [], adminUrl = adminSiteUrl_(env) } = {}) {
   const tz = await timeZone_(env);   // Region setting, else TIMEZONE, else UTC
   const when = (iso) => new Date(iso).toLocaleString("en-US", { timeZone: tz, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
@@ -757,6 +765,7 @@ export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit
     `The morning check ran at ${when(new Date().toISOString())} and found nothing new ${since}: no new orders, payments, refunds, deliveries or problems.`,
     watching.length ? `Still being watched: ${watching.join(", ")}.` : "",
     maintenanceDue.length ? `Machine maintenance due: ${maintenanceText_(maintenanceDue).join("; ")}.` : "",
+    (recurringRecorded || []).length ? `Recurring expenses recorded: ${recurringText_(recurringRecorded).join("; ")}.` : "",
     adminUrl ? `Details: ${adminUrl}/#comms` : "Details: Tools → Communications in the program.",
   ].filter(Boolean);
   const html = `<div style="font-family:system-ui,sans-serif;font-size:14px;color:#222;line-height:1.5;">` +
@@ -772,8 +781,9 @@ export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit
 // sends sendDigestHeartbeatEmail instead, so a quiet morning still proves the roll-up ran).
 // pickedUp = orders the tracking check just marked shipped (carrier's first scan); awaitingPickup =
 // orders with a label the carrier hasn't scanned yet (listed for the record, never a reason to send).
-export async function sendDailyDigestEmail(env, { orders = [], notices = [], orgNames = {}, security = null, inTransit = [], pickedUp = [], awaitingPickup = [], issues = [], awaitingBlanks = [], priceReminder = null, belowTarget = [], maintenanceDue = [], rushToSet = [], adminUrl = adminSiteUrl_(env) }) {
+export async function sendDailyDigestEmail(env, { orders = [], notices = [], orgNames = {}, security = null, inTransit = [], pickedUp = [], awaitingPickup = [], issues = [], awaitingBlanks = [], priceReminder = null, belowTarget = [], maintenanceDue = [], rushToSet = [], recurringRecorded = [], adminUrl = adminSiteUrl_(env) }) {
   issues = issues || [];
+  recurringRecorded = recurringRecorded || [];
   rushToSet = rushToSet || [];
   belowTarget = belowTarget || [];
   const pr = priceReminder && ((priceReminder.blanks || []).length || (priceReminder.products || []).length) ? priceReminder : null;
@@ -899,6 +909,9 @@ export async function sendDailyDigestEmail(env, { orders = [], notices = [], org
     ${maintenanceDue.length ? `<h3 style="margin:22px 0 6px;font-size:17px">🔧 Machine maintenance due — ${maintenanceDue.length}</h3>
     <ul style="margin:0;padding-left:18px;font-size:14px">${maintenanceText_(maintenanceDue).map(x => `<li>${escHtml(x)}</li>`).join("")}</ul>
     ${adminUrl ? `<p style="margin:6px 0 0;font-size:13px"><a href="${escHtml(adminUrl)}/#maintenance">Machine maintenance</a></p>` : ""}` : ""}
+    ${recurringRecorded.length ? `<h3 style="margin:22px 0 6px;font-size:17px">🔁 Recurring expenses recorded — ${recurringRecorded.length}</h3>
+    <ul style="margin:0;padding-left:18px;font-size:14px">${recurringText_(recurringRecorded).map(x => `<li>${escHtml(x)}</li>`).join("")}</ul>
+    ${adminUrl ? `<p style="margin:6px 0 0;font-size:13px"><a href="${escHtml(adminUrl)}/#expenses">Expenses</a></p>` : ""}` : ""}
     <hr/><p style="font-size:12px;color:#666">%%BUSINESS%% — daily roll-up</p>
   </div>`;
   const noticeText = (x) => `  ${when(x.createdAt)}  ${KIND[x.kind] || x.kind}  ${x.orderId} (${orgName(x.orgId)})  ${x.summary}${x.detail ? " — " + x.detail : ""}`;
@@ -926,6 +939,7 @@ export async function sendDailyDigestEmail(env, { orders = [], notices = [], org
     belowTarget.length ? `PRODUCTS NOW BELOW YOUR PRICE TARGETS — ${belowTarget.length}\n` + belowTarget.map(p => `  ${p.name} (${orgName(p.orgId)})\n` + (p.problems || []).map(x => "    " + x).join("\n")).join("\n") : "",
     rushToSet.length ? `RUSH FEES TO SET — ${rushToSet.length}\n` + rushToSet.map(x => `  ${x.orderId} (${orgName(x.orgId)})  ${x.customerName}${x.dueDate ? "  needed by " + x.dueDate : ""}`).join("\n") : "",
     maintenanceDue.length ? `MACHINE MAINTENANCE DUE — ${maintenanceDue.length}\n` + maintenanceText_(maintenanceDue).map(x => "  " + x).join("\n") : "",
+    recurringRecorded.length ? `RECURRING EXPENSES RECORDED — ${recurringRecorded.length}\n` + recurringText_(recurringRecorded).map(x => "  " + x).join("\n") : "",
     adminUrl,
   ].filter(Boolean).join("\n\n");
   return send_(env, { to: ORDER_NOTIFICATION_EMAIL, subject, html, text });

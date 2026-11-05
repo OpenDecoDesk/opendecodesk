@@ -31,6 +31,7 @@ LEAGUE-MUG,Mugs,A mug,,,10,,,,,,,,,,TRUE
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt, ready) VALUES ('league','league','League','t','t',1);`);
   const count = async (sql) => Number((await d1.prepare(sql).first()).n);
   const sent = [];

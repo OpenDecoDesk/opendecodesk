@@ -55,7 +55,7 @@ import {
   getBoxPresets, setBoxPresets,
   addShippingPaidAmount, setShippingPaidAmount,
   getAllInventory, createInventoryItem, updateInventoryItem, deleteInventoryItem,
-  getAllBlanks, createBlank, updateBlank, deleteBlank, mergeBlanks, getBlanksToOrder, getFreeShippingCandidates, getBlankLowStock, getVendorShipping, setVendorShipping, vendorShippingFor, recordRestockOrder, listRestockOrders, cancelRestockOrder, importBlanksCsv, importProductsCsv, IMPORT_MAX_ROWS,
+  getAllBlanks, createBlank, updateBlank, deleteBlank, mergeBlanks, getBlanksToOrder, getFreeShippingCandidates, getBlankLowStock, getVendorShipping, vendorShippingFor, listVendors, saveVendor, deleteVendor, resolveVendorName, ensureVendor, recordRestockOrder, listRestockOrders, cancelRestockOrder, importBlanksCsv, importProductsCsv, IMPORT_MAX_ROWS,
   listThreads, createThread, updateThread, deleteThread, importThreadChart,
   listSpoolSizes, saveSpoolSize, deleteSpoolSize, saveThreadInventory, deleteThreadInventory,
   listNeedleSizes, saveNeedleSize, deleteNeedleSize, listNeedleTypes, saveNeedleType, deleteNeedleType, needleTypeExists,
@@ -106,6 +106,8 @@ import {
   getReconciliationData, setReconciled, clearReconciled, isReconciled, saveCsvMapping, previewExpenseRows, landedCostLines, spreadCents,
   SCHEDULE_C_LINES, DEDUCTION_TYPES, DEPRECIATION_METHODS, listExpenseCategories, getExpenseCategory, findExpenseCategoryByName,
   saveExpenseCategory, deleteExpenseCategory, listExpenses, getExpense, saveExpense, deleteExpense, expenseMonth, getExpenseSummary,
+  RECURRING_FREQUENCIES, recurringDueDates, recurringIndexAfter, listRecurringExpenses, getRecurringExpense, saveRecurringExpense, stopRecurringExpense,
+  deleteRecurringExpense, recordDueRecurringExpenses, getRecurringExpensesRecorded,
   getRefundedCents, getDepositPayments, linkPaymentsToCashout, cashoutNetCents_,
   receiveBlanks, writeOffBlanks, getBlankMovements, markBlankPricesChecked, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection,
   getSiteSetting, setSiteDomain,
@@ -184,7 +186,7 @@ function sampleOrder_({ example = "shipping", method = "Check", paid = false, sa
 const CATALOG_ADMIN_ACTIONS = new Set([
   "createOrg", "updateOrg", "listOrgsAdmin", "setupOrgDomain", "getOrgDomainStatus",
   "listProducts", "createProduct", "updateProduct", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "importProducts", "importBlanks", "getBlanksToOrder",
-  "freeShippingSuggestions", "getVendorShipping", "setVendorShipping", "recordRestockOrder", "cancelRestockOrder",
+  "freeShippingSuggestions", "listVendors", "saveVendor", "deleteVendor", "recordRestockOrder", "cancelRestockOrder",
   "getGlobalSettings", "updateGlobalSettings", "getSetupStatus", "getCloudflareSetup", "connectCloudflare", "getMachineSettings", "updateMachineSettings",
   "getShipFromAddress", "updateShipFromAddress", "getBusinessProfile", "updateBusinessProfile",
   "getLocaleSettings", "updateLocaleSettings", "getFeatures", "updateFeatures",
@@ -306,13 +308,14 @@ const MANAGER_ACTIONS = [
   "getBusinessProfile", "getLocaleSettings", "getSalesTaxSettings", "getShipFromAddress", "getSetupStatus", "setBoxPresets", "saveAccount",
   "saveMoneyDefaults", "listMoney", "saveMoneyEntry", "deleteMoneyEntry", "getReconciliation", "importStatement", "autoMatchStatement",
   "matchStatementLine", "unmatchStatementLine", "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth",
-  "listCashoutPayments", "analyzePricing", "getPricingSettings", "setVendorShipping",
+  "listCashoutPayments", "analyzePricing", "getPricingSettings", "saveVendor", "deleteVendor",
+  "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",   // recurring expenses (migrations/0085)
   "getBrandRules", "addBrandApproval", "revokeBrandApproval",   // brand rules (migrations/0075)
   "recomputeBlankAverageCosts", "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount", "saveExpenseCategory", "deleteExpenseCategory", "closePeriod", "reopenPeriod", "getAccountantExport",
 ];
 const STAFF_ACTIONS = [
   "listBrandApprovals",
-  "listOrgsAdmin", "listProducts", "createProduct", "updateProduct", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "importProducts", "importBlanks", "previewVendorBlanks", "applyVendorBlanks", "copyVendorImage", "suggestColorGroups", "removeBlankImages", "listVendorConnections", "fetchVendorProducts", "getBlanksToOrder", "freeShippingSuggestions", "getVendorShipping", "recordRestockOrder", "cancelRestockOrder",
+  "listOrgsAdmin", "listProducts", "createProduct", "updateProduct", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "importProducts", "importBlanks", "previewVendorBlanks", "applyVendorBlanks", "copyVendorImage", "suggestColorGroups", "removeBlankImages", "listVendorConnections", "fetchVendorProducts", "getBlanksToOrder", "freeShippingSuggestions", "listVendors", "recordRestockOrder", "cancelRestockOrder",
   "getMachineSettings", "getBoxPresets", "getInventory", "createInventoryItem", "updateInventoryItem", "deleteInventoryItem", "getBlankReadyCounts", "getBlanks",
   "createBlank", "updateBlank", "deleteBlank", "mergeBlanks", "listThreads", "saveThread", "deleteThread", "importThreadChart", "listSpoolSizes",
   "saveSpoolSize", "deleteSpoolSize", "saveThreadInventory", "deleteThreadInventory", "getNeedleSettings", "saveNeedleSize", "deleteNeedleSize",
@@ -373,6 +376,7 @@ const FEATURE_ACTIONS = {
     "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount",
     "listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory",
     "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses",
+    "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",
   ],
   // (Reading the ship-from address isn't behind the switch: Global settings shows it as soon as
   // Shipping is ticked, before it's saved on.)
@@ -436,6 +440,24 @@ export async function onRequestPost(context) {
   // never silently swallowed.
   const audit = (args) => context.waitUntil(insertAuditLog(env.DB, auditEntry(args))
     .catch((e) => console.error("AUDIT WRITE FAILED:", args.action, args.orderId || "", e)));
+  // Vendor names come from the vendor list (migrations/0084): an action that records one gets the list's spelling, and
+  // a name that isn't on the list is refused (400) — vendors are added with Manage…, never by typing them into a record.
+  // Called after the action's sign-in check. A missing field is left alone; "" means no vendor.
+  let vendorList_ = null;
+  const vendorName_ = async (raw) => resolveVendorName(env.DB, raw, { vendors: vendorList_ || (vendorList_ = await listVendors(env.DB)) });
+  const checkVendors_ = async () => {
+    try {
+      const a = body.action;
+      if (["createBlank", "updateBlank", "receiveBlanks", "receiveBlankOrder", "receiveTransferSheet", "recordRestockOrder",
+        "createFromStatementLine", "setFulfillmentStage", "bulkSetFulfillmentStage", "addBlankShipment"].includes(a) && typeof body.vendor === "string") body.vendor = await vendorName_(body.vendor);
+      if (a === "saveExpense" && body.expense && typeof body.expense.vendor === "string") body.expense.vendor = await vendorName_(body.expense.vendor);
+      if (a === "saveRecurringExpense" && body.recurring && typeof body.recurring.vendor === "string") body.recurring.vendor = await vendorName_(body.recurring.vendor);
+      return null;
+    } catch (e) {
+      if (!e || !e.userFacing) throw e;
+      return jsonResponse({ status: "error", message: e.message }, 400);
+    }
+  };
   // Destructive / history-rewriting actions: the audit row (with the full
   // before-values) is written FIRST, and the action is refused if it can't
   // be — so nothing irreversible ever happens without a record of it.
@@ -803,6 +825,7 @@ export async function onRequestPost(context) {
   if (RECON_ACTIONS.includes(body.action)) {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
     { const locked = await periodGuard(body); if (locked) return locked; }
     const bad = (message) => jsonResponse({ status: "error", message }, 400);
     const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -1043,7 +1066,7 @@ export async function onRequestPost(context) {
           await env.DB.batch(feeToPayments.map(f => env.DB.prepare("UPDATE order_payments SET feeCents = feeCents + ? WHERE id = ? AND feeCents = 0").bind(f.cents, f.paymentId)));
         } else if (feeGroup) {
           const venmoish = feeGroup.hasVenmo;
-          feeExpenseId = await saveExpense(env.DB, 0, { date: l.lineDate, categoryId: feeCat.id, amount: diffCents / 100, vendor: venmoish ? "Venmo" : (anyCard ? "Stripe" : ""),
+          feeExpenseId = await saveExpense(env.DB, 0, { date: l.lineDate, categoryId: feeCat.id, amount: diffCents / 100, vendor: await ensureVendor(env.DB, venmoish ? "Venmo" : (anyCard ? "Stripe" : "")),
             description: `${venmoish ? "Venmo fees — cash-out" : anyCard ? "Stripe payout difference — payout" : "Deposit shortfall — deposit"} ${l.lineDate} (${orderList.slice(0, 6).join(", ")}${orderList.length > 6 ? ", …" : ""})`.slice(0, 300),
             businessUsePct: 100, receiptKey: "", receiptName: "", placedInService: feeCat.deductionType === "depreciation" ? l.lineDate : null,
             depMethod: feeCat.deductionType === "depreciation" ? "ask_cpa" : null, vendorChargedTax: true, accountId: feeGroup.accountId, paidPersonally: false });
@@ -1270,15 +1293,27 @@ export async function onRequestPost(context) {
 
   // ---- Expenses (migrations/0012) — Schedule C Part II + Form 4562 facts --------
   const EXPENSE_ACTIONS = ["listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory",
-    "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses"];
+    "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses",
+    "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",
+    "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense"];
   if (EXPENSE_ACTIONS.includes(body.action)) {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
     { const locked = await periodGuard(body); if (locked) return locked; }
     const bad = (message) => jsonResponse({ status: "error", message }, 400);
     const ymd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) && !isNaN(Date.parse(v + "T00:00:00Z"));
     const pct = (v, lo) => Number.isInteger(Number(v)) && Number(v) >= lo && Number(v) <= 100;
-    const meta = { scheduleCLines: SCHEDULE_C_LINES, deductionTypes: DEDUCTION_TYPES, depreciationMethods: DEPRECIATION_METHODS };
+    const meta = { scheduleCLines: SCHEDULE_C_LINES, deductionTypes: DEDUCTION_TYPES, depreciationMethods: DEPRECIATION_METHODS, frequencies: RECURRING_FREQUENCIES };
+    const today = await localToday(env);
+    // Recurring expenses that came due are recorded before anything is listed (the daily run does it too) — so a rule
+    // due today shows up after 6 AM, and a missed daily run is made up.
+    const recordDue_ = async (opts = {}) => {
+      const res = await recordDueRecurringExpenses(env.DB, today, opts);
+      for (const x of res.recorded) audit({ orgId: null, orderId: null, action: "expense.created",
+        detail: { id: x.id, recurringId: x.ruleId, date: x.date, amount: x.amount, description: x.description } });
+      return res;
+    };
 
     if (body.action === "listExpenseCategories") {
       return jsonResponse({ status: "ok", categories: await listExpenseCategories(env.DB), ...meta });
@@ -1312,6 +1347,7 @@ export async function onRequestPost(context) {
       const cat = id ? await getExpenseCategory(env.DB, id) : null;
       if (!cat) return jsonResponse({ status: "error", message: "Category not found" }, 404);
       if (cat.expenseCount > 0) return bad(`"${cat.name}" is used by ${cat.expenseCount} expense${cat.expenseCount === 1 ? "" : "s"} — move them to another category first`);
+      if (cat.recurringCount > 0) return bad(`"${cat.name}" is used by ${cat.recurringCount} recurring expense${cat.recurringCount === 1 ? "" : "s"} — change ${cat.recurringCount === 1 ? "its" : "their"} category first`);
       const auditErr = await auditStrict({ orgId: null, orderId: null, action: "expense_category.deleted", detail: cat });
       if (auditErr) return auditErr;
       if (!(await deleteExpenseCategory(env.DB, id))) return bad("That category is in use");
@@ -1320,8 +1356,10 @@ export async function onRequestPost(context) {
     if (body.action === "listExpenses" || body.action === "getExpenseReport") {
       const from = String(body.dateFrom || ""), to = String(body.dateTo || "");
       if (!ymd(from) || !ymd(to)) return bad("Invalid date range — expected YYYY-MM-DD");
-      const [expenses, summary] = await Promise.all([listExpenses(env.DB, from, to), getExpenseSummary(env.DB, from, to)]);
-      return jsonResponse({ status: "ok", dateFrom: from, dateTo: to, expenses, summary, ...meta });
+      if (body.action === "listExpenses") { try { await recordDue_(); } catch (e) { console.error("Recording recurring expenses failed (listing anyway):", e); } }
+      const [expenses, summary, recurring] = await Promise.all([listExpenses(env.DB, from, to), getExpenseSummary(env.DB, from, to),
+        body.action === "listExpenses" ? listRecurringExpenses(env.DB).catch(() => []) : Promise.resolve(undefined)]);
+      return jsonResponse({ status: "ok", dateFrom: from, dateTo: to, expenses, summary, ...(recurring ? { recurring } : {}), ...meta });
     }
     if (body.action === "saveExpense") {
       const x = body.expense || {};
@@ -1391,7 +1429,18 @@ export async function onRequestPost(context) {
         rows.push({ date: r.date, description: String(r.description || "").trim().slice(0, 300), vendor: String(r.vendor || "").trim().slice(0, 120),
           amount, amountCents: Math.round(amount * 100), categoryId: Number(r.categoryId) || 0 });
       }
-      if (body.action === "previewExpenseImport") return jsonResponse({ status: "ok", rows: await previewExpenseRows(env.DB, rows) });
+      // A file's vendor column (migrations/0084): a vendor on the list gets the list's spelling; any other name is
+      // left blank — the preview says which, so it can be added with Manage… and the file imported again.
+      const vendorNote = [];
+      for (const r of rows) {
+        if (!r.vendor) continue;
+        try { r.vendor = await vendorName_(r.vendor); }
+        catch (e) { if (!e || !e.userFacing) throw e; vendorNote.push(r.vendor); r.vendorNotListed = r.vendor; r.vendor = ""; }
+      }
+      if (body.action === "previewExpenseImport") {
+        const prev = await previewExpenseRows(env.DB, rows);
+        return jsonResponse({ status: "ok", rows: prev.map((x, i) => ({ ...x, vendor: rows[i].vendor, vendorNotListed: rows[i].vendorNotListed || "" })) });
+      }
       const paidPersonally = body.paidPersonally === true;
       let accountId = null;
       if (!paidPersonally) {
@@ -1424,6 +1473,75 @@ export async function onRequestPost(context) {
       if (auditErr) return auditErr;
       await deleteExpense(env.DB, id);
       return jsonResponse({ status: "ok" });
+    }
+
+    // ---- Recurring expenses (migrations/0085) — recorded automatically on each date they come due ----
+    if (body.action === "listRecurringExpenses") {
+      return jsonResponse({ status: "ok", recurring: await listRecurringExpenses(env.DB), frequencies: RECURRING_FREQUENCIES });
+    }
+    if (body.action === "saveRecurringExpense") {
+      const x = body.recurring || {};
+      const id = x.id ? Number(x.id) : 0;
+      const before = id ? await getRecurringExpense(env.DB, id) : null;
+      if (id && (!before || before.deletedAt)) return jsonResponse({ status: "error", message: "Recurring expense not found" }, 404);
+      const description = String(x.description || "").trim().slice(0, 300);
+      if (!description) return bad("Description is required");
+      const amount = Math.round(Number(x.amount) * 100) / 100;
+      if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) return bad("Amount must be a positive number");
+      if (x.refund) return bad("A refund can't repeat — record it as a single expense");
+      if (!RECURRING_FREQUENCIES[x.frequency]) return bad("Choose how often it repeats");
+      if (!ymd(x.startDate)) return bad("The first date must be YYYY-MM-DD");
+      const yearAhead = new Date(Date.parse(today + "T12:00:00Z") + 366 * 86400000).toISOString().slice(0, 10);
+      if (x.startDate > yearAhead) return bad("The first date can be at most a year from today");
+      const endDate = x.endDate ? String(x.endDate) : "";
+      if (endDate && !ymd(endDate)) return bad("The end date must be YYYY-MM-DD");
+      if (endDate && endDate < x.startDate) return bad("The end date can't be before the first date");
+      if (before && before.lastRecorded && x.startDate !== before.startDate) {
+        return bad("The first date can't change once an expense has been recorded from it — stop this one and add a new one instead");
+      }
+      const cat = await getExpenseCategory(env.DB, Number(x.categoryId));
+      if (!cat) return bad("Choose a category");
+      if (cat.deductionType === "depreciation") return bad("Capital equipment (a Depreciation category) can't repeat — record each purchase on its own");
+      const businessUsePct = x.businessUsePct === undefined || x.businessUsePct === "" ? 100 : Number(x.businessUsePct);
+      if (!pct(businessUsePct, 1)) return bad("Business-use % must be a whole number from 1 to 100");
+      const paidPersonally = x.paidPersonally === true;
+      let accountId = null;
+      if (!paidPersonally) {
+        const acct = x.accountId ? await getAccount(env.DB, x.accountId) : null;
+        if (!acct || !acct.active) return bad("Choose which account pays it (or Personal funds)");
+        accountId = acct.id;
+      }
+      const fields = { description, categoryId: cat.id, amount, vendor: String(x.vendor || "").trim().slice(0, 120), accountId, paidPersonally,
+        businessUsePct, vendorChargedTax: x.vendorChargedTax !== false, frequency: x.frequency, startDate: x.startDate, endDate };
+      // What saving would record straight away (a first date in the past) mustn't land in a closed month.
+      const nextIndex = before ? recurringIndexAfter(fields, before.lastRecorded) : 0;
+      const due = recurringDueDates({ ...fields, nextIndex }, today);
+      for (const m of [...new Set(due.map(d => d.slice(0, 7)))]) {
+        if (await isMonthClosed(env.DB, m)) {
+          const label = new Date(m + "-15T12:00:00Z").toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+          return jsonResponse({ status: "error", message: `${label} is closed (already filed), and this would record an expense in it — pick a later first date, or reopen ${label} under Periods & Export.` }, 409);
+        }
+      }
+      if (id) {
+        const auditErr = await auditStrict({ orgId: null, orderId: null, action: "recurring_expense.updated", detail: { id, from: before, to: fields } });
+        if (auditErr) return auditErr;
+      }
+      const savedId = await saveRecurringExpense(env.DB, id, fields);
+      if (!id) audit({ orgId: null, orderId: null, action: "recurring_expense.created", detail: { id: savedId, ...fields, category: cat.name } });
+      const res = await recordDue_({ ids: [savedId] });
+      const rule = await getRecurringExpense(env.DB, savedId);
+      return jsonResponse({ status: "ok", recurring: rule, recorded: res.recorded, skipped: res.skipped, nextDate: rule ? rule.nextDate : "" });
+    }
+    if (body.action === "stopRecurringExpense" || body.action === "deleteRecurringExpense") {
+      const id = Number(body.id);
+      const rule = id ? await getRecurringExpense(env.DB, id) : null;
+      if (!rule || rule.deletedAt) return jsonResponse({ status: "error", message: "Recurring expense not found" }, 404);
+      const stop = body.action === "stopRecurringExpense";
+      const auditErr = await auditStrict({ orgId: null, orderId: null, action: stop ? "recurring_expense.stopped" : "recurring_expense.deleted",
+        detail: stop ? { id, description: rule.description, endDate: today, previousEndDate: rule.endDate || null } : rule });
+      if (auditErr) return auditErr;
+      if (stop) await stopRecurringExpense(env.DB, id, today); else await deleteRecurringExpense(env.DB, id);
+      return jsonResponse({ status: "ok", recurring: await listRecurringExpenses(env.DB) });
     }
   }
 
@@ -1460,7 +1578,9 @@ export async function onRequestPost(context) {
       maintenanceDue: (await getFeatures(env.DB).catch(() => ({ production: true }))).production
         ? (await listMaintenanceTasks(env.DB).catch(() => [])).filter(t => t.status === "due") : [],
       // Rush orders whose fee is still to follow (migrations/0082).
-      rushToSet: (await getRushFeesToSet(env.DB).catch(() => [])).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })) });
+      rushToSet: (await getRushFeesToSet(env.DB).catch(() => [])).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
+      // Recurring expenses recorded since the last roll-up (migrations/0085) — the roll-up lists them.
+      recurringRecorded: await getRecurringExpensesRecorded(env.DB, (state && state.sentAt) || new Date(Date.now() - 86400000).toISOString()).catch(() => []) });
   }
 
   // ---- sendTestEmail — one test message, and what the email provider said (Communications page) ----
@@ -2202,6 +2322,7 @@ export async function onRequestPost(context) {
   if (body.action === "setFulfillmentStage") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
     if (!body.org || !body.orderId || !body.stage) {
       return jsonResponse({ status: "error", message: "Missing org, orderId, or stage" }, 400);
     }
@@ -2266,6 +2387,7 @@ export async function onRequestPost(context) {
   if (body.action === "addBlankShipment") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
     const itemIds = Array.isArray(body.itemIds) ? body.itemIds.map(Number).filter(Boolean) : [];
     if (!itemIds.length) return jsonResponse({ status: "error", message: "Pick at least one line item" }, 400);
     try {
@@ -2307,6 +2429,7 @@ export async function onRequestPost(context) {
   if (body.action === "bulkSetFulfillmentStage") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
     if (!Array.isArray(body.orderIds) || !body.stage) {
       return jsonResponse({ status: "error", message: "Missing orderIds or stage" }, 400);
     }
@@ -2658,6 +2781,7 @@ export async function onRequestPost(context) {
   if (CATALOG_ADMIN_ACTIONS.has(body.action)) {
     const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
 
     // Sets up the org's subdomain as a custom domain (customDomain.js). Never throws: the
     // result carries {configured:false} when the CF_* env vars aren't set, or {error} on failure.
@@ -3550,10 +3674,13 @@ export async function onRequestPost(context) {
     // Inventory → Blanks to Order: what to buy from each supplier for the open orders (read-only).
     if (body.action === "getBlanksToOrder") {
       const [report, shipping, restockOrders] = await Promise.all([getBlanksToOrder(env.DB, { includeUnpaid: !!body.includeUnpaid }), getVendorShipping(env.DB), listRestockOrders(env.DB)]);
-      // Each supplier's free-shipping threshold (by vendor name), and every vendor named on a blank (Start an order for…).
-      for (const sup of report.suppliers) sup.freeShipping = vendorShippingFor(shipping, sup.vendor);
-      const { results: vend } = await env.DB.prepare("SELECT vendor, COUNT(*) AS n FROM blanks WHERE vendor <> '' GROUP BY vendor ORDER BY vendor").all();
-      const vendors = vend.map(v => ({ vendor: v.vendor, blanks: Number(v.n), freeShipping: vendorShippingFor(shipping, v.vendor) }));
+      // Each supplier's free shipping (from the vendor list), and every vendor for blanks on the list (Start an order for…).
+      for (const sup of report.suppliers) {
+        sup.freeShipping = vendorShippingFor(shipping, sup.vendor);
+        const v = shipping.find(x => x.name.toLowerCase() === String(sup.vendor || "").toLowerCase());
+        sup.vendorId = v ? v.id : null;
+      }
+      const vendors = shipping.filter(v => v.forBlanks && !v.hidden).map(v => ({ id: v.id, vendor: v.name, freeShipping: v.freeShipping }));
       return jsonResponse({ status: "ok", ...report, vendors, restockOrders });
     }
     // "Get me to free shipping" (2026-10): the vendor's blanks and their use, its threshold, and whether it can be
@@ -3564,20 +3691,31 @@ export async function onRequestPost(context) {
       const [candidates, shipping] = await Promise.all([getFreeShippingCandidates(env.DB, vendor), getVendorShipping(env.DB)]);
       return jsonResponse({ status: "ok", vendor, freeShipping: vendorShippingFor(shipping, vendor), candidates });
     }
-    if (body.action === "getVendorShipping") {
-      const saved = await getVendorShipping(env.DB);
-      const { results: vend } = await env.DB.prepare("SELECT vendor, COUNT(*) AS n FROM blanks WHERE vendor <> '' GROUP BY vendor ORDER BY vendor").all();
-      return jsonResponse({ status: "ok", saved, vendors: vend.map(v => ({ vendor: v.vendor, blanks: Number(v.n), freeShipping: vendorShippingFor(saved, v.vendor) })) });
+    // ---- The vendor list (migrations/0084) — Manage… beside every vendor picker ----
+    if (body.action === "listVendors") {
+      return jsonResponse({ status: "ok", vendors: await listVendors(env.DB, { withUse: !!body.withUse }) });
     }
-    if (body.action === "setVendorShipping") {
-      const vendor = String(body.vendor || "").trim();
+    if (body.action === "saveVendor") {
       try {
-        const r = await setVendorShipping(env.DB, vendor, { over: body.over, minQty: body.minQty, reset: !!body.reset });
-        audit({ orgId: null, orderId: null, action: "settings.vendor_shipping", detail: { vendor, from: r.before, to: r.after, reset: !!body.reset } });
-        return jsonResponse({ status: "ok", vendor, freeShipping: r.after });
+        const r = await saveVendor(env.DB, body.vendor || {});
+        const fsText = (v) => v ? { forBlanks: v.forBlanks, hidden: v.hidden, freeShipping: v.freeShipping, noFreeShipping: v.noFreeShipping } : null;
+        audit({ orgId: null, orderId: null, action: r.before ? "vendor.updated" : "vendor.created",
+          detail: { id: r.vendor.id, name: r.vendor.name, ...(r.before && r.before.name !== r.vendor.name ? { renamedFrom: r.before.name, recordsRenamed: r.renamed } : {}),
+            from: fsText(r.before), to: fsText(r.vendor) } });
+        return jsonResponse({ status: "ok", vendor: r.vendor, renamed: r.renamed, vendors: await listVendors(env.DB, { withUse: true }) });
       } catch (e) {
         if (!e || !e.userFacing) throw e;
         return jsonResponse({ status: "error", message: e.message }, 400);
+      }
+    }
+    if (body.action === "deleteVendor") {
+      try {
+        const v = await deleteVendor(env.DB, body.id);
+        audit({ orgId: null, orderId: null, action: "vendor.deleted", detail: { id: v.id, name: v.name } });
+        return jsonResponse({ status: "ok", vendors: await listVendors(env.DB, { withUse: true }) });
+      } catch (e) {
+        if (!e || !e.userFacing) throw e;
+        return jsonResponse({ status: "error", message: e.message }, 409);
       }
     }
     if (body.action === "recordRestockOrder") {
@@ -4048,7 +4186,7 @@ export async function onRequestPost(context) {
         // counted as on its way so the restock isn't suggested again (restockOnOrder_ in db.js).
         sendLines = plan.lines.map(l => ({ blankId: l.blankId, blank: l.blank, color: l.color, size: l.size, style: l.style, productId: l.productId, partId: l.partId, qty: l.qty, unitCents: l.unitCents,
           restockQty: Math.min(l.qty, Math.max(0, Math.floor(Number(l.restockQty) || 0))) }));
-        const id = await insertSupplierOrder(env.DB, { connectionId: conn.id, vendor: conn.name, environment: conn.environment, poNumber, carrier: method.carrier, service: method.service,
+        const id = await insertSupplierOrder(env.DB, { connectionId: conn.id, vendor: await ensureVendor(env.DB, conn.name, { forBlanks: true }), environment: conn.environment, poNumber, carrier: method.carrier, service: method.service,
           shipTo, totalCents: plan.totalCents, lines: sendLines, itemIds, createdBy: adminActor(request) });
         if (!id) return jsonResponse({ status: "error", message: `PO number ${poNumber} has already been used — each order needs its own.` }, 409);
         order = await getSupplierOrder(env.DB, id);
@@ -4067,7 +4205,7 @@ export async function onRequestPost(context) {
       }
       await setSupplierOrderResult(env.DB, order.id, result);
       let marked = [];
-      if (result.status === "placed") marked = await markItemsBlankOrdered(env.DB, order.itemIds, { vendor: conn.name, vendorOrderId: order.poNumber });
+      if (result.status === "placed") marked = await markItemsBlankOrdered(env.DB, order.itemIds, { vendor: await ensureVendor(env.DB, conn.name, { forBlanks: true }), vendorOrderId: order.poNumber });
       if (brandCheck && brandCheck.needsApproval.length && overrideReason)
         audit({ orgId: null, orderId: null, action: "supplier_order.approval_overridden",
           detail: { id: order.id, poNumber: order.poNumber, reason: overrideReason, styles: brandCheck.needsApproval.map(n => ({ brand: n.brand, style: n.style, pieces: n.pieces, products: n.missing.map(m => m.productId) })) } });

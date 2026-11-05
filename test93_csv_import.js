@@ -41,6 +41,7 @@ const P_S700 = prodRow("LEAGUE-S700", "Hoodies & Layers", "Champion Powerblend P
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt, ready) VALUES ('league','league','League','t','t',1), ('other','other','Other','t','t',1);`);
   const count = async (sql) => Number((await d1.prepare(sql).first()).n);
 
@@ -189,6 +190,7 @@ const P_S700 = prodRow("LEAGUE-S700", "Hoodies & Layers", "Champion Powerblend P
   const d2 = await createD1();
   d2._raw.exec(read("testlib/schema-pre-0006.sql"));
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d2.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d2);
   const withColors = { ...B_64800, colors: "Navy|Black| navy |White" };
   let cv = await lib.importBlanksCsv(d2, [withColors], { dryRun: true });
   ok("preview counts the colors (repeats dropped)", cv.results[0].colors.join("|") === "Navy|Black|White");

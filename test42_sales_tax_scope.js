@@ -30,6 +30,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
     INSERT INTO products (productId, orgId, type, name, pricingMode, flatPrice, sizePricing, createdAt, updatedAt) VALUES
       ('polo','prime','shirt','Polo','flat',16,'{}','t','t'), ('sew','prime','custom','Embroider your item','flat',10,'{}','t','t');`);
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   const call = async (body) => {
     const res = await api({ env: { DB: d1 }, waitUntil: (p) => p.then(() => {}, () => {}),
       request: { url: "https://admin.example.com/api/orders", json: async () => Object.assign({ key: "x", org: "prime" }, body), headers: { get: () => null } } });

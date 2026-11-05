@@ -34,6 +34,7 @@ const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt, ready) VALUES ('team','team','TEAM','t','t',1);`);
   const env = { DB: d1 };
   const call = async (body, { role = "admin" } = {}) => { const res = await api({ env, waitUntil: (p) => Promise.resolve(p).catch(() => {}),
@@ -240,7 +241,7 @@ const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
   ok("Apply uploads the ticked images from the folder (only White's — Gold was unticked) into the blanks folder", w.__uploads.sort().join() === "5100_white_bm.jpg|blanks,5100_white_fm.jpg|blanks");
   const blanksNow = await lib.getAllBlanks(d1);
   const c2 = blanksNow.find(b => b.sku === "5100");
-  ok("…creates the new blank with its picked color, images, description and S&S prices", applied.length === 1 && c2 && c2.vendor === "S&S Activewear" && c2.colors.map(c => c.color).join() === "White" &&
+  ok("…creates the new blank with its picked color, images, description and S&S prices (the vendor as the list spells it)", applied.length === 1 && c2 && c2.vendor === "S&S" && c2.colors.map(c => c.color).join() === "White" &&
     c2.colors[0].images.length === 2 && c2.description === "Light and fast." && c2.sizes.find(z => z.size === "2XL").vendorPrice === 4.11);
   ok("…and updates the SanMar blank's prices", size(k8, "Black", "S").vendorPriceCents === 1550 && size(k8, "Oxford Heather", "S").vendorPriceCents === 1731);
   ok("…then reports back", Array.isArray(doneWith) && doneWith.length === 2);

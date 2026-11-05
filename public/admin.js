@@ -412,19 +412,7 @@ function showBlankOrderModal(title){
         <label style="font-weight:600;font-size:15px;margin-bottom:14px;display:block;">${escapeHtml(title)}</label>
 
         <label for="blankVendorSelect" style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">Vendor</label>
-        <select id="blankVendorSelect" style="width:100%;padding:8px 10px;border:1px solid var(--border,#ccc);border-radius:5px;font-size:14px;margin-bottom:10px;background:var(--surface,#fff);color:var(--ink,#111);">
-          <option value="SanMar">SanMar</option>
-          <option value="S&S">S&amp;S</option>
-          <option value="Amazon">Amazon</option>
-          <option value="OttoCap">OttoCap</option>
-          <option value="Other">Other…</option>
-        </select>
-
-        <div id="blankVendorOtherWrap" style="display:none;margin-bottom:10px;">
-          <label for="blankVendorOther" style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">Vendor name</label>
-          <input type="text" id="blankVendorOther" placeholder="Enter vendor name" maxlength="100"
-                 style="width:100%;padding:8px 10px;border:1px solid var(--border,#ccc);border-radius:5px;font-size:14px;box-sizing:border-box;background:var(--surface,#fff);color:var(--ink,#111);">
-        </div>
+        <div style="margin-bottom:10px;">${vendorPickerHtml_("blankVendorSelect", "", { blanks: true, style: "flex:1;min-width:0;padding:8px 10px;border:1px solid var(--border,#ccc);border-radius:5px;font-size:14px;background:var(--surface,#fff);color:var(--ink,#111);" })}</div>
 
         <label for="blankVendorOrderId" style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">Supplier order # <span style="font-weight:400;color:var(--ink-soft,#888)">(optional)</span></label>
         <input type="text" id="blankVendorOrderId" placeholder="e.g. PO-12345" maxlength="100"
@@ -445,32 +433,22 @@ function showBlankOrderModal(title){
     document.body.appendChild(overlay);
 
     const vendorSelect = overlay.querySelector("#blankVendorSelect");
-    const otherWrap = overlay.querySelector("#blankVendorOtherWrap");
-    const otherInput = overlay.querySelector("#blankVendorOther");
     const errEl = overlay.querySelector("#blankOrderFormErr");
-
-    vendorSelect.addEventListener("change", () => {
-      const isOther = vendorSelect.value === "Other";
-      otherWrap.style.display = isOther ? "" : "none";
-      if(isOther) otherInput.focus();
-    });
 
     const finish = (result) => { document.body.removeChild(overlay); resolve(result); };
 
     overlay.querySelector("#blankOrderForm").addEventListener("submit", (e) => {
       e.preventDefault();
-      const isOther = vendorSelect.value === "Other";
-      const otherName = otherInput.value.trim();
-      if(isOther && !otherName){
-        errEl.textContent = "Enter a vendor name.";
+      if(!vendorSelect.value){
+        errEl.textContent = "Pick the vendor (Manage… adds one).";
         errEl.style.display = "";
-        otherInput.focus();
+        vendorSelect.focus();
         return;
       }
       const at = whenFrom_(overlay, "blankOrderWhen");
       if(!at) return;
       finish({
-        vendor: isOther ? otherName : vendorSelect.value,
+        vendor: vendorSelect.value,
         vendorOrderId: overlay.querySelector("#blankVendorOrderId").value.trim(),
         estimatedDelivery: overlay.querySelector("#blankEstDelivery").value,
         at
@@ -7575,15 +7553,14 @@ const QUICK_BLANK_COLORS_ = ["Black", "White", "Navy", "Royal", "Red", "Maroon",
   "Charcoal", "Heather Grey", "Light Blue", "Pink", "Brown", "Khaki", "Sand"];
 async function showQuickBlank_(onDone){
   await loadProductCategories_();
-  let vendors = [];
-  try { vendors = [...new Set(((await hoopApi_({ action: "getBlanks" })).blanks || []).map(b => b.vendor).filter(Boolean))].sort(); } catch (e) {}
+  try { await loadVendors_(); } catch (e) {}
   const sizes = SIZE_ORDER_ALL.concat(["OSFA"]);
   const chip = (cls, v, on) => `<label class="wiz-chip"><input type="checkbox" class="${cls}" value="${escapeHtml(v)}"${on ? " checked" : ""}> ${escapeHtml(v)}</label>`;
   const { ov, close } = inventoryModal_("Enter a blank", `
     <div class="wiz-body">
       <label class="wiz-field">Name <input type="text" id="qbName" class="wiz-input" maxlength="200" placeholder="e.g. Gildan 5000 Heavy Cotton Tee"></label>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-        <label class="wiz-field">Vendor <input type="text" id="qbVendor" class="wiz-input" maxlength="100" list="qbVendors" placeholder="e.g. SanMar"><datalist id="qbVendors">${vendors.map(v => `<option value="${escapeHtml(v)}">`).join("")}</datalist></label>
+        <label class="wiz-field">Vendor ${vendorPickerHtml_("qbVendor", "", { blanks: true, style: "flex:1;min-width:0;" })}</label>
         <label class="wiz-field">Category <span class="pick-with-manage"><select id="qbType" class="wiz-input">${categoryOptionsHtml_("")}</select>${manageCategoriesBtn_('data-select="#qbType"')}</span></label>
       </div>
       <div class="wiz-field">Colors it comes in
@@ -8544,9 +8521,6 @@ async function renderGlobalSettings(app){
         <div id="gRushRule">${rushRuleFieldsHtml_("gRush", rush.rule, { allowOff: true })}</div>
         <label class="checkbox-row"><input type="checkbox" id="gRushTaxable" ${rush.taxable ? "checked" : ""}> Rush fee is taxable — it carries sales tax like the items (inside the fee when prices include tax, added to it when tax is added on top), except on tax-exempt and out-of-state orders</label>
 
-        <h2 style="margin:22px 0 12px;">Vendor free shipping</h2>
-        <div class="admin-note" style="margin-bottom:14px;">When an order from a vendor reaches its amount (or piece count) it ships free. Blanks to Order shows how far each vendor's order is from it, with <strong>Get me to free shipping</strong>. One row per vendor named on a blank; each change is saved at once.</div>
-        <div id="gVendorShipping"><div class="admin-summary">Loading&hellip;</div></div>
 
         </div>
 
@@ -8559,27 +8533,11 @@ async function renderGlobalSettings(app){
       </div>
     `;
     wireRushRule_("gRush");
-    loadVendorShippingSettings_();
     wireGlobalFeatures_(ctx);
     try { if (sessionStorage.getItem("oddSettingsSaved")) { sessionStorage.removeItem("oddSettingsSaved"); showToast("Global settings saved."); } } catch (e) {}
   }catch(e){
     document.getElementById("adminPanel").innerHTML = `<div class="admin-empty">Could not reach the server.</div>`;
   }
-}
-// Global settings → Vendor free shipping: every vendor named on a blank, its free shipping and Change… (saved at once).
-async function loadVendorShippingSettings_(){
-  const box = document.getElementById("gVendorShipping");
-  if (!box) return;
-  try {
-    const r = await hoopApi_({ action: "getVendorShipping" });
-    const list = r.vendors || [];
-    box.innerHTML = list.length ? `<table style="border-collapse:collapse;font-size:13px;">${list.map((v, i) => `<tr>
-      <td style="padding:4px 12px 4px 0;font-weight:600;">${escapeHtml(v.vendor)}</td>
-      <td style="padding:4px 12px 4px 0;">${v.freeShipping ? "Free " + escapeHtml(freeShipText_(v.freeShipping)) + (v.freeShipping.isDefault ? ` <span style="color:#888;">(default)</span>` : "") : `<span style="color:#888;">No free shipping</span>`}</td>
-      <td style="padding:4px 0;"><button type="button" class="admin-btn gvs-edit" data-i="${i}" style="padding:2px 10px;font-size:12px;">Change…</button></td></tr>`).join("")}</table>`
-      : `<div style="font-size:13px;color:#888;">No blank has a vendor yet.</div>`;
-    box.querySelectorAll(".gvs-edit").forEach(b => b.onclick = () => { const v = list[Number(b.dataset.i)]; showVendorShippingForm_(v.vendor, v.freeShipping, loadVendorShippingSettings_); });
-  } catch (e) { box.innerHTML = `<div class="admin-empty">${escapeHtml(e.message || "Couldn't load.")}</div>`; }
 }
 // One-time maintenance: records Stripe's fee on past card payments that
 // predate fee tracking. Safe to run again (only fills fees still at $0).
@@ -13767,7 +13725,7 @@ function showPdfImportPreview_(body, parsed, { file, blanks, close, onDone, show
   body.innerHTML = `${aiNote}
     <div style="font-size:13px;color:#333;margin-bottom:10px;">Found ${matched.length} item${matched.length === 1 ? "" : "s"} in ${escapeHtml(file.name)}. Untick anything you don't want, and pick which existing blank each one is (or leave "New blank" to create it). The next screen lets you check every size/qty/cost before anything is saved.</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-      <label style="font-size:12px;font-weight:600;">Vendor<br><input id="piVendor" value="${escapeHtml(parsed.vendor)}" style="${inp}width:150px;"></label>
+      <label style="font-size:12px;font-weight:600;">Vendor<br>${vendorPickerHtml_("piVendor", parsed.vendor, { blanks: true, style: inp + "width:150px;" })}</label>
       <label style="font-size:12px;font-weight:600;">Invoice / order #<br><input id="piRef" value="${escapeHtml(parsed.vendorRef)}" style="${inp}width:130px;"></label>
       <label style="font-size:12px;font-weight:600;">Date<br><input id="piDate" type="date" value="${escapeHtml(parsed.receivedAt || new Date().toISOString().slice(0, 10))}" style="${inp}"></label>
       <label style="font-size:12px;font-weight:600;">Shipping &amp; other costs<br>$<input id="piShip" type="number" min="0" step="0.01" value="${parsed.extraCost ? Number(parsed.extraCost).toFixed(2) : ""}" style="${inp}width:90px;"></label>
@@ -14122,9 +14080,12 @@ async function renderBlanksToOrder(app){
       const s = t.suppliers[Number(b.dataset.si)];
       showFreeShipping_(s.vendor, s.rows, { supplier, onDone: afterOrder });
     });
-    body.querySelectorAll(".bto-fs-edit").forEach(b => b.onclick = () => {
+    body.querySelectorAll(".bto-fs-edit").forEach(b => b.onclick = async () => {
       const s = t.suppliers[Number(b.dataset.si)];
-      showVendorShippingForm_(s.vendor, s.freeShipping, load);
+      try { await loadVendors_(true); } catch (e) {}
+      const v = (_vendorList || []).find(x => x.id === s.vendorId) || vendorMatch_(s.vendor);
+      if (!v) { showToast(`${s.vendor || "These blanks"} ${s.vendor ? "isn't in the vendor list" : "have no vendor"} — set the blanks' vendor, or add it with Manage…`, true); return; }
+      showVendorFormModal_(v, () => load());
     });
     body.querySelectorAll(".bto-rso-cancel").forEach(b => b.onclick = async () => {
       if (!await askConfirm_("Cancel this restock order? Its blanks will be suggested again.")) return;
@@ -14175,17 +14136,19 @@ async function renderBlanksToOrder(app){
 }
 
 // ---- Free shipping per vendor + "Get me to free shipping" (2026-10) ----
-// A vendor ships free over a dollar amount (SanMar, S&S: $200) or at a piece count — kept per vendor
-// NAME (the blank's Vendor field), so it works with or without a vendor connection (setVendorShipping in db.js).
+// A vendor ships free over a dollar amount (SanMar, S&S: $200; 0 = every order) or at a piece count — set on the
+// vendor in the vendor list (Manage vendors; migrations/0084), so it works with or without a vendor connection.
 const fsDollars_ = (cents) => "$" + (Number(cents) % 100 ? (Number(cents) / 100).toFixed(2) : String(Number(cents) / 100));
 function freeShipText_(fs){
   if (!fs) return "";
+  if (fs.overCents === 0) return "on every order";
   return [fs.overCents ? `at ${fsDollars_(fs.overCents)}` : "", fs.minQty ? `at ${fs.minQty} pieces` : ""].filter(Boolean).join(" or ");
 }
+const freeShipMet_ = (fs, cents, pieces) => !!fs && ((fs.overCents != null && cents >= fs.overCents) || (fs.minQty != null && pieces >= fs.minQty));
 // How far an order (cents at the supplier's price, pieces) is from free shipping: {met, toGoCents, toGoPieces, label}.
 function freeShipProgress_(fs, cents, pieces){
   if (!fs) return null;
-  if ((fs.overCents && cents >= fs.overCents) || (fs.minQty && pieces >= fs.minQty)) return { met: true, toGoCents: 0, toGoPieces: 0, label: "free shipping" };
+  if (freeShipMet_(fs, cents, pieces)) return { met: true, toGoCents: 0, toGoPieces: 0, label: "free shipping" };
   const toGoCents = fs.overCents ? fs.overCents - cents : null, toGoPieces = fs.minQty ? fs.minQty - pieces : null;
   const label = [toGoCents != null ? "$" + (toGoCents / 100).toFixed(2) + " to go" : "", toGoPieces != null ? `${toGoPieces} piece${toGoPieces === 1 ? "" : "s"} to go` : ""].filter(Boolean).join(" or ");
   return { met: false, toGoCents, toGoPieces, label };
@@ -14199,28 +14162,6 @@ function freeShipHeaderHtml_(s, si){
     ${pr.met ? "✓ Free shipping" : `Free shipping ${escapeHtml(freeShipText_(fs))} — ${escapeHtml(pr.label)}`}
     <button type="button" class="bto-fs-edit" data-si="${si}" title="Change ${escapeHtml(s.vendor)}'s free shipping" style="background:none;border:none;color:#2563eb;cursor:pointer;font-size:12px;padding:0;">✎</button>
     ${pr.met ? "" : `<button type="button" class="admin-btn bto-free" data-si="${si}" style="padding:3px 10px;font-size:12px;" title="Add restock and best sellers until this order ships free">Get me to free shipping</button>`}</span>`;
-}
-// Sets a vendor's free shipping: over $ and/or at N pieces (blank = not that kind); Use default / no free shipping.
-function showVendorShippingForm_(vendor, current, onSaved){
-  const fs = current || {};
-  const { ov, close } = inventoryModal_(`Free shipping — ${escapeHtml(vendor)}`, `
-    <div style="font-size:13px;color:#555;margin-bottom:12px;">When an order from ${escapeHtml(vendor)} reaches either amount it ships free. Leave one empty if the vendor doesn't use it (some vendors count pieces, SanMar and S&amp;S dollars).</div>
-    <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px;">
-      <label style="display:flex;flex-direction:column;gap:4px;">Free at ($ or more)<input type="number" id="vsOver" min="0" step="0.01" value="${fs.overCents ? (fs.overCents / 100).toFixed(2) : ""}" placeholder="—" style="width:120px;"></label>
-      <label style="display:flex;flex-direction:column;gap:4px;">…or at (pieces)<input type="number" id="vsQty" min="0" step="1" value="${fs.minQty || ""}" placeholder="—" style="width:100px;"></label>
-    </div>
-    ${fs.isDefault ? `<div style="font-size:12px;color:#888;margin-top:8px;">This is the built-in default for ${escapeHtml(vendor)}.</div>` : ""}
-    <div style="display:flex;justify-content:space-between;gap:8px;margin-top:16px;flex-wrap:wrap;">
-      <button type="button" class="admin-btn" id="vsReset" style="background:#fff;color:var(--ink,#222);border:1px solid #ccc;" title="Go back to the built-in default (SanMar / S&amp;S $200; none for other vendors)">Use default</button>
-      <span style="display:flex;gap:8px;"><button type="button" class="admin-btn" id="vsCancel" style="background:#fff;color:var(--ink,#222);border:1px solid #ccc;">Cancel</button><button type="button" class="admin-btn" id="vsSave">Save</button></span>
-    </div>`, 460);
-  const save = async (body) => {
-    try { const r = await hoopApi_({ action: "setVendorShipping", vendor, ...body }); close(); showToast(r.freeShipping ? `${vendor} ships free ${freeShipText_(r.freeShipping)}.` : `${vendor}: no free shipping.`); onSaved && onSaved(); }
-    catch (e) { showToast(e.message || "Couldn't save", true); }
-  };
-  ov.querySelector("#vsCancel").onclick = close;
-  ov.querySelector("#vsReset").onclick = () => save({ reset: true });
-  ov.querySelector("#vsSave").onclick = () => save({ over: ov.querySelector("#vsOver").value, minQty: ov.querySelector("#vsQty").value });
 }
 // Restock orders placed by hand and recorded here (migrations/0074), with Cancel for one that never got ordered.
 function restockOrdersHtml_(list){
@@ -14249,7 +14190,7 @@ function fillToFreeShipping_(base, candidates, fs){
   for (const l of base || []) baseQty.set(key(l), (baseQty.get(key(l)) || 0) + (Number(l.qty) || 0));
   let cents = (base || []).reduce((t, l) => t + Math.round((Number(l.price) || 0) * 100) * (Number(l.qty) || 0), 0);
   let pieces = (base || []).reduce((n, l) => n + (Number(l.qty) || 0), 0);
-  const met = () => !!fs && ((fs.overCents && cents >= fs.overCents) || (fs.minQty && pieces >= fs.minQty));
+  const met = () => freeShipMet_(fs, cents, pieces);
   const out = new Map();
   const add = (c, n, reason) => {
     const k = key(c), cur = out.get(k);
@@ -15806,7 +15747,7 @@ function blankOrderForm_(el, opts){
           <div id="rccUnmatched" style="font-size:12px;color:#b03a2e;margin-bottom:6px;"></div>
           <button type="button" id="rccAddBlank" style="padding:4px 10px;border:1px dashed #999;border-radius:5px;background:#fff;cursor:pointer;font-size:12px;margin-bottom:6px;">+ Add another blank</button>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0;">
-            <label style="font-size:12px;font-weight:600;">Vendor<br><input id="rccVendor" maxlength="100" style="${inp}width:150px;"></label>
+            <label style="font-size:12px;font-weight:600;">Vendor<br>${vendorPickerHtml_("rccVendor", "", { blanks: true, style: inp + "width:150px;" })}</label>
             <label style="font-size:12px;font-weight:600;">Invoice / order #<br><input id="rccRef" maxlength="100" style="${inp}width:130px;"></label></div>
           <label style="display:block;font-size:12px;font-weight:600;margin-bottom:6px;">Shipping &amp; other costs<br>$<input type="number" min="0" step="0.01" id="rccShip" placeholder="0.00" style="${inp}width:90px;"></label>
           <details id="rccMixed" style="margin:4px 0 8px;font-size:12px;"><summary style="cursor:pointer;font-weight:600;">Not all of it is for inventory? (R&amp;D / testing, personal)</summary>
@@ -15876,7 +15817,7 @@ function blankOrderForm_(el, opts){
           <td style="padding:3px 6px;"><input type="number" min="0" step="1" class="rcc-qty" data-i="${i}" data-color="${escapeHtml(z.color || "")}" data-size="${escapeHtml(z.size || "")}" data-avg="${Number(z.vendorPrice != null ? z.vendorPrice : (z.purchasePrice || 0))}" placeholder="0" style="${inp}width:64px;"></td>
           <td style="padding:3px 6px;">$<input type="number" min="0" step="0.01" class="rcc-cost" data-i="${i}" placeholder="0.00" style="${inp}width:86px;"></td>
           <td style="padding:3px 6px;font-size:12px;color:#666;" class="rcc-each" data-i="${i}"></td></tr>`).join("")}</table>` : "";
-      if (b && b.vendor && !el.querySelector("#rccVendor").value) el.querySelector("#rccVendor").value = b.vendor;
+      if (b && b.vendor && !el.querySelector("#rccVendor").value) setVendorPick_(el.querySelector("#rccVendor"), b.vendor);
       const each = (i) => {
         const q = parseInt(g.querySelector(`.rcc-qty[data-i="${i}"]`).value, 10) || 0, t = parseFloat(g.querySelector(`.rcc-cost[data-i="${i}"]`).value) || 0;
         g.querySelector(`.rcc-each[data-i="${i}"]`).textContent = q > 0 && t > 0 ? "$" + (t / q).toFixed(Math.round(t * 100) % q ? 3 : 2) + " each" : "";
@@ -15914,7 +15855,7 @@ function blankOrderForm_(el, opts){
   };
   el.querySelector("#rccAddBlank").onclick = () => addGroup();
   if (opts.prefill && opts.prefill.groups && opts.prefill.groups.length) {
-    el.querySelector("#rccVendor").value = opts.prefill.vendor || "";
+    setVendorPick_(el.querySelector("#rccVendor"), opts.prefill.vendor || "");
     el.querySelector("#rccRef").value = opts.prefill.vendorRef || "";
     if (opts.prefill.extraCost) el.querySelector("#rccShip").value = Number(opts.prefill.extraCost).toFixed(2);
     const unmatched = [];
@@ -16244,7 +16185,7 @@ async function renderExpenses(app){
             <label style="display:flex;gap:4px;align-items:center;font-size:11px;color:#555;margin-top:3px;" title="Money back for an earlier purchase (a returned item, a reversed fee). It reduces this category instead of counting as income."><input type="checkbox" id="expRefund"> This is a refund</label></div>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">
-          <div style="flex:1;min-width:160px;"><label style="${lbl}" for="expVendor">Vendor <span style="font-weight:400;color:#777;">(optional)</span></label><input id="expVendor" type="text" maxlength="120" placeholder="e.g. Amazon" style="${inp}width:100%;"></div>
+          <div style="flex:1;min-width:160px;"><label style="${lbl}" for="expVendor">Vendor <span style="font-weight:400;color:#777;">(optional)</span></label>${vendorPickerHtml_("expVendor", "", { placeholder: "— none —", style: inp + "flex:1;min-width:0;" })}</div>
           <div><label style="${lbl}" for="expPaidFrom">Paid from</label><select id="expPaidFrom" style="${inp}"></select></div>
           <div><label style="${lbl}" for="expBiz">Business use %</label><input id="expBiz" type="number" min="1" max="100" step="1" value="100" style="${inp}width:80px;"></div>
           <div><label style="${lbl}" for="expReceipt">Receipt <span style="font-weight:400;color:#777;">(image or PDF, optional)</span></label>
@@ -16321,7 +16262,8 @@ function expResetForm_(){
   document.getElementById("expSave").textContent = "Save expense";
   document.getElementById("expCancel").style.display = "none";
   document.getElementById("expDate").value = expToday_();
-  ["expDesc", "expAmount", "expVendor", "expPIS"].forEach(id => { document.getElementById(id).value = ""; });
+  ["expDesc", "expAmount", "expPIS"].forEach(id => { document.getElementById(id).value = ""; });
+  setVendorPick_(document.getElementById("expVendor"), "");
   document.getElementById("expBiz").value = "100";
   document.getElementById("expVendorTax").checked = true;
   document.getElementById("expRefund").checked = false; _exp.refundOfId = null;
@@ -16347,7 +16289,7 @@ function expEdit_(id){
   document.getElementById("expCat").value = String(x.categoryId);
   document.getElementById("expAmount").value = Math.abs(Number(x.amount)).toFixed(2);   // a refund is shown as a positive amount with the box ticked
   document.getElementById("expRefund").checked = x.amount < 0; _exp.refundOfId = x.refundOfId || null;
-  document.getElementById("expVendor").value = x.vendor;
+  setVendorPick_(document.getElementById("expVendor"), x.vendor);
   document.getElementById("expBiz").value = String(x.businessUsePct);
   document.getElementById("expVendorTax").checked = x.vendorChargedTax !== false;
   document.getElementById("expPaidFrom").innerHTML = accountOptions_(_exp.accounts || [], x.paidPersonally ? "personal" : (x.accountId || ""), { personal: true, blank: !x.paidPersonally && !x.accountId });
@@ -16568,6 +16510,9 @@ function showExpenseImportModal_(){
       const exact = _exp.categories.find(c => c.name.toLowerCase() === t); if (exact) return exact.id;
       const start = _exp.categories.find(c => c.name.toLowerCase().startsWith(t)); return start ? start.id : null; };
     rows.forEach((r, i) => { r.duplicate = pv.rows[i].duplicate; r.categoryId = catFromName(r.categoryName) || pv.rows[i].suggestedCategoryId || ""; });
+    // The file's vendor column, matched to the vendor list (migrations/0084); a name that isn't on it is said so.
+    try { await loadVendors_(); } catch (e) {}
+    rows.forEach(r => { const m = vendorMatch_(r.vendor); r.vendorNotListed = r.vendor && !m ? r.vendor : ""; r.vendor = m ? m.name : ""; });
     const catOpts = (sel) => `<option value="">Choose…</option>` + _exp.categories.map(c => `<option value="${c.id}"${String(c.id) === String(sel) ? " selected" : ""}>${escapeHtml(c.name)}</option>`).join("");
     const td = "padding:4px 6px;border-bottom:1px solid #eee;vertical-align:middle;";
     reviewEl.innerHTML = `
@@ -16577,10 +16522,10 @@ function showExpenseImportModal_(){
           <td style="${td}"><input type="checkbox" class="ei-on" ${r.duplicate ? "" : "checked"}></td>
           <td style="${td}white-space:nowrap;">${escapeHtml(r.date)}</td>
           <td style="${td}"><input class="ei-desc" value="${escapeHtml(r.description)}" maxlength="300" style="${inp}width:100%;min-width:180px;"></td>
-          <td style="${td}"><input class="ei-vendor" value="${escapeHtml(r.vendor)}" maxlength="120" style="${inp}width:110px;"></td>
+          <td style="${td}"><select class="ei-vendor" style="${inp}max-width:130px;">${vendorOptionsHtml_(r.vendor, { placeholder: "— none —" })}</select></td>
           <td style="${td}text-align:right;white-space:nowrap;">$${r.amount.toFixed(2)}</td>
           <td style="${td}"><select class="ei-cat" style="${inp}max-width:190px;">${catOpts(r.categoryId)}</select></td>
-          <td style="${td}font-size:11px;color:#b45309;">${r.duplicate ? "Looks already recorded" : ""}</td></tr>`).join("")}</tbody></table></div>
+          <td style="${td}font-size:11px;color:#b45309;">${[r.duplicate ? "Looks already recorded" : "", r.vendorNotListed ? `“${escapeHtml(r.vendorNotListed)}” isn't in the vendor list — add it with Manage vendors, or pick one` : ""].filter(Boolean).join("<br>")}</td></tr>`).join("")}</tbody></table></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;">
         <span id="eiCount" style="font-size:13px;"></span>
         <span><button type="button" id="eiCancel" style="padding:6px 12px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button>
@@ -17947,7 +17892,7 @@ async function showBlankModal(blank, onSave) {
             <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">Product type</label>
             <span class="pick-with-manage"><select id="blkType" style="width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #ccc;border-radius:4px;font-size:14px;">${typeOptions}</select>${manageCategoriesBtn_('data-select="#blkType"')}</span>
           </div>
-          <div><label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">Vendor</label>${inp(f.vendor, "S&S", "blkVendor")}</div>
+          <div><label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">Vendor</label>${vendorPickerHtml_("blkVendor", f.vendor, { blanks: true, style: "flex:1;min-width:0;box-sizing:border-box;padding:7px 9px;border:1px solid #ccc;border-radius:4px;font-size:14px;" })}</div>
           <div><label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">Brand</label>${inp(f.brand, "Jerzees", "blkBrand")}</div>
           <div><label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">SKU</label>${inp(f.sku, "63374", "blkSku")}</div>
           <div${adminFeatureOn_("production") ? "" : ' style="display:none;"'}>
@@ -18966,7 +18911,7 @@ async function showVendorFileImport_(mode, onDone){
     <div style="font-size:13px;color:#555;margin-bottom:10px;line-height:1.45;">Pick the vendor's files: <b>S&amp;S</b> — <i>Products.xlsx</i> and <i>Styles.xlsx</i> from its Data Library (pick both); <b>SanMar</b> — <i>SanMar_SDL_N.csv</i>; or a CSV with one row per style and color (<b>style</b>, <b>color</b>, <b>supplier</b>, <b>cost_&lt;size&gt;</b>…). They're read on this computer — only the styles you pick are sent.</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
       <input type="file" id="vfFile" multiple accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" aria-label="Vendor files">
-      <label style="font-size:13px;">Vendor <input type="text" id="vfVendor" placeholder="SanMar" style="padding:5px 7px;border:1px solid #ccc;border-radius:4px;width:170px;"></label>
+      <label style="font-size:13px;display:inline-flex;gap:6px;align-items:center;">Vendor ${vendorPickerHtml_("vfVendor", "", { blanks: true, style: "padding:5px 7px;border:1px solid #ccc;border-radius:4px;width:170px;" })}</label>
     </div>
     <div id="vfStatus" style="font-size:13px;color:#555;margin:10px 0;min-height:18px;"></div>
     <div id="vfStyles"></div>
@@ -19057,7 +19002,7 @@ async function showVendorFileImport_(mode, onDone){
     if (!vEl.value) {
       const heads = [];
       for (const f of files) heads.push(...await readVendorRows_(f, () => false).catch(() => []));
-      vEl.value = guessVendorOfFile_(heads, files.map(f => f.name).join(" "));
+      setVendorPick_(vEl, guessVendorOfFile_(heads, files.map(f => f.name).join(" ")));
     }
     await read();
   };
@@ -19989,6 +19934,185 @@ document.addEventListener("click", (e) => {
   if (isCat) showCategoriesModal_(refresh); else showLocationsModal_(refresh);
 });
 
+// ---- The vendor list (migrations/0084) ------------------------------------------------------------------------------
+// Every vendor box — a blank, Receive order, Import from PDF, Mark blank ordered, a transfer sheet, an expense, the
+// wizard's quick blank, a vendor file — is a picker from one list (vendorPickerHtml_), with Manage… beside it: add,
+// rename or hide a vendor, mark it as a vendor for blanks, and set its free shipping. Records keep the vendor's name;
+// renaming one renames them all (the server). The list is loaded once and kept (_vendorList); every picker on the
+// page is refreshed after a change.
+let _vendorList = null, _vendorListP = null;
+function loadVendors_(force){
+  if (force) _vendorListP = null;
+  if (!_vendorListP) _vendorListP = hoopApi_({ action: "listVendors" }).then(r => (_vendorList = r.vendors || []))
+    .catch(e => { _vendorListP = null; throw e; });
+  return _vendorListP;
+}
+// The vendor a name means — same name in any case, else the one whose name it's a form of ("S&S Activewear" → "S&S").
+function vendorMatch_(name){
+  const n = String(name || "").trim();
+  if (!n || !_vendorList) return null;
+  const exact = _vendorList.find(v => v.name.toLowerCase() === n.toLowerCase());
+  if (exact) return exact;
+  const alike = _vendorList.filter(v => sameVendorName_(v.name, n));
+  return alike.length === 1 ? alike[0] : null;
+}
+function vendorOptionsHtml_(selected, opts = {}){
+  const m = vendorMatch_(selected);
+  const cur = m ? m.name : String(selected || "");
+  const list = (_vendorList || []).filter(v => (!v.hidden && (!opts.blanks || v.forBlanks)) || (m && v.id === m.id));
+  let html = `<option value="">${escapeHtml(opts.placeholder || "— pick a vendor —")}</option>` +
+    list.map(v => `<option value="${escapeHtml(v.name)}"${v.name === cur ? " selected" : ""}>${escapeHtml(v.name)}${v.hidden ? " (hidden)" : ""}</option>`).join("");
+  if (cur && !list.some(v => v.name === cur)) html += `<option value="${escapeHtml(cur)}" selected>${escapeHtml(cur)} (not in the vendor list)</option>`;
+  return html;
+}
+// A vendor picker: the list (only vendors for blanks with opts.blanks; hidden ones only when already chosen) and, for a
+// manager, Manage…. opts: {blanks, placeholder, style}. It fills itself in once the list is loaded.
+function vendorPickerHtml_(id, value, opts = {}){
+  setTimeout(() => fillVendorPickers_(), 0);
+  return `<span class="pick-with-manage vendor-pick"><select id="${escapeHtml(id)}" data-vendor-pick${opts.blanks ? " data-blanks" : ""} data-placeholder="${escapeHtml(opts.placeholder || "")}" data-value="${escapeHtml(value || "")}" aria-label="Vendor" style="${opts.style || ""}">${vendorOptionsHtml_(value, opts)}</select>${adminCan_("manager") ? `<button type="button" class="admin-btn admin-btn-secondary manage-list-btn" data-manage-vendors title="Add, rename or hide vendors, and set their free shipping">Manage&hellip;</button>` : ""}</span>`;
+}
+// Puts a name into a picker — the list's spelling of it ("S&S Activewear" picks S&S) — even before the list has loaded.
+function setVendorPick_(sel, name){
+  if (!sel) return;
+  sel.dataset.value = String(name || "");
+  if (sel.tagName !== "SELECT") { sel.value = String(name || ""); return; }
+  sel.innerHTML = vendorOptionsHtml_(name, { blanks: sel.hasAttribute("data-blanks"), placeholder: sel.dataset.placeholder || "" });
+}
+async function fillVendorPickers_(root){
+  try { await loadVendors_(); } catch (e) { return; }
+  (root || document).querySelectorAll("select[data-vendor-pick]").forEach(sel => {
+    const v = sel.value || sel.dataset.value || "";
+    sel.innerHTML = vendorOptionsHtml_(v, { blanks: sel.hasAttribute("data-blanks"), placeholder: sel.dataset.placeholder || "" });
+  });
+}
+// "Free at $200 or 25 pieces" / "Free on every order" / "No free shipping".
+function vendorFreeShipLabel_(v){
+  if (!v) return "";
+  if (v.noFreeShipping) return "No free shipping";
+  return v.freeShipping ? "Free " + freeShipText_(v.freeShipping) : "Not set";
+}
+// Manage vendors: the list, with + New vendor, Edit, Hide / Show, and Delete for one nothing names. onChange(list,
+// saved) runs after every change (saved = the vendor just added or changed).
+async function mountVendorManager_(box, onChange){
+  const canEdit = adminCan_("manager");
+  box.innerHTML = `
+    <div style="font-size:13px;color:#555;margin-bottom:12px;line-height:1.45;">Every vendor box picks from this list — blanks, receipts, transfer sheets, expenses, blank orders. <b>For blanks</b> puts a vendor in the blank pickers and Blanks to Order, with its <b>free shipping</b>. Renaming a vendor renames it on every record. A vendor that's on records can't be deleted — hide it instead, so it's no longer offered.</div>
+    ${canEdit ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;"><button type="button" class="admin-btn" data-vd-new>+ New vendor</button>
+      <label style="font-size:13px;display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" data-vd-showhidden> Show hidden vendors</label></div>` : ""}
+    <div data-vd-body style="max-height:60vh;overflow-y:auto;color:#888;font-size:14px;">Loading…</div>`;
+  const body = box.querySelector("[data-vd-body]");
+  let list = [], showHidden = false;
+  const usedText = (v) => Object.entries(v.used || {}).map(([k, n]) => `${n} ${k}`).join(", ");
+  const draw = () => {
+    const rows = list.filter(v => showHidden || !v.hidden);
+    if (!rows.length) { body.innerHTML = `<div style="color:#888;padding:12px 0;">No vendors yet.</div>`; return; }
+    const td = "padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top;";
+    body.innerHTML = `<table class="stack-mobile" style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr style="text-align:left;background:#f3f4f6;"><th style="${td}">Vendor</th><th style="${td}">For blanks</th><th style="${td}">Free shipping</th><th style="${td}">On records</th><th style="${td}"></th></tr></thead>
+      <tbody>${rows.map(v => `<tr data-vendor-row="${v.id}"${v.hidden ? ' style="opacity:.6;"' : ""}>
+        <td class="stack-title" style="${td}font-weight:600;">${escapeHtml(v.name)}${v.hidden ? ` <span style="font-weight:400;color:#888;">(hidden)</span>` : ""}</td>
+        <td data-label="For blanks" style="${td}">${v.forBlanks ? "✓ Yes" : `<span style="color:#999;">No</span>`}</td>
+        <td data-label="Free shipping" style="${td}">${v.forBlanks || v.freeShipping || v.noFreeShipping ? escapeHtml(vendorFreeShipLabel_(v)) : `<span style="color:#bbb;">—</span>`}</td>
+        <td data-label="On records" style="${td}color:#666;">${escapeHtml(usedText(v)) || `<span style="color:#bbb;">none</span>`}</td>
+        <td class="stack-actions" style="${td}text-align:right;white-space:nowrap;">${canEdit ? `
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-vd-edit="${v.id}">Edit</button>
+          <button type="button" class="admin-btn admin-btn-secondary" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-vd-hide="${v.id}">${v.hidden ? "Show" : "Hide"}</button>
+          ${v.usedTotal ? "" : `<button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-vd-del="${v.id}">Delete</button>`}` : ""}</td>
+      </tr>`).join("")}</tbody></table>`;
+  };
+  const apply = (vendors, saved) => {
+    list = vendors || [];
+    _vendorList = list.map(v => ({ ...v })); _vendorListP = Promise.resolve(_vendorList);
+    draw(); fillVendorPickers_();
+    if (onChange) onChange(list, saved || null);
+  };
+  box.addEventListener("click", async (e) => {
+    const t = e.target.closest("button,input"); if (!t || !box.contains(t)) return;
+    if (t.hasAttribute("data-vd-showhidden")) { showHidden = t.checked; draw(); return; }
+    if (t.hasAttribute("data-vd-new")) { showVendorFormModal_(null, apply); return; }
+    const byId = (id) => list.find(v => v.id === Number(id));
+    if (t.dataset.vdEdit) { const v = byId(t.dataset.vdEdit); if (v) showVendorFormModal_(v, apply); }
+    else if (t.dataset.vdHide) {
+      const v = byId(t.dataset.vdHide); if (!v) return;
+      try { const r = await hoopApi_({ action: "saveVendor", vendor: { ...vendorFormValues_(v), hidden: !v.hidden } }); apply(r.vendors, r.vendor); showToast(v.hidden ? `${v.name} is offered again.` : `${v.name} is hidden — no longer offered, still on its records.`); }
+      catch (err) { showToast(err.message, true); }
+    } else if (t.dataset.vdDel) {
+      const v = byId(t.dataset.vdDel); if (!v) return;
+      if (!await askConfirm_(`Delete the vendor ${v.name}?`)) return;
+      try { apply((await hoopApi_({ action: "deleteVendor", id: v.id })).vendors); showToast("Vendor deleted."); }
+      catch (err) { showToast(err.message, true); }   // the server refuses while a record names it
+    }
+  });
+  try { apply((await hoopApi_({ action: "listVendors", withUse: true })).vendors); }
+  catch (e) { body.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message || "Couldn't load the vendors.")}</div>`; }
+}
+function showVendorsModal_(onChange){
+  const { ov } = inventoryModal_("Vendors", `<div data-vd-modal></div>`, 760);
+  return mountVendorManager_(ov.querySelector("[data-vd-modal]"), onChange);
+}
+// A vendor row → what saveVendor takes (dollars, pieces), so a change to one field keeps the rest.
+function vendorFormValues_(v){
+  return { id: v.id, name: v.name, forBlanks: !!v.forBlanks, hidden: !!v.hidden, noFreeShipping: !!v.noFreeShipping,
+    over: v.freeShipOverCents == null ? "" : v.freeShipOverCents / 100, minQty: v.freeShipMinQty == null ? "" : v.freeShipMinQty };
+}
+// Add or edit one vendor: name, For blanks, free shipping (an amount — 0 = every order ships free — and / or a piece
+// count, or No free shipping), Hidden. onSaved(list, vendor).
+function showVendorFormModal_(vendor, onSaved){
+  const isNew = !vendor;
+  const f = isNew ? { name: "", forBlanks: true, hidden: false, noFreeShipping: false, over: "", minQty: "" } : vendorFormValues_(vendor);
+  const inp = "font-size:13px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
+  const { ov, close } = inventoryModal_(isNew ? "New vendor" : `Edit vendor — ${escapeHtml(vendor.name)}`, `
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Name<br><input id="vfmName" value="${escapeHtml(f.name)}" maxlength="100" placeholder="e.g. SanMar" style="${inp}width:100%;"></label>
+    <label class="pick-row" style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:12px;"><input type="checkbox" id="vfmBlanks"${f.forBlanks ? " checked" : ""}> For blanks — offered when picking a blank's vendor and in Blanks to Order</label>
+    <fieldset id="vfmShip" style="border:1px solid #e5e7eb;border-radius:6px;padding:10px 12px;margin:0 0 12px;">
+      <legend style="font-size:12px;font-weight:600;padding:0 4px;">Free shipping</legend>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px;">
+        <label style="display:flex;flex-direction:column;gap:4px;">Free at ($ or more)<input type="number" id="vfmOver" min="0" step="0.01" value="${f.over === "" ? "" : Number(f.over).toFixed(2)}" placeholder="—" style="${inp}width:120px;"></label>
+        <label style="display:flex;flex-direction:column;gap:4px;">…or at (pieces)<input type="number" id="vfmQty" min="1" step="1" value="${escapeHtml(String(f.minQty))}" placeholder="—" style="${inp}width:100px;"></label>
+      </div>
+      <div style="font-size:12px;color:#666;margin:6px 0 8px;">Whichever is reached first. <b>0</b> = every order ships free. Leave a box empty if the vendor doesn't use it.</div>
+      <label class="pick-row" style="display:flex;gap:8px;align-items:center;font-size:13px;"><input type="checkbox" id="vfmNone"${f.noFreeShipping ? " checked" : ""}> No free shipping — this vendor always charges for shipping</label>
+    </fieldset>
+    <label class="pick-row" style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="vfmHidden"${f.hidden ? " checked" : ""}> Hidden — no longer offered in the pickers (kept on its records)</label>
+    ${isNew ? "" : `<div style="font-size:12px;color:#666;margin-bottom:6px;">Renaming changes the name on every blank, receipt, expense and order that names it.</div>`}
+    <div id="vfmErr" style="color:#b03a2e;font-size:13px;min-height:18px;"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button type="button" id="vfmCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button>
+      <button type="button" id="vfmSave" class="admin-btn">${isNew ? "Add vendor" : "Save changes"}</button>
+    </div>`, 500);
+  const none = ov.querySelector("#vfmNone");
+  const sync = () => { ov.querySelector("#vfmOver").disabled = none.checked; ov.querySelector("#vfmQty").disabled = none.checked; };
+  none.onchange = sync; sync();
+  ov.querySelector("#vfmCancel").onclick = close;
+  ov.querySelector("#vfmSave").onclick = async () => {
+    const err = ov.querySelector("#vfmErr");
+    const payload = { id: f.id, name: ov.querySelector("#vfmName").value.trim(), forBlanks: ov.querySelector("#vfmBlanks").checked,
+      noFreeShipping: none.checked, hidden: ov.querySelector("#vfmHidden").checked,
+      over: none.checked ? "" : ov.querySelector("#vfmOver").value.trim(), minQty: none.checked ? "" : ov.querySelector("#vfmQty").value.trim() };
+    if (!payload.name) { err.textContent = "Name the vendor."; return; }
+    try {
+      const r = await hoopApi_({ action: "saveVendor", vendor: payload });
+      close();
+      const n = Object.values(r.renamed || {}).reduce((t, x) => t + x, 0);
+      showToast(isNew ? `${r.vendor.name} added.` : n ? `${r.vendor.name} saved — renamed on ${n} record${n === 1 ? "" : "s"}.` : `${r.vendor.name} saved.`);
+      if (onSaved) onSaved(r.vendors, r.vendor);
+    } catch (e) { err.textContent = e.message || "Couldn't save the vendor."; }
+  };
+  setTimeout(() => ov.querySelector("#vfmName").focus(), 0);
+}
+// Every Manage… beside a vendor picker opens the list; afterwards every picker on the page is refreshed, and the one
+// beside this button picks a vendor just added there (when it had none).
+document.addEventListener("click", (e) => {
+  const b = e.target.closest && e.target.closest("[data-manage-vendors]");
+  if (!b) return;
+  e.preventDefault();
+  const sel = b.parentElement && b.parentElement.querySelector("select[data-vendor-pick]");
+  showVendorsModal_((list, saved) => {
+    if (sel && saved && !sel.value && !saved.hidden && (!sel.hasAttribute("data-blanks") || saved.forBlanks)) setVendorPick_(sel, saved.name);
+    if (sel) sel.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+});
+
 function showCategoryFormModal_(category, onSaved){
   const isNew = !category;
   const f = category || { name: "", plural: "", packAs: "other", sortOrder: "" };
@@ -20424,6 +20548,7 @@ function showReceiveTransferModal_(transfers, onDone){
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:end;">
       <label style="font-size:12px;font-weight:600;">Date<br><input id="trDate" type="date" value="${new Date().toLocaleDateString("en-CA")}" max="${new Date().toLocaleDateString("en-CA")}" style="${inp}"></label>
       <label style="font-size:12px;font-weight:600;">Sheet total ($)<br>$<input id="trTotal" type="number" min="0" step="0.01" style="${inp}width:100px;"></label>
+      <label style="font-size:12px;font-weight:600;">Vendor<br>${vendorPickerHtml_("trVendor", "", { style: inp + "width:150px;" })}</label>
       <label style="font-size:12px;font-weight:600;">Invoice #<br><input id="trRef" style="${inp}width:120px;"></label>
       <label style="font-size:12px;font-weight:600;">Paid from<br><select id="trPaid" style="${inp}"><option value="">Loading…</option></select></label>
       <label style="font-size:12px;font-weight:600;">Receipt (optional)<br><input type="file" id="trReceipt" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif,application/pdf" style="font-size:12px;"></label>
@@ -20550,7 +20675,7 @@ function showReceiveTransferModal_(transfers, onDone){
     const why = problem(); if (why) { err.textContent = why; return; }
     const woPct = Math.max(0, parseFloat(ov.querySelector("#trWoPct").value) || 0), pePct = Math.max(0, parseFloat(ov.querySelector("#trPePct").value) || 0);
     const body = { action: "receiveTransferSheet", rows, total: parseFloat(ov.querySelector("#trTotal").value) || 0,
-      receivedAt: ov.querySelector("#trDate").value, vendorRef: ov.querySelector("#trRef").value.trim(),
+      receivedAt: ov.querySelector("#trDate").value, vendor: ov.querySelector("#trVendor").value, vendorRef: ov.querySelector("#trRef").value.trim(),
       ...(paid === "personal" ? { paidPersonally: true } : paid ? { accountId: Number(paid) } : {}),
       ...(woPct > 0 ? { writeoff: { pct: woPct, description: ov.querySelector("#trWoDesc").value.trim(), categoryId: Number(ov.querySelector("#trWoCat").value) || 0 } } : {}),
       ...(pePct > 0 ? { personal: { pct: pePct, description: ov.querySelector("#trPeDesc").value.trim() } } : {}) };

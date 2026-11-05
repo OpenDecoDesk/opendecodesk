@@ -37,6 +37,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
     UPDATE products SET name='Polo - Kelly' WHERE productId='polo';
   `);
   for(const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   const qty = (size) => d1.q("SELECT quantity FROM blank_sizes WHERE blankId=1 AND size=?", size)[0].quantity;
   const sumMoves = (size) => d1.q("SELECT COALESCE(SUM(qtyDelta),0) s FROM inventory_movements WHERE blankId=1 AND size=?", size)[0].s;
   const ledgerMatchesStock = () => ["S", "M"].every(s => qty(s) === sumMoves(s));

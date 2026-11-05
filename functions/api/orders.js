@@ -55,7 +55,7 @@ import {
   getBoxPresets, setBoxPresets,
   addShippingPaidAmount, setShippingPaidAmount,
   getAllInventory, createInventoryItem, updateInventoryItem, deleteInventoryItem,
-  getAllBlanks, createBlank, updateBlank, deleteBlank, mergeBlanks, getBlanksToOrder, getFreeShippingCandidates, getBlankLowStock, getVendorShipping, setVendorShipping, vendorShippingFor, recordRestockOrder, listRestockOrders, cancelRestockOrder, importBlanksCsv, importProductsCsv, IMPORT_MAX_ROWS,
+  getAllBlanks, createBlank, updateBlank, deleteBlank, mergeBlanks, getBlanksToOrder, getFreeShippingCandidates, getBlankLowStock, getVendorShipping, vendorShippingFor, listVendors, saveVendor, deleteVendor, resolveVendorName, ensureVendor, recordRestockOrder, listRestockOrders, cancelRestockOrder, importBlanksCsv, importProductsCsv, IMPORT_MAX_ROWS,
   listThreads, createThread, updateThread, deleteThread, importThreadChart,
   listSpoolSizes, saveSpoolSize, deleteSpoolSize, saveThreadInventory, deleteThreadInventory,
   listNeedleSizes, saveNeedleSize, deleteNeedleSize, listNeedleTypes, saveNeedleType, deleteNeedleType, needleTypeExists,
@@ -184,7 +184,7 @@ function sampleOrder_({ example = "shipping", method = "Check", paid = false, sa
 const CATALOG_ADMIN_ACTIONS = new Set([
   "createOrg", "updateOrg", "listOrgsAdmin", "setupOrgDomain", "getOrgDomainStatus",
   "listProducts", "createProduct", "updateProduct", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "importProducts", "importBlanks", "getBlanksToOrder",
-  "freeShippingSuggestions", "getVendorShipping", "setVendorShipping", "recordRestockOrder", "cancelRestockOrder",
+  "freeShippingSuggestions", "listVendors", "saveVendor", "deleteVendor", "recordRestockOrder", "cancelRestockOrder",
   "getGlobalSettings", "updateGlobalSettings", "getSetupStatus", "getCloudflareSetup", "connectCloudflare", "getMachineSettings", "updateMachineSettings",
   "getShipFromAddress", "updateShipFromAddress", "getBusinessProfile", "updateBusinessProfile",
   "getLocaleSettings", "updateLocaleSettings", "getFeatures", "updateFeatures",
@@ -306,13 +306,13 @@ const MANAGER_ACTIONS = [
   "getBusinessProfile", "getLocaleSettings", "getSalesTaxSettings", "getShipFromAddress", "getSetupStatus", "setBoxPresets", "saveAccount",
   "saveMoneyDefaults", "listMoney", "saveMoneyEntry", "deleteMoneyEntry", "getReconciliation", "importStatement", "autoMatchStatement",
   "matchStatementLine", "unmatchStatementLine", "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth",
-  "listCashoutPayments", "analyzePricing", "getPricingSettings", "setVendorShipping",
+  "listCashoutPayments", "analyzePricing", "getPricingSettings", "saveVendor", "deleteVendor",
   "getBrandRules", "addBrandApproval", "revokeBrandApproval",   // brand rules (migrations/0075)
   "recomputeBlankAverageCosts", "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount", "saveExpenseCategory", "deleteExpenseCategory", "closePeriod", "reopenPeriod", "getAccountantExport",
 ];
 const STAFF_ACTIONS = [
   "listBrandApprovals",
-  "listOrgsAdmin", "listProducts", "createProduct", "updateProduct", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "importProducts", "importBlanks", "previewVendorBlanks", "applyVendorBlanks", "copyVendorImage", "suggestColorGroups", "removeBlankImages", "listVendorConnections", "fetchVendorProducts", "getBlanksToOrder", "freeShippingSuggestions", "getVendorShipping", "recordRestockOrder", "cancelRestockOrder",
+  "listOrgsAdmin", "listProducts", "createProduct", "updateProduct", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "importProducts", "importBlanks", "previewVendorBlanks", "applyVendorBlanks", "copyVendorImage", "suggestColorGroups", "removeBlankImages", "listVendorConnections", "fetchVendorProducts", "getBlanksToOrder", "freeShippingSuggestions", "listVendors", "recordRestockOrder", "cancelRestockOrder",
   "getMachineSettings", "getBoxPresets", "getInventory", "createInventoryItem", "updateInventoryItem", "deleteInventoryItem", "getBlankReadyCounts", "getBlanks",
   "createBlank", "updateBlank", "deleteBlank", "mergeBlanks", "listThreads", "saveThread", "deleteThread", "importThreadChart", "listSpoolSizes",
   "saveSpoolSize", "deleteSpoolSize", "saveThreadInventory", "deleteThreadInventory", "getNeedleSettings", "saveNeedleSize", "deleteNeedleSize",
@@ -436,6 +436,23 @@ export async function onRequestPost(context) {
   // never silently swallowed.
   const audit = (args) => context.waitUntil(insertAuditLog(env.DB, auditEntry(args))
     .catch((e) => console.error("AUDIT WRITE FAILED:", args.action, args.orderId || "", e)));
+  // Vendor names come from the vendor list (migrations/0084): an action that records one gets the list's spelling, and
+  // a name that isn't on the list is refused (400) — vendors are added with Manage…, never by typing them into a record.
+  // Called after the action's sign-in check. A missing field is left alone; "" means no vendor.
+  let vendorList_ = null;
+  const vendorName_ = async (raw) => resolveVendorName(env.DB, raw, { vendors: vendorList_ || (vendorList_ = await listVendors(env.DB)) });
+  const checkVendors_ = async () => {
+    try {
+      const a = body.action;
+      if (["createBlank", "updateBlank", "receiveBlanks", "receiveBlankOrder", "receiveTransferSheet", "recordRestockOrder",
+        "createFromStatementLine", "setFulfillmentStage", "bulkSetFulfillmentStage", "addBlankShipment"].includes(a) && typeof body.vendor === "string") body.vendor = await vendorName_(body.vendor);
+      if (a === "saveExpense" && body.expense && typeof body.expense.vendor === "string") body.expense.vendor = await vendorName_(body.expense.vendor);
+      return null;
+    } catch (e) {
+      if (!e || !e.userFacing) throw e;
+      return jsonResponse({ status: "error", message: e.message }, 400);
+    }
+  };
   // Destructive / history-rewriting actions: the audit row (with the full
   // before-values) is written FIRST, and the action is refused if it can't
   // be — so nothing irreversible ever happens without a record of it.
@@ -803,6 +820,7 @@ export async function onRequestPost(context) {
   if (RECON_ACTIONS.includes(body.action)) {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
     { const locked = await periodGuard(body); if (locked) return locked; }
     const bad = (message) => jsonResponse({ status: "error", message }, 400);
     const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -1043,7 +1061,7 @@ export async function onRequestPost(context) {
           await env.DB.batch(feeToPayments.map(f => env.DB.prepare("UPDATE order_payments SET feeCents = feeCents + ? WHERE id = ? AND feeCents = 0").bind(f.cents, f.paymentId)));
         } else if (feeGroup) {
           const venmoish = feeGroup.hasVenmo;
-          feeExpenseId = await saveExpense(env.DB, 0, { date: l.lineDate, categoryId: feeCat.id, amount: diffCents / 100, vendor: venmoish ? "Venmo" : (anyCard ? "Stripe" : ""),
+          feeExpenseId = await saveExpense(env.DB, 0, { date: l.lineDate, categoryId: feeCat.id, amount: diffCents / 100, vendor: await ensureVendor(env.DB, venmoish ? "Venmo" : (anyCard ? "Stripe" : "")),
             description: `${venmoish ? "Venmo fees — cash-out" : anyCard ? "Stripe payout difference — payout" : "Deposit shortfall — deposit"} ${l.lineDate} (${orderList.slice(0, 6).join(", ")}${orderList.length > 6 ? ", …" : ""})`.slice(0, 300),
             businessUsePct: 100, receiptKey: "", receiptName: "", placedInService: feeCat.deductionType === "depreciation" ? l.lineDate : null,
             depMethod: feeCat.deductionType === "depreciation" ? "ask_cpa" : null, vendorChargedTax: true, accountId: feeGroup.accountId, paidPersonally: false });
@@ -1274,6 +1292,7 @@ export async function onRequestPost(context) {
   if (EXPENSE_ACTIONS.includes(body.action)) {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
     { const locked = await periodGuard(body); if (locked) return locked; }
     const bad = (message) => jsonResponse({ status: "error", message }, 400);
     const ymd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) && !isNaN(Date.parse(v + "T00:00:00Z"));
@@ -1391,7 +1410,18 @@ export async function onRequestPost(context) {
         rows.push({ date: r.date, description: String(r.description || "").trim().slice(0, 300), vendor: String(r.vendor || "").trim().slice(0, 120),
           amount, amountCents: Math.round(amount * 100), categoryId: Number(r.categoryId) || 0 });
       }
-      if (body.action === "previewExpenseImport") return jsonResponse({ status: "ok", rows: await previewExpenseRows(env.DB, rows) });
+      // A file's vendor column (migrations/0084): a vendor on the list gets the list's spelling; any other name is
+      // left blank — the preview says which, so it can be added with Manage… and the file imported again.
+      const vendorNote = [];
+      for (const r of rows) {
+        if (!r.vendor) continue;
+        try { r.vendor = await vendorName_(r.vendor); }
+        catch (e) { if (!e || !e.userFacing) throw e; vendorNote.push(r.vendor); r.vendorNotListed = r.vendor; r.vendor = ""; }
+      }
+      if (body.action === "previewExpenseImport") {
+        const prev = await previewExpenseRows(env.DB, rows);
+        return jsonResponse({ status: "ok", rows: prev.map((x, i) => ({ ...x, vendor: rows[i].vendor, vendorNotListed: rows[i].vendorNotListed || "" })) });
+      }
       const paidPersonally = body.paidPersonally === true;
       let accountId = null;
       if (!paidPersonally) {
@@ -2202,6 +2232,7 @@ export async function onRequestPost(context) {
   if (body.action === "setFulfillmentStage") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
     if (!body.org || !body.orderId || !body.stage) {
       return jsonResponse({ status: "error", message: "Missing org, orderId, or stage" }, 400);
     }
@@ -2266,6 +2297,7 @@ export async function onRequestPost(context) {
   if (body.action === "addBlankShipment") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
     const itemIds = Array.isArray(body.itemIds) ? body.itemIds.map(Number).filter(Boolean) : [];
     if (!itemIds.length) return jsonResponse({ status: "error", message: "Pick at least one line item" }, 400);
     try {
@@ -2307,6 +2339,7 @@ export async function onRequestPost(context) {
   if (body.action === "bulkSetFulfillmentStage") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
     if (!Array.isArray(body.orderIds) || !body.stage) {
       return jsonResponse({ status: "error", message: "Missing orderIds or stage" }, 400);
     }
@@ -2658,6 +2691,7 @@ export async function onRequestPost(context) {
   if (CATALOG_ADMIN_ACTIONS.has(body.action)) {
     const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_ROLE[body.action]);
     if (denied) return denied;
+    { const vbad = await checkVendors_(); if (vbad) return vbad; }
 
     // Sets up the org's subdomain as a custom domain (customDomain.js). Never throws: the
     // result carries {configured:false} when the CF_* env vars aren't set, or {error} on failure.
@@ -3550,10 +3584,13 @@ export async function onRequestPost(context) {
     // Inventory → Blanks to Order: what to buy from each supplier for the open orders (read-only).
     if (body.action === "getBlanksToOrder") {
       const [report, shipping, restockOrders] = await Promise.all([getBlanksToOrder(env.DB, { includeUnpaid: !!body.includeUnpaid }), getVendorShipping(env.DB), listRestockOrders(env.DB)]);
-      // Each supplier's free-shipping threshold (by vendor name), and every vendor named on a blank (Start an order for…).
-      for (const sup of report.suppliers) sup.freeShipping = vendorShippingFor(shipping, sup.vendor);
-      const { results: vend } = await env.DB.prepare("SELECT vendor, COUNT(*) AS n FROM blanks WHERE vendor <> '' GROUP BY vendor ORDER BY vendor").all();
-      const vendors = vend.map(v => ({ vendor: v.vendor, blanks: Number(v.n), freeShipping: vendorShippingFor(shipping, v.vendor) }));
+      // Each supplier's free shipping (from the vendor list), and every vendor for blanks on the list (Start an order for…).
+      for (const sup of report.suppliers) {
+        sup.freeShipping = vendorShippingFor(shipping, sup.vendor);
+        const v = shipping.find(x => x.name.toLowerCase() === String(sup.vendor || "").toLowerCase());
+        sup.vendorId = v ? v.id : null;
+      }
+      const vendors = shipping.filter(v => v.forBlanks && !v.hidden).map(v => ({ id: v.id, vendor: v.name, freeShipping: v.freeShipping }));
       return jsonResponse({ status: "ok", ...report, vendors, restockOrders });
     }
     // "Get me to free shipping" (2026-10): the vendor's blanks and their use, its threshold, and whether it can be
@@ -3564,20 +3601,31 @@ export async function onRequestPost(context) {
       const [candidates, shipping] = await Promise.all([getFreeShippingCandidates(env.DB, vendor), getVendorShipping(env.DB)]);
       return jsonResponse({ status: "ok", vendor, freeShipping: vendorShippingFor(shipping, vendor), candidates });
     }
-    if (body.action === "getVendorShipping") {
-      const saved = await getVendorShipping(env.DB);
-      const { results: vend } = await env.DB.prepare("SELECT vendor, COUNT(*) AS n FROM blanks WHERE vendor <> '' GROUP BY vendor ORDER BY vendor").all();
-      return jsonResponse({ status: "ok", saved, vendors: vend.map(v => ({ vendor: v.vendor, blanks: Number(v.n), freeShipping: vendorShippingFor(saved, v.vendor) })) });
+    // ---- The vendor list (migrations/0084) — Manage… beside every vendor picker ----
+    if (body.action === "listVendors") {
+      return jsonResponse({ status: "ok", vendors: await listVendors(env.DB, { withUse: !!body.withUse }) });
     }
-    if (body.action === "setVendorShipping") {
-      const vendor = String(body.vendor || "").trim();
+    if (body.action === "saveVendor") {
       try {
-        const r = await setVendorShipping(env.DB, vendor, { over: body.over, minQty: body.minQty, reset: !!body.reset });
-        audit({ orgId: null, orderId: null, action: "settings.vendor_shipping", detail: { vendor, from: r.before, to: r.after, reset: !!body.reset } });
-        return jsonResponse({ status: "ok", vendor, freeShipping: r.after });
+        const r = await saveVendor(env.DB, body.vendor || {});
+        const fsText = (v) => v ? { forBlanks: v.forBlanks, hidden: v.hidden, freeShipping: v.freeShipping, noFreeShipping: v.noFreeShipping } : null;
+        audit({ orgId: null, orderId: null, action: r.before ? "vendor.updated" : "vendor.created",
+          detail: { id: r.vendor.id, name: r.vendor.name, ...(r.before && r.before.name !== r.vendor.name ? { renamedFrom: r.before.name, recordsRenamed: r.renamed } : {}),
+            from: fsText(r.before), to: fsText(r.vendor) } });
+        return jsonResponse({ status: "ok", vendor: r.vendor, renamed: r.renamed, vendors: await listVendors(env.DB, { withUse: true }) });
       } catch (e) {
         if (!e || !e.userFacing) throw e;
         return jsonResponse({ status: "error", message: e.message }, 400);
+      }
+    }
+    if (body.action === "deleteVendor") {
+      try {
+        const v = await deleteVendor(env.DB, body.id);
+        audit({ orgId: null, orderId: null, action: "vendor.deleted", detail: { id: v.id, name: v.name } });
+        return jsonResponse({ status: "ok", vendors: await listVendors(env.DB, { withUse: true }) });
+      } catch (e) {
+        if (!e || !e.userFacing) throw e;
+        return jsonResponse({ status: "error", message: e.message }, 409);
       }
     }
     if (body.action === "recordRestockOrder") {
@@ -4048,7 +4096,7 @@ export async function onRequestPost(context) {
         // counted as on its way so the restock isn't suggested again (restockOnOrder_ in db.js).
         sendLines = plan.lines.map(l => ({ blankId: l.blankId, blank: l.blank, color: l.color, size: l.size, style: l.style, productId: l.productId, partId: l.partId, qty: l.qty, unitCents: l.unitCents,
           restockQty: Math.min(l.qty, Math.max(0, Math.floor(Number(l.restockQty) || 0))) }));
-        const id = await insertSupplierOrder(env.DB, { connectionId: conn.id, vendor: conn.name, environment: conn.environment, poNumber, carrier: method.carrier, service: method.service,
+        const id = await insertSupplierOrder(env.DB, { connectionId: conn.id, vendor: await ensureVendor(env.DB, conn.name, { forBlanks: true }), environment: conn.environment, poNumber, carrier: method.carrier, service: method.service,
           shipTo, totalCents: plan.totalCents, lines: sendLines, itemIds, createdBy: adminActor(request) });
         if (!id) return jsonResponse({ status: "error", message: `PO number ${poNumber} has already been used — each order needs its own.` }, 409);
         order = await getSupplierOrder(env.DB, id);
@@ -4067,7 +4115,7 @@ export async function onRequestPost(context) {
       }
       await setSupplierOrderResult(env.DB, order.id, result);
       let marked = [];
-      if (result.status === "placed") marked = await markItemsBlankOrdered(env.DB, order.itemIds, { vendor: conn.name, vendorOrderId: order.poNumber });
+      if (result.status === "placed") marked = await markItemsBlankOrdered(env.DB, order.itemIds, { vendor: await ensureVendor(env.DB, conn.name, { forBlanks: true }), vendorOrderId: order.poNumber });
       if (brandCheck && brandCheck.needsApproval.length && overrideReason)
         audit({ orgId: null, orderId: null, action: "supplier_order.approval_overridden",
           detail: { id: order.id, poNumber: order.poNumber, reason: overrideReason, styles: brandCheck.needsApproval.map(n => ({ brand: n.brand, style: n.style, pieces: n.pieces, products: n.missing.map(m => m.productId) })) } });

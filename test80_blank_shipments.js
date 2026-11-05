@@ -39,6 +39,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt) VALUES ('prime','prime','PRIME','t','t');`);
   const call = async (body) => {
     const res = await api({ env: { DB: d1, SHIPPO_API_KEY: "k" }, waitUntil: (p) => p && p.then && p.then(() => {}, () => {}),

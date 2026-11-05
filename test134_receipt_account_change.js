@@ -25,6 +25,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   const call = async (body) => { const res = await api({ env: { DB: d1 }, waitUntil: (p) => Promise.resolve(p).catch(() => {}), request: { url: "https://admin.example.com/api/orders", json: async () => Object.assign({ key: "x" }, body), headers: { get: () => null } } });
     return { status: res.status, body: JSON.parse(await res.text()) }; };
   const acct = (n) => d1.q("SELECT id FROM accounts WHERE name = ?", n)[0].id;

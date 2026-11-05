@@ -3793,7 +3793,8 @@ export async function applyVendorBlanks(db, products, selections, opts = {}) {
       const c = sel.create || {};
       const colors = plan.colors.filter(x => pickColors.has(vendorColorKey_(x.vendorColor)));
       if (!colors.length) continue;
-      const fields = { name: String(c.name || plan.name).slice(0, 200), productType: String(c.productType || plan.category || "other").slice(0, 40), vendor: vp.vendor,
+      // The vendor as the list spells it — a vendor file or connection naming one that isn't there yet adds it.
+      const fields = { name: String(c.name || plan.name).slice(0, 200), productType: String(c.productType || plan.category || "other").slice(0, 40), vendor: await ensureVendor(db, vp.vendor, { forBlanks: true }),
         brand: String(c.brand != null ? c.brand : plan.brand).slice(0, 100), sku: String(c.sku || vp.style).slice(0, 100), notes: "",
         description: vp.description, features: vp.features,
         colors: colors.map(x => ({ color: x.vendorColor, images: imagesFor(x.vendorColor).map(({ url, locationId }) => ({ url, locationId })),
@@ -7788,49 +7789,146 @@ export async function getBlankUsage(db, sinceIso) {
   return new Map(results.filter(r => Number(r.used) > 0).map(r => [[Number(r.blankId), r.color || "", r.size || ""].join("\u0001"), Number(r.used)]));
 }
 
-// ---- Free shipping per vendor (2026-10) ------------------------------------------------------------------------
-// A supplier ships free over a dollar amount (SanMar, S&S: $200, their published thresholds) or a piece count. Kept per vendor
-// NAME — the blank's Vendor field, which Blanks to Order groups by — so it works with or without a vendor connection.
-// global_settings 'vendorShipping' = {"<key>": {name, overCents, minQty}} (key = letters and digits, lower case); a
-// vendor with no entry uses VENDOR_SHIPPING_DEFAULTS. 0 / null on both = no free shipping.
+// ---- The vendor list (migrations/0084) -------------------------------------------------------------------------
+// Every vendor picked on a blank, a receipt (blanks or a transfer sheet), an expense, a "blank ordered" step, a blank
+// shipment or a supplier / restock order is a row in `vendors`, chosen from a list (Manage… beside every picker).
+// Records keep the vendor's NAME, so renaming a vendor renames every record that names it (VENDOR_NAME_COLUMNS_).
+// Free shipping is per vendor: over an amount (0 = every order) and / or at a piece count, or none.
+// vendorShippingKey_ (letters and digits, lower case) still matches blanks to a vendor in getFreeShippingCandidates.
 export const vendorShippingKey_ = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-export const VENDOR_SHIPPING_DEFAULTS = {
-  sanmar: { name: "SanMar", overCents: 20000, minQty: null },
-  ss: { name: "S&S", overCents: 20000, minQty: null }, ssactivewear: { name: "S&S", overCents: 20000, minQty: null },
-};
-export async function getVendorShipping(db) {
-  const row = await db.prepare("SELECT value FROM global_settings WHERE key='vendorShipping'").first();
-  const v = row ? tryParse_(row.value, {}) : {};
-  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+// Every column that stores a vendor's name — what a rename updates and what "in use" counts.
+const VENDOR_NAME_COLUMNS_ = [
+  ["blanks", "vendor", "blanks"], ["inventory_movements", "vendor", "blank receipts"], ["transfer_movements", "vendor", "transfer receipts"],
+  ["expenses", "vendor", "expenses"], ["order_items", "blankVendor", "order lines"], ["orders", "blankVendor", "orders"],
+  ["blank_shipments", "vendor", "blank shipments"], ["supplier_orders", "vendor", "supplier orders"], ["blank_restock_orders", "vendor", "restock orders"],
+];
+const vendorErr_ = (m) => Object.assign(new Error(m), { userFacing: true });
+// {overCents, minQty, isDefault} — free shipping for a vendor row, or null when it has none. overCents 0 = always free.
+function vendorFreeShipping_(v) {
+  if (!v || Number(v.noFreeShipping)) return null;
+  const overCents = v.freeShipOverCents == null ? null : Math.max(0, Math.round(Number(v.freeShipOverCents)));
+  const minQty = v.freeShipMinQty == null ? null : Math.max(1, Math.floor(Number(v.freeShipMinQty)));
+  return overCents != null || minQty != null ? { overCents, minQty, isDefault: false } : null;
 }
-// {overCents, minQty, isDefault} for a vendor name, or null when it has no free shipping.
-export function vendorShippingFor(saved, vendor) {
-  const key = vendorShippingKey_(vendor);
-  if (!key) return null;
-  const own = saved && Object.prototype.hasOwnProperty.call(saved, key) ? saved[key] : null;
-  const e = own || VENDOR_SHIPPING_DEFAULTS[key];
-  if (!e) return null;
-  const overCents = Number(e.overCents) > 0 ? Math.round(Number(e.overCents)) : null, minQty = Number(e.minQty) > 0 ? Math.floor(Number(e.minQty)) : null;
-  return overCents || minQty ? { overCents, minQty, isDefault: !own } : null;
+function vendorView_(r) {
+  return { id: Number(r.id), name: r.name, forBlanks: !!Number(r.forBlanks), hidden: !!Number(r.hidden), noFreeShipping: !!Number(r.noFreeShipping),
+    freeShipOverCents: r.freeShipOverCents == null ? null : Number(r.freeShipOverCents), freeShipMinQty: r.freeShipMinQty == null ? null : Number(r.freeShipMinQty),
+    freeShipping: vendorFreeShipping_(r) };
 }
-// Sets one vendor's free shipping: `over` in dollars and/or `minQty` pieces (blank / 0 = not that kind); `reset`
-// goes back to the default. Returns {before, after} for the audit.
-export async function setVendorShipping(db, vendor, { over, minQty, reset } = {}) {
-  const key = vendorShippingKey_(vendor);
-  if (!key) throw Object.assign(new Error("Name the vendor."), { userFacing: true });
-  const blankOrNum = (v, max, label) => {
+// The list, by name. withUse: how many records name each vendor ({blanks: 3, expenses: 1, …}) for Manage vendors.
+export async function listVendors(db, { withUse = false } = {}) {
+  let rows = [];
+  try { rows = (await db.prepare("SELECT * FROM vendors ORDER BY name COLLATE NOCASE").all()).results || []; }
+  catch (e) { return []; }   // before migrations/0084
+  const out = rows.map(vendorView_);
+  if (withUse) {
+    const byName = new Map(out.map(v => [v.name.toLowerCase(), v]));
+    for (const v of out) v.used = {};
+    for (const [table, col, label] of VENDOR_NAME_COLUMNS_) {
+      const { results } = await db.prepare(`SELECT ${col} AS vendor, COUNT(*) AS n FROM ${table} WHERE ${col} <> '' GROUP BY ${col} COLLATE NOCASE`).all();
+      for (const r of results || []) { const v = byName.get(String(r.vendor).toLowerCase()); if (v) v.used[label] = Number(r.n); }
+    }
+    for (const v of out) v.usedTotal = Object.values(v.used).reduce((t, n) => t + n, 0);
+  }
+  return out;
+}
+// Free shipping is now on the vendor list: what used to be the saved setting is the list itself.
+export async function getVendorShipping(db) { return listVendors(db); }
+// The vendor a name means — same name in any case, else the one vendor whose name it's an alias of ("S&S Activewear"
+// for "S&S", sameVendor_). null when none (or two) match.
+function findVendor_(vendors, name) {
+  const n = String(name || "").trim();
+  if (!n || !Array.isArray(vendors)) return null;
+  const exact = vendors.find(v => v.name.toLowerCase() === n.toLowerCase());
+  if (exact) return exact;
+  const alike = vendors.filter(v => sameVendor_(v.name, n));
+  return alike.length === 1 ? alike[0] : null;
+}
+// {overCents, minQty, isDefault} for a vendor name, or null when it has no free shipping (or isn't on the list).
+export function vendorShippingFor(vendors, vendor) {
+  return vendorFreeShipping_(findVendor_(vendors, vendor));
+}
+// A vendor name as the list spells it. '' stays '' unless `required`; a name that isn't on the list is refused —
+// vendors are added with Manage… beside the picker, never by typing a new name into a record. `forBlanks`: the vendor
+// must be one that sells blanks. `vendors` may be passed in when one request resolves several names.
+export async function resolveVendorName(db, name, { required = false, forBlanks = false, label = "Vendor", vendors = null } = {}) {
+  const n = String(name == null ? "" : name).trim();
+  if (!n) { if (required) throw vendorErr_(`Pick the ${label.toLowerCase()}.`); return ""; }
+  const list = vendors || await listVendors(db);
+  const v = findVendor_(list, n);
+  if (!v) throw vendorErr_(`“${n.slice(0, 100)}” isn't in the vendor list — add it with Manage… next to the ${label.toLowerCase()}.`);
+  if (forBlanks && !v.forBlanks) throw vendorErr_(`${v.name} isn't marked as a vendor for blanks — tick “For blanks” for it in Manage vendors.`);
+  return v.name;
+}
+// A vendor a system path names (a supplier connection, a vendor file, Stripe on a fee expense): the list's spelling,
+// added to the list when it isn't there yet. '' for no name.
+export async function ensureVendor(db, name, { forBlanks = false } = {}) {
+  const n = String(name || "").trim().replace(/\s+/g, " ").slice(0, 100);
+  if (!n) return "";
+  const v = findVendor_(await listVendors(db), n);
+  if (v) return v.name;
+  try {
+    const now = new Date().toISOString();
+    await db.prepare("INSERT OR IGNORE INTO vendors (name, forBlanks, createdAt, updatedAt) VALUES (?,?,?,?)").bind(n, forBlanks ? 1 : 0, now, now).run();
+  } catch (e) { /* before migrations/0084 */ }
+  return n;
+}
+// Adds or changes a vendor: {id?, name, forBlanks, over (dollars, "" = not by amount, 0 = always free), minQty
+// ("" = not by pieces), noFreeShipping, hidden}. A rename updates every record that names it (any case). Returns
+// {vendor, before, renamed: {label: count}}.
+export async function saveVendor(db, input = {}) {
+  const name = String(input.name || "").trim().replace(/\s+/g, " ");
+  if (!name) throw vendorErr_("Name the vendor.");
+  if (name.length > 100) throw vendorErr_("A vendor's name can be at most 100 characters.");
+  if (name.toLowerCase() === "in stock") throw vendorErr_("“In stock” is how blanks taken off the shelf are marked — it can't be a vendor.");
+  const blankOr = (v, max, label, min) => {
     if (v === undefined || v === null || v === "") return null;
-    const n = Number(v);
-    if (!Number.isFinite(n) || n < 0 || n > max) throw Object.assign(new Error(`${label} must be a number from 0 to ${max.toLocaleString("en-US")}.`), { userFacing: true });
-    return n;
+    const x = Number(v);
+    if (!Number.isFinite(x) || x < min || x > max) throw vendorErr_(`${label} must be a number from ${min} to ${max.toLocaleString("en-US")}.`);
+    return x;
   };
-  const dollars = blankOrNum(over, 100000, "Free shipping over $"), pieces = blankOrNum(minQty, 100000, "Free shipping at pieces");
-  const saved = await getVendorShipping(db);
-  const before = vendorShippingFor(saved, vendor);
-  if (reset) delete saved[key];
-  else saved[key] = { name: String(vendor).trim().slice(0, 80), overCents: dollars ? toCents(dollars) : null, minQty: pieces ? Math.floor(pieces) : null };
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('vendorShipping', ?)").bind(JSON.stringify(saved)).run();
-  return { before, after: vendorShippingFor(saved, vendor) };
+  const over = blankOr(input.over, 100000, "Free shipping at ($)", 0);
+  const minQty = blankOr(input.minQty, 100000, "Free shipping at (pieces)", 1);
+  const noFree = !!input.noFreeShipping;
+  const id = Number(input.id) || 0;
+  const before = id ? await db.prepare("SELECT * FROM vendors WHERE id=?").bind(id).first() : null;
+  if (id && !before) throw vendorErr_("That vendor no longer exists — reload and try again.");
+  const clash = await db.prepare("SELECT id, name FROM vendors WHERE name = ? COLLATE NOCASE AND id <> ?").bind(name, id).first();
+  if (clash) throw vendorErr_(`There's already a vendor called “${clash.name}”.`);
+  const now = new Date().toISOString();
+  const vals = [name, input.forBlanks ? 1 : 0, noFree ? null : (over == null ? null : toCents(over)), noFree ? null : (minQty == null ? null : Math.floor(minQty)), noFree ? 1 : 0, input.hidden ? 1 : 0];
+  const stmts = [];
+  let newId = id;
+  if (id) stmts.push(db.prepare("UPDATE vendors SET name=?, forBlanks=?, freeShipOverCents=?, freeShipMinQty=?, noFreeShipping=?, hidden=?, updatedAt=? WHERE id=?").bind(...vals, now, id));
+  const renamed = {};
+  if (before && before.name !== name) {
+    for (const [table, col, label] of VENDOR_NAME_COLUMNS_) {
+      const r = await db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${col} = ? COLLATE NOCASE`).bind(before.name).first();
+      if (Number(r && r.n)) renamed[label] = Number(r.n);
+      stmts.push(db.prepare(`UPDATE ${table} SET ${col} = ? WHERE ${col} = ? COLLATE NOCASE`).bind(name, before.name));
+    }
+  }
+  if (id) await db.batch(stmts);
+  else {
+    const r = await db.prepare("INSERT INTO vendors (name, forBlanks, freeShipOverCents, freeShipMinQty, noFreeShipping, hidden, createdAt, updatedAt) VALUES (?,?,?,?,?,?,?,?) RETURNING id")
+      .bind(...vals, now, now).first();
+    newId = Number(r.id);
+  }
+  const after = await db.prepare("SELECT * FROM vendors WHERE id=?").bind(newId).first();
+  return { vendor: vendorView_(after), before: before ? vendorView_(before) : null, renamed };
+}
+// Deletes a vendor nothing names (otherwise hide it). Returns the deleted row.
+export async function deleteVendor(db, id) {
+  const v = await db.prepare("SELECT * FROM vendors WHERE id=?").bind(Number(id) || 0).first();
+  if (!v) throw vendorErr_("That vendor no longer exists.");
+  const uses = [];
+  for (const [table, col, label] of VENDOR_NAME_COLUMNS_) {
+    const r = await db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${col} = ? COLLATE NOCASE`).bind(v.name).first();
+    if (Number(r && r.n)) uses.push(`${r.n} ${label}`);
+  }
+  if (uses.length) throw vendorErr_(`${v.name} is named on ${uses.join(", ")} — hide it instead, so it's no longer offered.`);
+  await db.prepare("DELETE FROM vendors WHERE id=?").bind(v.id).run();
+  return vendorView_(v);
 }
 
 // "Get me to free shipping" — what could be added to an order from `vendor`: every size of every blank whose Vendor
@@ -8194,6 +8292,7 @@ export async function importBlanksCsv(db, rawRows, opts = {}) {
   const bySku = new Map();
   for (const b of blankRows) { const k = String(b.sku || "").trim().toLowerCase(); if (k) (bySku.get(k) || bySku.set(k, []).get(k)).push(b); }
   const needleTypes = await listNeedleTypes(db);
+  const vendorList = await listVendors(db);   // a row's supplier must be one of these (migrations/0084)
   const categories = await listProductCategories(db);
   const findNeedle = (name) => {
     const n = name.toLowerCase();
@@ -8251,7 +8350,12 @@ export async function importBlanksCsv(db, rawRows, opts = {}) {
     res.needle = needleName;
 
     const matches = bySku.get(style.toLowerCase()) || [];
-    const vendor = (r.supplier || r.vendor || "").slice(0, 100);
+    let vendor = (r.supplier || r.vendor || "").slice(0, 100);
+    if (vendor) {
+      const v = findVendor_(vendorList, vendor);
+      if (v) vendor = v.name;
+      else res.problems.push(`Supplier “${vendor}” isn't in the vendor list — add it with Manage… beside a vendor picker (e.g. the blank form), then import again`);
+    }
     // Matched on vendor + style: a blank of this style from ANOTHER vendor is never updated (or re-vendored).
     // With no vendor in the file, the first blank of the style is used, as before.
     const sameVendor = matches.filter(b => sameVendor_(b.vendor, vendor));

@@ -394,6 +394,22 @@ CREATE TABLE IF NOT EXISTS blank_sizes (
   UNIQUE (blankId, color, size)
 );
 
+-- The vendor list (migrations/0084): every vendor picked on a blank, receipt, transfer sheet, expense, blank order,
+-- shipment or supplier / restock order. Records store the vendor's name (renaming one renames them). freeShipOverCents
+-- 0 = every order ships free, NULL = not by amount; freeShipMinQty NULL = not by pieces; noFreeShipping overrides both.
+CREATE TABLE IF NOT EXISTS vendors (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  name              TEXT    NOT NULL,
+  forBlanks         INTEGER NOT NULL DEFAULT 0 CHECK (forBlanks IN (0, 1)),
+  freeShipOverCents INTEGER CHECK (freeShipOverCents IS NULL OR freeShipOverCents >= 0),
+  freeShipMinQty    INTEGER CHECK (freeShipMinQty IS NULL OR freeShipMinQty >= 1),
+  noFreeShipping    INTEGER NOT NULL DEFAULT 0 CHECK (noFreeShipping IN (0, 1)),
+  hidden            INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+  createdAt         TEXT    NOT NULL,
+  updatedAt         TEXT    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vendors_name ON vendors (name COLLATE NOCASE);
+
 -- Every vendor price entered (migrations/0062), append-only; priceCents NULL = cleared.
 CREATE TABLE IF NOT EXISTS blank_vendor_prices (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,

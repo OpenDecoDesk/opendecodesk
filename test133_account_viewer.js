@@ -29,6 +29,7 @@ const KEY = (c) => "receipts/2026/" + c.repeat(32) + ".pdf";
       ('A','pp','Ann','a@x','Check',1,50,50,'2026-03-01T00:00:00Z'), ('B','pp','Bob','b@x','Card',1,40,40,'2026-03-01T00:00:00Z');
     INSERT INTO order_items (orderId, orgId, productId, name, type, qty, unitPrice, lineTotal, cancelDate) VALUES ('A','pp','p','Cap','cap',1,50,50,''),('B','pp','p','Cap','cap',1,40,40,'');`);
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   const call = async (body) => { const res = await api({ env: { DB: d1 }, waitUntil: (p) => Promise.resolve(p).catch(() => {}), request: { url: "https://admin.example.com/api/orders", json: async () => Object.assign({ key: "x" }, body), headers: { get: () => null } } });
     return { status: res.status, body: JSON.parse(await res.text()) }; };
   const acct = (n) => d1.q("SELECT id FROM accounts WHERE name = ?", n)[0].id;

@@ -30,6 +30,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  require("./testlib/vendors.js").seedVendors(d1);
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt, ready) VALUES ('northside','northside','Northside','t','t',1);`);
   const ENV = { DB: d1, SIGNING_SECRET: "a-signing-secret-for-tests-0123456789abcdef" };
   const call = async (body, { role = "admin" } = {}) => { const res = await api({ env: ENV, waitUntil: (pr) => Promise.resolve(pr).catch(() => {}),

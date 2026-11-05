@@ -3507,8 +3507,9 @@ function adminActionCell(org, o){
     // Payments stays available: money recorded on a cancelled order must be voided/refunded before the order can be voided.
     return `<span class="muted-cell" style="font-size:12px;">Cancelled</span>` + paymentsBtn + deleteBtn;
   }
-  const resendLabel = !o.paid ? (o.receivedEmailAt ? "Resend received" : "Send received") :
-                      (o.confirmedEmailAt ? "Resend confirmation" : "Send confirmation");
+  // The two customer emails are "Order received" and "Payment received" (email.js) — the button says which.
+  const resendLabel = !o.paid ? (o.receivedEmailAt ? "Resend “Order received”" : "Send “Order received”") :
+                      (o.confirmedEmailAt ? "Resend “Payment received”" : "Send “Payment received”");
   const rushBtn = `<button class="admin-btn" ${dataAttrs} onclick="showRushFeeModal_(this.dataset.org,this.dataset.order)" title="Rush this order, or change its rush fee" style="margin-top:4px;">${o.rushRequested ? "Rush…" : "+ Rush…"}</button>`;
 
   // Paid for everything but a rush fee (migrations/0082) counts as paid for the work: the stages go on.
@@ -3645,7 +3646,29 @@ function invoiceCell_(org, o){
   // for a paid order too (it then says "Paid in full").
   const pdfBtn = adminDesktop_() && !o.voidedAt && window.oddDesktop && typeof window.oddDesktop.saveInvoicePdf === "function"
     ? `<button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="saveInvoicePdf_(this.dataset.org, this.dataset.order)" title="Save this order's invoice as a PDF, to print or send yourself" style="margin-top:4px;">Save invoice PDF…</button>` : "";
-  return btn + pdfBtn + status;
+  // On the web: the same PDF the customer's emails carry — an invoice while something is owed, a receipt once paid.
+  const webPdfBtn = !adminDesktop_() && !o.voidedAt
+    ? `<button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="downloadOrderPdf_(this.dataset.org, this.dataset.order)" title="Download this order's ${owes ? "invoice" : "receipt"} as a PDF" style="margin-top:4px;">${owes ? "Invoice PDF" : "Receipt PDF"}</button>` : "";
+  return btn + pdfBtn + webPdfBtn + status;
+}
+
+// A PDF the server drew (email.js orderPdf), saved as a download — base64 → a Blob → a link with
+// `download`. (Opening it in a tab from a blob: address would be blanked by the admin's content policy.)
+function savePdfFile_(file){
+  const bin = atob(String(file.contentBase64 || "")), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+  const a = document.createElement("a"); a.href = url; a.download = file.filename || "document.pdf";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  return bytes;
+}
+async function downloadOrderPdf_(orgId, orderId){
+  try {
+    const d = await hoopApi_({ action: "getOrderPdf", org: orgId, orderId });
+    savePdfFile_(d.file);
+    showToast("Downloaded " + (d.file.filename || "the PDF") + ".");
+  } catch (e) { showToast((e && e.message) || "Couldn't make the PDF.", true); }
 }
 
 // Orders → Save invoice PDF… (desktop): the server makes the invoice page, the program makes it a
@@ -4481,7 +4504,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
     });
   }).join("");
 }
-const ORDERS_TABLE_HEADERS_ = `<th>Action</th><th><input type="checkbox" id="selectAllOrders" onchange="toggleSelectAllOrders(this)" title="Select all" aria-label="Select all orders"></th><th>Date</th><th>Due</th><th>Customer</th><th>Order #</th><th>Item</th><th>Size</th><th>Qty</th><th>Personalization</th><th>Line Total</th><th>Cancel</th><th>Refund</th><th>Payment</th><th>Paid</th><th>Discount</th><th>Balance Due</th><th>Received</th><th>Confirmed</th><th>Blank Ordered</th><th>Blank Shipped</th><th>Blank Received</th><th>Manufactured</th><th>Digitizing</th><th>Verif. Sent</th><th>Change Req.</th><th>Design Approved</th><th>QA &amp; Packed</th><th>Shipped</th><th>Delivered</th><th>Completed</th><th>Shipping</th><th>Tracking</th>`;
+const ORDERS_TABLE_HEADERS_ = `<th>Action</th><th><input type="checkbox" id="selectAllOrders" onchange="toggleSelectAllOrders(this)" title="Select all" aria-label="Select all orders"></th><th>Date</th><th>Due</th><th>Customer</th><th>Order #</th><th>Item</th><th>Size</th><th>Qty</th><th>Personalization</th><th>Line Total</th><th>Cancel</th><th>Refund</th><th>Payment</th><th>Paid</th><th>Discount</th><th>Balance Due</th><th>Order email</th><th>Payment email</th><th>Blank Ordered</th><th>Blank Shipped</th><th>Blank Received</th><th>Manufactured</th><th>Digitizing</th><th>Verif. Sent</th><th>Change Req.</th><th>Design Approved</th><th>QA &amp; Packed</th><th>Shipped</th><th>Delivered</th><th>Completed</th><th>Shipping</th><th>Tracking</th>`;
 
 // ---- Orders on a phone: one card per order instead of the 31-column table ----------------------
 // Chosen when the page renders (adminIsMobile_); crossing the breakpoint re-renders the view. A card
@@ -4547,7 +4570,7 @@ function orderCardHtml_(o, org, verif, showShop){
     o.balanceDue > 0.005 ? `<div style="color:#b03a2e;font-weight:600;">Balance due ${money(o.balanceDue)}</div>` : "",
   ].join("");
   const tracking = trackingCell(org, o);
-  const detail = [["Received email", emailBadge(o.receivedEmailAt)], ["Confirmed email", emailBadge(o.confirmedEmailAt)]]
+  const detail = [["“Order received” email", emailBadge(o.receivedEmailAt)], ["“Payment received” email", emailBadge(o.confirmedEmailAt)]]
     .concat(ORDER_CARD_STAGES_.slice(0, 4).map(s => [s[1], fulfillmentBadge(o[s[0]], o, s[2])]))
     .concat([["Verification sent", verifSentCell(verif, 1)], ["Change request", changeRequestCell(verif, 1, org)]])
     .concat(ORDER_CARD_STAGES_.slice(4).map(s => [s[1], fulfillmentBadge(o[s[0]], o, s[2])]))
@@ -5521,7 +5544,9 @@ async function showOrderDates_(orgId, orderId){
 // disappears once an order is paid — this is the only way to send (or
 // resend, e.g. after a bounced email) a confirmation for those orders.
 async function resendEmail(orgId, orderId){
-  if(!await askConfirm_("Resend the order confirmation email for " + orderId + "?")) return;
+  const cached = ((window._ordersCache && window._ordersCache[orgId]) || []).find(x => x.orderId === orderId);
+  const which = cached && cached.paid ? "Payment received" : "Order received";
+  if(!await askConfirm_("Send the “" + which + "” email for " + orderId + " to the customer again?")) return;
   if(!adminKey){
     adminKey = (await adminLogin()) || "";
   }
@@ -5538,7 +5563,7 @@ async function resendEmail(orgId, orderId){
       showToast("Could not resend email: " + ((data && data.message) || "unknown error"), true);
       return;
     }
-    showToast(data.resent === "confirmed" ? "Payment-confirmed email sent." : "Order-received email sent.", false);
+    showToast(data.resent === "confirmed" ? "“Payment received” email sent." : "“Order received” email sent.", false);
   }catch(e){
     showToast("Could not reach the server.", true);
   }
@@ -8361,6 +8386,8 @@ async function renderGlobalSettings(app){
       const ld = await lr.json();
       if(lr.ok && ld.status === "ok"){ locale = ld.locale || locale; effectiveTz = ld.effectiveTimeZone || "UTC"; envTz = ld.envTimeZone || ""; }
     }catch(e){}
+    let emailSettings = { attachPdf: true };
+    try{ const er = await hoopApi_({ action: "getEmailSettings" }); if(er && er.emailSettings) emailSettings = er.emailSettings; }catch(e){}
     const us = locale.country !== "OTHER";
     const bizField = (id, key, label, note, extra) => `<label>${label}
           <input type="${/Email$/.test(key) ? "email" : "text"}" id="${id}" value="${escapeHtml(biz[key] || "")}" ${extra || ""}>
@@ -8431,7 +8458,14 @@ async function renderGlobalSettings(app){
         ${bizField("gBizZelle", "zelle", "Zelle email or phone", "", 'maxlength="200"')}
         ${bizField("gBizLegalName", "legalName", "Checks payable to", "Your legal or bank-account name, if it differs from the business name.", 'maxlength="160"')}
         ${bizField("gBizMailing", "mailingAddress", "Mail checks to", us ? "A single line: street, city, state, ZIP." : "A single line: street, city, region, postal code.", 'maxlength="300"')}
+        ${bizField("gBizPhone", "phone", "Phone (optional)", "Printed with your address and email on customers' emails and PDF receipts.", 'maxlength="40"')}
+        <div${adminDesktop_() ? ' style="display:none;"' : ""}>
+        ${bizField("gBizWebsite", "website", "Website (optional)", "Blank = this site.", 'maxlength="200" placeholder="https://"')}
+        </div>
+        ${bizField("gBizPaymentNote", "paymentNote", "Note on paying (optional)", "Added to “How to pay” on emails and invoices — e.g. “Cash is fine at pickup.”", 'maxlength="300"')}
         ${bizField("gBizPoPrefix", "poPrefix", "Purchase order prefix", "Starts the number of each order placed with a supplier from Blanks to Order (PO-20261021-1). Letters and numbers; blank = PO.", 'maxlength="10" placeholder="PO"')}
+
+        ${customerEmailsBoxHtml_(emailSettings)}
 
         <h2 style="margin:22px 0 12px;">Region</h2>
         <div class="admin-note" style="margin-bottom:14px;">Where the business is. ${adminDesktop_()
@@ -8589,6 +8623,112 @@ async function backfillStripeFees(btn){
 // that affects. Required and recommended things that are missing come first and are marked; an
 // optional service that isn't set up is just listed as off. `items` is the server's list
 // (functions/_lib/setupStatus.js); null (couldn't be loaded) draws nothing.
+// ---- Global settings → Customer emails ----------------------------------------------------------------------
+// Whether order emails carry a PDF, and a preview of each email a customer gets — built by the server with the
+// same code that sends them, from a made-up order using your Business profile, sales tax and payment methods.
+function customerEmailsBoxHtml_(settings){
+  const admin = adminCan_("admin");
+  return `<h2 style="margin:22px 0 12px;">Customer emails</h2>
+    <div class="admin-note" style="margin-bottom:10px;">The “Order received” email goes out when an order is placed, with how to pay; the “Payment received” email when you record the payment. Both list the items priced before tax, the sales tax above the total, and your business details from above.</div>
+    <label class="checkbox-row"><input type="checkbox" id="gEmailAttachPdf" ${settings && settings.attachPdf === false ? "" : "checked"} ${admin ? "" : "disabled"}> Attach a PDF to order emails — an invoice while something is owed, a receipt once paid</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 4px;">
+      <button type="button" class="admin-btn" id="gEmailPreviewBtn" onclick="showEmailPreview_()">Preview emails…</button>
+      <button type="button" class="admin-btn admin-btn-secondary" onclick="showEmailPreview_({ pdf: true })">View sample PDF receipt…</button>
+    </div>
+    <div class="admin-note">Save first if you've changed the Business profile — the preview uses what's saved.</div>`;
+}
+const EMAIL_PREVIEW_KINDS_ = [["received", "Order received"], ["payment", "Payment received"], ["invoice", "Invoice"], ["shipped", "Shipped"]];
+function showEmailPreview_(opts = {}){
+  const sel = "font-size:14px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;";
+  const opt = (pairs, val) => pairs.map(([v, l]) => `<option value="${escapeHtml(v)}" ${v === val ? "selected" : ""}>${escapeHtml(l)}</option>`).join("");
+  const { ov, close } = inventoryModal_("Preview customer emails", `
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px;">
+      <label style="font-size:13px;">Email<br><select id="epKind" style="${sel}">${opt(EMAIL_PREVIEW_KINDS_, opts.pdf ? "payment" : "received")}</select></label>
+      <label style="font-size:13px;">Example<br><select id="epExample" style="${sel}">${opt([["shipping", "With shipping"], ["pickup", "Without shipping (pickup)"]], "shipping")}</select></label>
+      <label style="font-size:13px;">Payment method<br><select id="epMethod" style="${sel}">${opt([["Check", "Check"], ["Venmo", "Venmo"], ["Zelle", "Zelle"], ["Card", "Card"]], "Check")}</select></label>
+    </div>
+    <div id="epSubjectRow" style="font-size:14px;margin-bottom:8px;"><span style="color:#666;">Subject:</span> <strong id="epSubject">…</strong></div>
+    <div style="display:flex;gap:6px;margin-bottom:6px;" role="tablist">
+      <button type="button" class="admin-btn" id="epTabHtml" aria-selected="true">Email</button>
+      <button type="button" class="admin-btn admin-btn-secondary" id="epTabText" aria-selected="false">Plain text</button>
+      <button type="button" class="admin-btn admin-btn-secondary" id="epTabPdf" aria-selected="false">PDF</button>
+    </div>
+    <iframe id="epFrame" title="Email preview" sandbox="" style="width:100%;height:56vh;border:1px solid #ddd;border-radius:6px;background:#fff;"></iframe>
+    <pre id="epText" style="display:none;white-space:pre-wrap;font-size:13px;max-height:56vh;overflow:auto;border:1px solid #ddd;border-radius:6px;padding:12px;background:#fafafa;margin:0;"></pre>
+    <div id="epPdf" style="display:none;max-height:56vh;overflow:auto;border:1px solid #ddd;border-radius:6px;background:#e5e7eb;padding:10px;text-align:center;"></div>
+    <div id="epAttach" style="font-size:13px;color:#555;margin-top:8px;"></div>
+    <div id="epErr" style="color:#b03a2e;font-size:13px;margin-top:6px;"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:12px;">
+      ${adminCan_("admin") ? `<button type="button" class="admin-btn admin-btn-secondary" id="epSend">Send me this sample</button>` : ""}
+      <button type="button" class="admin-btn admin-btn-secondary" id="epDownload">Download PDF</button>
+      <button type="button" class="admin-btn" id="epClose">Close</button>
+    </div>`, 900);
+  const $ = (id) => ov.querySelector("#" + id);
+  const pick = () => ({ kind: $("epKind").value, example: $("epExample").value, method: $("epMethod").value });
+  let tab = opts.pdf ? "pdf" : "html", pdfFile = null, seq = 0;
+  const showTab = (t, noLoad) => {
+    tab = t;
+    $("epFrame").style.display = t === "html" ? "" : "none"; $("epText").style.display = t === "text" ? "" : "none"; $("epPdf").style.display = t === "pdf" ? "" : "none";
+    for (const [id, k] of [["epTabHtml", "html"], ["epTabText", "text"], ["epTabPdf", "pdf"]]) {
+      $(id).classList.toggle("admin-btn-secondary", k !== t); $(id).setAttribute("aria-selected", k === t ? "true" : "false");
+    }
+    if (t === "pdf" && !noLoad) loadPdf();
+  };
+  // The PDF, drawn page by page with the vendored pdf.js (the same one Import from PDF uses).
+  async function loadPdf(){
+    const my = ++seq, box = $("epPdf");
+    box.innerHTML = `<div style="padding:20px;color:#555;">Making the PDF…</div>`;
+    try {
+      const d = await hoopApi_({ action: "samplePdf", ...pick() });
+      if (my !== seq) return;
+      pdfFile = d.file;
+      const bin = atob(pdfFile.contentBase64), bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      box.innerHTML = "";
+      try {
+        const lib = await loadPdfjsLib_();
+        const pdf = await lib.getDocument({ data: bytes }).promise;
+        for (let n = 1; n <= pdf.numPages; n++) {
+          const page = await pdf.getPage(n), vp = page.getViewport({ scale: 1.3 });
+          const c = document.createElement("canvas"); c.width = vp.width; c.height = vp.height;
+          c.style.cssText = "max-width:100%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.2);margin:0 auto 10px;display:block;";
+          box.appendChild(c);
+          await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
+        }
+      } catch (e) {
+        box.innerHTML = `<div style="padding:20px;color:#555;">The PDF (${escapeHtml(pdfFile.filename)}) is ready — use Download PDF to open it.</div>`;
+      }
+    } catch (e) { if (my === seq) box.innerHTML = `<div style="padding:20px;color:#b03a2e;">${escapeHtml(e.message || "Couldn't make the PDF.")}</div>`; }
+  }
+  async function load(){
+    $("epErr").textContent = ""; pdfFile = null;
+    try {
+      const d = await hoopApi_({ action: "previewCustomerEmail", ...pick() });
+      const p = d.preview || {};
+      $("epSubject").textContent = p.subject || "";
+      $("epFrame").srcdoc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"></head><body style="margin:12px;">${p.html || ""}</body></html>`;
+      $("epText").textContent = p.text || "";
+      $("epAttach").textContent = (p.attachments || []).length
+        ? "Attached: " + p.attachments.map(a => `${a.filename} (${Math.max(1, Math.round(a.bytes / 1024))} KB)`).join(", ")
+        : ($("epKind").value === "shipped" ? "" : "No PDF attached (switched off above, or the shipping cost is still to come).");
+    } catch (e) { $("epErr").textContent = e.message || "Couldn't make the preview."; }
+    if (tab === "pdf") loadPdf();
+  }
+  for (const id of ["epKind", "epExample", "epMethod"]) $(id).onchange = load;
+  $("epTabHtml").onclick = () => showTab("html"); $("epTabText").onclick = () => showTab("text"); $("epTabPdf").onclick = () => showTab("pdf");
+  $("epDownload").onclick = async () => {
+    try { const file = pdfFile || (await hoopApi_({ action: "samplePdf", ...pick() })).file; savePdfFile_(file); }
+    catch (e) { $("epErr").textContent = e.message || "Couldn't make the PDF."; }
+  };
+  if ($("epSend")) $("epSend").onclick = async () => {
+    try { const d = await hoopApi_({ action: "sendSampleEmail", ...pick() }); showToast(d.message || "Sent to your inbox."); }
+    catch (e) { $("epErr").textContent = e.message || "It couldn't be sent."; }
+  };
+  $("epClose").onclick = close;
+  showTab(tab, true);   // load() below draws the PDF tab too when it opens on it
+  load();
+}
+
 function setupStatusHtml_(items){
   if(!Array.isArray(items) || !items.length) return "";
   const rank = (i) => i.ready ? 3 : i.level === "required" ? 0 : i.level === "recommended" ? 1 : 2;
@@ -8721,7 +8861,8 @@ async function submitGlobalSettings(){
         body: JSON.stringify({ action: "updateBusinessProfile", key: adminKey, business: {
           name: gv("gBizName"), tagline: gv("gBizTagline"), footer: gv("gBizFooter"), supportEmail: gv("gBizSupportEmail"),
           ownerEmail: gv("gBizOwnerEmail"), receiptsEmail: gv("gBizReceiptsEmail"), venmo: gv("gBizVenmo"), zelle: gv("gBizZelle"),
-          legalName: gv("gBizLegalName"), mailingAddress: gv("gBizMailing"), poPrefix: gv("gBizPoPrefix") } })
+          legalName: gv("gBizLegalName"), mailingAddress: gv("gBizMailing"), poPrefix: gv("gBizPoPrefix"),
+          phone: gv("gBizPhone"), website: gv("gBizWebsite"), paymentNote: gv("gBizPaymentNote") } })
       });
       const bizData = await bizRes.json();
       if(!bizRes.ok || bizData.status === "error"){
@@ -8729,6 +8870,11 @@ async function submitGlobalSettings(){
         return;
       }
       applyBusiness_(bizData.business);   // the header and page titles follow at once
+    }
+    const pdfBox = document.getElementById("gEmailAttachPdf");
+    if(pdfBox && adminCan_("admin")){
+      try{ await hoopApi_({ action: "updateEmailSettings", emailSettings: { attachPdf: pdfBox.checked } }); }
+      catch(e){ if(errEl) errEl.textContent = e.message || "Could not save the email settings."; return; }
     }
     if(machShown && stillOn("production")){
     const machRes = await fetch("/api/orders", {

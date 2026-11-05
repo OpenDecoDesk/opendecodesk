@@ -233,17 +233,17 @@ function lastToastText(win){
   // X1 was marked paid earlier in this test and already has a confirmedEmailAt in
   // the mock -> "Resend". X2 has never had a receivedEmailAt set -> "Send", not "Resend".
   const finalHtml = adminWindow.document.getElementById("app").innerHTML;
-  console.log("Paid order (X1, already confirmed once) shows 'Resend confirmation':", finalHtml.includes("Resend confirmation"));
-  console.log("Unpaid order (X2, never sent) shows 'Send received', not 'Resend received':", finalHtml.includes("Send received") && !finalHtml.includes("Resend received"));
+  console.log("Paid order (X1, already confirmed once) shows 'Resend “Payment received”':", finalHtml.includes("Resend “Payment received”"));
+  console.log("Unpaid order (X2, never sent) shows 'Send “Order received”', not 'Resend “Order received”':", finalHtml.includes("Send “Order received”") && !finalHtml.includes("Resend “Order received”"));
 
   await adminWindow.resendEmail("league-101", "X1");
   const resendCallPaid = adminCalls.filter(c => c.body && c.body.action === "resendEmail").pop();
   console.log("Resend for the paid order sent the right org/orderId:", resendCallPaid.body.org === "league-101" && resendCallPaid.body.orderId === "X1");
   console.log("Client sent the admin passphrase:", resendCallPaid.body.key === "proxy-passphrase");
-  console.log("Confirms the 'confirmed' email was sent (server decided based on X1's real paid status):", lastToastText(adminWindow) === "Payment-confirmed email sent.");
+  console.log("Confirms the 'confirmed' email was sent (server decided based on X1's real paid status):", lastToastText(adminWindow) === "“Payment received” email sent.");
 
   await adminWindow.resendEmail("league-101", "X2");
   const resendCallUnpaid = adminCalls.filter(c => c.body && c.body.action === "resendEmail").pop();
   console.log("Send for the unpaid order sent the right org/orderId:", resendCallUnpaid.body.org === "league-101" && resendCallUnpaid.body.orderId === "X2");
-  console.log("Confirms the 'received' email was sent:", lastToastText(adminWindow) === "Order-received email sent.");
+  console.log("Confirms the 'received' email was sent:", lastToastText(adminWindow) === "“Order received” email sent.");
 })();

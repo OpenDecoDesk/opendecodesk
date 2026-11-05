@@ -229,7 +229,7 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   globalThis.__mails = [];
   await email.sendOrderReceivedEmail({}, await lib.getOrderById(d1, taxedId));
   await email.sendOrderReceivedEmail({}, { orderId: "X-1", customerName: "Alex Sample", contact: "a@x.com", items: [{ name: "Cap", qty: 1, lineTotal: 25 }], subtotal: 25, shippingCost: 0, rushRequested: true, rushFee: 0, rushFeePending: true });
-  ok("receipts show the rush fee, or that it's to follow (and the total still shows)", /Rush fee: \$10\.60/.test(globalThis.__mails[0].text) &&
+  ok("receipts show the rush fee (before tax, its tax in the tax line), or that it's to follow (and the total still shows)", /Rush fee: \$10\.00\nSales tax \(6%\): \$2\.02\nTotal: \$35\.60/.test(globalThis.__mails[0].text) &&
     /Rush fee: to follow/.test(globalThis.__mails[1].text) && /Total: \$25\.00/.test(globalThis.__mails[1].text));
   const toSet = [{ orderId: "R-9", orgId: "acme", customerName: "Alex Sample", dueDate: soon }];
   globalThis.__mails = [];

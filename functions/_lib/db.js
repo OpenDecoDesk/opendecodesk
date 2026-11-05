@@ -2808,11 +2808,12 @@ export async function localToday(env, now) {
 // Tools → Global settings → Business profile. Everything is optional; BUSINESS_NAME_FALLBACK stands
 // in for a missing name so nothing ever renders blank.
 export const BUSINESS_NAME_FALLBACK = "Our shop";
+// phone / website / paymentNote: printed on customers' emails and PDF receipts with the rest of who you are.
 const BUSINESS_FIELDS = { name: 120, legalName: 160, tagline: 200, supportEmail: 200, ownerEmail: 200, receiptsEmail: 200,
-  mailingAddress: 300, venmo: 60, zelle: 200, footer: 300, poPrefix: 10 };
+  mailingAddress: 300, venmo: 60, zelle: 200, footer: 300, poPrefix: 10, phone: 40, website: 200, paymentNote: 300 };
 const BUSINESS_EMAIL_FIELDS = ["supportEmail", "ownerEmail", "receiptsEmail"];
 // What a visitor's browser may see. ownerEmail / receiptsEmail are internal inboxes and stay private.
-const BUSINESS_PUBLIC_FIELDS = ["name", "legalName", "tagline", "supportEmail", "mailingAddress", "venmo", "zelle", "footer"];
+const BUSINESS_PUBLIC_FIELDS = ["name", "legalName", "tagline", "supportEmail", "mailingAddress", "venmo", "zelle", "footer", "phone", "website", "paymentNote"];
 
 export async function getBusinessProfile(db) {
   const out = {};
@@ -2839,10 +2840,28 @@ export async function setBusinessProfile(db, p) {
   const bad = (m) => { const e = new Error(m); e.userFacing = true; return e; };
   for (const k of BUSINESS_EMAIL_FIELDS) if (clean[k] && !/^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/.test(clean[k])) throw bad("That doesn't look like a valid email: " + clean[k]);
   if (clean.venmo && !/^[A-Za-z0-9_-]+$/.test(clean.venmo)) throw bad("A Venmo username has only letters, numbers, - and _");
+  // A website is printed as a link on emails and receipts, so only a plain web address is kept.
+  if (clean.website && !/^https?:\/\//i.test(clean.website)) clean.website = "https://" + clean.website;
+  if (clean.website && !/^https?:\/\/[^\s<>"'()]+$/i.test(clean.website)) throw bad("That doesn't look like a web address: " + clean.website);
   // Starts the number of each purchase order placed with a supplier (migrations/0072): PO-20261021-1.
   clean.poPrefix = clean.poPrefix.toUpperCase();
   if (clean.poPrefix && !/^[A-Z0-9]+$/.test(clean.poPrefix)) throw bad("A purchase order prefix has only letters and numbers");
   await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('business', ?)").bind(JSON.stringify(clean)).run();
+  return clean;
+}
+
+// ---- Customer email settings ------------------------------------------------------------------
+// Global settings → Customer emails. attachPdf: the order-received and payment-received emails carry a
+// PDF of the invoice / receipt (email.js orderPdfAttachment). On unless turned off.
+export async function getEmailSettings(db) {
+  let saved = {};
+  try { const row = db && await db.prepare("SELECT value FROM global_settings WHERE key='emailSettings'").first(); saved = row ? (tryParse_(row.value, {}) || {}) : {}; }
+  catch (e) { /* no table yet — defaults */ }
+  return { attachPdf: saved.attachPdf !== false };
+}
+export async function setEmailSettings(db, s) {
+  const clean = { attachPdf: !(s && s.attachPdf === false) };
+  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('emailSettings', ?)").bind(JSON.stringify(clean)).run();
   return clean;
 }
 
@@ -11282,6 +11301,7 @@ function parseOrder_(row, items, payments, labels) {
     paidForWork: !!row.paid || !!row.paidForWork,   // `paid` covers the work too
     discountAmount,
     discountNote: row.discountNote || "",
+    discountTax: fromCents(Number(row.discountTaxCents) || 0),   // the tax inside the discount (inclusive prices)
     taxExempt: !!row.taxExempt,
     voidedAt: row.voidedAt || "",
     voidReason: row.voidReason || "",

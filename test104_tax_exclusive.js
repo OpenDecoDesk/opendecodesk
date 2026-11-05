@@ -239,10 +239,12 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   ok("a saved order's receipt adds up from the order itself ($100.00 + $3.60 = $103.60)", /Subtotal \$100\.00 Sales tax \(6%\) \$3\.60 Total \$103\.60/.test(h));
   await E.sendPaymentConfirmedEmail(env, await get("DISCI"), "2026-09-22T00:00:00Z");
   h = plain(sent.pop().htmlBody);
-  ok("a tax-included order's receipt is unchanged: the note under the total", /Total \$95\.40 Includes sales tax \(6%\) \$5\.40/.test(h) && !/Sales tax \(6%\) \$5\.40 Total/.test(h));
+  // Prices include tax: shown before tax ($106.00 → $100.00, the $10.60 discount → $10.00), the tax its own row above the Total.
+  ok("a tax-included order's receipt shows prices before tax, then the tax above the Total", /Unit price Amount Item One Size 1 \$100\.00 \$100\.00/.test(h)
+    && /Subtotal \$100\.00 Discount \(loyalty\) −\$10\.00 Sales tax \(6%\) \$5\.40 Total \$95\.40/.test(h) && !/Includes sales tax/i.test(h));
   await E.sendPaymentConfirmedEmail(env, await get("EX-exclusive"), "2026-09-22T00:00:00Z");
   h = plain(sent.pop().htmlBody);
-  ok("a tax-exempt order says so and adds nothing", /Total \$80\.00 Tax-exempt order/.test(h) && !/Sales tax \(/.test(h));
+  ok("a tax-exempt order says so and adds nothing", /Sales tax Tax-exempt Total \$80\.00/.test(h) && !/Sales tax \(/.test(h));
 
   console.log("\n=== A refund's tax reversal ===");
   const fresh = async () => {

@@ -159,8 +159,8 @@ const ok = (d, c) => { console.log(d + ":", !!c); };
   ok("…from the business, replies to the owner, naming no web address", t.fromName === "Stitch Co" && t.replyTo === "owner@stitch.example" && /the OpenDecoDesk program/.test(t.text) && !/example\.com/.test(t.text + t.html));
   mail.length = 0;
   r = await post(on, { action: "resendEmail", key: "x", org: "shop", orderId });
-  ok("Resend confirmation works, and the email ends at the business's name (no site)", r.status === 200 && r.body.resent === "confirmed" && mail.length === 1 &&
-    mail[0].to === "sam@example.net" && /Stitch Co<\/p>/.test(mail[0].html) && !/%%|example\.com/.test(mail[0].html + mail[0].text));
+  ok("Resend confirmation works (the Payment received email), and the email ends at the business's details (no site)", r.status === 200 && r.body.resent === "confirmed" && mail.length === 1 &&
+    mail[0].to === "sam@example.net" && /Stitch Co<\/strong>/.test(mail[0].html) && /^Payment received — SHOP-\S+ · paid in full$/.test(mail[0].subject) && !/%%|example\.com/.test(mail[0].html + mail[0].text));
   // An invoice: a second order that still owes.
   r = await post(on, { action: "createLocalSale", key: "x", org: "shop", paymentMethod: "Venmo", customerName: "Sam", contact: "sam@example.net",
     items: [{ productId: "__custom__", name: "Cap", qty: 1, customUnitPrice: 30, type: "cap" }] });
@@ -170,7 +170,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); };
   const inv = mail[0] || {};
   ok("an invoice is sent with no link (there is no page to open), and no delivery choice", r.status === 200 && r.body.emailSent && r.body.url === "" && !/View &amp; pay|https?:\/\/[^"\s]*invoice/.test(inv.html) && r.body.invoice && r.body.invoice.allowDelivery !== true);
   ok("…it is the invoice itself: the lines, the total, and how to pay from the Business profile", /Here is your invoice/.test(inv.html) && /Cap/.test(inv.html) && /How to pay \$30\.00/.test(inv.html) &&
-    /venmo\.com\/u\/stitchco\?txn=pay&amp;amount=30\.00/.test(inv.html) && /A check made out to Stitch Co, mailed to 1 Main St, Columbus OH 43215/.test(inv.html) && /How to pay \$30\.00:/.test(inv.text) && new RegExp(owing).test(inv.text));
+    /venmo\.com\/u\/stitchco\?txn=pay&amp;amount=30\.00/.test(inv.html) && /check for \$30\.00 payable to “Stitch Co” and mail it to 1 Main St, Columbus OH 43215/.test(inv.html) && /1 × Cap/.test(inv.text) && /How to pay \$30\.00:/.test(inv.text) && new RegExp(owing).test(inv.text));
   ok("…and asks the program to attach it as a PDF, saying so in the email", inv.pdf && inv.pdf.filename === `Invoice ${owing}.pdf` && inv.pdf.pageSize === "Letter" &&
     /It's also attached as a PDF/.test(inv.html + inv.text) && /<!doctype html>/.test(inv.pdf.html));
 

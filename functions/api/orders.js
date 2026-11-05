@@ -106,6 +106,8 @@ import {
   getReconciliationData, setReconciled, clearReconciled, isReconciled, saveCsvMapping, previewExpenseRows, landedCostLines, spreadCents,
   SCHEDULE_C_LINES, DEDUCTION_TYPES, DEPRECIATION_METHODS, listExpenseCategories, getExpenseCategory, findExpenseCategoryByName,
   saveExpenseCategory, deleteExpenseCategory, listExpenses, getExpense, saveExpense, deleteExpense, expenseMonth, getExpenseSummary,
+  RECURRING_FREQUENCIES, recurringDueDates, recurringIndexAfter, listRecurringExpenses, getRecurringExpense, saveRecurringExpense, stopRecurringExpense,
+  deleteRecurringExpense, recordDueRecurringExpenses, getRecurringExpensesRecorded,
   getRefundedCents, getDepositPayments, linkPaymentsToCashout, cashoutNetCents_,
   receiveBlanks, writeOffBlanks, getBlankMovements, markBlankPricesChecked, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection,
   getSiteSetting, setSiteDomain,
@@ -307,6 +309,7 @@ const MANAGER_ACTIONS = [
   "saveMoneyDefaults", "listMoney", "saveMoneyEntry", "deleteMoneyEntry", "getReconciliation", "importStatement", "autoMatchStatement",
   "matchStatementLine", "unmatchStatementLine", "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth",
   "listCashoutPayments", "analyzePricing", "getPricingSettings", "saveVendor", "deleteVendor",
+  "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",   // recurring expenses (migrations/0085)
   "getBrandRules", "addBrandApproval", "revokeBrandApproval",   // brand rules (migrations/0075)
   "recomputeBlankAverageCosts", "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount", "saveExpenseCategory", "deleteExpenseCategory", "closePeriod", "reopenPeriod", "getAccountantExport",
 ];
@@ -373,6 +376,7 @@ const FEATURE_ACTIONS = {
     "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount",
     "listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory",
     "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses",
+    "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",
   ],
   // (Reading the ship-from address isn't behind the switch: Global settings shows it as soon as
   // Shipping is ticked, before it's saved on.)
@@ -447,6 +451,7 @@ export async function onRequestPost(context) {
       if (["createBlank", "updateBlank", "receiveBlanks", "receiveBlankOrder", "receiveTransferSheet", "recordRestockOrder",
         "createFromStatementLine", "setFulfillmentStage", "bulkSetFulfillmentStage", "addBlankShipment"].includes(a) && typeof body.vendor === "string") body.vendor = await vendorName_(body.vendor);
       if (a === "saveExpense" && body.expense && typeof body.expense.vendor === "string") body.expense.vendor = await vendorName_(body.expense.vendor);
+      if (a === "saveRecurringExpense" && body.recurring && typeof body.recurring.vendor === "string") body.recurring.vendor = await vendorName_(body.recurring.vendor);
       return null;
     } catch (e) {
       if (!e || !e.userFacing) throw e;
@@ -1288,7 +1293,9 @@ export async function onRequestPost(context) {
 
   // ---- Expenses (migrations/0012) — Schedule C Part II + Form 4562 facts --------
   const EXPENSE_ACTIONS = ["listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory",
-    "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses"];
+    "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses",
+    "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",
+    "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense"];
   if (EXPENSE_ACTIONS.includes(body.action)) {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
@@ -1297,7 +1304,16 @@ export async function onRequestPost(context) {
     const bad = (message) => jsonResponse({ status: "error", message }, 400);
     const ymd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) && !isNaN(Date.parse(v + "T00:00:00Z"));
     const pct = (v, lo) => Number.isInteger(Number(v)) && Number(v) >= lo && Number(v) <= 100;
-    const meta = { scheduleCLines: SCHEDULE_C_LINES, deductionTypes: DEDUCTION_TYPES, depreciationMethods: DEPRECIATION_METHODS };
+    const meta = { scheduleCLines: SCHEDULE_C_LINES, deductionTypes: DEDUCTION_TYPES, depreciationMethods: DEPRECIATION_METHODS, frequencies: RECURRING_FREQUENCIES };
+    const today = await localToday(env);
+    // Recurring expenses that came due are recorded before anything is listed (the daily run does it too) — so a rule
+    // due today shows up after 6 AM, and a missed daily run is made up.
+    const recordDue_ = async (opts = {}) => {
+      const res = await recordDueRecurringExpenses(env.DB, today, opts);
+      for (const x of res.recorded) audit({ orgId: null, orderId: null, action: "expense.created",
+        detail: { id: x.id, recurringId: x.ruleId, date: x.date, amount: x.amount, description: x.description } });
+      return res;
+    };
 
     if (body.action === "listExpenseCategories") {
       return jsonResponse({ status: "ok", categories: await listExpenseCategories(env.DB), ...meta });
@@ -1331,6 +1347,7 @@ export async function onRequestPost(context) {
       const cat = id ? await getExpenseCategory(env.DB, id) : null;
       if (!cat) return jsonResponse({ status: "error", message: "Category not found" }, 404);
       if (cat.expenseCount > 0) return bad(`"${cat.name}" is used by ${cat.expenseCount} expense${cat.expenseCount === 1 ? "" : "s"} — move them to another category first`);
+      if (cat.recurringCount > 0) return bad(`"${cat.name}" is used by ${cat.recurringCount} recurring expense${cat.recurringCount === 1 ? "" : "s"} — change ${cat.recurringCount === 1 ? "its" : "their"} category first`);
       const auditErr = await auditStrict({ orgId: null, orderId: null, action: "expense_category.deleted", detail: cat });
       if (auditErr) return auditErr;
       if (!(await deleteExpenseCategory(env.DB, id))) return bad("That category is in use");
@@ -1339,8 +1356,10 @@ export async function onRequestPost(context) {
     if (body.action === "listExpenses" || body.action === "getExpenseReport") {
       const from = String(body.dateFrom || ""), to = String(body.dateTo || "");
       if (!ymd(from) || !ymd(to)) return bad("Invalid date range — expected YYYY-MM-DD");
-      const [expenses, summary] = await Promise.all([listExpenses(env.DB, from, to), getExpenseSummary(env.DB, from, to)]);
-      return jsonResponse({ status: "ok", dateFrom: from, dateTo: to, expenses, summary, ...meta });
+      if (body.action === "listExpenses") { try { await recordDue_(); } catch (e) { console.error("Recording recurring expenses failed (listing anyway):", e); } }
+      const [expenses, summary, recurring] = await Promise.all([listExpenses(env.DB, from, to), getExpenseSummary(env.DB, from, to),
+        body.action === "listExpenses" ? listRecurringExpenses(env.DB).catch(() => []) : Promise.resolve(undefined)]);
+      return jsonResponse({ status: "ok", dateFrom: from, dateTo: to, expenses, summary, ...(recurring ? { recurring } : {}), ...meta });
     }
     if (body.action === "saveExpense") {
       const x = body.expense || {};
@@ -1455,6 +1474,75 @@ export async function onRequestPost(context) {
       await deleteExpense(env.DB, id);
       return jsonResponse({ status: "ok" });
     }
+
+    // ---- Recurring expenses (migrations/0085) — recorded automatically on each date they come due ----
+    if (body.action === "listRecurringExpenses") {
+      return jsonResponse({ status: "ok", recurring: await listRecurringExpenses(env.DB), frequencies: RECURRING_FREQUENCIES });
+    }
+    if (body.action === "saveRecurringExpense") {
+      const x = body.recurring || {};
+      const id = x.id ? Number(x.id) : 0;
+      const before = id ? await getRecurringExpense(env.DB, id) : null;
+      if (id && (!before || before.deletedAt)) return jsonResponse({ status: "error", message: "Recurring expense not found" }, 404);
+      const description = String(x.description || "").trim().slice(0, 300);
+      if (!description) return bad("Description is required");
+      const amount = Math.round(Number(x.amount) * 100) / 100;
+      if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) return bad("Amount must be a positive number");
+      if (x.refund) return bad("A refund can't repeat — record it as a single expense");
+      if (!RECURRING_FREQUENCIES[x.frequency]) return bad("Choose how often it repeats");
+      if (!ymd(x.startDate)) return bad("The first date must be YYYY-MM-DD");
+      const yearAhead = new Date(Date.parse(today + "T12:00:00Z") + 366 * 86400000).toISOString().slice(0, 10);
+      if (x.startDate > yearAhead) return bad("The first date can be at most a year from today");
+      const endDate = x.endDate ? String(x.endDate) : "";
+      if (endDate && !ymd(endDate)) return bad("The end date must be YYYY-MM-DD");
+      if (endDate && endDate < x.startDate) return bad("The end date can't be before the first date");
+      if (before && before.lastRecorded && x.startDate !== before.startDate) {
+        return bad("The first date can't change once an expense has been recorded from it — stop this one and add a new one instead");
+      }
+      const cat = await getExpenseCategory(env.DB, Number(x.categoryId));
+      if (!cat) return bad("Choose a category");
+      if (cat.deductionType === "depreciation") return bad("Capital equipment (a Depreciation category) can't repeat — record each purchase on its own");
+      const businessUsePct = x.businessUsePct === undefined || x.businessUsePct === "" ? 100 : Number(x.businessUsePct);
+      if (!pct(businessUsePct, 1)) return bad("Business-use % must be a whole number from 1 to 100");
+      const paidPersonally = x.paidPersonally === true;
+      let accountId = null;
+      if (!paidPersonally) {
+        const acct = x.accountId ? await getAccount(env.DB, x.accountId) : null;
+        if (!acct || !acct.active) return bad("Choose which account pays it (or Personal funds)");
+        accountId = acct.id;
+      }
+      const fields = { description, categoryId: cat.id, amount, vendor: String(x.vendor || "").trim().slice(0, 120), accountId, paidPersonally,
+        businessUsePct, vendorChargedTax: x.vendorChargedTax !== false, frequency: x.frequency, startDate: x.startDate, endDate };
+      // What saving would record straight away (a first date in the past) mustn't land in a closed month.
+      const nextIndex = before ? recurringIndexAfter(fields, before.lastRecorded) : 0;
+      const due = recurringDueDates({ ...fields, nextIndex }, today);
+      for (const m of [...new Set(due.map(d => d.slice(0, 7)))]) {
+        if (await isMonthClosed(env.DB, m)) {
+          const label = new Date(m + "-15T12:00:00Z").toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+          return jsonResponse({ status: "error", message: `${label} is closed (already filed), and this would record an expense in it — pick a later first date, or reopen ${label} under Periods & Export.` }, 409);
+        }
+      }
+      if (id) {
+        const auditErr = await auditStrict({ orgId: null, orderId: null, action: "recurring_expense.updated", detail: { id, from: before, to: fields } });
+        if (auditErr) return auditErr;
+      }
+      const savedId = await saveRecurringExpense(env.DB, id, fields);
+      if (!id) audit({ orgId: null, orderId: null, action: "recurring_expense.created", detail: { id: savedId, ...fields, category: cat.name } });
+      const res = await recordDue_({ ids: [savedId] });
+      const rule = await getRecurringExpense(env.DB, savedId);
+      return jsonResponse({ status: "ok", recurring: rule, recorded: res.recorded, skipped: res.skipped, nextDate: rule ? rule.nextDate : "" });
+    }
+    if (body.action === "stopRecurringExpense" || body.action === "deleteRecurringExpense") {
+      const id = Number(body.id);
+      const rule = id ? await getRecurringExpense(env.DB, id) : null;
+      if (!rule || rule.deletedAt) return jsonResponse({ status: "error", message: "Recurring expense not found" }, 404);
+      const stop = body.action === "stopRecurringExpense";
+      const auditErr = await auditStrict({ orgId: null, orderId: null, action: stop ? "recurring_expense.stopped" : "recurring_expense.deleted",
+        detail: stop ? { id, description: rule.description, endDate: today, previousEndDate: rule.endDate || null } : rule });
+      if (auditErr) return auditErr;
+      if (stop) await stopRecurringExpense(env.DB, id, today); else await deleteRecurringExpense(env.DB, id);
+      return jsonResponse({ status: "ok", recurring: await listRecurringExpenses(env.DB) });
+    }
   }
 
   // ---- getPendingCommunications — what the next 6 AM roll-up will contain ----
@@ -1490,7 +1578,9 @@ export async function onRequestPost(context) {
       maintenanceDue: (await getFeatures(env.DB).catch(() => ({ production: true }))).production
         ? (await listMaintenanceTasks(env.DB).catch(() => [])).filter(t => t.status === "due") : [],
       // Rush orders whose fee is still to follow (migrations/0082).
-      rushToSet: (await getRushFeesToSet(env.DB).catch(() => [])).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })) });
+      rushToSet: (await getRushFeesToSet(env.DB).catch(() => [])).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
+      // Recurring expenses recorded since the last roll-up (migrations/0085) — the roll-up lists them.
+      recurringRecorded: await getRecurringExpensesRecorded(env.DB, (state && state.sentAt) || new Date(Date.now() - 86400000).toISOString()).catch(() => []) });
   }
 
   // ---- sendTestEmail — one test message, and what the email provider said (Communications page) ----

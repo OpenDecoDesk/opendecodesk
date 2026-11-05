@@ -7801,6 +7801,7 @@ const VENDOR_NAME_COLUMNS_ = [
   ["blanks", "vendor", "blanks"], ["inventory_movements", "vendor", "blank receipts"], ["transfer_movements", "vendor", "transfer receipts"],
   ["expenses", "vendor", "expenses"], ["order_items", "blankVendor", "order lines"], ["orders", "blankVendor", "orders"],
   ["blank_shipments", "vendor", "blank shipments"], ["supplier_orders", "vendor", "supplier orders"], ["blank_restock_orders", "vendor", "restock orders"],
+  ["recurring_expenses", "vendor", "recurring expenses"],
 ];
 const vendorErr_ = (m) => Object.assign(new Error(m), { userFacing: true });
 // {overCents, minQty, isDefault} — free shipping for a vendor row, or null when it has none. overCents 0 = always free.
@@ -10102,7 +10103,7 @@ function expenseDeductibleCents_(row) {
 }
 function parseExpenseCategory_(r) {
   return { id: Number(r.id), name: r.name, deductionType: r.deductionType, scheduleCLine: r.scheduleCLine || "",
-    deductiblePct: Number(r.deductiblePct), useTaxable: !!r.useTaxable, expenseCount: Number(r.expenseCount || 0) };
+    deductiblePct: Number(r.deductiblePct), useTaxable: !!r.useTaxable, expenseCount: Number(r.expenseCount || 0), recurringCount: Number(r.recurringCount || 0) };
 }
 function parseExpense_(r) {
   return {
@@ -10117,17 +10118,22 @@ function parseExpense_(r) {
     accountId: r.accountId == null ? null : Number(r.accountId), paidPersonally: !!r.paidPersonally,
     // A refund is a negative expense (money back for something bought) in the ORIGINAL's category.
     isRefund: Number(r.amountCents) < 0, refundOfId: r.refundOfId == null ? null : Number(r.refundOfId),
+    recurringId: r.recurringId == null ? null : Number(r.recurringId),   // recorded from a recurring expense (0085)
   };
 }
 
+// How many recurring expenses use a category (migrations/0085) — a category a rule uses can't be deleted. The table is
+// looked up by name so this still works on a database from before 0085.
+const RECURRING_COUNT_SQL_ = `(CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recurring_expenses')
+  THEN (SELECT count(*) FROM recurring_expenses r WHERE r.categoryId = c.id) ELSE 0 END) AS recurringCount`;
 export async function listExpenseCategories(db) {
   const { results } = await db.prepare(
-    `SELECT c.*, (SELECT count(*) FROM expenses e WHERE e.categoryId = c.id) AS expenseCount
+    `SELECT c.*, (SELECT count(*) FROM expenses e WHERE e.categoryId = c.id) AS expenseCount, ${RECURRING_COUNT_SQL_}
      FROM expense_categories c ORDER BY c.name COLLATE NOCASE`).all();
   return results.map(parseExpenseCategory_);
 }
 export async function getExpenseCategory(db, id) {
-  const r = await db.prepare(`SELECT c.*, (SELECT count(*) FROM expenses e WHERE e.categoryId = c.id) AS expenseCount
+  const r = await db.prepare(`SELECT c.*, (SELECT count(*) FROM expenses e WHERE e.categoryId = c.id) AS expenseCount, ${RECURRING_COUNT_SQL_}
     FROM expense_categories c WHERE c.id = ?`).bind(Number(id)).first();
   return r ? parseExpenseCategory_(r) : null;
 }
@@ -10150,6 +10156,8 @@ export async function saveExpenseCategory(db, id, { name, deductionType, schedul
 export async function deleteExpenseCategory(db, id) {
   const used = await db.prepare("SELECT count(*) AS n FROM expenses WHERE categoryId = ?").bind(Number(id)).first();
   if (Number(used.n) > 0) return false;
+  const rules = await db.prepare("SELECT count(*) AS n FROM recurring_expenses WHERE categoryId = ?").bind(Number(id)).first().catch(() => ({ n: 0 }));
+  if (Number(rules.n) > 0) return false;
   await db.prepare("DELETE FROM expense_categories WHERE id = ?").bind(Number(id)).run();
   return true;
 }
@@ -10191,6 +10199,163 @@ export async function getRefundedCents(db, originalId, excludeId = 0) {
   const r = await db.prepare("SELECT COALESCE(-SUM(amountCents), 0) AS c FROM expenses WHERE refundOfId = ? AND deletedAt IS NULL AND amountCents < 0 AND id <> ?")
     .bind(Number(originalId), Number(excludeId) || 0).first();
   return Number(r.c);
+}
+
+// ---- Recurring expenses (migrations/0085) --------------------------------------
+// A rule (description, category, amount, vendor, paid from, business use, the vendor-charged-tax flag) plus a frequency,
+// a first date and an optional end date. Each date it comes due becomes an ordinary expense row tagged recurringId —
+// recorded by recordDueRecurringExpenses, the one writer, from the Worker's daily run and whenever the Expenses screen
+// loads. Editing a rule only changes the occurrences not recorded yet.
+export const RECURRING_FREQUENCIES = {
+  weekly: "Weekly", biweekly: "Every 2 weeks", monthly: "Monthly", quarterly: "Every 3 months", semiannual: "Every 6 months", yearly: "Yearly",
+};
+const RECURRING_STEP_ = { weekly: { days: 7 }, biweekly: { days: 14 }, monthly: { months: 1 }, quarterly: { months: 3 }, semiannual: { months: 6 }, yearly: { months: 12 } };
+// The i-th date (0 = the start) of a rule, YYYY-MM-DD. Months are counted from the START, with its day of the month
+// clamped to the month's last day — so the 31st runs Jan 31 → Feb 28 (29) → Mar 31, never drifting to the 28th.
+export function recurringOccurrenceDate(rule, i) {
+  const step = RECURRING_STEP_[rule && rule.frequency];
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(rule && rule.startDate || ""));
+  if (!step || !m) return "";
+  const n = Math.max(0, Math.floor(Number(i) || 0));
+  const [y, mo, d] = [Number(m[1]), Number(m[2]) - 1, Number(m[3])];
+  if (step.days) return new Date(Date.UTC(y, mo, d + step.days * n)).toISOString().slice(0, 10);
+  const total = mo + step.months * n;
+  const yy = y + Math.floor(total / 12), mm = ((total % 12) + 12) % 12;
+  const last = new Date(Date.UTC(yy, mm + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(yy, mm, Math.min(d, last))).toISOString().slice(0, 10);
+}
+// The occurrence a rule is at once nothing up to `afterDate` is to be recorded again: the first index whose date is
+// after it ("" = from the start).
+export function recurringIndexAfter(rule, afterDate) {
+  if (!afterDate) return 0;
+  let i = 0;
+  while (i < 100000 && recurringOccurrenceDate(rule, i) && recurringOccurrenceDate(rule, i) <= afterDate) i++;
+  return i;
+}
+// Every occurrence of a rule from its next one up to `today` (inclusive) and its end date — what recording would add.
+export function recurringDueDates(rule, today, max = 400) {
+  const out = [];
+  for (let i = Number(rule.nextIndex) || 0; out.length < max; i++) {
+    const d = recurringOccurrenceDate(rule, i);
+    if (!d || d > today || (rule.endDate && d > rule.endDate)) break;
+    out.push(d);
+  }
+  return out;
+}
+function parseRecurring_(r) {
+  const rule = {
+    id: Number(r.id), description: r.description, categoryId: Number(r.categoryId), category: r.categoryName || "",
+    amount: fromCents(r.amountCents), vendor: r.vendor || "", accountId: r.accountId == null ? null : Number(r.accountId),
+    accountName: r.accountName || "", paidPersonally: !!r.paidPersonally, businessUsePct: Number(r.businessUsePct),
+    vendorChargedTax: !!r.vendorChargedTax, frequency: r.frequency, frequencyLabel: RECURRING_FREQUENCIES[r.frequency] || r.frequency,
+    startDate: r.startDate, endDate: r.endDate || "", nextIndex: Number(r.nextIndex), createdAt: r.createdAt, updatedAt: r.updatedAt,
+    deletedAt: r.deletedAt || "",
+    recordedCount: Number(r.recordedCount || 0), recordedTotal: fromCents(Number(r.recordedCents || 0)), lastRecorded: r.lastRecorded || "",
+  };
+  const next = recurringOccurrenceDate(rule, rule.nextIndex);
+  rule.ended = !next || (!!rule.endDate && next > rule.endDate);
+  rule.nextDate = rule.ended ? "" : next;
+  return rule;
+}
+const RECURRING_SELECT_ = `SELECT r.*, c.name AS categoryName, a.name AS accountName,
+    (SELECT count(*) FROM expenses e WHERE e.recurringId = r.id AND e.deletedAt IS NULL) AS recordedCount,
+    (SELECT COALESCE(SUM(e.amountCents), 0) FROM expenses e WHERE e.recurringId = r.id AND e.deletedAt IS NULL) AS recordedCents,
+    (SELECT MAX(e.expenseDate) FROM expenses e WHERE e.recurringId = r.id) AS lastRecorded
+  FROM recurring_expenses r JOIN expense_categories c ON c.id = r.categoryId LEFT JOIN accounts a ON a.id = r.accountId`;
+// Live rules first (by next date), then the ones that have ended; deleted ones left out unless asked for.
+export async function listRecurringExpenses(db, { includeDeleted = false } = {}) {
+  const { results } = await db.prepare(`${RECURRING_SELECT_} ${includeDeleted ? "" : "WHERE r.deletedAt IS NULL"} ORDER BY r.id`).all();
+  return results.map(parseRecurring_).sort((a, b) => (a.ended - b.ended) || String(a.nextDate || a.endDate).localeCompare(String(b.nextDate || b.endDate)) || a.id - b.id);
+}
+export async function getRecurringExpense(db, id) {
+  const r = await db.prepare(`${RECURRING_SELECT_} WHERE r.id = ?`).bind(Number(id)).first();
+  return r ? parseRecurring_(r) : null;
+}
+// Fields already validated by the caller (orders.js saveRecurringExpense). On an edit the next occurrence is worked out
+// again from the (possibly new) frequency and start: the first one after the last date already recorded.
+export async function saveRecurringExpense(db, id, x) {
+  const now = new Date().toISOString();
+  const vals = [String(x.description).trim(), Number(x.categoryId), toCents(x.amount), x.vendor || "",
+    x.paidPersonally ? null : (x.accountId ? Number(x.accountId) : null), x.paidPersonally ? 1 : 0, Number(x.businessUsePct) || 100,
+    x.vendorChargedTax === false ? 0 : 1, x.frequency, x.startDate, x.endDate || null];
+  if (id) {
+    const last = await db.prepare("SELECT MAX(expenseDate) AS d FROM expenses WHERE recurringId = ?").bind(Number(id)).first();
+    const nextIndex = recurringIndexAfter({ frequency: x.frequency, startDate: x.startDate }, last && last.d ? last.d : "");
+    await db.prepare(`UPDATE recurring_expenses SET description = ?, categoryId = ?, amountCents = ?, vendor = ?, accountId = ?, paidPersonally = ?,
+      businessUsePct = ?, vendorChargedTax = ?, frequency = ?, startDate = ?, endDate = ?, nextIndex = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL`)
+      .bind(...vals, nextIndex, now, Number(id)).run();
+    return Number(id);
+  }
+  const r = await db.prepare(`INSERT INTO recurring_expenses (description, categoryId, amountCents, vendor, accountId, paidPersonally, businessUsePct,
+    vendorChargedTax, frequency, startDate, endDate, nextIndex, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?) RETURNING id`)
+    .bind(...vals, now, now).first();
+  return Number(r.id);
+}
+// No more occurrences after `today` (the rule is kept, with what it recorded).
+export async function stopRecurringExpense(db, id, today) {
+  await db.prepare("UPDATE recurring_expenses SET endDate = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL AND (endDate IS NULL OR endDate > ?)")
+    .bind(today, new Date().toISOString(), Number(id), today).run();
+}
+// Soft delete: nothing more is recorded; the expenses it already recorded stay (and keep their tag).
+export async function deleteRecurringExpense(db, id) {
+  await db.prepare("UPDATE recurring_expenses SET deletedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL")
+    .bind(new Date().toISOString(), new Date().toISOString(), Number(id)).run();
+}
+// Records every occurrence that's due (date <= today, not past its end date) of every live rule — or only `ids` — as an
+// expense, and moves each rule on. INSERT OR IGNORE on the (recurringId, expenseDate) index makes it once-only: a run at
+// the same moment, or a recorded expense that was later deleted, never gives a second one. A rule whose account was made
+// inactive (or that has no account and isn't paid personally) is skipped and stays where it is, so it's recorded once
+// fixed. At most `max` expenses a run. Returns {recorded: [{id, ruleId, date, amount, description}], skipped: [{ruleId,
+// description, reason}]}.
+export async function recordDueRecurringExpenses(db, today, { ids = null, max = 400 } = {}) {
+  const out = { recorded: [], skipped: [] };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(today || ""))) return out;
+  let rows;
+  try {
+    ({ results: rows } = await db.prepare(`SELECT r.*, a.active AS accountActive FROM recurring_expenses r LEFT JOIN accounts a ON a.id = r.accountId
+      WHERE r.deletedAt IS NULL AND r.startDate <= ? AND (r.endDate IS NULL OR r.endDate >= r.startDate)`).bind(today).all());
+  } catch (e) {
+    if (/no such table/i.test(String(e && e.message))) return out;   // before migrations/0085
+    throw e;
+  }
+  if (ids) { const want = new Set(ids.map(Number)); rows = rows.filter(r => want.has(Number(r.id))); }
+  for (const r of rows) {
+    if (out.recorded.length >= max) break;
+    const dates = recurringDueDates(r, today, max - out.recorded.length);
+    if (!dates.length) continue;
+    if (!Number(r.paidPersonally) && (r.accountId == null || !Number(r.accountActive))) {
+      out.skipped.push({ ruleId: Number(r.id), description: r.description, reason: "the account it's paid from is no longer active" });
+      continue;
+    }
+    const now = new Date().toISOString();
+    const stmts = dates.map(d => db.prepare(`INSERT OR IGNORE INTO expenses (expenseDate, description, categoryId, amountCents, vendor, businessUsePct,
+        receiptKey, receiptName, placedInService, depMethod, vendorChargedTax, accountId, paidPersonally, refundOfId, createdAt, updatedAt, recurringId)
+        VALUES (?, ?, ?, ?, ?, ?, '', '', NULL, NULL, ?, ?, ?, NULL, ?, ?, ?)`)
+      .bind(d, r.description, Number(r.categoryId), Number(r.amountCents), r.vendor || "", Number(r.businessUsePct), Number(r.vendorChargedTax) ? 1 : 0,
+        Number(r.paidPersonally) ? null : Number(r.accountId), Number(r.paidPersonally) ? 1 : 0, now, now, Number(r.id)));
+    // Move the rule on only from where this run read it, so two runs at once can't both move it.
+    stmts.push(db.prepare("UPDATE recurring_expenses SET nextIndex = ? WHERE id = ? AND nextIndex = ?")
+      .bind(Number(r.nextIndex) + dates.length, Number(r.id), Number(r.nextIndex)));
+    await db.batch(stmts);
+    // What this run wrote (an ignored date keeps its older createdAt).
+    const { results: made } = await db.prepare(`SELECT id, expenseDate FROM expenses WHERE recurringId = ? AND createdAt = ?
+      AND expenseDate IN (${dates.map(() => "?").join(",")}) ORDER BY expenseDate`).bind(Number(r.id), now, ...dates).all();
+    for (const row of made) out.recorded.push({ id: Number(row.id), ruleId: Number(r.id), date: row.expenseDate, amount: fromCents(r.amountCents), description: r.description });
+  }
+  return out;
+}
+// Expenses recorded by a recurring rule since `sinceIso` (their createdAt) — the roll-up's and Communications' list.
+export async function getRecurringExpensesRecorded(db, sinceIso) {
+  try {
+    const { results } = await db.prepare(`SELECT e.id, e.expenseDate, e.description, e.amountCents, e.vendor, e.createdAt, r.frequency, a.name AS accountName, e.paidPersonally
+      FROM expenses e JOIN recurring_expenses r ON r.id = e.recurringId LEFT JOIN accounts a ON a.id = e.accountId
+      WHERE e.recurringId IS NOT NULL AND e.deletedAt IS NULL AND e.createdAt > ? ORDER BY e.expenseDate, e.id LIMIT 200`).bind(String(sinceIso || "")).all();
+    return results.map(x => ({ id: Number(x.id), date: x.expenseDate, description: x.description, amount: fromCents(x.amountCents), vendor: x.vendor || "",
+      frequency: RECURRING_FREQUENCIES[x.frequency] || x.frequency, paidFrom: Number(x.paidPersonally) ? "Personal funds" : (x.accountName || "") }));
+  } catch (e) {
+    if (/no such table|no such column/i.test(String(e && e.message))) return [];
+    throw e;
+  }
 }
 
 // ---- Deposits: Venmo cash-outs, cash and checks (migrations/0017, 0018) --------
@@ -11104,6 +11269,7 @@ export const SYSTEM_ISSUE_LABELS = {
   email_failed: "Emails that couldn't be sent at all",
   webhook_failed: "Stripe webhook updates that failed (Stripe retries these)",
   digest_failed: "Daily roll-ups that did not complete (the scheduled run will try again tomorrow)",
+  recurring_expense_skipped: "Recurring expenses that couldn't be recorded (fix the rule on Expenses — it's recorded once fixed)",
 };
 export async function recordSystemIssue(db, kind, sample) {
   if (!db || typeof db.prepare !== "function") return;

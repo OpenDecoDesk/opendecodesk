@@ -79,7 +79,7 @@ and the tax and shipping features are built around a US business (see [Region](#
   what it leaves, the hourly rate from its run time, and targets that flag products priced too low.
 - Products that are embroidered and printed (fixed DTF transfers in the price), and mockups for any
   product, configurable or not.
-- Expenses with receipts and tax categories, accounts and transfers, bank-statement import and
+- Expenses with receipts and tax categories (recurring ones recorded automatically), accounts and transfers, bank-statement import and
   reconciliation, closed months, and a year-end export for an accountant.
 - An account viewer: one account's register with a running balance and a receipt on every row. A stock
   purchase shows as one charge, as on the statement, and its paying account can be changed for the whole

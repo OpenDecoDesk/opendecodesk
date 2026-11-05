@@ -1060,10 +1060,33 @@ CREATE TABLE IF NOT EXISTS expenses (
   vendorChargedTax INTEGER NOT NULL DEFAULT 1 CHECK (vendorChargedTax IN (0, 1)),  -- migrations/0013
   accountId       INTEGER REFERENCES accounts(id),                                   -- paid from (0014)
   paidPersonally  INTEGER NOT NULL DEFAULT 0 CHECK (paidPersonally IN (0, 1)),       -- owner's own money (0014)
-  refundOfId      INTEGER REFERENCES expenses(id) ON DELETE SET NULL                 -- the purchase this refunds (0017)
+  refundOfId      INTEGER REFERENCES expenses(id) ON DELETE SET NULL,                -- the purchase this refunds (0017)
+  recurringId     INTEGER REFERENCES recurring_expenses(id)                          -- recorded from this rule (0085)
 );
 CREATE INDEX IF NOT EXISTS idx_expenses_date     ON expenses(deletedAt, expenseDate);
 CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(categoryId);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_recurring ON expenses(recurringId, expenseDate) WHERE recurringId IS NOT NULL;
+
+-- Recurring expenses (migrations/0085): recorded automatically on each date they come due (frequency from startDate,
+-- the start's day of the month as the anchor; endDate NULL = no end; nextIndex = the occurrence that's next).
+CREATE TABLE IF NOT EXISTS recurring_expenses (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  description      TEXT    NOT NULL CHECK (length(trim(description)) > 0),
+  categoryId       INTEGER NOT NULL REFERENCES expense_categories(id) ON DELETE RESTRICT,
+  amountCents      INTEGER NOT NULL CHECK (amountCents > 0),
+  vendor           TEXT    NOT NULL DEFAULT '',
+  accountId        INTEGER REFERENCES accounts(id),
+  paidPersonally   INTEGER NOT NULL DEFAULT 0 CHECK (paidPersonally IN (0, 1)),
+  businessUsePct   INTEGER NOT NULL DEFAULT 100 CHECK (businessUsePct BETWEEN 1 AND 100),
+  vendorChargedTax INTEGER NOT NULL DEFAULT 1 CHECK (vendorChargedTax IN (0, 1)),
+  frequency        TEXT    NOT NULL CHECK (frequency IN ('weekly', 'biweekly', 'monthly', 'quarterly', 'semiannual', 'yearly')),
+  startDate        TEXT    NOT NULL CHECK (startDate GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]'),
+  endDate          TEXT    CHECK (endDate IS NULL OR endDate GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]'),
+  nextIndex        INTEGER NOT NULL DEFAULT 0 CHECK (nextIndex >= 0),
+  createdAt        TEXT    NOT NULL,
+  updatedAt        TEXT    NOT NULL,
+  deletedAt        TEXT
+);
 
 -- Starting categories (all editable / deletable while unused).
 INSERT OR IGNORE INTO expense_categories (name, deductionType, scheduleCLine, deductiblePct, createdAt, updatedAt) VALUES

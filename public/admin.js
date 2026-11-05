@@ -16147,7 +16147,26 @@ function rcImportPreview_(d, file){
 }
 
 // ---- Expenses (migrations/0012): Schedule C Part II + Form 4562 facts ---------
-const _exp = { categories: [], lines: {}, methods: {}, editing: null, receipt: null };
+const _exp = { categories: [], lines: {}, methods: {}, editing: null, receipt: null, recurring: [] };
+// Recurring expenses (migrations/0085) — the server's RECURRING_FREQUENCIES, in the same order.
+const EXP_FREQUENCIES_ = { weekly: "Weekly", biweekly: "Every 2 weeks", monthly: "Monthly", quarterly: "Every 3 months", semiannual: "Every 6 months", yearly: "Yearly" };
+const expYearAhead_ = () => { const d = new Date(Date.parse(expToday_() + "T12:00:00Z") + 365 * 86400000); return d.toISOString().slice(0, 10); };
+// Repeating: the date is the FIRST one (may be ahead, up to a year), an end date is offered, and the receipt and refund
+// boxes go (a receipt belongs to each recorded expense; a refund doesn't repeat). Editing one expense never repeats.
+function expOnRepeatChange_(){
+  const sel = document.getElementById("expRepeat");
+  const on = !!(sel && sel.value) && !_exp.editing;
+  document.getElementById("expRepeatRow").style.display = _exp.editing ? "none" : "flex";
+  document.getElementById("expEndsWrap").style.display = on ? "" : "none";
+  document.getElementById("expRepeatNote").style.display = on ? "" : "none";
+  document.getElementById("expReceiptWrap").style.display = on ? "none" : "";
+  document.getElementById("expRefundWrap").style.display = on ? "none" : "flex";
+  document.getElementById("expDateLbl").textContent = on ? "First date" : "Date";
+  const date = document.getElementById("expDate");
+  date.max = on ? expYearAhead_() : expToday_();
+  if (on) document.getElementById("expRefund").checked = false;
+  else if (date.value > expToday_()) date.value = expToday_();
+}
 
 async function expApi_(body){
   if (!adminKey) adminKey = (await adminLogin()) || "";
@@ -16176,21 +16195,27 @@ async function renderExpenses(app){
           <button type="button" class="admin-btn" id="expImportBtn" style="padding:4px 12px;font-size:12px;" title="Import expenses from a card/bank statement or spreadsheet CSV">Import CSV</button>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
-          <div><label style="${lbl}" for="expDate">Date</label><input id="expDate" type="date" max="${expToday_()}" value="${expToday_()}" style="${inp}"></div>
+          <div><label style="${lbl}" for="expDate" id="expDateLbl">Date</label><input id="expDate" type="date" max="${expToday_()}" value="${expToday_()}" style="${inp}"></div>
           <div style="flex:2;min-width:200px;"><label style="${lbl}" for="expDesc">Description</label><input id="expDesc" type="text" maxlength="300" placeholder="e.g. Embroidery machine" style="${inp}width:100%;"></div>
           <div><label style="${lbl}" for="expCat">Category</label>
             <div style="display:flex;gap:4px;"><select id="expCat" style="${inp}max-width:260px;"></select>
               ${adminCan_("manager") ? `<button type="button" class="admin-btn" id="expCatManage" title="Manage categories" aria-label="Manage categories" style="padding:4px 9px;font-size:14px;">⚙</button>` : ""}</div></div>
           <div><label style="${lbl}" for="expAmount">Amount ($)</label><input id="expAmount" type="number" min="0.01" step="0.01" placeholder="0.00" style="${inp}width:110px;">
-            <label style="display:flex;gap:4px;align-items:center;font-size:11px;color:#555;margin-top:3px;" title="Money back for an earlier purchase (a returned item, a reversed fee). It reduces this category instead of counting as income."><input type="checkbox" id="expRefund"> This is a refund</label></div>
+            <label id="expRefundWrap" style="display:flex;gap:4px;align-items:center;font-size:11px;color:#555;margin-top:3px;" title="Money back for an earlier purchase (a returned item, a reversed fee). It reduces this category instead of counting as income."><input type="checkbox" id="expRefund"> This is a refund</label></div>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">
           <div style="flex:1;min-width:160px;"><label style="${lbl}" for="expVendor">Vendor <span style="font-weight:400;color:#777;">(optional)</span></label>${vendorPickerHtml_("expVendor", "", { placeholder: "— none —", style: inp + "flex:1;min-width:0;" })}</div>
           <div><label style="${lbl}" for="expPaidFrom">Paid from</label><select id="expPaidFrom" style="${inp}"></select></div>
           <div><label style="${lbl}" for="expBiz">Business use %</label><input id="expBiz" type="number" min="1" max="100" step="1" value="100" style="${inp}width:80px;"></div>
-          <div><label style="${lbl}" for="expReceipt">Receipt <span style="font-weight:400;color:#777;">(image or PDF, optional)</span></label>
+          <div id="expReceiptWrap"><label style="${lbl}" for="expReceipt">Receipt <span style="font-weight:400;color:#777;">(image or PDF, optional)</span></label>
             <input id="expReceipt" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif,application/pdf" style="font-size:12px;">
             <div id="expReceiptCurrent" style="font-size:12px;color:#555;margin-top:3px;"></div></div>
+        </div>
+        <div id="expRepeatRow" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">
+          <div><label style="${lbl}" for="expRepeat">Repeats</label><select id="expRepeat" style="${inp}"><option value="">Doesn't repeat</option>${
+            Object.entries(EXP_FREQUENCIES_).map(([k, v]) => `<option value="${k}">${escapeHtml(v)}</option>`).join("")}</select></div>
+          <div id="expEndsWrap" style="display:none;"><label style="${lbl}" for="expEnds">Ends <span style="font-weight:400;color:#777;">(optional)</span></label><input id="expEnds" type="date" style="${inp}"></div>
+          <div id="expRepeatNote" style="display:none;font-size:12px;color:#555;flex:1;min-width:220px;">Recorded automatically on each date it comes due, starting on the first date — paid from the account above. Add a receipt to each one afterwards.</div>
         </div>
         <div id="expUseTaxRow" style="display:none;margin-top:10px;font-size:13px;">
           <label style="display:inline-flex;align-items:center;gap:6px;"><input type="checkbox" id="expVendorTax" checked> Sales tax was charged by the vendor</label>
@@ -16211,6 +16236,7 @@ async function renderExpenses(app){
         </div>
         <div style="font-size:12px;color:#777;margin-top:10px;">Don't enter Stripe fees, Shippo postage, or blanks bought through Blanks → Receive — those are already recorded automatically.</div>
       </div>
+      <div id="expRecurring"></div>
 
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px;">
         <div><label style="${lbl}" for="expYear">Year</label><select id="expYear" style="${inp}">${[y, y - 1, y - 2].map(v => `<option value="${v}">${v}</option>`).join("")}</select></div>
@@ -16224,6 +16250,7 @@ async function renderExpenses(app){
   { const m = document.getElementById("expCatManage"); if (m) m.onclick = showExpenseCategoriesModal_; }
   document.getElementById("expImportBtn").onclick = showExpenseImportModal_;
   document.getElementById("expCat").onchange = expOnCategoryChange_;
+  document.getElementById("expRepeat").onchange = expOnRepeatChange_;
   document.getElementById("expSave").onclick = expSave_;
   document.getElementById("expCancel").onclick = () => expResetForm_();
   document.getElementById("expYear").onchange = expLoad_;
@@ -16275,6 +16302,9 @@ function expResetForm_(){
   document.getElementById("expMethod").value = "ask_cpa";
   document.getElementById("expCat").value = "";
   document.getElementById("expFormErr").textContent = "";
+  document.getElementById("expRepeat").value = "";
+  document.getElementById("expEnds").value = "";
+  expOnRepeatChange_();
   expOnCategoryChange_();
 }
 function expEdit_(id){
@@ -16298,6 +16328,8 @@ function expEdit_(id){
   document.getElementById("expReceipt").value = "";
   document.getElementById("expReceiptCurrent").innerHTML = x.receiptKey
     ? `Current: ${escapeHtml(x.receiptName || "receipt")} <button type="button" id="expReceiptRemove" style="font-size:11px;padding:1px 6px;cursor:pointer;">Remove</button> <span style="color:#777;">(choose a file to replace it)</span>` : "";
+  document.getElementById("expRepeat").value = "";
+  expOnRepeatChange_();
   const rm = document.getElementById("expReceiptRemove");
   if (rm) rm.onclick = () => { _exp.receipt = null; document.getElementById("expReceiptCurrent").textContent = "Receipt will be removed when you save."; };
   expOnCategoryChange_();
@@ -16354,6 +16386,25 @@ async function expSave_(){
   if (!expense.description) { err.textContent = "Enter a description."; return; }
   if (!cat) { err.textContent = "Choose a category."; return; }
   if (!(expense.amount > 0)) { err.textContent = "Enter an amount."; return; }
+  const repeat = !_exp.editing && document.getElementById("expRepeat").value;
+  if (repeat) {
+    if (cat.deductionType === "depreciation") { err.textContent = "Capital equipment can't repeat — record each purchase on its own."; return; }
+    const endDate = document.getElementById("expEnds").value;
+    if (endDate && endDate < expense.date) { err.textContent = "The end date can't be before the first date."; return; }
+    const recurring = { description: expense.description, categoryId: expense.categoryId, amount: expense.amount, vendor: expense.vendor,
+      businessUsePct: expense.businessUsePct, vendorChargedTax: expense.vendorChargedTax, frequency: repeat, startDate: expense.date, endDate,
+      ...(expense.paidPersonally ? { paidPersonally: true } : { accountId: expense.accountId }) };
+    btn.disabled = true;
+    try {
+      const r = await expApi_({ action: "saveRecurringExpense", recurring });
+      const n = (r.recorded || []).length;
+      showToast(`Recurring expense saved — ${n ? `${n} recorded so far` : "nothing recorded yet"}${r.nextDate ? `, next on ${expShortDate_(r.nextDate)}` : ""}.`);
+      expResetForm_();
+      await expRefresh_();
+    } catch (e) { err.textContent = e.message; }
+    finally { btn.disabled = false; btn.textContent = "Save expense"; }
+    return;
+  }
   if (cat.deductionType === "depreciation") {
     expense.placedInService = document.getElementById("expPIS").value || expense.date;
     expense.depMethod = document.getElementById("expMethod").value || "ask_cpa";
@@ -16372,6 +16423,113 @@ async function expSave_(){
   finally { btn.disabled = false; btn.textContent = _exp.editing ? "Save changes" : "Save expense"; }
 }
 
+// "Nov 5" (or "Nov 5, 2027" when not this year) for a YYYY-MM-DD.
+function expShortDate_(ymd){
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ymd || ""))) return String(ymd || "");
+  const d = new Date(ymd + "T12:00:00Z");
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", ...(ymd.slice(0, 4) !== expToday_().slice(0, 4) ? { year: "numeric" } : {}), timeZone: "UTC" });
+}
+function expRecurringTag_(ruleId){
+  const r = (_exp.recurring || []).find(x => x.id === Number(ruleId));
+  const title = r ? `Recorded automatically from “${r.description}”, ${r.frequencyLabel.toLowerCase()}. Editing it changes only this expense.` : "Recorded automatically from a recurring expense. Editing it changes only this expense.";
+  return `<span style="font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;background:#e0e7ff;color:#3730a3;margin-right:5px;" title="${escapeHtml(title)}">🔁 RECURRING</span>`;
+}
+// The Recurring expenses section (migrations/0085): the live ones by next date, then the ones that ended, dimmed.
+function expDrawRecurring_(){
+  const el = document.getElementById("expRecurring");
+  if (!el) return;
+  const list = _exp.recurring || [];
+  if (!list.length) { el.innerHTML = ""; return; }
+  const th = "padding:7px 10px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
+  const td = "padding:8px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#111;background:#fff;";
+  const live = list.filter(r => !r.ended).length;
+  const paid = (r) => r.paidPersonally ? "Personal funds" : (r.accountName || "—");
+  el.innerHTML = `<details data-keep-open="exp-recurring" open style="margin-bottom:22px;">
+    <summary style="cursor:pointer;font-size:15px;font-weight:700;">🔁 Recurring expenses — ${live} active${list.length > live ? `, ${list.length - live} ended` : ""}</summary>
+    <div style="font-size:12px;color:#555;margin:6px 0 8px;">Each is recorded automatically on the day it comes due. Editing one changes the ones still to come; what's already recorded stays as it is (edit those in the list below).</div>
+    <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table class="stack-mobile" style="width:100%;border-collapse:collapse;font-size:14px;">
+      <thead><tr><th style="${th}">Description</th><th style="${th}text-align:right;">Amount</th><th style="${th}">Category</th><th style="${th}">Repeats</th><th style="${th}">Paid from</th><th style="${th}">Next</th><th style="${th}">Ends</th><th style="${th}">Recorded</th><th style="${th}"></th></tr></thead>
+      <tbody>${list.map(r => `<tr data-recurring-row="${r.id}" style="${r.ended ? "opacity:.55;" : ""}">
+        <td style="${td}">${escapeHtml(r.description)}${r.vendor ? `<br><span style="font-size:12px;color:#666;">${escapeHtml(r.vendor)}</span>` : ""}</td>
+        <td style="${td}text-align:right;white-space:nowrap;">${expMoney_(r.amount)}</td>
+        <td style="${td}">${escapeHtml(r.category)}</td>
+        <td style="${td}white-space:nowrap;">${escapeHtml(r.frequencyLabel)}<br><span style="font-size:12px;color:#666;">from ${escapeHtml(expShortDate_(r.startDate))}</span></td>
+        <td style="${td}">${escapeHtml(paid(r))}</td>
+        <td style="${td}white-space:nowrap;">${r.ended ? "Ended" : escapeHtml(expShortDate_(r.nextDate))}</td>
+        <td style="${td}white-space:nowrap;">${r.endDate ? escapeHtml(expShortDate_(r.endDate)) : "—"}</td>
+        <td style="${td}white-space:nowrap;">${r.recordedCount ? `${r.recordedCount} · ${expMoney_(r.recordedTotal)}` : "None yet"}</td>
+        <td style="${td}white-space:nowrap;text-align:right;">
+          <button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${r.id}" onclick="expEditRecurring_(this.dataset.id)">Edit…</button>
+          ${r.ended ? "" : `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${r.id}" onclick="expStopRecurring_(this.dataset.id)">Stop</button>`}
+          <button class="admin-btn-danger" type="button" style="padding:3px 8px;font-size:12px;border-radius:4px;cursor:pointer;" data-id="${r.id}" onclick="expDeleteRecurring_(this.dataset.id)">Delete</button>
+        </td></tr>`).join("")}</tbody></table></div></details>`;
+}
+// Edit a recurring expense in a window: the same fields as the form. The first date is fixed once one is recorded.
+function expEditRecurring_(id){
+  const r = (_exp.recurring || []).find(x => x.id === Number(id));
+  if (!r) return;
+  const inp = "font-size:13px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
+  const lbl = "display:flex;flex-direction:column;gap:3px;font-size:12px;font-weight:600;";
+  const locked = r.recordedCount > 0 || !!r.lastRecorded;
+  const cats = (_exp.categories || []).filter(c => c.deductionType !== "depreciation");
+  const { ov, close } = inventoryModal_(`Edit recurring expense — ${escapeHtml(r.description)}`, `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;">
+      <label style="${lbl}grid-column:1/-1;">Description<input id="erDesc" type="text" maxlength="300" value="${escapeHtml(r.description)}" style="${inp}width:100%;"></label>
+      <label style="${lbl}">Amount ($)<input id="erAmount" type="number" min="0.01" step="0.01" value="${Number(r.amount).toFixed(2)}" style="${inp}"></label>
+      <label style="${lbl}">Category<select id="erCat" style="${inp}">${cats.map(c => `<option value="${c.id}"${c.id === r.categoryId ? " selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}</select></label>
+      <label style="${lbl}">Vendor ${vendorPickerHtml_("erVendor", r.vendor, { placeholder: "— none —", style: inp })}</label>
+      <label style="${lbl}">Paid from<select id="erPaidFrom" style="${inp}">${accountOptions_(_exp.accounts || [], r.paidPersonally ? "personal" : (r.accountId || ""), { personal: true, blank: !r.paidPersonally && !r.accountId })}</select></label>
+      <label style="${lbl}">Business use %<input id="erBiz" type="number" min="1" max="100" step="1" value="${r.businessUsePct}" style="${inp}"></label>
+      <label style="${lbl}">Repeats<select id="erFreq" style="${inp}">${Object.entries(EXP_FREQUENCIES_).map(([k, v]) => `<option value="${k}"${k === r.frequency ? " selected" : ""}>${escapeHtml(v)}</option>`).join("")}</select></label>
+      <label style="${lbl}">First date<input id="erStart" type="date" value="${escapeHtml(r.startDate)}" max="${expYearAhead_()}" ${locked ? "disabled" : ""} style="${inp}"></label>
+      <label style="${lbl}">Ends <span style="font-weight:400;color:#777;">(optional)</span><input id="erEnds" type="date" value="${escapeHtml(r.endDate || "")}" style="${inp}"></label>
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:10px;"><input type="checkbox" id="erVendorTax" ${r.vendorChargedTax ? "checked" : ""}> Sales tax is charged by the vendor</label>
+    <div style="font-size:12px;color:#555;margin-top:8px;">${locked ? `${r.recordedCount} already recorded — those stay as they are; the changes apply from the next one. The first date can't change now (stop this one and add a new one instead).` : "Nothing has been recorded from this yet."}</div>
+    <div id="erErr" style="color:#b03a2e;font-size:13px;min-height:16px;margin-top:8px;"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px;">
+      <button type="button" class="admin-btn" id="erCancel">Cancel</button>
+      <button type="button" class="admin-pass-submit" id="erSave" style="padding:7px 18px;font-size:13px;">Save changes</button>
+    </div>`, 720);
+  ov.querySelector("#erCancel").onclick = close;
+  ov.querySelector("#erSave").onclick = async () => {
+    const err = ov.querySelector("#erErr"); err.textContent = "";
+    const paidFrom = ov.querySelector("#erPaidFrom").value;
+    if (!paidFrom) { err.textContent = "Choose which account pays it (or Personal funds)."; return; }
+    const startDate = ov.querySelector("#erStart").value, endDate = ov.querySelector("#erEnds").value;
+    if (endDate && endDate < startDate) { err.textContent = "The end date can't be before the first date."; return; }
+    const cat = (_exp.categories || []).find(c => String(c.id) === ov.querySelector("#erCat").value);
+    const recurring = { id: r.id, description: ov.querySelector("#erDesc").value.trim(), amount: parseFloat(ov.querySelector("#erAmount").value),
+      categoryId: Number(ov.querySelector("#erCat").value), vendor: ov.querySelector("#erVendor").value.trim(),
+      businessUsePct: parseInt(ov.querySelector("#erBiz").value, 10) || 100, frequency: ov.querySelector("#erFreq").value, startDate, endDate,
+      vendorChargedTax: !(cat && cat.useTaxable) || ov.querySelector("#erVendorTax").checked,
+      ...(paidFrom === "personal" ? { paidPersonally: true } : { accountId: Number(paidFrom) }) };
+    if (!recurring.description) { err.textContent = "Enter a description."; return; }
+    if (!(recurring.amount > 0)) { err.textContent = "Enter an amount."; return; }
+    const btn = ov.querySelector("#erSave"); btn.disabled = true;
+    try {
+      const res = await expApi_({ action: "saveRecurringExpense", recurring });
+      close();
+      const n = (res.recorded || []).length;
+      showToast(`Recurring expense updated${n ? ` — ${n} recorded` : ""}${res.nextDate ? `, next on ${expShortDate_(res.nextDate)}` : ""}.`);
+      await expRefresh_();
+      flashRows_([`tr[data-recurring-row="${r.id}"]`]);
+    } catch (e) { err.textContent = e.message; btn.disabled = false; }
+  };
+}
+async function expStopRecurring_(id){
+  const r = (_exp.recurring || []).find(x => x.id === Number(id));
+  if (!r || !await askConfirm_(`Stop “${r.description}”? Nothing more is recorded from today on. The ${r.recordedCount === 1 ? "expense" : "expenses"} already recorded stay.`)) return;
+  try { const d = await expApi_({ action: "stopRecurringExpense", id: r.id }); _exp.recurring = d.recurring || []; showToast("Recurring expense stopped."); await expRefresh_(); }
+  catch (e) { showToast(e.message, true); }
+}
+async function expDeleteRecurring_(id){
+  const r = (_exp.recurring || []).find(x => x.id === Number(id));
+  if (!r || !await askConfirm_(`Delete the recurring expense “${r.description}”? Nothing more is recorded from it. ${r.recordedCount ? `The ${r.recordedCount} already recorded stay in your expenses (delete those one by one if they shouldn't count).` : ""}`)) return;
+  try { const d = await expApi_({ action: "deleteRecurringExpense", id: r.id }); _exp.recurring = d.recurring || []; showToast("Recurring expense deleted."); await expRefresh_(); }
+  catch (e) { showToast(e.message, true); }
+}
+
 async function expDelete_(id){
   const x = (_exp.list || []).find(e => e.id === Number(id));
   if (!x || !await askConfirm_(`Delete "${x.description}" (${expMoney_(x.amount)})? It's removed from all totals (kept in the audit log).`)) return;
@@ -16383,10 +16541,12 @@ async function expDelete_(id){
 // and flash the expenses that are new or changed.
 async function expRefresh_(){
   const snap = () => new Map((_exp.list || []).map(x => [x.id, JSON.stringify(x)]));
-  const before = snap();
+  const snapR = () => new Map((_exp.recurring || []).map(x => [x.id, JSON.stringify(x)]));
+  const before = snap(), beforeR = snapR();
   await keepView_(expLoad_);
-  const after = snap();
-  flashRows_([...after.keys()].filter(id => before.get(id) !== after.get(id)).map(id => `tr[data-expense-row="${id}"]`));
+  const after = snap(), afterR = snapR();
+  flashRows_([...after.keys()].filter(id => before.get(id) !== after.get(id)).map(id => `tr[data-expense-row="${id}"]`)
+    .concat([...afterR.keys()].filter(id => beforeR.get(id) !== afterR.get(id)).map(id => `tr[data-recurring-row="${id}"]`)));
 }
 async function expLoad_(){
   const y = document.getElementById("expYear").value, m = document.getElementById("expMonth").value;
@@ -16397,6 +16557,7 @@ async function expLoad_(){
   try { d = await expApi_({ action: "listExpenses", dateFrom: from, dateTo: to }); }
   catch (e) { listEl.textContent = e.message; return; }
   _exp.list = d.expenses;
+  if (Array.isArray(d.recurring)) { _exp.recurring = d.recurring; expDrawRecurring_(); }
   const s = d.summary;
   const th = "padding:7px 10px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
   const td = "padding:8px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#111;background:#fff;";
@@ -16424,7 +16585,7 @@ async function expLoad_(){
       <thead><tr><th style="${th}">Date</th><th style="${th}">Description</th><th style="${th}">Category</th><th style="${th}text-align:right;">Amount</th><th style="${th}text-align:right;">Deductible</th><th style="${th}"></th></tr></thead>
       <tbody>${d.expenses.map(x => `<tr data-expense-row="${x.id}">
         <td style="${td}white-space:nowrap;">${escapeHtml(x.date)}</td>
-        <td style="${td}">${x.isRefund ? `<span style="font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;background:#dcfce7;color:#166534;margin-right:5px;" title="Money back for an earlier purchase — reduces this category">REFUND</span>` : ""}${escapeHtml(x.description)}${x.vendor ? `<br><span style="font-size:12px;color:#666;">${escapeHtml(x.vendor)}</span>` : ""}${x.businessUsePct < 100 ? `<br><span style="font-size:12px;color:#666;">${x.businessUsePct}% business use</span>` : ""}${x.useTaxDue ? `<br><span style="font-size:12px;color:#b45309;font-weight:600;">Use tax due — no sales tax charged</span>` : ""}<br><span style="font-size:12px;color:${x.paidPersonally || x.accountId ? "#666" : "#b45309"};">${x.paidPersonally ? "Paid personally" : x.accountId ? "Paid from " + escapeHtml(((_exp.accounts || []).find(a => a.id === x.accountId) || {}).name || "account") : "Paid from: not set"}</span></td>
+        <td style="${td}">${x.isRefund ? `<span style="font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;background:#dcfce7;color:#166534;margin-right:5px;" title="Money back for an earlier purchase — reduces this category">REFUND</span>` : ""}${x.recurringId ? expRecurringTag_(x.recurringId) : ""}${escapeHtml(x.description)}${x.vendor ? `<br><span style="font-size:12px;color:#666;">${escapeHtml(x.vendor)}</span>` : ""}${x.businessUsePct < 100 ? `<br><span style="font-size:12px;color:#666;">${x.businessUsePct}% business use</span>` : ""}${x.useTaxDue ? `<br><span style="font-size:12px;color:#b45309;font-weight:600;">Use tax due — no sales tax charged</span>` : ""}<br><span style="font-size:12px;color:${x.paidPersonally || x.accountId ? "#666" : "#b45309"};">${x.paidPersonally ? "Paid personally" : x.accountId ? "Paid from " + escapeHtml(((_exp.accounts || []).find(a => a.id === x.accountId) || {}).name || "account") : "Paid from: not set"}</span></td>
         <td style="${td}">${escapeHtml(x.category)}<br><span style="font-size:12px;color:#666;">${escapeHtml(EXP_TYPE_LABEL[x.deductionType] || "")}${x.scheduleCLine ? " · line " + escapeHtml(x.scheduleCLine) : ""}${x.deductionType === "depreciation" && x.depMethod ? " · " + escapeHtml(_exp.methods[x.depMethod] || "") : ""}</span></td>
         <td style="${td}text-align:right;white-space:nowrap;">${expMoney_(x.amount)}</td>
         <td style="${td}text-align:right;white-space:nowrap;">${x.deductionType === "deductible" ? expMoney_(x.deductible) : x.deductionType === "depreciation" ? `<span style="font-size:12px;color:#666;">capital</span>` : "—"}</td>
@@ -16821,6 +16982,9 @@ async function renderCommunications(app, opts){
     ${(d.maintenanceDue || []).length ? `<h2 style="font-size:17px;margin:22px 0 8px;" id="commsMaint">🔧 Machine maintenance due — ${d.maintenanceDue.length}</h2>
       <div style="font-size:13px;color:#555;margin:0 0 8px;">Listed in the next roll-up. Mark it done on <a href="#maintenance">Machine maintenance</a>.</div>
       <ul style="margin:0;padding-left:18px;font-size:14px;">${d.maintenanceDue.map(t => `<li><b>${escapeHtml(t.machineName)}</b> — ${escapeHtml(t.name)} <span style="color:#666;">· ${escapeHtml(maintProgressText_(t))}</span></li>`).join("")}</ul>` : ""}
+    ${(d.recurringRecorded || []).length ? `<h2 style="font-size:17px;margin:22px 0 8px;" id="commsRecurring">🔁 Recurring expenses recorded — ${d.recurringRecorded.length}</h2>
+      <div style="font-size:13px;color:#555;margin:0 0 8px;">Recorded automatically on the day they came due; listed in the next roll-up. Change one on <a href="#expenses">Expenses</a>.</div>
+      <ul style="margin:0;padding-left:18px;font-size:14px;">${d.recurringRecorded.map(x => `<li>${escapeHtml(x.date)} — <b>${escapeHtml(x.description)}</b> ${escapeHtml(expMoney_(x.amount))} <span style="color:#666;">· ${escapeHtml([x.frequency, x.paidFrom].filter(Boolean).join(" · "))}</span></li>`).join("")}</ul>` : ""}
     <div style="display:flex;align-items:center;gap:8px;margin:22px 0 8px;flex-wrap:wrap;">
       <h2 style="font-size:17px;margin:0;">👕 Blanks in transit from the vendor${awaitingBlanks.length ? ` — ${awaitingBlanks.length}` : ""}</h2>
       ${adminFeatureOn_("shipping") ? `<button class="admin-btn" style="font-size:12px;padding:4px 10px;" onclick="checkBlankShipmentsNow(this)">Check now</button>` : ""}</div>

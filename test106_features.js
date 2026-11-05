@@ -183,7 +183,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   ok("on: a payment dated in the closed month is refused", r.status === 409 && /closed/.test(r.body.message));
 
   await setF({ bookkeeping: false });
-  const bookActions = ["listExpenses", "saveExpense", "deleteExpense", "listExpenseCategories", "getExpenseReport", "importExpenses", "listAccounts", "saveAccount", "listMoney", "saveMoneyEntry", "setPaymentAccount",
+  const bookActions = ["listExpenses", "saveExpense", "deleteExpense", "listExpenseCategories", "getExpenseReport", "importExpenses", "listRecurringExpenses", "saveRecurringExpense", "listAccounts", "saveAccount", "listMoney", "saveMoneyEntry", "setPaymentAccount",
     "getReconciliation", "importStatement", "createFromStatementLine", "reconcileMonth", "listClosedPeriods", "closePeriod", "reopenPeriod", "getAccountantExport"];
   refused.length = 0; for (const a of bookActions) refused.push(off403(await admin({ action: a, month: "2020-03", expense: { date: "2024-01-01" } }), "Bookkeeping"));
   ok("off: expenses, accounts & money, reconcile, periods and the accountant export all answer 403 naming the feature", refused.every(Boolean));
@@ -399,7 +399,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
       "setDesignVersionStitches", "fillDesignStitchCounts",                                                   // design stitch counts
     ],
     bookkeeping: [
-      "listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory", "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses", // Expenses
+      "listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory", "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses", "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense", // Expenses
       "listAccounts", "saveAccount", "saveMoneyDefaults", "listMoney", "saveMoneyEntry", "deleteMoneyEntry", "setPaymentAccount", // Accounts & money
       "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount",                       // Account viewer, Change account…
       "getReconciliation", "importStatement", "autoMatchStatement", "matchStatementLine", "unmatchStatementLine", "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth", "listCashoutPayments", // Reconcile

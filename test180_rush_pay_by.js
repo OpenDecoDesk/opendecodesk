@@ -132,14 +132,14 @@ const quiet = () => { const vc = new VirtualConsole(); vc.on("jsdomError", (e) =
   ok("a rush fee still to follow is part of the full payment", /including the rush fee, which we'll send you separately/.test(mail[0].body));
   mail.length = 0;
   await M.sendInvoiceEmail(env, { order: { ...(await M.getOrderById(d1, "P-2")) }, orgName: "Acme", invoiceUrl: "https://x/?invoice=1", allowDelivery: false });
-  ok("no pay-by date → no notice, the usual subject", !/cannot guarantee/.test(mail[0].body) && /^Invoice for your order/.test(mail[0].subject));
+  ok("no pay-by date → no notice, the usual subject", !/cannot guarantee/.test(mail[0].body) && /^Invoice — P-2( · \$[\d.,]+ due)?$/.test(mail[0].subject));
   mail.length = 0;
   await M.sendInvoiceEmail(env, { order: { ...(await M.getOrderById(d1, id)), balanceDue: 0, rushFeePending: false }, orgName: "Acme", invoiceUrl: "https://x/?invoice=1", allowDelivery: false });
   ok("nothing left to pay → no notice", !/cannot guarantee/.test(mail[0].body));
   mail.length = 0;
   o = await order({ rush: true, neededBy: due });
   await tick(30);
-  const rec = mail.find(m => /has been received/.test(m.subject));
+  const rec = mail.find(m => /^Order received/.test(m.subject));
   ok("the order-received email says it too", rec && rec.body.includes(`cannot guarantee the rush delivery date of ${dueNice}`) && plain(rec.htmlBody).includes(`full payment by ${longDay(addDays(today, 7))}`));
 
   console.log("\n=== The invoice page ===");

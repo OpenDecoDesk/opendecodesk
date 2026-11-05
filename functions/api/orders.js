@@ -119,11 +119,13 @@ import {
   getAccountRegister, getReceiptRecords, receiptTargets, getRecordReceipt, setReceiptFile, receiptAccountBlockers, setReceiptAccount,
   lineQty, QTY_MESSAGE, zipStates, SHIPPING_QUOTE_PENDING, byId_,
   getRushSettings, setRushSettings, getRushFeesToSet, rushRuleView, resolveRushRule, rushFeeFor, cleanShopRush, setOrgRushFee, setOrderRushFee, rushPayByFor, localToday,
+  getEmailSettings, setEmailSettings, splitTaxInclusive, addTaxExclusive, orderAmounts,
 } from "../_lib/db.js";
 import {
   sendOrderReceivedEmail,
   sendPaymentConfirmedEmail, sendCancellationEmail, sendShippedEmail,
   sendDesignVerificationEmail, sendShippingPaymentEmail, sendInvoiceEmail, sendTestEmail, invoiceDocument,
+  buildOrderReceivedEmail, buildPaymentReceivedEmail, buildShippedEmail, buildInvoiceEmail, previewMessage, sendSampleMessage, orderPdfFile,
 } from "../_lib/email.js";
 import { verifyQuote, canonicalItems } from "../_lib/quoteToken.js";
 import { selectBox } from "../_lib/boxSize.js";
@@ -150,6 +152,35 @@ const stitchReader_ = (env) => (env && env.DESIGNS ? async (d) => {
 // Carrier rate quotes and labels work from US ZIP codes only (Region → country).
 const NO_CARRIER_SHIPPING_MSG = "Carrier shipping (rates by ZIP) is only available when the country in Global settings → Region is US. Use Local pickup or a custom delivery option with a flat fee instead.";
 
+// A made-up order for the Customer emails preview: "shipping" (two taxed products, carrier shipping, a
+// discount) or "pickup" (a taxed and an untaxed product, picked up). Taxed the way this install taxes —
+// its rate and whether prices include the tax — with the one per-line formula (splitTaxInclusive /
+// addTaxExclusive) and totalled by orderAmounts, so it adds up exactly like a real order.
+function sampleOrder_({ example = "shipping", method = "Check", paid = false, salesTax = {} } = {}) {
+  const rateBps = Math.max(0, Number(salesTax.rateBps) || 0);
+  const exclusive = salesTax.taxMode === "exclusive";
+  const taxOf = (cents) => exclusive ? addTaxExclusive(cents, rateBps).taxCents : splitTaxInclusive(cents, rateBps).taxCents;
+  const lines = example === "pickup"
+    ? [{ name: "Club T-shirt", size: "M", qty: 3, unit: 1800, taxable: true }, { name: "Sticker pack", size: "", qty: 1, unit: 500, taxable: false }]
+    : [{ name: "Performance polo", size: "L", qty: 2, unit: 2500, taxable: true }, { name: "Structured cap", size: "", qty: 1, unit: 2000, taxable: true }];
+  const items = lines.map(l => { const total = l.unit * l.qty, tax = l.taxable ? taxOf(total) : 0;
+    return { name: l.name, size: l.size, qty: l.qty, unitPrice: l.unit / 100, lineTotal: total / 100, tax: tax / 100, taxable: l.taxable }; });
+  const itemsCents = lines.reduce((t, l) => t + l.unit * l.qty, 0), taxableCents = lines.filter(l => l.taxable).reduce((t, l) => t + l.unit * l.qty, 0);
+  const itemsTaxCents = items.reduce((t, it) => t + Math.round(it.tax * 100), 0);
+  const shippingCents = example === "pickup" ? 0 : 945, discountCents = example === "pickup" ? 0 : 500;
+  const discountTaxCents = discountCents && itemsCents ? taxOf(Math.round(discountCents * taxableCents / itemsCents)) : 0;
+  const a = orderAmounts({ itemsCents, itemsTaxCents, shippingCents, discountCents, discountTaxCents, taxMode: exclusive ? "exclusive" : "inclusive" });
+  const m = ["Check", "Venmo", "Zelle", "Card"].find(x => x.toLowerCase() === String(method || "").toLowerCase()) || "Check";
+  const now = new Date().toISOString();
+  return { orderId: "SAMPLE-1001", orgId: "", customerName: "Alex Sample", contact: "customer@example.com", paymentMethod: m, placedAt: now,
+    items, itemsSubtotal: itemsCents / 100, shippingCost: shippingCents / 100, shippingMethod: example === "pickup" ? "" : "USPS Ground Advantage",
+    shippingAddress: example === "pickup" ? null : { name: "Alex Sample", line1: "12 Elm St", city: "Springfield", state: "IL", zip: "60001" },
+    discountAmount: discountCents / 100, discountTax: discountTaxCents / 100, discountNote: discountCents ? "Club discount" : "",
+    taxRate: rateBps / 100, taxMode: exclusive ? "exclusive" : "inclusive", taxExempt: false, salesTax: a.taxCents / 100,
+    effectiveTotal: a.owedCents / 100, total: a.owedCents / 100, amountReceived: paid ? a.owedCents / 100 : 0, balanceDue: paid ? 0 : a.owedCents / 100,
+    paid, paidAt: paid ? now : "" };
+}
+
 const CATALOG_ADMIN_ACTIONS = new Set([
   "createOrg", "updateOrg", "listOrgsAdmin", "setupOrgDomain", "getOrgDomainStatus",
   "listProducts", "createProduct", "updateProduct", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "importProducts", "importBlanks", "getBlanksToOrder",
@@ -157,6 +188,7 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "getGlobalSettings", "updateGlobalSettings", "getSetupStatus", "getCloudflareSetup", "connectCloudflare", "getMachineSettings", "updateMachineSettings",
   "getShipFromAddress", "updateShipFromAddress", "getBusinessProfile", "updateBusinessProfile",
   "getLocaleSettings", "updateLocaleSettings", "getFeatures", "updateFeatures",
+  "getEmailSettings", "updateEmailSettings", "previewCustomerEmail", "samplePdf", "sendSampleEmail",
   "getSalesTaxSettings", "updateSalesTaxSettings",
   "getBoxPresets", "setBoxPresets",
   "getInventory", "createInventoryItem", "updateInventoryItem", "deleteInventoryItem",
@@ -260,9 +292,11 @@ const ADMIN_ONLY_ACTIONS = [
   // The domain step (Global settings → Your domain): a Cloudflare key that can change the account's Workers and DNS.
   "getCloudflareSetup", "connectCloudflare",
   "updateRushSettings",   // rush fees (migrations/0082)
+  "updateEmailSettings", "sendSampleEmail",   // Global settings → Customer emails
 ];
 const MANAGER_ACTIONS = [
   "getRushSettings", "setRushFee",                                // rush fees (migrations/0082)
+  "getEmailSettings", "previewCustomerEmail", "samplePdf",       // Global settings → Customer emails: preview and sample PDF
   "getPublishState", "getPreviewLink",                            // publish per shop (migrations/0076)
   "previewDiscardShopChanges", "discardShopChanges",              // Discard changes… (back to the published shop)
   "applyRulePrices",                                              // Brand rules → Show price impact → Apply
@@ -302,7 +336,7 @@ const STAFF_ACTIONS = [
   "setDiscount", "deleteOrder", "voidOrder", "updateCustomerInfo", "createLocalSale", "setFulfillmentStage", "useBlanksFromStock", "addBlankShipment",
   "updateBlankShipment", "deleteBlankShipment", "getBlankShipments", "bulkSetFulfillmentStage", "cancelLineItem", "bulkCancelLineItems",
   "setLineItemRefund", "editOrder", "recordTracking", "bulkRecordTracking", "getOrderForShipping", "sendDesignVerification",
-  "listDesignVerifications", "setShippingInfo", "setShippingPaidAmount", "createShippingPaymentLink", "sendInvoice", "getInvoiceDocument", "updateOrderDate", "setOrderDates", "setOrderDueDate",
+  "listDesignVerifications", "setShippingInfo", "setShippingPaidAmount", "createShippingPaymentLink", "sendInvoice", "getInvoiceDocument", "getOrderPdf", "updateOrderDate", "setOrderDates", "setOrderDueDate",
   "bulkSetDueDate", "listClosedPeriods",
 ];
 const ACTION_ROLE = Object.create(null);   // no prototype: "constructor" is not an action
@@ -3181,10 +3215,11 @@ export async function onRequestPost(context) {
     // Says only whether each thing is set — never a key, token or id.
     if (body.action === "getSetupStatus") {
       const safe = async (f, fallback) => { try { return await f(); } catch (e) { return fallback; } };
-      const [business, salesTax, locale] = await Promise.all([
+      const [business, salesTax, locale, global] = await Promise.all([
         safe(() => getBusinessProfile(env.DB), {}), safe(() => getSalesTaxSettings(env.DB), {}), safe(() => getLocaleSettings(env.DB), {}),
+        safe(() => getGlobalSettings(env.DB), {}),
       ]);
-      const items = setupStatus(env, { business, salesTax, locale });
+      const items = setupStatus(env, { business, salesTax, locale, payments: (global && global.enabledPayments) || null });
       return jsonResponse({ status: "ok", items, summary: setupSummary(items) });
     }
 
@@ -3314,6 +3349,42 @@ export async function onRequestPost(context) {
       try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
       return jsonResponse({ status: "ok", business });
     }
+    // ---- Customer emails (Global settings): the PDF setting, a preview of each email, a sample PDF ----
+    // The preview is built by the same functions that send the real emails (email.js build…Email), from
+    // a made-up order (sampleOrder_) priced with this install's sales tax and paid by the method picked —
+    // nothing is saved. "Send me this sample" sends it to the owner's inbox, marked [Sample].
+    if (body.action === "getEmailSettings") {
+      return jsonResponse({ status: "ok", emailSettings: await getEmailSettings(env.DB) });
+    }
+    if (body.action === "updateEmailSettings") {
+      const before = await getEmailSettings(env.DB);
+      const emailSettings = await setEmailSettings(env.DB, body.emailSettings || {});
+      audit({ orgId: null, orderId: null, action: "settings.email_set", detail: { attachPdf: { from: before.attachPdf, to: emailSettings.attachPdf } } });
+      return jsonResponse({ status: "ok", emailSettings });
+    }
+    if (body.action === "previewCustomerEmail" || body.action === "sendSampleEmail" || body.action === "samplePdf") {
+      const kind = ["received", "payment", "invoice", "shipped"].includes(body.kind) ? body.kind : "received";
+      const example = body.example === "pickup" ? "pickup" : "shipping";
+      let salesTax = {};
+      try { salesTax = await getSalesTaxSettings(env.DB); } catch (e) { salesTax = {}; }
+      const order = sampleOrder_({ example, method: body.method, paid: kind === "payment" || kind === "shipped", salesTax });
+      if (body.action === "samplePdf") {
+        const file = await orderPdfFile(env, order, { kind: kind === "payment" || kind === "shipped" ? "receipt" : "invoice", orgName: "Sample shop" });
+        return jsonResponse({ status: "ok", file });
+      }
+      const msg = kind === "payment" ? await buildPaymentReceivedEmail(env, order, order.paidAt)
+        : kind === "invoice" ? await buildInvoiceEmail(env, { order, orgName: "Sample shop", invoiceUrl: "https://" + (env.ROOT_DOMAIN || "example.com") + "/?invoice=SAMPLE", allowDelivery: false })
+        : kind === "shipped" ? buildShippedEmail(env, order, { carrier: "USPS", tracking: "9400100000000000000000" })
+        : await buildOrderReceivedEmail(env, order);
+      if (body.action === "sendSampleEmail") {
+        const rl = await rateLimited(env, "sample_email", request, 10);
+        if (rl.blocked) return rateLimitResponse(rl.retryAfter);
+        const sent = await sendSampleMessage(env, msg);
+        return jsonResponse({ status: sent ? "ok" : "error", message: sent ? "Sent to your inbox." : "It couldn't be sent — Communications → Send a test email shows why." }, sent ? 200 : 502);
+      }
+      return jsonResponse({ status: "ok", preview: await previewMessage(env, msg) });
+    }
+
     // ---- Region: time zone and country (db.js getLocaleSettings) ----
     if (body.action === "getLocaleSettings") {
       const locale = await getLocaleSettings(env.DB);
@@ -5558,6 +5629,20 @@ export async function onRequestPost(context) {
     return jsonResponse({ status: "ok", document: await invoiceDocument(env, order, { orgName: (org && org.name) || "" }) });
   }
 
+  // ---- getOrderPdf — Orders → PDF: the order's invoice (something owed) or receipt (paid), drawn by
+  // email.js orderPdf — the same PDF the customer's emails carry.
+  if (body.action === "getOrderPdf") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    if (denied) return denied;
+    const orderId = String(body.orderId || "").trim();
+    if (!ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
+    const order = await getOrderById(env.DB, orderId);
+    if (!order || (body.org && order.orgId !== body.org)) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    if (!(order.items || []).some(it => !it.cancelDate)) return jsonResponse({ status: "error", message: "Every item on this order is cancelled — there's nothing to print" }, 400);
+    const org = await getOrgById(env.DB, order.orgId);
+    return jsonResponse({ status: "ok", file: await orderPdfFile(env, order, { orgName: (org && org.name) || "" }) });
+  }
+
   if (body.action === "sendInvoice") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
@@ -6007,14 +6092,12 @@ export async function onRequestPost(context) {
   const sendReceived = (async () => {
     // The tax recorded for this order (backed out per line in insertOrder), so
     // the receipt shows exactly what's on the books.
-    let taxInfo = {};
-    try {
-      const saved = await getOrderById(env.DB, orderId);
-      if (saved) taxInfo = { salesTax: saved.salesTax, taxRate: saved.taxRate, taxExempt: saved.taxExempt, taxMode: saved.taxMode,
-        // With tax on top, the order's total is the saved one (items + shipping + tax), not the sum above.
-        ...(saved.taxMode === "exclusive" ? { total: saved.effectiveTotal, effectiveTotal: saved.effectiveTotal } : {}) };
-    } catch (_) {}
-    const receivedSent = await sendOrderReceivedEmail(env, { ...order, ...taxInfo, items: pricedItems, manualShipping });
+    // The saved order is what the email shows: each line's own tax (so prices read before tax), the
+    // totals and balance as booked. Only if it can't be read back does the email fall back to what was sent.
+    let saved = null;
+    try { saved = await getOrderById(env.DB, orderId); } catch (_) {}
+    const receivedSent = await sendOrderReceivedEmail(env, saved ? { ...saved, manualShipping: manualShipping || saved.shippingPending }
+      : { ...order, items: pricedItems, manualShipping });
     if (receivedSent) {
       await setOrderEmailTimestamp(env.DB, orderId, "receivedEmailAt", new Date().toISOString());
     }

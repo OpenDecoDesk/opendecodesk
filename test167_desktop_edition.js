@@ -159,7 +159,7 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
   console.log("\n=== E. Setup status ===");
   const { setupStatus } = new Function(strip(read("functions/_lib/setupStatus.js")) + "\nreturn { setupStatus };")();
   const items = setupStatus({ EDITION: "desktop", DB: d1 }, { business: {}, salesTax: {}, locale: {} });
-  ok("the desktop list is the database, business profile, sales tax and time zone", items.map(i => i.key).join() === "database,business,salesTax,timeZone");
+  ok("the desktop list is the database, business profile, payment details, sales tax and time zone", items.map(i => i.key).join() === "database,business,paymentDetails,salesTax,timeZone");
   ok("…with nothing about domains, email, buckets or online services", !items.some(i => /domain|email|bucket|stripe|shippo/i.test(i.key)));
   const named_ = setupStatus({ EDITION: "desktop", DB: d1 }, { business: { name: "Stitch Co" }, salesTax: {}, locale: {} });
   ok("a business name is all the profile needs (no email is sent)", named_.find(i => i.key === "business").ready === true);

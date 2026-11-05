@@ -8,7 +8,7 @@
 // Only sending: nothing here reads the mailbox.
 
 const EMAIL_RE = /^[^@\s<>"]+@[^@\s<>"]+\.[^@\s<>"]+$/;
-// Attachments (a design proof's pictures): pictures only, at most 5 and 20 MB in all.
+// Attachments (a design proof's pictures, an order's PDF receipt): pictures and PDFs, at most 5 and 20 MB in all.
 const MAX_ATTACHMENTS = 5, MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 // [{ filename, contentType, contentBase64, cid }] from the Worker → nodemailer's attachments, or an
@@ -20,7 +20,7 @@ function cleanAttachments(list) {
   const attachments = [];
   for (const a of list) {
     const type = String((a && a.contentType) || "");
-    if (!/^image\/(jpeg|png|gif|webp|heic|heif)$/.test(type)) return { error: "Only pictures can be attached." };
+    if (!/^(image\/(jpeg|png|gif|webp|heic|heif)|application\/pdf)$/.test(type)) return { error: "Only pictures and PDFs can be attached." };
     const content = Buffer.from(String(a.contentBase64 || ""), "base64");
     total += content.length;
     if (!content.length || total > MAX_ATTACHMENT_BYTES) return { error: "The attachments are too big for one email." };

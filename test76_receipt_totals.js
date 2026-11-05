@@ -30,7 +30,7 @@ const plain = (html) => html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").rep
     console.log("items, then Subtotal $56.00, Shipping (method) $8.25, Total $64.25 — in that order:",
       /Polo .*Cap .*Subtotal \$56\.00 Shipping \(USPS Ground Advantage\) \$8\.25 Total \$64\.25/.test(h));
     console.log("the sales-tax note stays under the total:", /Total \$64\.25 Includes sales tax \(6%\) \$3\.17/.test(h));
-    console.log("the plain-text version has the same lines:", /Subtotal: \$56\.00\nShipping \(USPS Ground Advantage\): \$8\.25\nTotal: \$64\.25 \(includes \$3\.17 sales tax\)/.test(m.body || m.text || ""));
+    console.log("the plain-text version has the same lines:", /Subtotal: \$56\.00\nShipping \(USPS Ground Advantage\): \$8\.25\nTotal: \$64\.25\nIncludes sales tax \(6%\): \$3\.17/.test(m.body || m.text || ""));
 
     console.log("\n=== Order received, no shipping (pickup) ===");
     await E.sendOrderReceivedEmail(env, { orderId: "PRIME-2", customerName: "Bo", contact: "b@x.com", paymentMethod: "Venmo",
@@ -54,7 +54,7 @@ const plain = (html) => html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").rep
     console.log("Subtotal $44.00 + Shipping $6.25 − Discount $4.00 = Total $46.25 (the order's current total, not the stale stored one):",
       /Subtotal \$44\.00 Shipping \(USPS Ground Advantage\) \$6\.25 Discount \(Club\) −\$4\.00 Total \$46\.25/.test(h) && !/\$68\.00/.test(h));
     console.log("the cancelled line isn't listed:", /Tee/.test(h) && !/Cap/.test(h));
-    console.log("plain text adds up too:", /Subtotal: \$44\.00\nShipping \(USPS Ground Advantage\): \$6\.25\nDiscount: −\$4\.00\nTotal: \$46\.25/.test(m.body));
+    console.log("plain text adds up too:", /Subtotal: \$44\.00\nShipping \(USPS Ground Advantage\): \$6\.25\nDiscount \(Club\): −\$4\.00\nTotal: \$46\.25/.test(m.body));
 
     // A configurable line (migrations/0036) shows its garment colour + per-location picks in the
     // receipt — not just the product name — so the customer sees what they configured. The invisible

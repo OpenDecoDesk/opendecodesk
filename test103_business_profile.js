@@ -68,7 +68,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   await mail.sendOrderReceivedEmail(env, { orderId: "A-1", orgId: "o", customerName: "Pat <b>", contact: "pat@example.com", paymentMethod: "Check", items: [{ name: "Polo", size: "L", qty: 1, unitPrice: 20, lineTotal: 20 }], total: 20 }, "Shop");
   const m = sent[sent.length - 1];
   ok("a customer email is from the business, replies go to the owner, the receipts inbox gets a copy", m && m.from.name === "Northside Stitch Co." && m.from.address === "orders@northside.test" && m.reply_to === "owner@northside.test" && JSON.stringify(m.bcc) === '["copies@northside.test"]');
-  ok("its footer names the business and the site, with no placeholder left behind", /Northside Stitch Co\. — northside\.test/.test(m.html) && !/%%/.test(m.html + m.text + m.subject));
+  ok("its footer names the business and the site, with no placeholder left behind", /<strong[^>]*>Northside Stitch Co\.<\/strong>[\s\S]*northside\.test/.test(m.html) && !/%%/.test(m.html + m.text + m.subject));
   await mail.sendDigestHeartbeatEmail(env, {});
   ok("the owner's roll-up goes to the owner's inbox and links to this install's admin", sent[sent.length - 1].to === "owner@northside.test" && /https:\/\/admin\.northside\.test/.test(sent[sent.length - 1].html));
   d1._raw.run("DELETE FROM global_settings WHERE key='business'");

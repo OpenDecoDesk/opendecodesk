@@ -81,8 +81,9 @@ const plain = (html) => String(html || "").replace(/<[^>]+>/g, " ").replace(/&am
   let r = await admin({ action: "sendInvoice", org: "club", orderId: O1, message: "Thanks for the order!" });
   const inv1 = await M.getOrderInvoiceByOrder(d1, O1);
   console.log("it answers with the link, on the shop's own address:", r.status === 200 && r.body.emailSent === true && r.body.url === `https://club.example.com/?invoice=${inv1.token}` && /^[a-z0-9]{32}$/.test(inv1.token));
-  console.log("one email goes to the customer, with the link, the note and the amounts:", mail.length === 1 && mail[0].to === "sam1@example.com" && /Invoice for your order/.test(mail[0].subject)
-    && mail[0].htmlBody.includes(r.body.url) && /Thanks for the order!/.test(plain(mail[0].htmlBody)) && /Polo .*Subtotal \$50\.00 .*Total \$50\.00/.test(plain(mail[0].htmlBody)) && mail[0].body.includes(r.body.url));
+  console.log("one email goes to the customer, with the link, the note and the amounts:", mail.length === 1 && mail[0].to === "sam1@example.com" && /^Invoice — CLUB-\S+ · \$50\.00 due$/.test(mail[0].subject)
+    && mail[0].htmlBody.includes(r.body.url) && /Thanks for the order!/.test(plain(mail[0].htmlBody))
+    && /Polo M 2 \$23\.59 \$47\.17 Prices are shown before sales tax\. Unit prices are rounded to the cent; the amounts are exact\. Subtotal \$47\.17 Sales tax \(6%\) \$2\.83 Total \$50\.00/.test(plain(mail[0].htmlBody)) && mail[0].body.includes(r.body.url));
   console.log("the order now carries when its invoice went out:", !!r.body.invoice.sentAt && (await M.getOrderById(d1, O1)).invoice.sentTo === "sam1@example.com");
   console.log("sending is audited:", d1.q("SELECT count(*) n FROM audit_log WHERE action='order.invoice_sent' AND orderId=?", O1)[0].n === 1);
   mail.length = 0;

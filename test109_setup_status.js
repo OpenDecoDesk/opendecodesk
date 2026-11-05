@@ -30,22 +30,22 @@ const SECRETS = { PROXY_ADMIN_PASSPHRASE: "PASSPHRASE-zzq1", SIGNING_SECRET: "SI
   LINK_SIGNING_SECRET: "link_zzq12", QUOTE_SIGNING_SECRET: "quote_zzq13", TOTP_SECRET: "totp_zzq14" };
 const IDS = { CF_ACCOUNT_ID: "acct_zzq15", CF_ZONE_ID: "zone_zzq16", TURNSTILE_SITE_KEY: "site_zzq17", ACCESS_AUD: "aud_zzq18", ACCESS_TEAM_DOMAIN: "team-zzq19.cloudflareaccess.com", R2_PUBLIC_BASE: "https://images-zzq20.myshop.com" };
 const FULL_ENV = { ...SECRETS, ...IDS, DB, IMAGES: bucket, RECEIPTS: bucket, DESIGNS: bucket, AGENT_MAILBOX: {}, ROOT_DOMAIN: "myshop.com", CF_WORKER_NAME: "opendecodesk", TIMEZONE: "Europe/London" };
-const FULL_SETTINGS = { business: { name: "Thread & Needle", ownerEmail: "owner@myshop.com" }, salesTax: { rateBps: 600, jurisdiction: "OH" }, locale: { timeZone: "Europe/London" } };
+const FULL_SETTINGS = { business: { name: "Thread & Needle", ownerEmail: "owner@myshop.com", mailingAddress: "1 Main St", venmo: "thread", zelle: "pay@myshop.com", supportEmail: "help@myshop.com" }, salesTax: { rateBps: 600, jurisdiction: "OH" }, locale: { timeZone: "Europe/London" } };
 
 (async () => {
   console.log("=== The list ===");
-  const EXPECT = ["rootDomain", "database", "signingSecret", "email", "images", "receipts", "designs", "business", "salesTax", "timeZone", "stripe", "shippo", "turnstile", "access", "customDomains", "agentRelay", "cronSecret"];
+  const EXPECT = ["rootDomain", "database", "signingSecret", "email", "images", "receipts", "designs", "business", "paymentDetails", "salesTax", "timeZone", "stripe", "shippo", "turnstile", "access", "customDomains", "agentRelay", "cronSecret"];
   let items = lib.setupStatus(FULL_ENV, FULL_SETTINGS), s = by(items);
   ok("it covers the domain, database, signing secret, email, the three buckets, business profile, tax, time zone, and each optional service", items.map(i => i.key).join() === EXPECT.join());
   ok("each line has a name, a level, and one sentence on what it affects", items.every(i => i.label && ["required", "recommended", "optional"].includes(i.level) && i.affects.length > 30 && typeof i.ready === "boolean" && typeof i.note === "string"));
-  ok("a fully configured install: everything is ready", items.every(i => i.ready) && JSON.stringify(lib.setupSummary(items)) === JSON.stringify({ required: 0, recommended: 0, optional: 0, total: 17 }));
+  ok("a fully configured install: everything is ready", items.every(i => i.ready) && JSON.stringify(lib.setupSummary(items)) === JSON.stringify({ required: 0, recommended: 0, optional: 0, total: 18 }));
   ok("it names the email provider in use (Resend wins when its key is set, as in email.js)", /Resend/.test(s.email.note));
   const leak = (obj) => [...Object.values(SECRETS), ...Object.values(IDS)].filter(v => JSON.stringify(obj).includes(v));
   ok("no key, token, passphrase, id or address appears anywhere in it", leak(items).length === 0);
 
   items = lib.setupStatus({}, {}); s = by(items);
-  ok("nothing configured at all: nothing is ready, and it doesn't crash on an empty environment", items.every(i => !i.ready) && lib.setupStatus(null, null).length === 17 && lib.setupStatus(undefined).every(i => !i.ready));
-  ok("…three required, four recommended, ten optional (file storage is optional)", JSON.stringify(lib.setupSummary(items)) === JSON.stringify({ required: 3, recommended: 4, optional: 10, total: 17 }));
+  ok("nothing configured at all: nothing is ready, and it doesn't crash on an empty environment", items.every(i => !i.ready) && lib.setupStatus(null, null).length === 18 && lib.setupStatus(undefined).every(i => !i.ready));
+  ok("…three required, five recommended, ten optional (file storage is optional)", JSON.stringify(lib.setupSummary(items)) === JSON.stringify({ required: 3, recommended: 5, optional: 10, total: 18 }));
   ok("the required ones are the domain, the database and the signing secret", items.filter(i => i.level === "required").map(i => i.key).join() === "rootDomain,database,signingSecret");
 
   console.log("\n=== Each line follows what the code actually needs ===");
@@ -99,7 +99,7 @@ const FULL_SETTINGS = { business: { name: "Thread & Needle", ownerEmail: "owner@
   ok("…on the admin host: a shop's own address is refused even with the right key", r.status === 401 && !/items/.test(r.text));
   r = await post("admin", { action: "getSetupStatus", key: "x" });
   let body = JSON.parse(r.text); s = by(body.items);
-  ok("the admin gets the list and a summary", r.status === 200 && body.status === "ok" && body.items.length === 17 && body.summary.total === 17);
+  ok("the admin gets the list and a summary", r.status === 200 && body.status === "ok" && body.items.length === 18 && body.summary.total === 18);
   ok("a fresh database: no business profile, no tax, no time zone", !s.business.ready && !s.salesTax.ready && !s.timeZone.ready && s.rootDomain.ready && s.database.ready && s.signingSecret.ready);
   ok("the half-configured services are flagged: Stripe without its webhook secret, the images bucket without an address, a Turnstile secret without its site key",
     !s.stripe.ready && /not recorded/.test(s.stripe.note) && !s.images.ready && /R2_PUBLIC_BASE/.test(s.images.note) && !s.turnstile.ready && /EVERY order/.test(s.turnstile.note));
@@ -108,7 +108,8 @@ const FULL_SETTINGS = { business: { name: "Thread & Needle", ownerEmail: "owner@
   await lib.setSalesTaxSettings(d1, { rateBps: 725, jurisdiction: "OH" });
   await lib.setLocaleSettings(d1, { timeZone: "Europe/London" });
   body = JSON.parse((await post("admin", { action: "getSetupStatus", key: "x" })).text); s = by(body.items);
-  ok("filling in the business profile, the tax rate and the region turns those three ready", s.business.ready && s.salesTax.ready && s.timeZone.ready && body.summary.recommended === 1);
+  ok("filling in the business profile, the tax rate and the region turns those three ready", s.business.ready && s.salesTax.ready && s.timeZone.ready && body.summary.recommended === 2 && !s.paymentDetails.ready);
+  ok("…while the payment details on emails still name what's missing: where to mail a check, Venmo, Zelle, a contact", /Mail checks to/.test(s.paymentDetails.note) && /Venmo/.test(s.paymentDetails.note) && /Zelle/.test(s.paymentDetails.note) && /contact/.test(s.paymentDetails.note));
   ok("the owner's email saved in the profile is not echoed back", !/owner@myshop\.com/.test(JSON.stringify(body)));
   const brokenEnv = { ...env, DB: { prepare(){ throw new Error("D1 is down"); } } };
   ok("it is an ordinary admin action: listed with the catalog-admin actions, and not behind any feature switch", /"getSetupStatus"/.test(read("functions/api/orders.js").match(/const CATALOG_ADMIN_ACTIONS = new Set\(\[([\s\S]*?)\]\);/)[1]) &&
@@ -142,14 +143,14 @@ const FULL_SETTINGS = { business: { name: "Thread & Needle", ownerEmail: "owner@
   const panel = doc.getElementById("adminPanel");
   ok("a Setup status section is the first thing on the page, above the Business profile", !!box && panel.querySelector("h2").textContent === "Setup status" &&
     (box.compareDocumentPosition(doc.getElementById("gBizName")) & w.Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
-  ok("one row per item, each with its name, ready / not set up, and what it affects", rows.length === 17 && rows.every(r => r.querySelector("strong").textContent && /Ready|Not set up/.test(r.textContent) && r.querySelector(".admin-note").textContent.length > 30));
+  ok("one row per item, each with its name, ready / not set up, and what it affects", rows.length === 18 && rows.every(r => r.querySelector("strong").textContent && /Ready|Not set up/.test(r.textContent) && r.querySelector(".admin-note").textContent.length > 30));
   const keys = rows.map(r => r.dataset.key), ready = (k) => rows.find(r => r.dataset.key === k).dataset.ready === "1";
   ok("what's missing comes first: needed things, then optional ones that are off, then everything that's ready", (() => {
     const rk = rows.map(r => r.dataset.ready === "1" ? 3 : r.dataset.level === "required" ? 0 : r.dataset.level === "recommended" ? 1 : 2);
     return rk.every((v, i) => i === 0 || rk[i - 1] <= v) && keys[0] === "images";
   })());
   ok("it matches the server: images, Stripe and Turnstile not set up; the domain, email and the business profile ready", !ready("images") && !ready("stripe") && !ready("turnstile") && ready("rootDomain") && ready("email") && ready("business"));
-  ok("it says how many things still need setting up, and where server-side settings are changed", box.dataset.need === "1" && /1 thing still needs setting up/.test(panel.textContent) && /npm run setup/.test(panel.textContent) && /docs\/configuration\.md/.test(panel.textContent));
+  ok("it says how many things still need setting up, and where server-side settings are changed", box.dataset.need === "2" && /2 things still need setting up/.test(panel.textContent) && !ready("paymentDetails") && /npm run setup/.test(panel.textContent) && /docs\/configuration\.md/.test(panel.textContent));
   ok("an optional service that's off is marked optional, not as a problem", /Not set up \(optional\)/.test(rows.find(r => r.dataset.key === "stripe").textContent) && !/required/.test(rows.find(r => r.dataset.key === "stripe").textContent));
   ok("a half-configured service shows its warning", /EVERY order is refused/.test(rows.find(r => r.dataset.key === "turnstile").textContent));
   ok("it promises — and shows — no key or password", /never a key or password/.test(panel.textContent) && !/zzq/.test(panel.innerHTML));

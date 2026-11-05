@@ -60,14 +60,50 @@ probably doesn't exist.
 
 To customers, as things happen:
 
-- **Order received** — when an order is placed.
-- **Order confirmed** — when you mark an order paid, or press the order's **Resend** button once it
-  is paid. A card payment does not email the customer by itself: it is recorded and reported to you
-  in the roll-up. (Stripe can send its own receipt, depending on your Stripe settings.)
+- **Order received** — when an order is placed. Subject "Order received — <order> · $X due", or
+  "Order received and paid — <order>" when it was paid by card at checkout. While something is owed
+  it says **how to pay** (below).
+- **Payment received** — when you record a payment (Mark as paid, or a payment in the payments
+  window), or press the order's **Resend** button once it is paid. Subject "Payment received —
+  <order> · paid in full", or "· $X still due" for a part payment. A card payment does not email the
+  customer by itself: it is recorded and reported to you in the roll-up. (Stripe can send its own
+  receipt, depending on your Stripe settings.)
 - **Your order has shipped** — once, when an order becomes shipped (Shipping feature).
 - **Design proof** — when you send a design for approval (Design approval feature).
 - **Payment request** — when you email a payment link.
 - **Cancellation** — when you cancel items on an order that has an email address.
+
+### What's in the order emails
+
+- **The items, priced before tax.** Item · Size · Qty · Unit price · Amount. When your prices include
+  tax (Global settings → Sales tax), each line's tax is taken out, so the amounts are before tax; then
+  Subtotal, Shipping, Rush fee, Discount (before tax), **Sales tax**, and the **Total** the customer
+  pays. A unit price that had to be rounded to the cent says so (the line amounts stay exact).
+  Tax added on top reads the same way; a tax-exempt order says "Tax-exempt" above the total.
+- **How to pay**, while something is owed: the way the customer chose first — a check (payable to
+  your legal name, else your business name; mailed to your "Mail checks to" address; the order
+  number on the memo line), Venmo (with a link carrying the amount and the order number), Zelle —
+  then the other ways you take (Global settings → Payment methods, and the shop's own), then your
+  payment note.
+- **Who it's from**, at the bottom: your business name, legal name, mailing address, phone, contact
+  email and website, then your footer line.
+- **A PDF**: an invoice while something is owed, a receipt once it's paid ("Invoice <order>.pdf" /
+  "Receipt <order>.pdf"). It's made by the site itself (no browser, nothing to pay for) and attached
+  on every provider. Turn it off with Global settings → Customer emails → "Attach a PDF to order
+  emails". Orders → **Invoice PDF** / **Receipt PDF** downloads the same file.
+
+All of it comes from **Global settings → Business profile**. Setup status lists "Payment details on
+emails" until what the emails need is filled in (where to mail a check, your Venmo name and Zelle
+address if you take those, and a contact email or phone).
+
+### Seeing them before a customer does
+
+Global settings → **Customer emails** → **Preview emails…** shows any of them — Order received,
+Payment received, Invoice, Shipped — for a sample order **with shipping** (a carrier, a discount) or
+**without** (pickup, an untaxed item), paid by Check, Venmo, Zelle or Card. It shows the subject, the
+email as it will look, the plain-text version, and the PDF. Nothing is saved or sent. **Send me this
+sample** (admins) emails it to your inbox with "[Sample]" in front of the subject; **View sample PDF
+receipt…** opens straight on the PDF. The preview uses the saved Business profile, so save first.
 
 To you:
 

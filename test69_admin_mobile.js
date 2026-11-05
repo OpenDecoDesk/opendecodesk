@@ -79,7 +79,7 @@ async function boot(width){
     console.log("a cancelled line is struck through with its cancel note; discount shown:",
       !!c1.querySelector(".oc-item-cancelled s") && /Changed mind/.test(c1.textContent) && /Discount/.test(c1.textContent));
     console.log("every stage and both emails are under Progress & emails:",
-      ["Received email", "Confirmed email", "Blank ordered", "Design approved", "Verification sent", "Manufactured", "Shipped", "Delivered", "Completed"].every(k => [...c1.querySelectorAll(".oc-more dt")].some(dt => dt.textContent === k)) &&
+      ["“Order received” email", "“Payment received” email", "Blank ordered", "Design approved", "Verification sent", "Manufactured", "Shipped", "Delivered", "Completed"].every(k => [...c1.querySelectorAll(".oc-more dt")].some(dt => dt.textContent === k)) &&
       !c1.querySelector(".oc-more td"));
 
     console.log("\n=== Bulk selection works with cards ===");

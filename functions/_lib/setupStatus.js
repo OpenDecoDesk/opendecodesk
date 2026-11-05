@@ -24,7 +24,7 @@ const MIN_AGENT_TOKEN = 32;
 
 export function setupStatus(env, settings) {
   env = env || {};
-  const { business = {}, salesTax = {}, locale = {} } = settings || {};
+  const { business = {}, salesTax = {}, locale = {}, payments = null } = settings || {};
   const items = [];
   const add = (key, label, level, ready, affects, note) => items.push({ key, label, level, ready: !!ready, affects, note: note || "" });
   // The desktop edition (hostConfig.js isDesktopEdition, repeated so this file keeps no imports): no
@@ -33,6 +33,7 @@ export function setupStatus(env, settings) {
   if (String(env.EDITION || "").trim().toLowerCase() === "desktop") {
     add("database", "Database", "required", !!(env.DB && typeof env.DB.prepare === "function"), "Everything: orders, shops, products, settings.");
     addBusiness_(add, business, env);
+    addPaymentDetails_(add, business, payments);
     addSalesTax_(add, salesTax);
     addTimeZone_(add, locale, env);
     return items;
@@ -68,6 +69,7 @@ export function setupStatus(env, settings) {
   add("designs", "Designs bucket", "optional", !!env.DESIGNS, "Embroidery design files and files attached to order lines (private files).", env.DESIGNS ? "" : NO_STORAGE);
 
   addBusiness_(add, business, env);
+  addPaymentDetails_(add, business, payments);
   addSalesTax_(add, salesTax);
   addTimeZone_(add, locale, env);
 
@@ -120,6 +122,19 @@ function addBusiness_(add, business, env) {
   add("business", "Business profile", "recommended", set(business.name) && inbox,
     "The name customers see and where notices to you are sent. Without a name the site says “Our shop”; without your inbox, notices go to owner@ your domain.",
     set(business.name) && inbox ? "" : !set(business.name) ? "No business name yet (Business profile, below)." : "No inbox for yourself yet (Business profile → Your inbox, below).");
+}
+// What customers' emails and PDF receipts print about paying and reaching you (email.js howToPay_ /
+// businessBlock_): for each way to pay that's switched on, the detail it needs, and a way to contact you.
+function addPaymentDetails_(add, business, payments) {
+  const on = (k) => !payments || payments[k] !== false;
+  const missing = [];
+  if (on("check") && !set(business.mailingAddress)) missing.push("where to mail a check (Mail checks to)");
+  if (on("venmo") && !set(business.venmo)) missing.push("your Venmo username");
+  if (on("zelle") && !set(business.zelle)) missing.push("your Zelle email or phone");
+  if (!set(business.supportEmail) && !set(business.phone)) missing.push("a contact email or phone");
+  add("paymentDetails", "Payment details on emails", "recommended", !missing.length,
+    "How to pay and how to reach you, printed on the order emails and PDF receipts customers get.",
+    missing.length ? "Missing: " + missing.join(", ") + " (Business profile, below). Turn off a payment method you don't take under Payment methods." : "");
 }
 function addSalesTax_(add, salesTax) {
   const rate = Number(salesTax.rateBps) || 0, home = set(salesTax.jurisdiction);

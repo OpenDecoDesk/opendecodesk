@@ -191,7 +191,9 @@ aren't here: copy them to your pictures bucket and point the products at them.
    private repository or a branch that only exists on your computer.
 3. Read the release notes for anything to do by hand.
 4. `npm run deploy` — it applies new migrations, lists every shop's hostname in `wrangler.toml`,
-   and then deploys, in that order, stopping at the first failure. Don't use a bare
+   checks with Cloudflare that no hostname the Worker has would be dropped, and then deploys, in that
+   order, stopping at the first failure (`npm run deploy -- --check` does the checks and lists the
+   migrations still to run, changing nothing). Don't use a bare
    `npx wrangler deploy` on an installed site: it detaches any shop hostname that isn't listed in
    `wrangler.toml` ([shops-and-domains.md](shops-and-domains.md#by-hand)), and code deployed
    before its migration has run refuses sign-in until the migration is applied.

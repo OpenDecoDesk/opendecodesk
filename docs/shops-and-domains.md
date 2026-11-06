@@ -133,6 +133,26 @@ routes = [
 > If a shop went offline this way, run `npm run deploy`. The hostname is attached again; give it
 > a few minutes, since the address was briefly gone and computers remember that for a while.
 
+**Before it deploys, `npm run deploy` checks with Cloudflare.** It reads the Worker's Custom Domains
+and refuses to deploy when one of them isn't listed in `wrangler.toml` (the deploy would detach it),
+when a shop or the admin isn't listed, or when the sign-in can't see your domain's zone (usually the
+wrong Cloudflare account). It names each hostname and says what to do. `npm run deploy -- --check`
+does the same checks and also lists the database migrations still to run, changing nothing — run it
+before a deploy you're unsure of. `--skip-hostname-check` deploys without asking Cloudflare.
+
+**Hostnames that already have their own DNS records** (a site that was served some other way before it
+moved to this Worker) can stay **zone routes** instead of custom domains — no DNS change, no gap while
+a record is replaced. Put them in the hostnames block like this; the deploy keeps them as they are and
+adds only shops that have no line of their own:
+
+```toml
+routes = [
+  { pattern = "admin.myshop.com/*", zone_name = "myshop.com" },
+  { pattern = "league.myshop.com/*", zone_name = "myshop.com" },
+  { pattern = "club.myshop.com", custom_domain = true },
+]
+```
+
 ## Turning the storefront off
 
 With **Global settings → Features → Storefront** off, every shop address and the root domain show

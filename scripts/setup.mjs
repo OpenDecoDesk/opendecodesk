@@ -141,8 +141,11 @@ const tomlString = (v) => JSON.stringify(String(v));   // a TOML basic string ta
 function managedBlock(text, begin, end) { const m = blockRe(begin, end).exec(text); return m ? m[1] : null; }
 function withoutBlock(text, begin, end) { return text.replace(blockRe(begin, end), ""); }
 
-// What's in the file now: { name, databaseName, databaseId, buckets: {IMAGES, RECEIPTS, DESIGNS}, hosts: [], vars: {}, storageOff }.
-// The bucket names are read whether their blocks are live or commented out by the installer.
+// What's in the file now: { name, databaseName, databaseId, buckets: {IMAGES, RECEIPTS, DESIGNS}, hosts: [], zoneRoutes: [],
+// vars: {}, storageOff }. The bucket names are read whether their blocks are live or commented out by the installer.
+// The hostnames block holds custom domains (`hosts`: { pattern = "shop.myshop.com", custom_domain = true }) and may
+// hold zone routes (`zoneRoutes`: [{host, pattern, zone}] from { pattern = "shop.myshop.com/*", zone_name = "myshop.com" }),
+// for a site whose hostnames already have their own DNS records in front of the Worker.
 export function readWranglerToml(text) {
   const first = (re) => { const m = re.exec(text); return m ? m[1] : ""; };
   const buckets = {};
@@ -151,9 +154,15 @@ export function readWranglerToml(text) {
     const b = /^\s*binding\s*=\s*"([^"]+)"/m.exec(m[1]), n = /^\s*bucket_name\s*=\s*"([^"]+)"/m.exec(m[1]);
     if (b && n) buckets[b[1]] = n[1];
   }
-  const hosts = [], vars = {};
+  const hosts = [], zoneRoutes = [], vars = {};
   const rb = managedBlock(text, ROUTES_BEGIN, ROUTES_END);
-  if (rb) for (const m of rb.matchAll(/pattern\s*=\s*"([^"\/*]+)"/g)) hosts.push(m[1]);
+  if (rb) for (const m of rb.matchAll(/\{([^}]*)\}/g)) {
+    const pattern = (/pattern\s*=\s*"([^"]+)"/.exec(m[1]) || [])[1];
+    if (!pattern) continue;
+    const zone = (/zone_name\s*=\s*"([^"]+)"/.exec(m[1]) || [])[1];
+    if (/custom_domain\s*=\s*true/.test(m[1]) && /^[^"\/*]+$/.test(pattern)) hosts.push(pattern);
+    else if (zone) zoneRoutes.push({ host: pattern.replace(/\/.*$/, "").toLowerCase(), pattern, zone });
+  }
   const vb = managedBlock(text, VARS_BEGIN, VARS_END);
   if (vb) for (const m of vb.matchAll(/^([A-Z][A-Z0-9_]*)\s*=\s*("(?:[^"\\]|\\.)*")\s*$/gm)) { try { vars[m[1]] = JSON.parse(m[2]); } catch { /* leave it out */ } }
   return {
@@ -161,7 +170,7 @@ export function readWranglerToml(text) {
     name: first(/^name\s*=\s*"([^"]+)"/m),
     databaseName: first(/^\s*database_name\s*=\s*"([^"]+)"/m),
     databaseId: first(/^\s*database_id\s*=\s*"([^"]*)"/m),
-    buckets, hosts, vars, storageOff: off != null,
+    buckets, hosts, zoneRoutes, vars, storageOff: off != null,
   };
 }
 
@@ -201,14 +210,17 @@ export function rewriteWranglerToml(text, { databaseId, hosts = [], vars = {}, f
   }
 
   // ---- hostnames
-  const allHosts = [...new Set([...current.hosts, ...hosts].map(h => String(h).toLowerCase()))];
+  const routed = new Set(current.zoneRoutes.map(r => r.host));
+  const allHosts = [...new Set([...current.hosts, ...hosts].map(h => String(h).toLowerCase()))].filter(h => !routed.has(h));
   let rest = withoutBlock(out, ROUTES_BEGIN, ROUTES_END);
   if (/^routes\s*=/m.test(rest) || /^\[\[routes\]\]/m.test(rest)) {
     throw new SetupError("wrangler.toml already has its own routes. Add your admin hostname to it by hand — { pattern = \"" + (hosts[0] || "admin.yourdomain") +
       "\", custom_domain = true } — or delete that routes setting and run setup again.");
   }
-  if (allHosts.length) {
-    const block = ROUTES_BEGIN + "\nroutes = [\n" + allHosts.map(h => `  { pattern = ${tomlString(h)}, custom_domain = true },`).join("\n") + "\n]\n" + ROUTES_END + "\n";
+  if (allHosts.length || current.zoneRoutes.length) {
+    const lines = [...current.zoneRoutes.map(r => `  { pattern = ${tomlString(r.pattern)}, zone_name = ${tomlString(r.zone)} },`),
+      ...allHosts.map(h => `  { pattern = ${tomlString(h)}, custom_domain = true },`)];
+    const block = ROUTES_BEGIN + "\nroutes = [\n" + lines.join("\n") + "\n]\n" + ROUTES_END + "\n";
     if (managedBlock(out, ROUTES_BEGIN, ROUTES_END) != null) out = out.replace(blockRe(ROUTES_BEGIN, ROUTES_END), () => block);
     else {
       // `routes` is a top-level key, so it has to come before the first [table]. Preferred spot:
@@ -265,6 +277,8 @@ export const commands = {
   r2List: () => ["r2", "bucket", "list"],
   r2Create: (name) => ["r2", "bucket", "create", name],
   migrate: (config) => ["d1", "migrations", "apply", "DB", "--remote", "--config", config],
+  migrationsList: (config) => ["d1", "migrations", "list", "DB", "--remote", "--config", config],
+  authToken: () => ["auth", "token", "--json"],
   d1Query: (config, sql) => ["d1", "execute", "DB", "--remote", "--json", "--yes", "--config", config, "--command", sql],
   d1File: (config, file) => ["d1", "execute", "DB", "--remote", "--yes", "--config", config, "--file", file],
   d1Execute: (config, sql) => ["d1", "execute", "DB", "--remote", "--yes", "--config", config, "--command", sql],
@@ -730,6 +744,54 @@ export function prepareTables({ run, files, configPath, say, fail }){
   return { isNew };
 }
 
+// ---- what a deploy would drop ------------------------------------------------------------------------
+// `wrangler deploy` replaces the Worker's routes with the file's, and — when the file lists any custom
+// domain — its Custom Domains with the file's too. So before deploying, the hostnames block (after the
+// shops were added) is compared with the Custom Domains the Worker has now, read from Cloudflare:
+//   - the admin's hostname and every shop's must be in the block (a custom domain or a zone route);
+//   - while the block lists custom domains, every Custom Domain the Worker has must be among them —
+//     one attached in the dashboard, or for a shop since deleted, would be detached.
+// `attached` = the Worker's Custom Domains (hostnames). Returns a list of problems, [] when it's safe.
+export function hostnameProblems({ cfg, want = [], adminHost = "", attached = [] }) {
+  const listed = new Set([...cfg.hosts, ...cfg.zoneRoutes.map(r => r.host)].map(h => h.toLowerCase()));
+  const problems = [];
+  for (const h of [...new Set([adminHost, ...want].filter(Boolean).map(h => h.toLowerCase()))]) {
+    if (!listed.has(h)) problems.push(`${h} isn't in the hostnames block — the deploy would leave it unserved. Add it there.`);
+  }
+  if (cfg.hosts.length) {
+    for (const h of [...new Set(attached.map(x => String(x).toLowerCase()))]) {
+      if (!listed.has(h)) problems.push(`${h} is a Custom Domain of the Worker that the hostnames block doesn't list — the deploy would detach it. Add it to the block (or remove it in the Cloudflare dashboard if it's no longer used).`);
+    }
+  }
+  return problems;
+}
+
+// Reads the Cloudflare API with the deploy's own sign-in: CLOUDFLARE_API_TOKEN when set (a build or a
+// script), else the token `wrangler login` keeps on this computer. api(path) → the answer's `result`;
+// it throws an Error with Cloudflare's own message when the call fails.
+export function createCloudflareApi({ run, env = process.env, fetchImpl = globalThis.fetch } = {}) {
+  let token = null;
+  const getToken = () => {
+    if (token !== null) return token;
+    token = (env && env.CLOUDFLARE_API_TOKEN) || "";
+    if (!token) {
+      const r = run(commands.authToken());
+      try { token = (r.ok && (jsonIn(r.stdout) || {}).token) || ""; } catch { token = ""; }
+    }
+    return token;
+  };
+  const api = async (path) => {
+    const t = getToken();
+    if (!t) throw new Error("not signed in to Cloudflare (run `npx wrangler login`, or set CLOUDFLARE_API_TOKEN)");
+    const res = await fetchImpl("https://api.cloudflare.com/client/v4" + path, { headers: { Authorization: "Bearer " + t } });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.success) throw new Error((body.errors || []).map(e => e.message).filter(Boolean).join("; ") || "HTTP " + res.status);
+    return body.result;
+  };
+  api.source = () => ((env && env.CLOUDFLARE_API_TOKEN) ? "CLOUDFLARE_API_TOKEN" : "wrangler login");
+  return api;
+}
+
 // ---- npm run deploy: upgrade an installed site --------------------------------------------------
 // New tables or migrations, then every hostname the site uses into wrangler.toml, then the deploy —
 // in that order, stopping at the first failure. Use this instead of a bare `wrangler deploy`: that
@@ -739,6 +801,10 @@ export function prepareTables({ run, files, configPath, say, fail }){
 // the database (the `site` setting) rather than in wrangler.toml.
 //   ci        running in Cloudflare's build (Workers Builds) rather than on someone's computer
 //   diagnose  print what the build sees (for checking a new Cloudflare setup), nothing secret
+//   api       createCloudflareApi(…): before deploying, check the sign-in sees the domain's zone and that no
+//             hostname the Worker has would be dropped (hostnameProblems). Without it the check is skipped.
+//   check     check only: list the migrations still to run and do the hostname check — change nothing
+//   skipHostnameCheck  deploy without the Cloudflare check (it says so)
 export const SITE_SETTING_SQL = "SELECT value FROM global_settings WHERE key = 'site'";
 export function parseSiteSetting(row) {
   let v = null;
@@ -747,7 +813,7 @@ export function parseSiteSetting(row) {
   const root = String((v && v.rootDomain) || "").trim().toLowerCase();
   return { rootDomain: validateDomain(root).value || "", adminSubdomain: label(v && v.adminSubdomain) || "admin", adminHostSeen: !!(v && v.adminHostSeen) };
 }
-export async function upgrade({ print, run, files, configPath = "wrangler.toml", ci = false, diagnose = false }) {
+export async function upgrade({ print, run, files, configPath = "wrangler.toml", ci = false, diagnose = false, api = null, check = false, skipHostnameCheck = false }) {
   const stop = (what, r, hint) => {
     const lines = (t) => String(t || "").split("\n").map(l => l.trimEnd()).filter(l => l.trim());
     const tail = r ? [...lines(r.stdout).slice(-4), ...lines(r.stderr).slice(-10)].join("\n") : "";
@@ -764,7 +830,11 @@ export async function upgrade({ print, run, files, configPath = "wrangler.toml",
   }
 
   print(""); print("── 1. Database tables");
-  prepareTables({ run, files, configPath, say: print, fail: stop });
+  if (check) {
+    print("   Check only — the migrations still to run (none is applied):");
+    const m = run(commands.migrationsList(configPath), { stream: true });
+    if (!m.skipped && !m.ok) stop("Could not list the database's migrations.", m);
+  } else prepareTables({ run, files, configPath, say: print, fail: stop });
 
   print(""); print("── 2. Hostnames");
   // Where the domain comes from: wrangler.toml (installed from the command line) or the database
@@ -809,6 +879,34 @@ export async function upgrade({ print, run, files, configPath = "wrangler.toml",
   if (cfg.workersDev !== workersDev) {
     next = rewriteWranglerToml(next, { workersDev });
     print(`   The workers.dev address is now ${workersDev ? "on (the admin is reached there until the domain is set up)" : "off (the admin is on its own domain)"}.`);
+  }
+  // What the deploy would drop, checked with Cloudflare (a site installed from the command line: the
+  // hostnames are in the file). Stops before anything is written or deployed.
+  if (cfg.vars.ROOT_DOMAIN && !ci) {
+    if (skipHostnameCheck) print("   ⚠ Not checked with Cloudflare (--skip-hostname-check): a hostname the Worker has and the file doesn't list would be detached.");
+    else if (!api) { /* the caller didn't ask for it */ }
+    else if (run.dryRun) print("   [dry run] would check with Cloudflare that the sign-in sees " + root + " and that no hostname the Worker has would be dropped");
+    else {
+      let zones = null, why = "";
+      try { zones = await api("/zones?name=" + encodeURIComponent(root)); } catch (e) { why = e.message || String(e); }
+      const zone = Array.isArray(zones) ? zones[0] : null;
+      if (!zone) stop(`The ${api.source ? api.source() : "Cloudflare sign-in"} can't see the ${root} zone, so nothing was deployed.` + (why ? " Cloudflare said: " + why + "." : ""),
+        null, (api.source && api.source() === "CLOUDFLARE_API_TOKEN")
+          ? `The token needs Zone · Zone · Read and Zone · Workers Routes · Edit on ${root}, and Account · Workers Scripts · Edit, on the account that owns it.`
+          : `wrangler is signed in to a Cloudflare account that doesn't own ${root}. Run \`npx wrangler login\` as the account that does.`);
+      let domains;
+      try { domains = await api(`/accounts/${zone.account && zone.account.id}/workers/domains?service=${encodeURIComponent(cfg.name)}`); }
+      catch (e) { stop(`Could not read the Worker's Custom Domains from Cloudflare, so nothing was deployed. Cloudflare said: ${e.message || e}.`, null,
+        "Run it with --skip-hostname-check to deploy anyway, knowing a hostname the file doesn't list may be detached."); }
+      const attached = (domains || []).map(d => d && d.hostname).filter(Boolean);
+      const problems = hostnameProblems({ cfg: readWranglerToml(next), want, adminHost: (cfg.vars.ADMIN_SUBDOMAIN || "admin") + "." + root, attached });
+      if (problems.length) stop("Not deploying — these hostnames would be dropped:\n  - " + problems.join("\n  - "));
+      print(`   Checked with Cloudflare: the sign-in sees ${root}; the Worker has ${attached.length} Custom Domain${attached.length === 1 ? "" : "s"} and every hostname is kept.`);
+    }
+  }
+  if (check) {
+    print(""); print("Check only — nothing was changed or deployed." + (next !== original ? ` (A deploy would first add the new shops to ${configPath}.)` : ""));
+    return { ok: true, check: true, hosts: readWranglerToml(next).hosts.length + readWranglerToml(next).zoneRoutes.length };
   }
   if (next !== original && !run.dryRun) files.write(configPath, next);
 

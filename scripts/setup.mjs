@@ -750,7 +750,9 @@ export function prepareTables({ run, files, configPath, say, fail }){
 // shops were added) is compared with the Custom Domains the Worker has now, read from Cloudflare:
 //   - the admin's hostname and every shop's must be in the block (a custom domain or a zone route);
 //   - while the block lists custom domains, every Custom Domain the Worker has must be among them —
-//     one attached in the dashboard, or for a shop since deleted, would be detached.
+//     one attached in the dashboard, or for a shop since deleted, would be detached. Listed only as a
+//     zone route isn't enough: detaching the Custom Domain also deletes its DNS record, which the
+//     route needs.
 // `attached` = the Worker's Custom Domains (hostnames). Returns a list of problems, [] when it's safe.
 export function hostnameProblems({ cfg, want = [], adminHost = "", attached = [] }) {
   const listed = new Set([...cfg.hosts, ...cfg.zoneRoutes.map(r => r.host)].map(h => h.toLowerCase()));
@@ -759,8 +761,12 @@ export function hostnameProblems({ cfg, want = [], adminHost = "", attached = []
     if (!listed.has(h)) problems.push(`${h} isn't in the hostnames block — the deploy would leave it unserved. Add it there.`);
   }
   if (cfg.hosts.length) {
+    const custom = new Set(cfg.hosts.map(h => h.toLowerCase()));
     for (const h of [...new Set(attached.map(x => String(x).toLowerCase()))]) {
-      if (!listed.has(h)) problems.push(`${h} is a Custom Domain of the Worker that the hostnames block doesn't list — the deploy would detach it. Add it to the block (or remove it in the Cloudflare dashboard if it's no longer used).`);
+      if (custom.has(h)) continue;
+      problems.push(listed.has(h)
+        ? `${h} is a Custom Domain of the Worker, but the hostnames block lists it only as a zone route — the deploy would detach the Custom Domain and its DNS record, and the route can't answer without it. List it as { pattern = "${h}", custom_domain = true } instead of the route.`
+        : `${h} is a Custom Domain of the Worker that the hostnames block doesn't list — the deploy would detach it. Add it to the block (or remove it in the Cloudflare dashboard if it's no longer used).`);
     }
   }
   return problems;
@@ -867,9 +873,10 @@ export async function upgrade({ print, run, files, configPath = "wrangler.toml",
       if (rows === null) stop("Could not read the shops from the database, so nothing was deployed.", r, `A deploy detaches every hostname that isn't listed in ${configPath}; deploying without the list would take shops offline.`);
       const shops = shopHostnames(rows, root);
       want.push(...shops);
-      const added = want.filter(h => !cfg.hosts.includes(h));
+      const routed = new Set(cfg.zoneRoutes.map(r => r.host));
+      const added = want.filter(h => !cfg.hosts.includes(h) && !routed.has(h));
       if (added.length) next = rewriteWranglerToml(next, { hosts: want });
-      const listed = readWranglerToml(next).hosts.length;
+      const nowCfg = readWranglerToml(next), listed = nowCfg.hosts.length + nowCfg.zoneRoutes.length;
       print(`   ${shops.length} shop${shops.length === 1 ? "" : "s"} in the database` + (added.length ? `; added to ${configPath}: ${added.join(", ")}` : "; all already listed") + `. ${listed} hostname${listed === 1 ? "" : "s"} in all.`);
     }
   }

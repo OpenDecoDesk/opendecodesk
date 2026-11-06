@@ -438,7 +438,8 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     let t = S.readWranglerToml(st.tomlAtDeploy);
     ok("a deploy keeps the zone routes as routes, and adds only the shop that has none (as a custom domain)", !u.error && st.deployed === deploys + 1 &&
       t.zoneRoutes.map(r => r.host).join() === "admin.myshop.com,league.myshop.com" && t.hosts.join() === "club.myshop.com" &&
-      /\{ pattern = "league\.myshop\.com\/\*", zone_name = "myshop\.com" \}/.test(st.tomlAtDeploy) && !/pattern = "league\.myshop\.com", custom_domain/.test(st.tomlAtDeploy));
+      /\{ pattern = "league\.myshop\.com\/\*", zone_name = "myshop\.com" \}/.test(st.tomlAtDeploy) && !/pattern = "league\.myshop\.com", custom_domain/.test(st.tomlAtDeploy) &&
+      /added to .*: club\.myshop\.com\. 3 hostnames in all/.test(u.text));
     ok("…it looked up the zone, then the Worker's Custom Domains, before deploying", cf.calls.slice(-2).join() === "/zones?name=myshop.com,/accounts/acct1/workers/domains?service=opendecodesk");
     u = await up();
     ok("running it again changes nothing in the file", !u.error && fs.readFileSync(p, "utf8") === st.tomlAtDeploy);
@@ -446,6 +447,11 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     cf.domains = ["club.myshop.com", "old-shop.myshop.com"];
     u = await up();
     ok("a Custom Domain the Worker has and the file doesn't list stops the deploy, naming it (it would be detached)", u.error instanceof S.SetupError && /old-shop\.myshop\.com is a Custom Domain of the Worker/.test(u.error.message) && st.deployed === deploys);
+    cf.domains = ["club.myshop.com", "league.myshop.com"];
+    u = await up();
+    ok("…and so does one the block lists only as a zone route (detaching the Custom Domain would delete the DNS record the route needs)", u.error instanceof S.SetupError &&
+      /league\.myshop\.com is a Custom Domain of the Worker, but the hostnames block lists it only as a zone route/.test(u.error.message) && st.deployed === deploys);
+    cf.domains = ["club.myshop.com", "old-shop.myshop.com"];
     u = await up({ skip: true });
     ok("…--skip-hostname-check deploys anyway and says what it didn't check", !u.error && st.deployed === deploys + 1 && /Not checked with Cloudflare/.test(u.text));
     cf.domains = ["club.myshop.com"];

@@ -183,6 +183,12 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
         for (const m of todo) { try { st.db.execFile(read("migrations/" + m)); } catch (err) { return bad("Migration " + m + " failed: " + err.message); } }
         st.migrated++; return okOut(todo.length ? "applied " + todo.length : "No migrations to apply!");
       }
+      if (is("d1", "migrations", "list")) {
+        let applied = [];
+        try { applied = st.db.q("SELECT name FROM d1_migrations").map(r => r.name); } catch (err) { /* none */ }
+        const todo = MIGRATIONS.filter(m => !applied.includes(m));
+        return okOut(todo.length ? "Migrations to be applied:\n" + todo.join("\n") : "✅ No migrations to apply!");
+      }
       if (is("d1", "execute")) {
         const fi = w.indexOf("--file"), ci = w.indexOf("--command");
         try {
@@ -394,7 +400,81 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     ok("a copy that was never installed is told to run the installer, and nothing is run", u.error instanceof S.SetupError && /npm run setup/.test(u.error.message) && st.deployed === deploys);
     ok("the hostnames come from the shops' subdomains and the root domain, lower-cased, once each", S.shopHostnames([{ subdomain: "League" }, { subdomain: "league" }, { subdomain: "" }, {}, null, { subdomain: "a.b" }, { subdomain: "-x" }, { subdomain: "images" }], "MyShop.com").join() === "league.myshop.com" &&
       S.shopHostnames([{ subdomain: "league" }], "").length === 0 && S.parseD1AllRows(' ⛅️ wrangler\n[{"results":[],"success":true}]').length === 0 && S.parseD1AllRows("not json") === null);
-    ok("npm run deploy is that command", JSON.parse(read("package.json")).scripts.deploy === "node scripts/deploy.mjs" && /import \{ upgrade, createRunner, realExec, realFiles, SetupError \} from "\.\/setup\.mjs";/.test(read("scripts/deploy.mjs")));
+    ok("npm run deploy is that command", JSON.parse(read("package.json")).scripts.deploy === "node scripts/deploy.mjs" && /import \{ upgrade, createRunner, createCloudflareApi, realExec, realFiles, SetupError \} from "\.\/setup\.mjs";/.test(read("scripts/deploy.mjs")) &&
+      /api: createCloudflareApi\(\{ run, env: process\.env \}\)/.test(read("scripts/deploy.mjs")));
+  }
+
+  console.log("\n=== npm run deploy checks with Cloudflare that no hostname is dropped ===");
+  // A site whose hostnames are zone routes (each with its own DNS record in front of the Worker) keeps them as
+  // routes; and before deploying, the Worker's Custom Domains are read from Cloudflare — a deploy that would
+  // detach one, or leave a shop unserved, doesn't happen.
+  {
+    const p = copy("routes.toml");
+    const first = await go({ answers: BASE, config: p });
+    const st = first.st, addShop = (id, sub) => st.db._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt) VALUES ('${id}', '${sub}', '${id}', 't', 't')`);
+    addShop("league-101", "league"); addShop("club-7", "club");
+    // the admin and the league shop are zone routes, as on a site that served them before it moved to this Worker
+    fs.writeFileSync(p, fs.readFileSync(p, "utf8").replace('  { pattern = "admin.myshop.com", custom_domain = true },',
+      '  { pattern = "admin.myshop.com/*", zone_name = "myshop.com" },\n  { pattern = "league.myshop.com/*", zone_name = "myshop.com" },'));
+    const r0 = S.readWranglerToml(fs.readFileSync(p, "utf8"));
+    ok("zone routes in the hostnames block are read as routes, with their zone", r0.hosts.length === 0 && r0.zoneRoutes.map(r => r.host + "@" + r.zone).join() === "admin.myshop.com@myshop.com,league.myshop.com@myshop.com");
+    const cf = { zones: [{ id: "z1", name: "myshop.com", account: { id: "acct1" } }], domains: [], calls: [], fail: null };
+    const api = async (pathname) => { cf.calls.push(pathname); if (cf.fail && pathname.startsWith(cf.fail)) throw new Error("Authentication error");
+      if (pathname.startsWith("/zones?name=")) return cf.zones.filter(z => pathname.endsWith("=" + z.name));
+      if (pathname.startsWith("/accounts/acct1/workers/domains?service=")) return cf.domains.map(h => ({ hostname: h, service: "opendecodesk" }));
+      throw new Error("unknown path " + pathname); };
+    api.source = () => "wrangler login";
+    const lines = [];
+    const up = async (opts = {}) => { lines.length = 0; let error = null, result = null;
+      try { result = await S.upgrade({ print: (l) => lines.push(String(l)), run: S.createRunner({ dryRun: !!opts.dryRun, exec: st.exec, print: (l) => lines.push(String(l)) }), files: S.realFiles, configPath: p,
+        api: opts.noApi ? null : api, check: !!opts.check, skipHostnameCheck: !!opts.skip }); } catch (e) { error = e; }
+      return { error, result, text: lines.join("\n") }; };
+    let deploys = st.deployed, tomlBefore = fs.readFileSync(p, "utf8");
+    let u = await up({ check: true });
+    ok("--check lists the migrations still to run, checks with Cloudflare, and changes nothing — no migration, no file change, no deploy", !u.error && u.result.check &&
+      st.calls.some(c => / d1 migrations list DB --remote --config /.test(c)) && /Checked with Cloudflare/.test(u.text) && /Check only — nothing was changed or deployed/.test(u.text) &&
+      st.deployed === deploys && fs.readFileSync(p, "utf8") === tomlBefore && /would first add the new shops/.test(u.text));
+    u = await up();
+    let t = S.readWranglerToml(st.tomlAtDeploy);
+    ok("a deploy keeps the zone routes as routes, and adds only the shop that has none (as a custom domain)", !u.error && st.deployed === deploys + 1 &&
+      t.zoneRoutes.map(r => r.host).join() === "admin.myshop.com,league.myshop.com" && t.hosts.join() === "club.myshop.com" &&
+      /\{ pattern = "league\.myshop\.com\/\*", zone_name = "myshop\.com" \}/.test(st.tomlAtDeploy) && !/pattern = "league\.myshop\.com", custom_domain/.test(st.tomlAtDeploy) &&
+      /added to .*: club\.myshop\.com\. 3 hostnames in all/.test(u.text));
+    ok("…it looked up the zone, then the Worker's Custom Domains, before deploying", cf.calls.slice(-2).join() === "/zones?name=myshop.com,/accounts/acct1/workers/domains?service=opendecodesk");
+    u = await up();
+    ok("running it again changes nothing in the file", !u.error && fs.readFileSync(p, "utf8") === st.tomlAtDeploy);
+    deploys = st.deployed;
+    cf.domains = ["club.myshop.com", "old-shop.myshop.com"];
+    u = await up();
+    ok("a Custom Domain the Worker has and the file doesn't list stops the deploy, naming it (it would be detached)", u.error instanceof S.SetupError && /old-shop\.myshop\.com is a Custom Domain of the Worker/.test(u.error.message) && st.deployed === deploys);
+    cf.domains = ["club.myshop.com", "league.myshop.com"];
+    u = await up();
+    ok("…and so does one the block lists only as a zone route (detaching the Custom Domain would delete the DNS record the route needs)", u.error instanceof S.SetupError &&
+      /league\.myshop\.com is a Custom Domain of the Worker, but the hostnames block lists it only as a zone route/.test(u.error.message) && st.deployed === deploys);
+    cf.domains = ["club.myshop.com", "old-shop.myshop.com"];
+    u = await up({ skip: true });
+    ok("…--skip-hostname-check deploys anyway and says what it didn't check", !u.error && st.deployed === deploys + 1 && /Not checked with Cloudflare/.test(u.text));
+    cf.domains = ["club.myshop.com"];
+    cf.zones = [];
+    deploys = st.deployed;
+    u = await up();
+    ok("a sign-in that can't see the domain's zone (the wrong account) stops before deploying, and says what to do", u.error instanceof S.SetupError && /can't see the myshop\.com zone/.test(u.error.message) && /npx wrangler login/.test(u.error.message) && st.deployed === deploys);
+    cf.zones = [{ id: "z1", name: "myshop.com", account: { id: "acct1" } }]; cf.fail = "/accounts/";
+    u = await up();
+    ok("if the Custom Domains can't be read it doesn't deploy, and quotes Cloudflare", u.error instanceof S.SetupError && /Could not read the Worker's Custom Domains/.test(u.error.message) && /Authentication error/.test(u.error.message) && st.deployed === deploys);
+    cf.fail = null;
+    const callsBefore = cf.calls.length;
+    u = await up({ dryRun: true });
+    ok("a dry run says it would check, and calls Cloudflare for nothing", !u.error && /would check with Cloudflare/.test(u.text) && cf.calls.length === callsBefore);
+    ok("the rule: every shop and the admin must be listed; while custom domains are listed, every attached one must be too", S.hostnameProblems({ cfg: { hosts: [], zoneRoutes: [] }, want: ["a.x.com"], adminHost: "admin.x.com" }).length === 2 &&
+      S.hostnameProblems({ cfg: { hosts: [], zoneRoutes: [{ host: "admin.x.com" }] }, want: [], adminHost: "admin.x.com", attached: ["other.x.com"] }).length === 0 &&
+      S.hostnameProblems({ cfg: { hosts: ["a.x.com"], zoneRoutes: [{ host: "admin.x.com" }] }, want: ["a.x.com"], adminHost: "admin.x.com", attached: ["A.x.com", "b.x.com"] }).join().includes("b.x.com"));
+    const tok = S.createCloudflareApi({ run: () => ({ ok: true, stdout: ' ⛅️ wrangler\n{"type":"oauth","token":"tok123"}' }), env: {}, fetchImpl: async (url, o) => ({ ok: true, json: async () => ({ success: true, result: [url, o.headers.Authorization] }) }) });
+    const viaEnv = S.createCloudflareApi({ run: () => { throw new Error("should not ask wrangler"); }, env: { CLOUDFLARE_API_TOKEN: "envtok" }, fetchImpl: async (url, o) => ({ ok: false, status: 403, json: async () => ({ success: false, errors: [{ message: "Forbidden" }] }) }) });
+    const a = await tok("/zones?name=x.com");
+    let thrown = ""; try { await viaEnv("/zones"); } catch (e) { thrown = e.message; }
+    ok("the API reader uses wrangler's own sign-in (or CLOUDFLARE_API_TOKEN when set) and passes Cloudflare's error on", a[0] === "https://api.cloudflare.com/client/v4/zones?name=x.com" && a[1] === "Bearer tok123" &&
+      thrown === "Forbidden" && viaEnv.source() === "CLOUDFLARE_API_TOKEN" && tok.source() === "wrangler login");
   }
 
   console.log("\n=== npm run deploy as Cloudflare's build runs it (a Deploy-button site) ===");

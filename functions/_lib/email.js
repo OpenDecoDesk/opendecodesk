@@ -1,5 +1,5 @@
 import { addOwnerNotice, recordSystemIssue, getBusinessProfile, resolveTimeZone, getLocaleSettings, getGlobalSettings, getOrgById, getEmailSettings, splitTaxInclusive } from "./db.js";
-import { pdfDocument, pdfWrap, pdfBase64 } from "./pdf.js";
+import { pdfDocument, pdfWrap, pdfTextWidth, pdfBase64 } from "./pdf.js";
 
 /**
  * Transactional email, sent through Cloudflare Email Service. Sends from EMAIL_FROM (default
@@ -581,15 +581,23 @@ export async function orderPdf(env, order, { kind = "", orgName = "", message = 
   let y = 60;
   const ensure = (h, header) => { if (y + h > doc.height - 70) { doc.newPage(); y = 60; if (header) header(); } };
   // Header: who you are (left), INVOICE / RECEIPT and its details (right).
-  doc.text(M, y, b.name, { size: 17, bold: true });
-  let ly = y + 16;
-  if (b.legal) { doc.text(M, ly, b.legal, { size: 10, color: GREY }); ly += 13; }
-  for (const d of b.details) for (const l of pdfWrap(d, 270, 10)) { doc.text(M, ly, l, { size: 10 }); ly += 13; }
-  doc.text(R, y + 4, title, { size: 24, bold: true, color: BLUE, align: "right" });
   const meta = [[isReceipt ? "Receipt no." : "Invoice no.", order.orderId], ["Date", day()], ...(order.placedAt ? [["Order date", day(order.placedAt)]] : []),
     ...(orgName ? [["Shop", orgName]] : []), ...(order.paymentMethod ? [["Payment", String(order.paymentMethod)]] : [])];
+  // The details' values are as wide as the widest one (up to 200pt; longer ones wrap), with their labels
+  // just left of them — a long order number or shop name used to run over its label.
+  const valueW = Math.min(200, Math.max(110, ...meta.map(([, v]) => pdfTextWidth(String(v), 10))));
+  const labelR = R - valueW - 10, labelW = Math.max(...meta.map(([k]) => pdfTextWidth(k, 10)));
+  const leftW = Math.max(150, Math.min(270, labelR - labelW - 16 - M));
+  doc.text(M, y, b.name, { size: 17, bold: true });
+  let ly = y + 16;
+  if (b.legal) for (const l of pdfWrap(b.legal, leftW, 10)) { doc.text(M, ly, l, { size: 10, color: GREY }); ly += 13; }
+  for (const d of b.details) for (const l of pdfWrap(d, leftW, 10)) { doc.text(M, ly, l, { size: 10 }); ly += 13; }
+  doc.text(R, y + 4, title, { size: 24, bold: true, color: BLUE, align: "right" });
   let my = y + 24;
-  for (const [k, v] of meta) { doc.text(R - 110, my, k, { size: 10, color: GREY, align: "right" }); doc.text(R, my, v, { size: 10, align: "right" }); my += 13; }
+  for (const [k, v] of meta) {
+    doc.text(labelR, my, k, { size: 10, color: GREY, align: "right" });
+    for (const l of pdfWrap(String(v), valueW, 10)) { doc.text(R, my, l, { size: 10, align: "right" }); my += 13; }
+  }
   y = Math.max(ly, my) + 8;
   doc.line(M, y, R, y, { color: BLUE, width: 2 });
   y += 22;
@@ -600,9 +608,9 @@ export async function orderPdf(env, order, { kind = "", orgName = "", message = 
   const ship = a ? [a.name, a.line1, a.line2, [a.city, a.state].filter(Boolean).join(", ") + (a.zip ? " " + a.zip : "")].filter(s => String(s || "").trim()) : [];
   if (bill.length || ship.length) {
     let by = y;
-    if (bill.length) { doc.text(M, by, "BILL TO", { size: 9, bold: true, color: GREY }); by += 13; for (const s of bill) { doc.text(M, by, s, { size: 10 }); by += 13; } }
+    if (bill.length) { doc.text(M, by, "BILL TO", { size: 9, bold: true, color: GREY }); by += 13; for (const s of bill) for (const l of pdfWrap(s, 240, 10)) { doc.text(M, by, l, { size: 10 }); by += 13; } }
     let sy = y;
-    if (ship.length) { doc.text(M + 260, sy, "SHIP TO", { size: 9, bold: true, color: GREY }); sy += 13; for (const s of ship) { doc.text(M + 260, sy, s, { size: 10 }); sy += 13; } }
+    if (ship.length) { doc.text(M + 260, sy, "SHIP TO", { size: 9, bold: true, color: GREY }); sy += 13; for (const s of ship) for (const l of pdfWrap(s, R - M - 260, 10)) { doc.text(M + 260, sy, l, { size: 10 }); sy += 13; } }
     y = Math.max(by, sy) + 12;
   }
   // The items: Item · Size · Qty · Unit price · Amount.

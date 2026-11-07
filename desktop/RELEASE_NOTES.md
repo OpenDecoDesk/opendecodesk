@@ -4,8 +4,19 @@ inventory and cost of goods, and the books, with everything kept on your own com
 
 **This is an early release.** Make backups (File → Back up…).
 
-**New in this release:** on Windows, run from a shared or network folder, the program closed with
-nothing on screen. It now says that it can't run from there and where to move it (see Downloads).
+**New in this release:**
+
+- **Vendors are one list.** Every vendor box (blanks, receiving, expenses, transfer sheets) picks
+  from it, with **Manage…** to add, rename or hide one. Free shipping is set on each vendor.
+- **Finished stock per combination:** a product with color and graphic choices is stocked per
+  color + graphic, and Make for stock takes the transfers each piece carries out of stock.
+- **Rush fees:** a rule in Global settings, and **Orders → Rush…** to set one on an order, with a
+  "full payment received by" date.
+- **Customer emails** list prices before tax, say how to pay, end with your business's details,
+  and attach a PDF: an invoice while something is owed, a receipt once paid (Global settings →
+  Customer emails, where **Preview emails** shows each one).
+- The invoice PDF no longer runs a long order number or shop name over its label.
+
 The version is the date of the release and that day's build number, such as 2026.11.01.01; the
 window's title bar shows it, and so does a small line above your business's name.
 

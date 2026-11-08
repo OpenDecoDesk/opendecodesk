@@ -21,7 +21,7 @@ global.fetch = async (url, init) => {
 };
 
 const hostSrc = strip(read("functions/_lib/hostConfig.js")), httpSrc = strip(read("functions/_lib/http.js")), dbSrc = strip(read("functions/_lib/db.js"));
-const pdfSrc = strip(read("functions/_lib/pdf.js")), emailSrc = strip(read("functions/_lib/email.js")), statusSrc = strip(read("functions/_lib/setupStatus.js"));
+const pdfSrc = strip(read("functions/_lib/pdf.js")), emailSrc = strip(read("functions/_lib/vendorCredentials.js")) + "\n" + strip(read("functions/_lib/smtp.js")) + "\n" + strip(read("functions/_lib/email.js")), statusSrc = strip(read("functions/_lib/setupStatus.js"));
 const M = new Function(hostSrc + "\n" + httpSrc + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + strip(read("functions/_lib/quoteToken.js")) + "\n" + statusSrc + "\n" +
   "const requireAdmin = async (env, host, key) => (host.kind === 'admin' && key === 'x') ? null : jsonResponse({ status: 'error', message: 'Unauthorized' }, 401); const adminActor = () => 'test';\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null; const verifyTurnstile = async () => ({ ok: true });\n" +

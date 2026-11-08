@@ -67,7 +67,8 @@ async function makeAuth({ d1, passphrase = "abcd-efgh-jkmn-pqrs-tuvw-xyz2", real
   const orders = async (body, cookie, opts) => {
     if (!ordersPost) ordersPost = new Function("__hits", prelude(realLimits, realDomains) + strip(read("functions/_lib/catalogValidation.js")) + "\n" + strip(read("functions/_lib/quoteToken.js")) + "\n" +
       "const verifyTurnstile = async () => ({ ok: true }); const invalidateCatalogVersionCache = () => {}; const selectBox = () => null;\n" +
-      strip(read("functions/_lib/setupStatus.js")) + "\n" + strip(read("functions/_lib/email.js")) + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")(hits);
+      strip(read("functions/_lib/setupStatus.js")) + "\n" + strip(read("functions/_lib/vendorCredentials.js")) + "\n" + strip(read("functions/_lib/smtp.js")) + "\n" +
+      strip(read("functions/_lib/email.js")) + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")(hits);
     try { return await answer(await ordersPost({ request: request("/api/orders", body, Object.assign({ cookie }, opts)), env, waitUntil: (p) => Promise.resolve(p).catch(() => {}) })); }
     catch (e) { return { status: 0, body: { threw: String(e && e.message) }, cookie: undefined }; }   // got past the gate, then lacked data
   };

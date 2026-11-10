@@ -1262,13 +1262,14 @@ function gShippingPanelHtml_({ shipFrom, us, desktop, keySet, cloudKey }){
             </div>
             <div class="admin-note"><a href="#packages">Package sizes</a> — the boxes you ship in, for rates and labels.</div>`;
 }
-// Email (desktop): the mailbox. `saved` is what the program has (or null).
-function gEmailPanelHtml_(saved){
+// Email: the mailbox. `saved` is what the program has (or null) — or, on a cloud install (`web`), the
+// server's saved mailbox ({ from, host, port, security, user, on }; the password never comes back).
+function gEmailPanelHtml_(saved, { web = false } = {}){
   const presetOf = (c) => (c && DESKTOP_MAIL_PRESETS.find(p => p.host && p.host === c.host)) || (c ? DESKTOP_MAIL_PRESETS.find(p => p.id === "other") : DESKTOP_MAIL_PRESETS[0]);
   const pre = presetOf(saved), v = saved || { host: pre.host, port: pre.port, security: pre.security, user: "", from: "" };
   return `${gRequiredNote_("Email", false)}
             <div class="admin-note" style="margin-bottom:10px;">They go out from your mailbox's address, as if you had sent them, and copies land in its Sent folder with Gmail, iCloud and most others. Microsoft 365 and Outlook.com mailboxes aren't supported yet.</div>
-            <div id="gEmailStatus" style="font-size:14px;margin-bottom:10px;">${saved ? (saved.on ? `Email is on: sending from <strong>${escapeHtml(saved.from)}</strong> through ${escapeHtml(saved.host)}.` : `A mailbox is saved (${escapeHtml(saved.from)}), not in use while Email is off.`) : "No mailbox yet."}</div>
+            <div id="gEmailStatus" style="font-size:14px;margin-bottom:10px;">${saved ? (saved.on ? `${web ? "Sending" : "Email is on: sending"} from <strong>${escapeHtml(saved.from)}</strong> through ${escapeHtml(saved.host)}.` : `A mailbox is saved (${escapeHtml(saved.from)}), not in use while ${web ? "a hosted service is chosen" : "Email is off"}.`) : "No mailbox yet."}</div>
             <label style="max-width:360px;"><span>Your mailbox ${G_REQ_}</span><select id="gEmailPreset">${DESKTOP_MAIL_PRESETS.map(p => `<option value="${p.id}"${p.id === pre.id ? " selected" : ""}>${escapeHtml(p.label)}</option>`).join("")}</select></label>
             <div id="gEmailPresetNote" class="admin-note" style="margin:-4px 0 10px;max-width:520px;">${escapeHtml(pre.note)}</div>
             <label style="max-width:360px;"><span>Email address ${G_REQ_}</span><input type="email" id="gEmailFrom" maxlength="200" autocomplete="off" spellcheck="false" value="${escapeHtml(v.from || "")}" placeholder="you@example.com"></label>
@@ -1281,6 +1282,7 @@ function gEmailPanelHtml_(saved){
                 <label style="flex:1 1 200px;">Username <span style="font-weight:400;color:#666;">(if not the email address)</span><input type="text" id="gEmailUser" maxlength="200" spellcheck="false" autocomplete="off" value="${escapeHtml(saved && saved.user !== saved.from ? saved.user : "")}"></label>
               </div>
             </details>
+            ${web ? `<div style="margin-bottom:6px;"><button type="button" class="admin-btn admin-btn-secondary" id="gEmailCheck" style="padding:3px 10px;font-size:12px;">Check the mailbox</button> <span id="gEmailCheckResult" style="font-size:13px;"></span></div>` : ""}
             ${saved && saved.on ? `<div><button type="button" class="admin-btn admin-btn-secondary" id="gEmailTest" style="padding:3px 10px;font-size:12px;">Send a test email</button> <span id="gEmailTestResult" style="font-size:13px;"></span></div>` : `<div class="admin-note">Save signs in to the mailbox first; nothing is saved if it can't.</div>`}`;
 }
 // Supplier connections (desktop): the vendors, once the program has them on.
@@ -1343,10 +1345,22 @@ function wireGlobalFeatures_(c){
     $("gEmailPort").onchange = () => { const n = Number($("gEmailPort").value); if (n === 465) $("gEmailSecurity").value = "tls"; else if (n === 587) $("gEmailSecurity").value = "starttls"; summary(); };
     $("gEmailHost").oninput = summary; $("gEmailSecurity").onchange = summary;
   }
+  document.querySelectorAll('input[name="gEmailVia"]').forEach(r => r.addEventListener("change", () => {
+    const panel = $("gEmailMailboxPanel");
+    if (panel) panel.hidden = (document.querySelector('input[name="gEmailVia"]:checked') || {}).value !== "mailbox";
+  }));
+  if ($("gEmailCheck")) $("gEmailCheck").onclick = async () => {
+    const out = $("gEmailCheckResult"); out.textContent = "Signing in…";
+    const v = (id) => (($(id) || {}).value || "").trim();
+    try {
+      const r = await hoopApi_({ action: "checkMailbox", mailbox: { host: v("gEmailHost"), port: Number(v("gEmailPort")), security: ($("gEmailSecurity") || {}).value || "starttls", from: v("gEmailFrom"), user: v("gEmailUser") || v("gEmailFrom"), password: ($("gEmailPass") || {}).value || "" } });
+      out.textContent = (r.ok ? "✓ " : "✗ ") + (r.message || "");
+    } catch (e) { out.textContent = "✗ " + e.message; }
+  };
   if ($("gEmailTest")) $("gEmailTest").onclick = async () => {
     const out = $("gEmailTestResult"); out.textContent = "Sending…";
     try {
-      const r = await hoopApi_({ action: "sendTestEmail", to: (c.emailSaved && c.emailSaved.from) || "" });
+      const r = await hoopApi_({ action: "sendTestEmail", to: (c.emailSaved && c.emailSaved.from) || (c.emailSending && c.emailSending.mailbox && c.emailSending.mailbox.from) || "" });
       const rep = r.report || {};
       out.textContent = rep.ok ? "✓ Sent to " + rep.to + " — " + (rep.providerMessage || "accepted") : "✗ " + (rep.providerMessage || (rep.hints || []).join(" ") || "Not sent.");
     } catch (e) { out.textContent = "✗ " + e.message; }
@@ -1394,6 +1408,15 @@ function globalSettingsProblem_(){
     need("Email", missing, bad);
   }
   if (c.desktop && ticked("designVerification") && !ticked("email")) problems.push("Design approval needs Email");
+  // A cloud install sending through its own mailbox: the same fields, and a way to keep the password.
+  if (!c.desktop && c.emailSending && adminCan_("admin") && ((document.querySelector('input[name="gEmailVia"]:checked') || {}).value === "mailbox")) {
+    const missing = [["gEmailFrom", "the email address"], ["gEmailHost", "the outgoing (SMTP) server"], ["gEmailPort", "the port"]].filter(([id]) => !val(id));
+    if (!val("gEmailPass") && !(c.emailSending.mailbox && c.emailSending.mailbox.passwordSaved)) missing.push(["gEmailPass", "the password"]);
+    const bad = val("gEmailFrom") && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(val("gEmailFrom")) ? [["gEmailFrom", "an email address that looks like one"]] : [];
+    if (!c.emailSending.credentialsReady) bad.push(["", "the VENDOR_CREDENTIALS_KEY variable set in Cloudflare (it encrypts the password)"]);
+    if (missing.some(m => m[0] === "gEmailHost" || m[0] === "gEmailPort") && $("gEmailServer")) $("gEmailServer").open = true;
+    need("Your own mailbox", missing, bad);
+  }
   if (!problems.length) return "";
   flagged.filter(Boolean).forEach(id => { const e = $(id); if (e) e.style.outline = "2px solid #b03a2e"; });
   const first = flagged.filter(Boolean).map($).find(Boolean);
@@ -8363,8 +8386,12 @@ async function renderGlobalSettings(app){
       const ld = await lr.json();
       if(lr.ok && ld.status === "ok"){ locale = ld.locale || locale; effectiveTz = ld.effectiveTimeZone || "UTC"; envTz = ld.envTimeZone || ""; }
     }catch(e){}
-    let emailSettings = { attachPdf: true };
-    try{ const er = await hoopApi_({ action: "getEmailSettings" }); if(er && er.emailSettings) emailSettings = er.emailSettings; }catch(e){}
+    let emailSettings = { attachPdf: true }, emailSending = null;
+    try{
+      const er = await hoopApi_({ action: "getEmailSettings" });
+      if(er && er.emailSettings) emailSettings = er.emailSettings;
+      if(er && er.mailbox) emailSending = { mailbox: er.mailbox, hosted: er.hosted || {}, credentialsReady: !!er.credentialsReady };
+    }catch(e){}
     const us = locale.country !== "OTHER";
     const bizField = (id, key, label, note, extra) => `<label>${label}
           <input type="${/Email$/.test(key) ? "email" : "text"}" id="${id}" value="${escapeHtml(biz[key] || "")}" ${extra || ""}>
@@ -8413,7 +8440,8 @@ async function renderGlobalSettings(app){
     const desktop = adminDesktop_() && !!window.oddDesktop;
     const ctx = window._gSettingsCtx = { desktop, featureList, features, lockedFeatures, shipFrom, us, machineSettings, machineLoaded: productionOn,
       keySet: desktop ? !!(await adminDesktopHasShippoKey_()) : false, cloudKey: window._gShippoKey,
-      emailSaved: desktop ? (await adminDesktopEmailSettings_()) || null : null, suppliersOn: desktop && adminDesktopSuppliers_() };
+      emailSaved: desktop ? (await adminDesktopEmailSettings_()) || null : null, suppliersOn: desktop && adminDesktopSuppliers_(),
+      emailSending: desktop ? null : emailSending };
     document.getElementById("adminPanel").innerHTML = `
       <div class="admin-form">
         ${setupStatusHtml_(setupItems)}
@@ -8442,7 +8470,7 @@ async function renderGlobalSettings(app){
         ${bizField("gBizPaymentNote", "paymentNote", "Note on paying (optional)", "Added to “How to pay” on emails and invoices — e.g. “Cash is fine at pickup.”", 'maxlength="300"')}
         ${bizField("gBizPoPrefix", "poPrefix", "Purchase order prefix", "Starts the number of each order placed with a supplier from Blanks to Order (PO-20261021-1). Letters and numbers; blank = PO.", 'maxlength="10" placeholder="PO"')}
 
-        ${customerEmailsBoxHtml_(emailSettings)}
+        ${customerEmailsBoxHtml_(emailSettings, desktop ? null : emailSending)}
 
         <h2 style="margin:22px 0 12px;">Region</h2>
         <div class="admin-note" style="margin-bottom:14px;">Where the business is. ${adminDesktop_()
@@ -8584,9 +8612,9 @@ async function backfillStripeFees(btn){
 // ---- Global settings → Customer emails ----------------------------------------------------------------------
 // Whether order emails carry a PDF, and a preview of each email a customer gets — built by the server with the
 // same code that sends them, from a made-up order using your Business profile, sales tax and payment methods.
-function customerEmailsBoxHtml_(settings){
+function customerEmailsBoxHtml_(settings, sending){
   const admin = adminCan_("admin");
-  return `<h2 style="margin:22px 0 12px;">Customer emails</h2>
+  return `${sending ? emailSendingBoxHtml_(sending, admin) : ""}<h2 style="margin:22px 0 12px;">Customer emails</h2>
     <div class="admin-note" style="margin-bottom:10px;">The “Order received” email goes out when an order is placed, with how to pay; the “Payment received” email when you record the payment. Both list the items priced before tax, the sales tax above the total, and your business details from above.</div>
     <label class="checkbox-row"><input type="checkbox" id="gEmailAttachPdf" ${settings && settings.attachPdf === false ? "" : "checked"} ${admin ? "" : "disabled"}> Attach a PDF to order emails — an invoice while something is owed, a receipt once paid</label>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 4px;">
@@ -8594,6 +8622,40 @@ function customerEmailsBoxHtml_(settings){
       <button type="button" class="admin-btn admin-btn-secondary" onclick="showEmailPreview_({ pdf: true })">View sample PDF receipt…</button>
     </div>
     <div class="admin-note">Save first if you've changed the Business profile — the preview uses what's saved.</div>`;
+}
+// A cloud install's way of sending (Global settings → Email): a hosted service — Resend or Cloudflare Email
+// Service, set up with secrets (docs/email.md) — or the owner's own mailbox over SMTP, set up here as in
+// the desktop version. `sending` = getEmailSettings' { mailbox, hosted, credentialsReady }.
+function emailWebSaved_(m){ return m && m.from ? { from: m.from, host: m.host, port: m.port, security: m.security, user: m.user || "", on: m.via === "mailbox" && !!m.passwordSaved, passwordSaved: !!m.passwordSaved } : null; }
+function emailSendingBoxHtml_(sending, admin){
+  const m = sending.mailbox || {}, h = sending.hosted || {}, own = m.via === "mailbox";
+  const hostedNow = h.resend ? "Resend is set up (the <code>RESEND_API_KEY</code> secret) and is used." : h.cloudflare ? "Cloudflare Email Service is set up and is used."
+    : `<span style="color:#b03a2e;">Neither is set up yet</span>: add the <code>RESEND_API_KEY</code> secret, or Cloudflare Email Service (docs/email.md).`;
+  const radio = (v, label, on) => `<label class="checkbox-row"><input type="radio" name="gEmailVia" value="${v}"${on ? " checked" : ""}${admin ? "" : " disabled"}> <strong>${label}</strong></label>`;
+  return `<h2 style="margin:22px 0 6px;">Email</h2>
+    <div class="admin-note" style="margin-bottom:10px;">How order emails, invoices, design proofs and the morning roll-up are sent. One way at a time: a send that fails is reported on Communications, not tried another way.</div>
+    <div id="gEmailVia">
+      ${radio("hosted", "A hosted email service", !own)}
+      <div class="admin-note g-email-via-desc" style="margin:-2px 0 10px 26px;">Resend or Cloudflare Email Service, sending from an address on your own domain (verified with the service). ${hostedNow}</div>
+      ${radio("mailbox", "Your own mailbox", own)}
+      <div class="admin-note g-email-via-desc" style="margin:-2px 0 10px 26px;">Gmail, iCloud, Fastmail, Zoho or your web host's mail, over SMTP — the same setup as the desktop version. Emails go out from that mailbox's address. Nothing to verify; mailboxes have daily limits (Gmail about 500).</div>
+    </div>
+    <div class="g-feat-panel" id="gEmailMailboxPanel"${own ? "" : " hidden"} style="margin-left:26px;">
+      ${sending.credentialsReady ? "" : `<div class="admin-error" style="margin-bottom:10px;">Set the <code>VENDOR_CREDENTIALS_KEY</code> variable (a long random string, encrypted) in Cloudflare first: the mailbox's password is stored encrypted with it.</div>`}
+      ${gEmailPanelHtml_(emailWebSaved_(m), { web: true })}
+    </div>`;
+}
+// What a cloud install's save sends for how to send: null when nothing changed.
+function emailSendingChanges_(){
+  const c = window._gSettingsCtx || {}, s = c.emailSending;
+  if (!s || !adminCan_("admin")) return null;
+  const $ = (id) => document.getElementById(id), val = (id) => (($(id) || {}).value || "").trim();
+  const picked = (document.querySelector('input[name="gEmailVia"]:checked') || {}).value || "hosted";
+  const m = s.mailbox || {};
+  if (picked !== "mailbox") return m.via === "mailbox" ? { via: "hosted" } : null;
+  const out = { via: "mailbox", host: val("gEmailHost"), port: Number(val("gEmailPort")), security: ($("gEmailSecurity") || {}).value || "starttls", from: val("gEmailFrom"), user: val("gEmailUser") || val("gEmailFrom"), password: ($("gEmailPass") || {}).value || "" };
+  const same = m.via === "mailbox" && m.host === out.host.toLowerCase() && Number(m.port) === out.port && m.security === out.security && m.from === out.from && (m.user || m.from) === out.user;
+  return same && !out.password ? null : out;
 }
 const EMAIL_PREVIEW_KINDS_ = [["received", "Order received"], ["payment", "Payment received"], ["invoice", "Invoice"], ["shipped", "Shipped"]];
 function showEmailPreview_(opts = {}){
@@ -8719,6 +8781,18 @@ async function submitGlobalSettings(){
   const problem = globalSettingsProblem_();
   if(problem){ if(errEl) errEl.textContent = problem; showToast(problem, true); return; }   // the page has scrolled to the fields: say it there too
   const program = globalProgramChanges_();   // the desktop program's part: Shippo key, mailbox, supplier switch
+  // A cloud install switching to (or changing) its own mailbox: signed in to before anything is saved.
+  const mailboxChange = emailSendingChanges_();
+  if(mailboxChange && mailboxChange.via === "mailbox"){
+    let tried = null;
+    try{ tried = await hoopApi_({ action: "checkMailbox", mailbox: mailboxChange }); }catch(e){ tried = { ok: false, message: e.message }; }
+    if(!tried || !tried.ok){
+      const m = "Nothing was saved. The mailbox didn't sign in: " + ((tried && tried.message) || "no answer");
+      if(errEl) errEl.textContent = m; showToast(m, true);
+      const pass = document.getElementById("gEmailPass"); if(pass){ pass.style.outline = "2px solid #b03a2e"; if(pass.scrollIntoView) pass.scrollIntoView({ block: "center" }); }
+      return;
+    }
+  }
   const needPublish = globalSettingsNeedPublish_();
   const body = {
     action: "updateGlobalSettings",
@@ -8831,8 +8905,14 @@ async function submitGlobalSettings(){
     }
     const pdfBox = document.getElementById("gEmailAttachPdf");
     if(pdfBox && adminCan_("admin")){
-      try{ await hoopApi_({ action: "updateEmailSettings", emailSettings: { attachPdf: pdfBox.checked } }); }
-      catch(e){ if(errEl) errEl.textContent = e.message || "Could not save the email settings."; return; }
+      // On a cloud install, how to send too: a new mailbox is signed in to by the server before it's saved.
+      const mailbox = emailSendingChanges_();
+      try{ await hoopApi_({ action: "updateEmailSettings", emailSettings: { attachPdf: pdfBox.checked }, ...(mailbox ? { mailbox } : {}) }); }
+      catch(e){
+        if(errEl) errEl.textContent = e.message || "Could not save the email settings.";
+        if(mailbox && mailbox.via === "mailbox"){ const pass = document.getElementById("gEmailPass"); if(pass && pass.scrollIntoView) pass.scrollIntoView({ block: "center" }); }
+        return;
+      }
     }
     if(machShown && stillOn("production")){
     const machRes = await fetch("/api/orders", {

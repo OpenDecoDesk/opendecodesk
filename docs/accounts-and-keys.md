@@ -462,6 +462,9 @@ a key only your site has. Make it once:
 openssl rand -hex 32 | npx wrangler secret put VENDOR_CREDENTIALS_KEY
 ```
 
+The same key protects the mailbox password when the site sends email through your own mailbox
+(Global settings → Email, [email.md](email.md)).
+
 Keep it: a new key makes the saved logins unreadable, and they'd have to be entered again. Without the
 key, Vendor integrations says so and nothing else changes; you can still import a vendor's product
 file (Blanks → Import → Vendor product file — new blanks…).

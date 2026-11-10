@@ -94,7 +94,7 @@ Set by `npm run setup`, or one at a time with `npx wrangler secret put NAME`.
 | `CF_EMAIL_API_TOKEN` | one email provider | A Cloudflare API token with only the Email Sending permission (used with `CF_ACCOUNT_ID`). |
 | `TURNSTILE_SECRET_KEY` | with Turnstile | The secret half of the Turnstile widget. **Set it together with `TURNSTILE_SITE_KEY`** — the secret alone refuses every order. |
 | `CF_API_TOKEN` | with automatic hostnames | A Cloudflare API token that can attach hostnames to this Worker. It can change your account, so give it the narrowest permissions that work (see [shops-and-domains.md](shops-and-domains.md)). |
-| `VENDOR_CREDENTIALS_KEY` | with vendor connections | Encrypts the logins saved under Tools → Vendor integrations (PromoStandards). Any long random string, set once: changing it makes the saved logins unreadable (enter them again). Without it vendors can't be connected; everything else works. |
+| `VENDOR_CREDENTIALS_KEY` | with vendor connections, or email through your own mailbox | Encrypts the logins saved under Tools → Vendor integrations (PromoStandards), and the mailbox password saved under Global settings → Email (docs/email.md). Any long random string, set once: changing it makes the saved logins and password unreadable (enter them again). Without it vendors can't be connected and your own mailbox can't be used; everything else works. |
 | `AGENT_TOKEN` | with the send-agent relay | Shared with the send-agent program; at least 32 characters, or the relay stays off. |
 
 Older names still read as fallbacks: `QUOTE_SIGNING_SECRET` and `LINK_SIGNING_SECRET` (used when

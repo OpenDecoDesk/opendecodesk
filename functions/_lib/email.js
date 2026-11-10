@@ -1,5 +1,7 @@
-import { addOwnerNotice, recordSystemIssue, getBusinessProfile, resolveTimeZone, getLocaleSettings, getGlobalSettings, getOrgById, getEmailSettings, splitTaxInclusive } from "./db.js";
+import { addOwnerNotice, recordSystemIssue, getBusinessProfile, resolveTimeZone, getLocaleSettings, getGlobalSettings, getOrgById, getEmailSettings, getEmailMailbox, splitTaxInclusive } from "./db.js";
 import { pdfDocument, pdfWrap, pdfTextWidth, pdfBase64 } from "./pdf.js";
+import { smtpSend } from "./smtp.js";
+import { decryptVendorCredentials } from "./vendorCredentials.js";
 
 /**
  * Transactional email, sent through Cloudflare Email Service. Sends from EMAIL_FROM (default
@@ -7,7 +9,9 @@ import { pdfDocument, pdfWrap, pdfTextWidth, pdfBase64 } from "./pdf.js";
  * receipts inbox when one is set (EMAIL_BCC, or Business profile → Receipts inbox) so there's a copy
  * of everything sent. Who the business is comes from the Business profile setting (db.js).
  * An install on the free Workers plan (no Cloudflare email) can send through Resend instead: set
- * RESEND_API_KEY and that provider is used for everything (sendViaResend_). The desktop program
+ * RESEND_API_KEY and that provider is used for everything (sendViaResend_). Or it can send through the
+ * owner's own mailbox (SMTP — Global settings → Email → "Your own mailbox": sendViaSmtp_, smtp.js),
+ * which then is used for everything instead of the hosted services. The desktop program
  * sends through the owner's own mailbox instead (SMTP, its MAILER binding: sendViaMailer_), once
  * email is set up there; until then it sends nothing (desktopEmail_). Cloudflare sending uses the `EMAIL` send_email binding if one is configured, otherwise the REST API
  * with CF_EMAIL_API_TOKEN (encrypted; a token with Email Sending permission only) + CF_ACCOUNT_ID.
@@ -36,6 +40,14 @@ const adminSiteUrl_ = (env) => isDesktop_(env) ? "" : "https://" + (String((env 
 // mailbox, the MAILER binding). "off" until then: nothing is sent, and nothing is recorded as a
 // failure — no email is the desktop's normal state, not a problem.
 const desktopEmail_ = (env) => !isDesktop_(env) ? "" : (env.MAILER && typeof env.MAILER.fetch === "function" ? "on" : "off");
+// A cloud install's own mailbox (db.js getEmailMailbox), when Global settings → Email says to send
+// through it; null when it sends through a hosted service. Once chosen it is used even while
+// incomplete: a send then fails and says why, rather than quietly going out another way.
+async function webMailbox_(env) {
+  if (isDesktop_(env) || typeof getEmailMailbox !== "function") return null;
+  try { const m = await getEmailMailbox(env && env.DB); return m && m.via === "mailbox" ? m : null; }
+  catch (e) { return null; }
+}
 
 // Who this install is, for one message: the saved Business profile with its fallbacks.
 //   owner inbox: the profile's, else OWNER_EMAIL, else owner@<root domain>
@@ -80,13 +92,16 @@ async function send_(env, msg) {
   // can't be mistaken for the real site's when both send to the same inboxes. Unset by default.
   const tag = env && env.EMAIL_SUBJECT_TAG ? String(env.EMAIL_SUBJECT_TAG).trim().slice(0, 30) : "";
   if (tag && !String(msg.subject || "").startsWith(tag)) msg = { ...msg, subject: `${tag} ${msg.subject || ""}`.trim() };
-  // One provider per install: the owner's mailbox in the desktop program, else Resend when
-  // RESEND_API_KEY is set, otherwise Cloudflare Email Service. Never two — a failed send is a
-  // failure, not a reason to try somewhere else.
-  const via = desktopEmail_(env) === "on" ? "mailbox" : env && env.RESEND_API_KEY ? "resend" : "cloudflare";
-  const r = via === "mailbox" ? await sendViaMailer_(env, msg, id) : via === "resend" ? await sendViaResend_(env, msg, id) : await sendViaCloudflare_(env, msg, id);
+  // One provider per install: the owner's mailbox in the desktop program; on a cloud install the
+  // owner's mailbox when Global settings → Email says so, else Resend when RESEND_API_KEY is set,
+  // otherwise Cloudflare Email Service. Never two — a failed send is a failure, not a reason to try
+  // somewhere else.
+  const mailbox = await webMailbox_(env);
+  const via = desktopEmail_(env) === "on" ? "mailbox" : mailbox ? "smtp" : env && env.RESEND_API_KEY ? "resend" : "cloudflare";
+  const r = via === "mailbox" ? await sendViaMailer_(env, msg, id) : via === "smtp" ? await sendViaSmtp_(env, msg, id, null, mailbox)
+    : via === "resend" ? await sendViaResend_(env, msg, id) : await sendViaCloudflare_(env, msg, id);
   if (r === true) return true;
-  if (r !== "bounced") console.error({ mailbox: "Mailbox (SMTP)", resend: "Resend", cloudflare: "Cloudflare Email Service" }[via] + " send failed for:", msg.subject);
+  if (r !== "bounced") console.error({ mailbox: "Mailbox (SMTP)", smtp: "Your mailbox (SMTP)", resend: "Resend", cloudflare: "Cloudflare Email Service" }[via] + " send failed for:", msg.subject);
   await recordSystemIssue(env && env.DB, "email_failed", msg.subject);
   return false;
 }
@@ -111,6 +126,25 @@ async function sendViaMailer_(env, { to, subject, html, text, attachments, pdf }
     if (report) report.providerMessage = "Couldn't reach the program's mail sender: " + String((e && e.message) || e).slice(0, 300);
     return false;
   }
+}
+
+// A cloud install's own mailbox (smtp.js): sent from the mailbox's own address under the business's
+// name, reply-to the owner, BCC the receipts inbox. The password is decrypted here, only to sign in.
+// Returns true or false; `report` as for Resend, with the mail server's answer.
+async function sendViaSmtp_(env, { to, subject, html, text, attachments }, id, report, mailbox) {
+  const m = mailbox || await webMailbox_(env);
+  const fail = (why) => { console.error("Mailbox (SMTP) send failed:", why.slice(0, 300)); if (report) report.providerMessage = why.slice(0, 500); return false; };
+  if (!m) return fail("No mailbox is set up.");
+  let password = "";
+  try { password = (m.password && (await decryptVendorCredentials(env, m.password) || {}).password) || ""; }
+  catch (e) { return fail(String((e && e.message) || e).replace(/vendor login/g, "mailbox password")); }
+  if (!password) return fail("The mailbox's password isn't saved. Enter it under Global settings → Email.");
+  const bcc = id.bcc && id.bcc.toLowerCase() !== String(to).trim().toLowerCase() ? [id.bcc] : [];
+  const r = await smtpSend(m, password, { to, fromName: id.name, replyTo: id.owner, bcc, subject, html, text, attachments: mailAttachments_(attachments) },
+    { connect: env && env.__SMTP_CONNECT_FOR_TESTS });
+  if (report) report.providerMessage = String(r.message || "").slice(0, 500);
+  if (!r.ok) { console.error("Mailbox (SMTP) send failed:", String(r.message).slice(0, 300)); return false; }
+  return true;
 }
 
 // Resend (https://resend.com) — an alternative for an install that can't use Cloudflare's email
@@ -214,10 +248,11 @@ async function sendViaCloudflare_(env, { to, subject, html, text, attachments },
 // Secrets are never returned: a key is described (set or not, its length, whether it looks right).
 export async function sendTestEmail(env, to) {
   const id = await mailIdentity_(env);
-  const from = String((env && env.EMAIL_FROM) || ("orders@" + siteRoot_(env))).trim();
   const desktop = desktopEmail_(env);
-  const key = !desktop && env && env.RESEND_API_KEY != null ? String(env.RESEND_API_KEY) : "";
-  const provider = desktop === "on" ? "mailbox" : desktop === "off" ? "none" : key ? "resend" : (env && env.EMAIL && typeof env.EMAIL.send === "function") ? "cloudflare-binding"
+  const mailbox = await webMailbox_(env);
+  const from = mailbox && mailbox.from ? mailbox.from : String((env && env.EMAIL_FROM) || ("orders@" + siteRoot_(env))).trim();
+  const key = !desktop && !mailbox && env && env.RESEND_API_KEY != null ? String(env.RESEND_API_KEY) : "";
+  const provider = desktop === "on" ? "mailbox" : desktop === "off" ? "none" : mailbox ? "smtp" : key ? "resend" : (env && env.EMAIL && typeof env.EMAIL.send === "function") ? "cloudflare-binding"
     : (env && env.CF_EMAIL_API_TOKEN && env.CF_ACCOUNT_ID) ? "cloudflare-api" : "none";
   const report = { provider, from, fromDomain: from.split("@")[1] || "", to: String(to || ""), replyTo: id.owner, bcc: id.bcc || "",
     businessName: id.name, rootDomain: siteRoot_(env), subjectTag: env && env.EMAIL_SUBJECT_TAG ? String(env.EMAIL_SUBJECT_TAG).trim() : "",
@@ -225,7 +260,7 @@ export async function sendTestEmail(env, to) {
     httpStatus: null, providerMessage: "", providerId: "", ok: false, hints: [] };
   const hint = (t) => report.hints.push(t);
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(report.to)) { hint("Enter an email address to send the test to."); return report; }
-  if (report.fromDomain === "example.com" && !desktop) hint("ROOT_DOMAIN isn't set, so emails would come from an example.com address. Set ROOT_DOMAIN (or EMAIL_FROM) to your own domain.");
+  if (report.fromDomain === "example.com" && !desktop && !mailbox) hint("ROOT_DOMAIN isn't set, so emails would come from an example.com address. Set ROOT_DOMAIN (or EMAIL_FROM) to your own domain.");
   if (key && report.key.spaceInside) hint("RESEND_API_KEY has a space or line break in the middle — copy it again (wrangler secret put RESEND_API_KEY) and redeploy.");
   else if (key && report.key.paddedEnds) hint("RESEND_API_KEY was saved with a space or line break at the end. Emails now ignore it, but it's worth setting the key again cleanly.");
   else if (key && !report.key.looksLikeResend) hint("RESEND_API_KEY doesn't look like a Resend key (they start with re_). Check you pasted the API key itself.");
@@ -235,7 +270,7 @@ export async function sendTestEmail(env, to) {
   const msg = { to: report.to, subject: (tag ? tag + " " : "") + "Test email from " + id.name,
     html: `<div style="font-family:sans-serif"><p>This is a test email from <strong>${escHtml(id.name)}</strong> (${escHtml(where)}), sent from Tools → Communications.</p><p>If you can read this, email is working.</p></div>`,
     text: `This is a test email from ${id.name} (${where}), sent from Tools → Communications.\n\nIf you can read this, email is working.` };
-  const r = provider === "mailbox" ? await sendViaMailer_(env, msg, id, report) : provider === "resend" ? await sendViaResend_(env, msg, id, report) : await sendViaCloudflare_(env, msg, id, report);
+  const r = provider === "mailbox" ? await sendViaMailer_(env, msg, id, report) : provider === "smtp" ? await sendViaSmtp_(env, msg, id, report, mailbox) : provider === "resend" ? await sendViaResend_(env, msg, id, report) : await sendViaCloudflare_(env, msg, id, report);
   report.ok = r === true;
   if (r === "bounced") hint("That address permanently bounced — try another one.");
   if (!report.ok && provider === "resend") {
@@ -247,8 +282,8 @@ export async function sendTestEmail(env, to) {
     if (st === 429) hint("Resend's rate limit — wait a minute and try again.");
     if (!report.hints.length || report.hints.every(h => /ROOT_DOMAIN/.test(h))) hint("See Resend's message above; the Logs page in your Resend account shows the same attempt.");
   }
-  if (!report.ok && provider === "mailbox") hint("See the mail server's answer above. Global settings → Email has the mailbox's settings.");
-  if (report.ok) hint(provider === "mailbox" ? "Your mail server accepted it. If it doesn't arrive, check spam; it is also in the mailbox's Sent folder with Gmail, iCloud and most others." : provider === "resend"
+  if (!report.ok && (provider === "mailbox" || provider === "smtp")) hint("See the mail server's answer above. Global settings → Email has the mailbox's settings.");
+  if (report.ok) hint(provider === "mailbox" || provider === "smtp" ? "Your mail server accepted it. If it doesn't arrive, check spam; it is also in the mailbox's Sent folder with Gmail, iCloud and most others." : provider === "resend"
     ? "Resend accepted it. If it doesn't arrive, check spam, and the Logs page in your Resend account for this email's id (above)."
     : "Accepted for sending. If it doesn't arrive, check spam.");
   return report;

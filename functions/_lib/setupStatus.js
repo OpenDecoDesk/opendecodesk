@@ -24,7 +24,7 @@ const MIN_AGENT_TOKEN = 32;
 
 export function setupStatus(env, settings) {
   env = env || {};
-  const { business = {}, salesTax = {}, locale = {}, payments = null } = settings || {};
+  const { business = {}, salesTax = {}, locale = {}, payments = null, mailbox = null } = settings || {};
   const items = [];
   const add = (key, label, level, ready, affects, note) => items.push({ key, label, level, ready: !!ready, affects, note: note || "" });
   // The desktop edition (hostConfig.js isDesktopEdition, repeated so this file keeps no imports): no
@@ -53,9 +53,13 @@ export function setupStatus(env, settings) {
 
   const resend = set(env.RESEND_API_KEY), cfBinding = !!(env.EMAIL && typeof env.EMAIL.send === "function");
   const cfToken = set(env.CF_EMAIL_API_TOKEN), cfAccount = set(env.CF_ACCOUNT_ID);
-  add("email", "Email", "recommended", resend || cfBinding || (cfToken && cfAccount),
+  // The owner's own mailbox (Global settings → Email, db.js getEmailMailbox) replaces the hosted services.
+  const own = !!(mailbox && mailbox.via === "mailbox");
+  const ownReady = own && set(mailbox.host) && set(mailbox.from) && !!mailbox.passwordSaved && set(env.VENDOR_CREDENTIALS_KEY);
+  add("email", "Email", "recommended", own ? ownReady : resend || cfBinding || (cfToken && cfAccount),
     "Order confirmations, design proofs, shipped notices and the morning roll-up. Without a provider no email is sent at all (each attempt is listed as a problem on Communications).",
-    resend ? "Sending through Resend." : cfBinding ? "Sending through Cloudflare Email Service (binding)." : (cfToken && cfAccount) ? "Sending through Cloudflare Email Service (API token)."
+    own ? (ownReady ? "Sending through your own mailbox (" + mailbox.from + ")." : !set(env.VENDOR_CREDENTIALS_KEY) ? "Your own mailbox is chosen, but VENDOR_CREDENTIALS_KEY isn't set, so its password can't be read." : "Your own mailbox is chosen but not complete — finish it under Global settings → Email.")
+    : resend ? "Sending through Resend." : cfBinding ? "Sending through Cloudflare Email Service (binding)." : (cfToken && cfAccount) ? "Sending through Cloudflare Email Service (API token)."
       : cfToken ? "CF_EMAIL_API_TOKEN is set but CF_ACCOUNT_ID is not — both are needed." : "Set RESEND_API_KEY, or CF_EMAIL_API_TOKEN with CF_ACCOUNT_ID. The sending domain must also be verified with the provider (this page can't check that).");
 
   // File storage (Cloudflare R2) is optional: an install without it works, minus uploads. The one

@@ -9,14 +9,24 @@ confirmation, and each attempted email is listed as a problem.
 
 ## Choosing a provider
 
-| | Cloudflare Email Service | Resend |
-|---|---|---|
-| Needs | Cloudflare's **paid Workers plan** | A Resend account |
-| Set | `CF_EMAIL_API_TOKEN` (secret) + `CF_ACCOUNT_ID` | `RESEND_API_KEY` (secret) |
-| Bounces | A customer address that permanently bounces is reported back at once, and the send counts as failed | Not reported back to the site (Resend reports bounces later, in its own dashboard) |
+Global settings → **Email** chooses between two ways of sending:
 
-**If `RESEND_API_KEY` is set, Resend is used for everything**, whatever else is set. To switch back
-to Cloudflare, remove that secret.
+- **A hosted email service**: Cloudflare Email Service or Resend, sending from an address on your
+  own domain. This is the default.
+- **Your own mailbox**: Gmail, iCloud, Fastmail, Zoho or your web host's mail, over SMTP, the same
+  setup as the desktop version (see [Your own mailbox](#your-own-mailbox-smtp) below).
+
+| | Cloudflare Email Service | Resend | Your own mailbox |
+|---|---|---|---|
+| Needs | Cloudflare's **paid Workers plan** | A Resend account | A mailbox, and its app password |
+| Set | `CF_EMAIL_API_TOKEN` (secret) + `CF_ACCOUNT_ID` | `RESEND_API_KEY` (secret) | Global settings → Email, plus `VENDOR_CREDENTIALS_KEY` (secret) |
+| Sends from | `EMAIL_FROM`, on your verified domain | `EMAIL_FROM`, on your verified domain | The mailbox's own address |
+| Limits | The provider's | The provider's | The mailbox's (Gmail: about 500 a day) |
+| Bounces | A customer address that permanently bounces is reported back at once, and the send counts as failed | Not reported back to the site (Resend reports bounces later, in its own dashboard) | Not reported back to the site (the bounce arrives in the mailbox) |
+
+**With your own mailbox chosen, it is used for everything**, whatever secrets are set. Otherwise,
+**if `RESEND_API_KEY` is set, Resend is used for everything**. To switch back to Cloudflare, remove
+that secret.
 
 `npm run setup` asks which one you want and stores the key. By hand: `npx wrangler secret put
 RESEND_API_KEY`, or `npx wrangler secret put CF_EMAIL_API_TOKEN` plus `CF_ACCOUNT_ID` in `[vars]`.
@@ -42,10 +52,38 @@ combined with the old ones, not added alongside.
 The domain to verify is the one in the sender address: by default `orders@<your root domain>`,
 or whatever you set as `EMAIL_FROM`.
 
+## Your own mailbox (SMTP)
+
+There's no domain to verify: emails go out from the mailbox's own address, as if you had sent them,
+and copies land in its Sent folder with Gmail, iCloud and most others.
+
+1. Set the key the mailbox's password is stored with, once (the same key that protects vendor
+   logins; skip this if it's already set):
+
+   ```bash
+   openssl rand -hex 32 | npx wrangler secret put VENDOR_CREDENTIALS_KEY
+   ```
+
+2. In Global settings → **Email**, choose **Your own mailbox**. Pick the mailbox (the presets fill
+   in the server), and enter its address and its password. Gmail and iCloud need an **app password**
+   (made in the account's security settings), not the normal one. **Check the mailbox** signs in
+   without sending anything.
+3. **Save global settings**. The site signs in to the mailbox first; nothing is saved if it can't.
+   Then **Send a test email**.
+
+The password is stored encrypted in the database and never sent back to the browser. Changing
+`VENDOR_CREDENTIALS_KEY` makes it unreadable: enter it again. Switching back to a hosted service
+keeps the mailbox's settings and password for later.
+
+Port 587 is STARTTLS and 465 is SSL/TLS; the connection is always encrypted before the password is
+sent. Port 25 isn't allowed (Cloudflare blocks it). Microsoft 365 and Outlook.com mailboxes aren't
+supported yet: they need "Sign in with Microsoft".
+
 ## Who sends, who receives
 
-Every email is sent **from** `EMAIL_FROM` (default `orders@<root domain>`), under your business
-name, with **reply-to set to your own inbox** — so a customer who replies reaches you.
+Every email is sent **from** `EMAIL_FROM` (default `orders@<root domain>`) — or, through your own
+mailbox, from the mailbox's address — under your business name, with **reply-to set to your own
+inbox**, so a customer who replies reaches you.
 
 | Inbox | Set in | Used for |
 |---|---|---|
@@ -115,7 +153,7 @@ To you:
 The quickest check is Tools → **Communications** → **Send a test email** (admins only). It sends
 one short message the same way order emails go, and shows what happened:
 
-- which provider was used, and the From, Reply-to and BCC addresses;
+- which provider was used (or your own mailbox), and the From, Reply-to and BCC addresses;
 - what the provider answered: its HTTP status and its own message (and, from Resend, the email's id
   to look up on its Logs page);
 - whether `RESEND_API_KEY` looks right: its length, that it starts with `re_`, and no stray space or

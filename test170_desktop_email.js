@@ -217,7 +217,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); };
   ok("…and with email on, a failed order email is a problem the roll-up reports", issuesOn.some(x => /email/i.test(JSON.stringify(x))));
   mailerAnswer = { ok: true, message: "250 OK" };
   const emailSrc = read("functions/_lib/email.js");
-  ok("one provider per install: the mailbox in the desktop program, before Resend or Cloudflare", /const via = desktopEmail_\(env\) === "on" \? "mailbox" : env && env\.RESEND_API_KEY \? "resend" : "cloudflare";/.test(emailSrc));
+  ok("one provider per install: the mailbox in the desktop program (a cloud install's own-mailbox setting never applies there), before Resend or Cloudflare", /const via = desktopEmail_\(env\) === "on" \? "mailbox" : mailbox \? "smtp" : env && env\.RESEND_API_KEY \? "resend" : "cloudflare";/.test(emailSrc) && /if \(isDesktop_\(env\) \|\| typeof getEmailMailbox !== "function"\) return null;/.test(emailSrc));
 
   console.log("\n=== D2. Design approval by email ===");
   {

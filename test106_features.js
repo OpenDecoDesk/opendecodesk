@@ -14,7 +14,7 @@ const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1");
 const dbSrc = strip(read("functions/_lib/db.js")), httpSrc = strip(read("functions/_lib/http.js")), hostSrc = strip(read("functions/_lib/hostConfig.js"));
-const emailSrc = strip(read("functions/_lib/email.js")), ordersJs = read("functions/api/orders.js");
+const emailSrc = strip(read("functions/_lib/vendorCredentials.js")) + "\n" + strip(read("functions/_lib/smtp.js")) + "\n" + strip(read("functions/_lib/email.js")), ordersJs = read("functions/api/orders.js");
 const lib = new Function(dbSrc + "\n" + emailSrc + "\n" + strip(read("functions/_lib/deliveryCheck.js")) +
   "\nreturn { FEATURES, getFeatures, setFeatures, normalizeFeatures, getPublicCatalogData, createProduct, createBlank, setBlankLink, getOrderById, getOrgById, getCatalogIssues, " +
   "getAllBlanks, getClosedPeriods, checkShippedDeliveries, checkBlankShipments, getProductionQueue };")();
@@ -416,7 +416,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   // Everything else the dispatcher answers: always available, whatever the switches say.
   const ALWAYS_ON = [
     // Orders, payments, fulfilment stages (incl. Mark manufactured, which uses blanks)
-    "listOrgs", "getOrders", "getOrdersAllShops", "getOpenOrders", "getPendingCommunications", "sendTestEmail", "setOrderCompleted", "useBlanksFromStock", "markPaidManual", "resendEmail",
+    "listOrgs", "getOrders", "getOrdersAllShops", "getOpenOrders", "getPendingCommunications", "sendTestEmail", "checkMailbox", "setOrderCompleted", "useBlanksFromStock", "markPaidManual", "resendEmail",
     "addPayment", "recordRefund", "setRefundShipping", "backfillStripeFees", "setPaymentDate", "deletePayment", "voidPayment", "setDiscount", "deleteOrder", "voidOrder",
     "updateCustomerInfo", "createLocalSale", "createTestTransaction", "setFulfillmentStage", "bulkSetFulfillmentStage", "cancelLineItem", "bulkCancelLineItems", "setLineItemRefund", "editOrder",
     "setRushFee", "recordTracking", "bulkRecordTracking", "setShippingInfo", "setShippingPaidAmount", "createShippingPaymentLink", "sendInvoice", "getInvoiceDocument", "getOrderPdf", "updateOrderDate", "setOrderDates", "setOrderDueDate", "bulkSetDueDate",

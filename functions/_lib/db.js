@@ -2865,6 +2865,32 @@ export async function setEmailSettings(db, s) {
   return clean;
 }
 
+// How a cloud install sends email (Global settings → Email): through a hosted service ("hosted": Resend
+// or Cloudflare Email Service, set up with secrets — email.js) or through the owner's own mailbox
+// ("mailbox": SMTP, smtp.js). { via, host, port, security, user, from, password } — `password` is the
+// encrypted string (vendorCredentials.js), never sent to the browser (emailMailboxForBrowser).
+// Unset = "hosted", so an install that never saw this setting sends as it always did.
+export async function getEmailMailbox(db) {
+  let saved = null;
+  try { const row = db && await db.prepare("SELECT value FROM global_settings WHERE key='emailMailbox'").first(); saved = row ? tryParse_(row.value, null) : null; }
+  catch (e) { saved = null; }
+  saved = saved && typeof saved === "object" ? saved : {};
+  return { via: saved.via === "mailbox" ? "mailbox" : "hosted", host: String(saved.host || ""), port: Number(saved.port) || 587,
+    security: saved.security === "tls" ? "tls" : "starttls", user: String(saved.user || ""), from: String(saved.from || ""), password: String(saved.password || "") };
+}
+export async function setEmailMailbox(db, m) {
+  const clean = { via: m && m.via === "mailbox" ? "mailbox" : "hosted", host: String((m && m.host) || ""), port: Number(m && m.port) || 587,
+    security: m && m.security === "tls" ? "tls" : "starttls", user: String((m && m.user) || ""), from: String((m && m.from) || ""), password: String((m && m.password) || "") };
+  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('emailMailbox', ?)").bind(JSON.stringify(clean)).run();
+  return clean;
+}
+// What the browser may see: everything but the password, and whether one is saved.
+export function emailMailboxForBrowser(m) {
+  m = m || {};
+  return { via: m.via === "mailbox" ? "mailbox" : "hosted", host: m.host || "", port: m.port || 587, security: m.security === "tls" ? "tls" : "starttls",
+    user: m.user && m.user !== m.from ? m.user : "", from: m.from || "", passwordSaved: !!m.password };
+}
+
 export async function getShipFromAddress(db, env) {
   const row = await db.prepare("SELECT value FROM global_settings WHERE key='shipFrom'").first();
   const saved = row ? tryParse_(row.value, {}) : {};

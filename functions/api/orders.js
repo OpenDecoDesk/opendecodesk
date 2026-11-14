@@ -121,8 +121,9 @@ import {
   getAccountRegister, getReceiptRecords, receiptTargets, getRecordReceipt, setReceiptFile, receiptAccountBlockers, setReceiptAccount,
   lineQty, QTY_MESSAGE, zipStates, SHIPPING_QUOTE_PENDING, byId_,
   getRushSettings, setRushSettings, getRushFeesToSet, rushRuleView, resolveRushRule, rushFeeFor, cleanShopRush, setOrgRushFee, setOrderRushFee, rushPayByFor, localToday,
-  getEmailSettings, setEmailSettings, splitTaxInclusive, addTaxExclusive, orderAmounts,
+  getEmailSettings, setEmailSettings, getEmailMailbox, setEmailMailbox, emailMailboxForBrowser, splitTaxInclusive, addTaxExclusive, orderAmounts,
 } from "../_lib/db.js";
+import { smtpCleanSettings, smtpVerify } from "../_lib/smtp.js";
 import {
   sendOrderReceivedEmail,
   sendPaymentConfirmedEmail, sendCancellationEmail, sendShippedEmail,
@@ -190,7 +191,7 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "getGlobalSettings", "updateGlobalSettings", "getSetupStatus", "getCloudflareSetup", "connectCloudflare", "getMachineSettings", "updateMachineSettings",
   "getShipFromAddress", "updateShipFromAddress", "getBusinessProfile", "updateBusinessProfile",
   "getLocaleSettings", "updateLocaleSettings", "getFeatures", "updateFeatures",
-  "getEmailSettings", "updateEmailSettings", "previewCustomerEmail", "samplePdf", "sendSampleEmail",
+  "getEmailSettings", "updateEmailSettings", "checkMailbox", "previewCustomerEmail", "samplePdf", "sendSampleEmail",
   "getSalesTaxSettings", "updateSalesTaxSettings",
   "getBoxPresets", "setBoxPresets",
   "getInventory", "createInventoryItem", "updateInventoryItem", "deleteInventoryItem",
@@ -295,6 +296,7 @@ const ADMIN_ONLY_ACTIONS = [
   "getCloudflareSetup", "connectCloudflare",
   "updateRushSettings",   // rush fees (migrations/0082)
   "updateEmailSettings", "sendSampleEmail",   // Global settings → Customer emails
+  "checkMailbox",                             // Global settings → Email: signs in to the owner's mailbox with a password typed there
 ];
 const MANAGER_ACTIONS = [
   "getRushSettings", "setRushFee",                                // rush fees (migrations/0082)
@@ -396,6 +398,7 @@ for (const [feature, actions] of Object.entries(FEATURE_ACTIONS)) for (const a o
 const DESKTOP_REFUSED_ACTIONS = new Set([
   "createShippingPaymentLink", "backfillStripeFees", "readInvoiceWithAi",
   "setupOrgDomain", "getOrgDomainStatus", "getPreviewLink",
+  "checkMailbox",   // the program checks its mailbox itself (desktop/mailer.js)
 ]);
 const DESKTOP_REFUSED_MSG = "This needs the internet, so it isn't part of the desktop version.";
 // …and sending email: refused until the owner sets up their mailbox in the program (hostConfig.js
@@ -415,6 +418,38 @@ const featureLabel_ = (key) => (FEATURES.find(f => f.key === key) || { label: ke
 const NO_SHIPPING_FEATURE_MSG = "Carrier shipping is turned off (Global settings → Features → Shipping). Use Local pickup or a custom delivery option with a flat fee instead.";
 // A Deploy-button install before its Setup step (noDomainYet in onRequestPost). public/admin.js says the same (NO_DOMAIN_YET_).
 const NO_DOMAIN_MSG = "This shop can't open for orders until your site has its own domain: each shop's address is <name>.<your domain>. Until then you can build it and preview it.";
+
+// Global settings → Email on a cloud install: how it sends, the mailbox (no password), what the hosted
+// services have set, and whether a password can be stored (VENDOR_CREDENTIALS_KEY).
+async function emailSendingView_(env) {
+  return {
+    mailbox: emailMailboxForBrowser(await getEmailMailbox(env.DB)),
+    hosted: { resend: !!env.RESEND_API_KEY, cloudflare: !!((env.EMAIL && typeof env.EMAIL.send === "function") || (env.CF_EMAIL_API_TOKEN && env.CF_ACCOUNT_ID)) },
+    credentialsReady: vendorCredentialsReady(env),
+  };
+}
+// What to save from Global settings → Email: { mailbox, passwordChanged } or { error }. A hosted service
+// keeps the mailbox's settings and password, so switching back needs nothing typed again. A mailbox
+// must be complete, have a password (typed now or saved before) and sign in.
+async function mailboxToSave_(env, m) {
+  const saved = await getEmailMailbox(env.DB);
+  if (m.via !== "mailbox") return { mailbox: { ...saved, via: "hosted" }, passwordChanged: false };
+  let settings;
+  try { settings = smtpCleanSettings(m); } catch (e) { return { error: e.message }; }
+  const typed = String(m.password || "");
+  if (typed.length > 300) return { error: "That password is too long." };
+  if (!vendorCredentialsReady(env)) return { error: "Set the VENDOR_CREDENTIALS_KEY variable (a long random string) in Cloudflare first: the mailbox's password is stored encrypted with it (docs/email.md)." };
+  let password = typed;
+  if (!password && saved.password) {
+    try { password = ((await decryptVendorCredentials(env, saved.password)) || {}).password || ""; }
+    catch (e) { return { error: "The saved password can't be read (was VENDOR_CREDENTIALS_KEY changed?). Enter it again." }; }
+  }
+  if (!password) return { error: "Enter the mailbox's password or app password." };
+  const check = await smtpVerify(settings, password, { connect: env.__SMTP_CONNECT_FOR_TESTS });
+  if (!check.ok) return { error: "Not saved: " + check.message };
+  const stored = typed ? await encryptVendorCredentials(env, { id: "smtp", password: typed }) : saved.password;
+  return { mailbox: { via: "mailbox", ...settings, password: stored }, passwordChanged: !!typed };
+}
 
 export async function onRequestPost(context) {
   const { request, env } = context;
@@ -3343,7 +3378,8 @@ export async function onRequestPost(context) {
         safe(() => getBusinessProfile(env.DB), {}), safe(() => getSalesTaxSettings(env.DB), {}), safe(() => getLocaleSettings(env.DB), {}),
         safe(() => getGlobalSettings(env.DB), {}),
       ]);
-      const items = setupStatus(env, { business, salesTax, locale, payments: (global && global.enabledPayments) || null });
+      const mailbox = await safe(async () => emailMailboxForBrowser(await getEmailMailbox(env.DB)), null);
+      const items = setupStatus(env, { business, salesTax, locale, payments: (global && global.enabledPayments) || null, mailbox });
       return jsonResponse({ status: "ok", items, summary: setupSummary(items) });
     }
 
@@ -3477,14 +3513,44 @@ export async function onRequestPost(context) {
     // The preview is built by the same functions that send the real emails (email.js build…Email), from
     // a made-up order (sampleOrder_) priced with this install's sales tax and paid by the method picked —
     // nothing is saved. "Send me this sample" sends it to the owner's inbox, marked [Sample].
+    // A cloud install also says how it sends (Global settings → Email): a hosted service or the owner's
+    // own mailbox (db.js getEmailMailbox; the password never leaves the server).
     if (body.action === "getEmailSettings") {
-      return jsonResponse({ status: "ok", emailSettings: await getEmailSettings(env.DB) });
+      const out = { status: "ok", emailSettings: await getEmailSettings(env.DB) };
+      if (!isDesktopEdition(env)) Object.assign(out, await emailSendingView_(env));
+      return jsonResponse(out);
     }
     if (body.action === "updateEmailSettings") {
       const before = await getEmailSettings(env.DB);
-      const emailSettings = await setEmailSettings(env.DB, body.emailSettings || {});
-      audit({ orgId: null, orderId: null, action: "settings.email_set", detail: { attachPdf: { from: before.attachPdf, to: emailSettings.attachPdf } } });
-      return jsonResponse({ status: "ok", emailSettings });
+      const detail = {};
+      // How to send (cloud only): checked — and for a mailbox, signed in to — before anything is saved.
+      if (!isDesktopEdition(env) && body.mailbox && typeof body.mailbox === "object") {
+        const r = await mailboxToSave_(env, body.mailbox);
+        if (r.error) return jsonResponse({ status: "error", message: r.error }, 400);
+        const was = await getEmailMailbox(env.DB);
+        await setEmailMailbox(env.DB, r.mailbox);
+        detail.sendVia = { from: was.via, to: r.mailbox.via };
+        if (r.mailbox.via === "mailbox") Object.assign(detail, { mailbox: r.mailbox.from + " via " + r.mailbox.host + ":" + r.mailbox.port, passwordChanged: r.passwordChanged });
+      }
+      const emailSettings = body.emailSettings && typeof body.emailSettings === "object" ? await setEmailSettings(env.DB, body.emailSettings) : before;
+      if (emailSettings.attachPdf !== before.attachPdf) detail.attachPdf = { from: before.attachPdf, to: emailSettings.attachPdf };
+      audit({ orgId: null, orderId: null, action: "settings.email_set", detail });
+      return jsonResponse({ status: "ok", emailSettings, ...(!isDesktopEdition(env) ? await emailSendingView_(env) : {}) });
+    }
+    // Signs in to a mailbox with the settings typed in Global settings → Email (the saved password when
+    // none is typed), without saving or sending anything.
+    if (body.action === "checkMailbox") {
+      const m = body.mailbox && typeof body.mailbox === "object" ? body.mailbox : {};
+      let settings;
+      try { settings = smtpCleanSettings(m); } catch (e) { return jsonResponse({ status: "ok", ok: false, message: e.message }); }
+      let password = String(m.password || "");
+      if (!password) {
+        const saved = await getEmailMailbox(env.DB);
+        try { password = saved.password ? ((await decryptVendorCredentials(env, saved.password)) || {}).password || "" : ""; } catch (e) { password = ""; }
+      }
+      if (!password) return jsonResponse({ status: "ok", ok: false, message: "Enter the mailbox's password or app password." });
+      const r = await smtpVerify(settings, password, { connect: env.__SMTP_CONNECT_FOR_TESTS });
+      return jsonResponse({ status: "ok", ok: r.ok, message: r.message });
     }
     if (body.action === "previewCustomerEmail" || body.action === "sendSampleEmail" || body.action === "samplePdf") {
       const kind = ["received", "payment", "invoice", "shipped"].includes(body.kind) ? body.kind : "received";

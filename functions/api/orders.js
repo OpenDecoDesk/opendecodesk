@@ -6258,7 +6258,18 @@ export async function onRequestPost(context) {
     digitalIds = new Set((dr || []).map(r => String(r.productId)));
   } catch (e) { digitalIds = new Set(); }   // a database from before the migration: none
   const digitalOnly = pricedItems.length > 0 && pricedItems.every(it => digitalIds.has(String(it.productId)));
-  if (digitalOnly && !featureOn("digital")) return jsonResponse({ status: "error", message: "Downloads aren't available right now — please contact the shop." }, 400);
+  const digitalLines = pricedItems.filter(it => digitalIds.has(String(it.productId)));
+  if (digitalLines.length && !featureOn("digital")) return jsonResponse({ status: "error", message: "Downloads aren't available right now — please contact the shop." }, 400);
+  // A digital product with no file to send isn't shown in the shop (catalog.js); one still in a cart can't be ordered.
+  if (digitalLines.length) {
+    let withFiles = new Set();
+    try {
+      const { results: fr } = await env.DB.prepare("SELECT DISTINCT productId FROM product_files WHERE orgId = ?").bind(orgId).all();
+      withFiles = new Set((fr || []).map(r => String(r.productId)));
+    } catch (e) { withFiles = new Set(); }
+    const empty = digitalLines.find(it => !withFiles.has(String(it.productId)));
+    if (empty) return jsonResponse({ status: "error", message: `“${empty.name || "A download"}” isn't available right now — please remove it from your cart.` }, 400);
+  }
 
   // Shipping: a carrier rate is only accepted via a signed quote bound to
   // this org, this cart and this ZIP. No token = no carrier charge (either

@@ -114,7 +114,7 @@ import {
   getPublishedOrg, setOrgReady, getShopWizard, saveShopWizard, deleteShopWizard, listShopWizards, setProductLinksFromBlank, publishShop, getPublishState, getDraftCatalogShop, signPreviewToken,
   planDiscardShopChanges, discardShopChanges, applyProductPrices,
   getBrandRules, setBrandRules, DEFAULT_BRAND_RULES, brandRuleFor_, listBrandApprovals, addBrandApproval, revokeBrandApproval, getBrandApproval,
-  nextSupplierPoNumber, insertSupplierOrder, claimSupplierOrderRetry, setSupplierOrderResult, getSupplierOrder, listSupplierOrders, markItemsBlankOrdered, cancelSupplierOrder, getInventoryValuation, getCogsReport, planBlankCatchUp, applyBlankCatchUp, voidInventoryMovement, getInventoryMovementById, restoreInventoryMovement, getInventoryRestoreBlocker, removeBlankColorImages, analyzePricing, planProductPreview, getPricingSettingsView, pricingBelowTargetForBlanks, setPricingSettings,
+  nextSupplierPoNumber, insertSupplierOrder, claimSupplierOrderRetry, setSupplierOrderResult, getSupplierOrder, listSupplierOrders, markItemsBlankOrdered, cancelSupplierOrder, getInventoryValuation, getCogsReport, planBlankCatchUp, applyBlankCatchUp, voidInventoryMovement, getInventoryMovementById, restoreInventoryMovement, getInventoryRestoreBlocker, removeBlankColorImages, analyzePricing, planProductPreview, getPricingSettingsView, pricingBelowTargetForBlanks, setPricingSettings, getShopRate, computeShopRate, setShopRate,
   voidOrder, voidPayment, getClosedPeriods, isMonthClosed, closePeriod, reopenPeriod, monthOf,
   orderMonth, itemOrderMonth, paymentMonth, movementMonth, getCashReport, getAccountantExport,
   bumpCatalogVersion, listStockPurchases,
@@ -191,6 +191,7 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "getGlobalSettings", "updateGlobalSettings", "getSetupStatus", "getCloudflareSetup", "connectCloudflare", "getMachineSettings", "updateMachineSettings",
   "getShipFromAddress", "updateShipFromAddress", "getBusinessProfile", "updateBusinessProfile",
   "getLocaleSettings", "updateLocaleSettings", "getFeatures", "updateFeatures",
+  "getShopRate", "saveShopRate",
   "getEmailSettings", "updateEmailSettings", "checkMailbox", "previewCustomerEmail", "samplePdf", "sendSampleEmail",
   "getSalesTaxSettings", "updateSalesTaxSettings",
   "getBoxPresets", "setBoxPresets",
@@ -297,6 +298,7 @@ const ADMIN_ONLY_ACTIONS = [
   "updateRushSettings",   // rush fees (migrations/0082)
   "updateEmailSettings", "sendSampleEmail",   // Global settings → Customer emails
   "checkMailbox",                             // Global settings → Email: signs in to the owner's mailbox with a password typed there
+  "getShopRate", "saveShopRate",              // Finance → Shop rate: the business's costs, and the target every price is held to
 ];
 const MANAGER_ACTIONS = [
   "getRushSettings", "setRushFee",                                // rush fees (migrations/0082)
@@ -376,7 +378,7 @@ const FEATURE_ACTIONS = {
     "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth", "listCashoutPayments",
     "listAccounts", "saveAccount", "saveMoneyDefaults", "listMoney", "saveMoneyEntry", "deleteMoneyEntry", "setPaymentAccount",
     "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount",
-    "listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory",
+    "listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory", "getShopRate", "saveShopRate",
     "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses",
     "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",
   ],
@@ -419,6 +421,17 @@ const NO_SHIPPING_FEATURE_MSG = "Carrier shipping is turned off (Global settings
 // A Deploy-button install before its Setup step (noDomainYet in onRequestPost). public/admin.js says the same (NO_DOMAIN_YET_).
 const NO_DOMAIN_MSG = "This shop can't open for orders until your site has its own domain: each shop's address is <name>.<your domain>. Until then you can build it and preview it.";
 
+// Finance → Shop rate as the page shows it: dollars.
+function shopRateView_(r) {
+  const d = (c) => c == null ? null : Math.round(c) / 100;
+  return { period: r.period, hours: r.hours, hoursPerWeek: r.hoursPerWeek, weeksPerYear: r.weeksPerYear, timedHours: r.timedHours, profitPct: r.profitPct,
+    running: r.running.map(c => ({ categoryId: c.categoryId, name: c.name, count: c.count, fromExpenses: d(c.fromExpensesCents), amount: d(c.cents), excluded: c.excluded, overridden: c.overridden, excludedByDefault: c.excludedByDefault })),
+    extras: r.extras.map(x => ({ label: x.label, amount: d(x.cents) })),
+    equipment: r.equipment.map(e => ({ expenseId: e.expenseId, description: e.description, date: e.date, cost: d(e.costCents), life: e.life, defaultLife: e.defaultLife, lifeOverridden: e.lifeOverridden, perYear: d(e.perYearCents) })),
+    running_total: d(r.runningCents), equipment_total: d(r.equipmentCents), overhead: d(r.overheadCents), ownerPay: d(r.ownerPayCents),
+    overheadPerHour: d(r.overheadPerHourCents), payPerHour: d(r.payPerHourCents), profitPerHour: d(r.profitPerHourCents), rate: d(r.ratePerHourCents),
+    saved: r.saved ? { overheadPerHour: d(r.saved.overheadPerHourCents), rate: d(r.saved.ratePerHourCents), savedAt: r.saved.savedAt || "" } : null };
+}
 // Global settings → Email on a cloud install: how it sends, the mailbox (no password), what the hosted
 // services have set, and whether a password can be stored (VENDOR_CREDENTIALS_KEY).
 async function emailSendingView_(env) {
@@ -3450,7 +3463,27 @@ export async function onRequestPost(context) {
 
     // ---- Pricing awareness (migrations/0067): fees, supplies, targets, and the analysis itself ----
     if (body.action === "getPricingSettings") {
-      return jsonResponse({ status: "ok", pricing: await getPricingSettingsView(env.DB) });
+      const sr = ((await getShopRate(env.DB).catch(() => ({}))) || {}).result;
+      const shopRate = sr && sr.ratePerHourCents != null ? { rate: sr.ratePerHourCents / 100, overheadPerHour: (sr.overheadPerHourCents || 0) / 100,
+        target: Math.max(0, sr.ratePerHourCents - (sr.overheadPerHourCents || 0)) / 100 } : null;
+      return jsonResponse({ status: "ok", pricing: { ...(await getPricingSettingsView(env.DB)), shopRate } });
+    }
+    // ---- Finance → Shop rate: the year's costs from the expenses (with the owner's overrides), and what an
+    // hour of production must earn. Saving re-flags prices against it (analyzePricing).
+    if (body.action === "getShopRate") {
+      // With `shopRate` (the page's unsaved choices, e.g. another period): worked out from those, nothing saved.
+      const saved = await getShopRate(env.DB);
+      const input = body.shopRate && typeof body.shopRate === "object" ? { ...body.shopRate, result: saved.result } : null;
+      return jsonResponse({ status: "ok", shopRate: shopRateView_(await computeShopRate(env.DB, input, { today: new Date((await localToday(env)) + "T12:00:00Z") })), input: saved });
+    }
+    if (body.action === "saveShopRate") {
+      let r;
+      try { r = await setShopRate(env.DB, body.shopRate || {}, { today: new Date((await localToday(env)) + "T12:00:00Z") }); }
+      catch (e) { if (e && e.status === 400) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
+      audit({ orgId: null, orderId: null, action: "settings.shop_rate_set", detail: { overheadPerHourCents: r.overheadPerHourCents, ratePerHourCents: r.ratePerHourCents, hours: r.hours, period: r.period.key } });
+      const all = await analyzePricing(env.DB);
+      const below = all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems }));
+      return jsonResponse({ status: "ok", shopRate: shopRateView_(r), input: await getShopRate(env.DB), belowTarget: below });
     }
     if (body.action === "updatePricingSettings") {
       const b = body.pricing || {};

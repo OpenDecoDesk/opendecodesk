@@ -1964,6 +1964,110 @@ export async function setPricingSettings(db, s) {
   return next;
 }
 
+// ---- Shop rate (Finance → Shop rate) ------------------------------------------------------------------------
+// What an hour of production costs: a year of running costs from the expenses (business share), equipment spread
+// over its life, an optional owner pay and profit %, divided by the hours worked. Every figure can be overridden;
+// the overrides and the result are saved in global_settings 'shopRate'. Pricing analysis charges the overhead per
+// hour on each product (run time × overhead) and uses the full rate as the target hourly rate unless one is typed.
+//   saved = { period: "last12" | "YYYY", categories: { [categoryId]: { cents } | { excluded: true } | { included: true } },
+//             extras: [{ label, cents }], lives: { [expenseId]: years }, ownerPayCents, profitPct, hoursPerWeek, weeksPerYear,
+//             result: { overheadPerHourCents, ratePerHourCents, savedAt } }
+// Costs that are already counted per product start excluded: shop supplies (a product's "supplies" cost).
+const SHOP_RATE_EXCLUDED_RE_ = /suppl/i;
+const SHOP_RATE_LIFE_ = { macrs5: 5, macrs7: 7 };
+const isoDay_ = (d) => d.toISOString().slice(0, 10);
+export function shopRatePeriod(period, today = new Date()) {
+  if (/^\d{4}$/.test(String(period || ""))) return { key: String(period), from: period + "-01-01", to: period + "-12-31", label: String(period) };
+  const to = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const from = new Date(Date.UTC(to.getUTCFullYear() - 1, to.getUTCMonth(), to.getUTCDate() + 1));
+  return { key: "last12", from: isoDay_(from), to: isoDay_(to), label: "Last 12 months" };
+}
+export async function getShopRate(db) {
+  const raw = await getSettingRaw(db, "shopRate").catch(() => null);
+  const v = tryParse_(raw, {}) || {};
+  return v && typeof v === "object" ? v : {};
+}
+// The figures, from the expenses and the saved (or given) choices. Money in cents.
+export async function computeShopRate(db, input = null, { today = new Date() } = {}) {
+  const s = input || await getShopRate(db);
+  const per = shopRatePeriod(s.period, today);
+  const cats = s.categories && typeof s.categories === "object" ? s.categories : {};
+  const lives = s.lives && typeof s.lives === "object" ? s.lives : {};
+  const share = (r) => Math.round(Number(r.amountCents) * Number(r.businessUsePct || 100) / 100);
+  // Running costs: the period's expenses by category, except equipment.
+  const { results: inPeriod } = await db.prepare(`${EXPENSE_SELECT_} WHERE e.expenseDate >= ? AND e.expenseDate <= ? AND e.deletedAt IS NULL`).bind(per.from, per.to).all();
+  const byCat = new Map();
+  for (const c of await listExpenseCategories(db)) if (c.deductionType !== "depreciation") byCat.set(Number(c.id), { categoryId: Number(c.id), name: c.name, fromExpensesCents: 0, count: 0 });
+  for (const r of inPeriod) {
+    if (r.deductionType === "depreciation") continue;
+    const c = byCat.get(Number(r.categoryId)); if (!c) continue;
+    c.fromExpensesCents += share(r); c.count++;
+  }
+  const running = [...byCat.values()].filter(c => c.count || cats[c.categoryId]).map(c => {
+    const o = cats[c.categoryId] || {};
+    const excluded = o.excluded === true || (SHOP_RATE_EXCLUDED_RE_.test(c.name) && o.included !== true && o.cents == null);
+    const overridden = !excluded && o.cents != null && Number.isFinite(Number(o.cents));
+    const cents = excluded ? 0 : overridden ? Math.max(0, Math.round(Number(o.cents))) : c.fromExpensesCents;
+    return { ...c, excluded, overridden, cents, excludedByDefault: SHOP_RATE_EXCLUDED_RE_.test(c.name) };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+  const extras = (Array.isArray(s.extras) ? s.extras : []).map(x => ({ label: String((x && x.label) || "").slice(0, 100), cents: Math.max(0, Math.round(Number(x && x.cents) || 0)) })).filter(x => x.label || x.cents);
+  const runningCents = running.reduce((n, c) => n + c.cents, 0) + extras.reduce((n, x) => n + x.cents, 0);
+  // Equipment: every equipment expense bought by the period's end whose life isn't used up at its start.
+  const { results: gear } = await db.prepare(`${EXPENSE_SELECT_} WHERE c.deductionType = 'depreciation' AND e.deletedAt IS NULL AND e.expenseDate <= ? ORDER BY e.expenseDate`).bind(per.to).all();
+  const equipment = [];
+  for (const r of gear) {
+    const defaultLife = SHOP_RATE_LIFE_[r.depMethod] || 5;
+    const life = Number(lives[r.id]) >= 1 && Number(lives[r.id]) <= 50 ? Math.round(Number(lives[r.id])) : defaultLife;
+    const start = String(r.placedInService || r.expenseDate);
+    const ends = (Number(start.slice(0, 4)) + life) + start.slice(4);
+    if (ends <= per.from) continue;   // fully used up before the period
+    const basis = share(r);
+    equipment.push({ expenseId: Number(r.id), description: r.description, date: start, costCents: basis, life, defaultLife, lifeOverridden: life !== defaultLife,
+      perYearCents: Math.round(basis / life) });
+  }
+  const equipmentCents = equipment.reduce((n, e) => n + e.perYearCents, 0);
+  const overheadCents = runningCents + equipmentCents;
+  const hoursPerWeek = Math.max(0, Math.min(168, Number(s.hoursPerWeek) || 0)), weeksPerYear = Math.max(0, Math.min(52, Number(s.weeksPerYear) || 0));
+  const hours = Math.round(hoursPerWeek * weeksPerYear * 100) / 100;
+  const ownerPayCents = Math.max(0, Math.round(Number(s.ownerPayCents) || 0)), profitPct = Math.max(0, Math.min(500, Number(s.profitPct) || 0));
+  const perHour = (c) => hours > 0 ? Math.round(c / hours) : null;
+  const overheadPerHourCents = perHour(overheadCents), payPerHourCents = perHour(ownerPayCents);
+  const profitPerHourCents = hours > 0 ? Math.round((overheadPerHourCents + payPerHourCents) * profitPct / 100) : null;
+  const ratePerHourCents = hours > 0 ? overheadPerHourCents + payPerHourCents + profitPerHourCents : null;
+  // The hint: machine time actually timed on Run order over the period.
+  let timedMinutes = 0;
+  try {
+    const { results: runs } = await db.prepare("SELECT startedAt, finishedAt FROM production_runs WHERE status = 'done' AND timed = 1 AND finishedAt >= ? AND finishedAt <= ?")
+      .bind(per.from, per.to + "T23:59:59.999Z").all();
+    for (const r of runs || []) { const ms = new Date(r.finishedAt) - new Date(r.startedAt); if (ms > 0 && ms < 24 * 3600e3) timedMinutes += ms / 60000; }
+  } catch (e) { timedMinutes = 0; }
+  return { period: per, running, extras, runningCents, equipment, equipmentCents, overheadCents, ownerPayCents, profitPct, hoursPerWeek, weeksPerYear, hours,
+    timedHours: Math.round(timedMinutes / 6) / 10, overheadPerHourCents, payPerHourCents, profitPerHourCents, ratePerHourCents,
+    saved: s.result || null };
+}
+// Saves the choices (cleaned) and the result worked out from them. Returns computeShopRate's answer.
+export async function setShopRate(db, input, { today = new Date() } = {}) {
+  const i = input && typeof input === "object" ? input : {};
+  const cats = {};
+  for (const [k, v] of Object.entries(i.categories && typeof i.categories === "object" ? i.categories : {})) {
+    if (!/^\d+$/.test(k) || !v || typeof v !== "object") continue;
+    if (v.excluded === true) cats[k] = { excluded: true };
+    else if (v.cents != null && v.cents !== "" && Number.isFinite(Number(v.cents)) && Number(v.cents) >= 0) cats[k] = { cents: Math.min(1e11, Math.round(Number(v.cents))) };
+    else if (v.included === true) cats[k] = { included: true };
+  }
+  const lives = {};
+  for (const [k, v] of Object.entries(i.lives && typeof i.lives === "object" ? i.lives : {})) if (/^\d+$/.test(k) && Number(v) >= 1 && Number(v) <= 50) lives[k] = Math.round(Number(v));
+  const clean = { period: /^\d{4}$/.test(String(i.period || "")) ? String(i.period) : "last12", categories: cats,
+    extras: (Array.isArray(i.extras) ? i.extras : []).slice(0, 30).map(x => ({ label: String((x && x.label) || "").trim().slice(0, 100), cents: Math.max(0, Math.min(1e11, Math.round(Number(x && x.cents) || 0))) })).filter(x => x.label || x.cents),
+    lives, ownerPayCents: Math.max(0, Math.min(1e11, Math.round(Number(i.ownerPayCents) || 0))), profitPct: Math.max(0, Math.min(500, Number(i.profitPct) || 0)),
+    hoursPerWeek: Math.max(0, Math.min(168, Number(i.hoursPerWeek) || 0)), weeksPerYear: Math.max(0, Math.min(52, Number(i.weeksPerYear) || 0)) };
+  if (!(clean.hoursPerWeek > 0 && clean.weeksPerYear > 0)) { const e = new Error("Enter the production hours a week and the weeks a year."); e.status = 400; throw e; }
+  const r = await computeShopRate(db, clean, { today });
+  clean.result = { overheadPerHourCents: r.overheadPerHourCents, ratePerHourCents: r.ratePerHourCents, savedAt: new Date().toISOString() };
+  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('shopRate', ?)").bind(JSON.stringify(clean)).run();
+  return { ...r, saved: clean.result };
+}
+
 // Average minutes to make one piece of each product, from its timed, finished runs (every hooping of a piece
 // added up). {productId: {minutes, pieces}} for one shop. Untimed hoopings ("Mark done (no timing)") and pieces
 // with any untimed hooping are left out, so a piece is never counted as quicker than it was.
@@ -1995,7 +2099,16 @@ async function avgRunMinutesByProduct_(db, orgId) {
 // rows: [{group, size, price, blank, blankSource, card, tax, transfer, supplies, costs, income, hourly, flags}],
 // addOns: [...], minIncome, maxIncome, minHourly, belowTarget, problems: [text]}]}, money in dollars.
 export async function analyzePricing(db, { orgId = null, productId = null, draft = null } = {}) {
-  const settings = await getPricingSettings(db);
+  // The saved shop rate (Finance → Shop rate): its overhead is charged per run minute, and the full rate is the
+  // target hourly rate unless one is typed in Global settings → Pricing.
+  const typed = await getPricingSettings(db);
+  const shopSaved = ((await getShopRate(db).catch(() => ({}))) || {}).result || null;
+  const shop = shopSaved && shopSaved.ratePerHourCents != null ? shopSaved : null;
+  // Income is after overhead, so the hourly target it's held to is the rest of the rate: your pay and profit per hour
+  // (an item earning that after overhead earns the full shop rate before it).
+  const shopTargetCents = shop ? Math.max(0, Number(shop.ratePerHourCents) - Number(shop.overheadPerHourCents || 0)) : null;
+  const settings = { ...typed, targetHourlyCents: typed.targetHourlyCents != null ? typed.targetHourlyCents : shop ? shopTargetCents : null };
+  const targetHourlySource = typed.targetHourlyCents != null ? "typed" : shop ? "shopRate" : null;
   const { rateBps, taxMode } = await getSalesTaxSettings(db);
   // Tax added on top (Global settings → Sales tax): the customer pays it over the price, so it isn't a cost —
   // but the card fee is charged on the price plus that tax. Prices that include tax: the tax comes out of them.
@@ -2076,7 +2189,8 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
         const taxIn = p.taxable === false ? 0 : taxOnTop ? addTaxExclusive(price, rateBps).taxCents : splitTaxInclusive(price, rateBps).taxCents;
         const card = cardOf(taxOnTop ? price + taxIn : price), tax = taxOnTop ? 0 : taxIn;
         const transfer = qrCents + fixedCents + ownTransfer;
-        const costs = (b.cents || 0) + card + tax + transfer + supplies;
+        const overhead = shop && minutes ? Math.round(minutes * Number(shop.overheadPerHourCents || 0) / 60) : 0;
+        const costs = (b.cents || 0) + card + tax + transfer + supplies + overhead;
         const income = price - costs;
         const hourly = minutes ? Math.round(income * 60 / minutes) : null;
         const flags = [];
@@ -2092,7 +2206,7 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
           if (settings.targetIncomeCents != null) flags.push("income");
           if (settings.targetHourlyCents != null && hourly != null) flags.push("hourly");
         }
-        rows.push({ group: g.label, size, price, blank: b.cents, blankSource: b.source, map: b.map, mapOf: b.mapOf, mapBlank: b.mapBlank, mapBrand: b.mapBrand, ruleMin: b.ruleMin, ruleOf: b.ruleOf, card, tax, transfer, supplies, costs, income, hourly, flags });
+        rows.push({ group: g.label, size, price, blank: b.cents, blankSource: b.source, map: b.map, mapOf: b.mapOf, mapBlank: b.mapBlank, mapBrand: b.mapBrand, ruleMin: b.ruleMin, ruleOf: b.ruleOf, card, tax, transfer, supplies, overhead, costs, income, hourly, flags });
       }
     }
     // A configurable product's graphic add-ons: per location, the offered graphic that leaves the least.
@@ -2127,12 +2241,15 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
       avgRunMinutes: run ? run.minutes : null, avgRunPieces: run ? run.pieces : 0, reorderQr: qrName, transferOwn: $(ownTransfer), transferFixed: $(fixedCents),
       suppliesFromProduct: p.suppliesCost != null,
       belowMap: mapProblems.length > 0, mapProblems, belowPriceRule: ruleProblems.length > 0, ruleProblems,
-      rows: rows.map(r => ({ ...r, price: $(r.price), blank: $(r.blank), map: $(r.map), ruleMin: $(r.ruleMin), card: $(r.card), tax: $(r.tax), transfer: $(r.transfer), supplies: $(r.supplies), costs: $(r.costs), income: $(r.income), hourly: $(r.hourly) })),
+      rows: rows.map(r => ({ ...r, price: $(r.price), blank: $(r.blank), map: $(r.map), ruleMin: $(r.ruleMin), card: $(r.card), tax: $(r.tax), transfer: $(r.transfer), supplies: $(r.supplies), overhead: $(r.overhead), costs: $(r.costs), income: $(r.income), hourly: $(r.hourly) })),
       addOns: addOns.map(a => ({ ...a, price: $(a.price), transfer: $(a.transfer), income: $(a.income) })),
       minIncome: incomes.length ? $(Math.min(...incomes)) : null, maxIncome: incomes.length ? $(Math.max(...incomes)) : null,
       minHourly: hours.length ? $(Math.min(...hours)) : null, belowTarget: !!(lowBoth.length || lowIncome.length || lowHourly.length), problems });
   }
-  return { settings: { ...(await getPricingSettingsView(db)), taxMode: taxOnTop ? "exclusive" : "inclusive" }, taxMode: taxOnTop ? "exclusive" : "inclusive", products: out };
+  const view = await getPricingSettingsView(db);
+  return { settings: { ...view, targetHourly: settings.targetHourlyCents == null ? null : fromCents(settings.targetHourlyCents), targetHourlyTyped: view.targetHourly, targetHourlySource,
+      shopRate: shop ? { overheadPerHour: fromCents(shop.overheadPerHourCents || 0), rate: fromCents(shop.ratePerHourCents), savedAt: shop.savedAt || "" } : null,
+      taxMode: taxOnTop ? "exclusive" : "inclusive" }, taxMode: taxOnTop ? "exclusive" : "inclusive", products: out };
 }
 
 // For the 6 AM roll-up: visible products below a pricing target that WEREN'T last time (global_settings key

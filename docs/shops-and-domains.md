@@ -401,6 +401,11 @@ on its form, on the Products list, in **Price analysis** (on Manage catalog and 
 by the catalog check, and the morning roll-up lists products that slip below one (a blank's cost, a fee
 or a target changed). Staff can edit products but don't see costs and margins.
 
+Once a **shop rate** is saved (Finance → Shop rate, [operations.md](operations.md#shop-rate)), each item
+also carries its share of the business's **overhead**: its run time × the overhead per hour, shown in an
+**Overhead** column, and the income is what's left after it. The hourly target is then the rest of the
+shop rate (your pay and profit per hour), unless you type your own **Target effective hourly rate**.
+
 ## Printed transfers and mockups
 
 A product can carry **Printed transfers (DTF)** at fixed locations — a crest on the back of an

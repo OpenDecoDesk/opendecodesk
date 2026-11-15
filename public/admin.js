@@ -252,6 +252,7 @@ async function adminRoute() {
   if (raw === "money")     { renderMoney(app); return; }
   if (raw === "reconcile") { renderReconcile(app); return; }
   if (raw === "accountviewer") { renderAccountViewer(app); return; }
+  if (raw === "shoprate") { renderShopRate(app); return; }
   if (raw === "security") { render2FASetup(app); return; }
   if (raw === "password") { renderChangePassword(app, false); return; }
   if (raw === "users") { renderUsers(app); return; }
@@ -1135,7 +1136,7 @@ const ADMIN_NAV_GROUPS = [
     ["threads", "Threads"], ["abortreasons", "Abort reasons"],
   ]},
   { label: "Inventory", items: [ ["inventory", "Blanks"], ["blankorder", "Blanks to order"], ["transfers", "Transfers"] ]},
-  { label: "Finance", items: [ ["expenses", "Expenses"], ["money", "Accounts & money"], ["reconcile", "Reconcile"], ["accountviewer", "Account viewer"] ]},
+  { label: "Finance", items: [ ["expenses", "Expenses"], ["money", "Accounts & money"], ["reconcile", "Reconcile"], ["accountviewer", "Account viewer"], ["shoprate", "Shop rate"] ]},
   { label: "Reports", items: [ ["audit", "Audit log"], ["revenue", "Revenue report"], ["salestax", "Sales tax report"], ["cogs", "Inventory & COGS"], ["runreport", "Run times"], ["books", "Periods & export"] ]},
   { label: "Settings", items: [
     ["settings", "Global settings"], ["vendors", "Vendor integrations"], ["comms", "Communications"], ["orphans", "Orphaned images"],
@@ -1153,7 +1154,7 @@ const ADMIN_NAV_TOOLS = ADMIN_NAV_GROUPS.flatMap(g => g.items.filter(Array.isArr
 const ADMIN_PAGE_FEATURE = {
   runorder: "production", machines: "production", maintenance: "production", machinefiles: "production", hoops: "production", threads: "production",
   abortreasons: "production", runreport: "production", designs: "production",
-  expenses: "bookkeeping", money: "bookkeeping", reconcile: "bookkeeping", books: "bookkeeping", accountviewer: "bookkeeping",
+  expenses: "bookkeeping", money: "bookkeeping", reconcile: "bookkeeping", books: "bookkeeping", accountviewer: "bookkeeping", shoprate: "bookkeeping",
   packages: "shipping",
 };
 // Names for the "turned off" page; replaced by the server's own list once Global settings has loaded it.
@@ -1494,7 +1495,7 @@ function renderDesktopOff_(app, hash){
 // authority; this keeps people from landing on screens that could only show refusals).
 // Global settings is an admin's page: every change on it is (updateGlobalSettings, updateFeatures, the
 // business profile, region, sales tax, ship-from), so nobody else is shown it at all.
-const ADMIN_ONLY_PAGES = ["users", "audit", "settings", "catalog/settings", "vendors", "orphans"];
+const ADMIN_ONLY_PAGES = ["users", "audit", "settings", "catalog/settings", "vendors", "orphans", "shoprate"];
 const ADMIN_MANAGER_PAGES = ["packages", "brandrules", "money", "reconcile", "accountviewer", "books", "catalog/new-org"];
 function adminPageRole_(hash){
   const raw = String(hash || "").replace(/^#\/?/, "");
@@ -6920,14 +6921,15 @@ function pricingTableHtml_(a, settings){
     : `<span title="${r.blankSource === "vendor" ? "The blank's vendor price" : r.blankSource === "average" ? "The blank's average cost (no vendor price entered)" : "Made with no blank"}">${pricingMoney_(r.blank)}${r.blankSource === "average" ? "*" : ""}</span>`;
   const hasGroups = a.rows.some(r => r.group);
   const hasMap = a.rows.some(r => r.map != null);   // migrations/0070
+  const hasOverhead = !!(settings && settings.shopRate);   // Finance → Shop rate saved
   return `<div style="overflow-x:auto;"><table class="pricing-table" style="border-collapse:collapse;width:100%;">
     <thead><tr><th style="${th}text-align:left;">${hasGroups ? "Colors · size" : "Size"}</th><th style="${th}">Price</th>${hasMap ? `<th style="${th}" title="The blank's minimum advertised price — the price can't be below it">MAP</th>` : ""}<th style="${th}">Blank</th><th style="${th}" title="Card processing at ${settings.cardPct}% + $${Number(settings.cardFixed).toFixed(2)}, as if paid by card">Card</th>
-      <th style="${th}" title="${settings && settings.taxMode === "exclusive" ? "Sales tax is added on top of your prices, so it costs you nothing (the card fee above is on the price plus tax)" : "Sales tax backed out of the price (in-state)"}">Tax</th><th style="${th}" title="Linked transfers (reorder QR, printed transfers) + this product's own DTF / transfer cost">DTF</th><th style="${th}">Supplies</th>
+      <th style="${th}" title="${settings && settings.taxMode === "exclusive" ? "Sales tax is added on top of your prices, so it costs you nothing (the card fee above is on the price plus tax)" : "Sales tax backed out of the price (in-state)"}">Tax</th><th style="${th}" title="Linked transfers (reorder QR, printed transfers) + this product's own DTF / transfer cost">DTF</th><th style="${th}">Supplies</th>${hasOverhead ? `<th style="${th}" title="Run time × the overhead per hour from Finance → Shop rate">Overhead</th>` : ""}
       <th style="${th}">Costs</th><th style="${th}">Income</th><th style="${th}">$/hr</th></tr></thead>
     <tbody>${a.rows.map(r => `<tr class="pricing-row${r.flags.length ? " pricing-flagged" : ""}">
       <td style="${td}text-align:left;">${escapeHtml([r.group, r.size].filter(Boolean).join(" · ") || "One price")}</td>
       <td style="${td}${low(r, "map")}">${pricingMoney_(r.price)}</td>${hasMap ? `<td style="${td}color:#6b21a8;" title="${escapeHtml(r.mapOf || "")}">${r.map == null ? "—" : pricingMoney_(r.map)}</td>` : ""}<td style="${td}">${blankCell(r)}</td><td style="${td}">${pricingMoney_(r.card)}</td>
-      <td style="${td}">${pricingMoney_(r.tax)}</td><td style="${td}">${pricingMoney_(r.transfer)}</td><td style="${td}">${pricingMoney_(r.supplies)}</td>
+      <td style="${td}">${pricingMoney_(r.tax)}</td><td style="${td}">${pricingMoney_(r.transfer)}</td><td style="${td}">${pricingMoney_(r.supplies)}</td>${hasOverhead ? `<td style="${td}">${r.overhead ? pricingMoney_(r.overhead) : `<span style="color:#888;" title="No run time typed: no overhead charged">—</span>`}</td>` : ""}
       <td style="${td}">${pricingMoney_(r.costs)}</td><td style="${td}${low(r, "income")}">${pricingMoney_(r.income)}</td>
       <td style="${td}${low(r, "hourly")}">${r.hourly == null ? `<span style="color:#888;" title="Type a run time to see the hourly rate">—</span>` : pricingMoney_(r.hourly) + "/hr"}</td></tr>`).join("")}</tbody></table></div>
     ${a.rows.some(r => r.blankSource === "average") ? `<div class="admin-note" style="margin-top:2px;">* average cost — no vendor price entered for that blank size.</div>` : ""}
@@ -6957,10 +6959,12 @@ async function showPriceAnalysis_(params, opts){
   const st = d.settings, list = d.products.filter(p => p.rows.length).sort((a, b) => (Number(!!(b.belowMap || b.belowTarget)) - Number(!!(a.belowMap || a.belowTarget))) || String(a.orgId).localeCompare(b.orgId) || a.name.localeCompare(b.name));
   const orgName = (id) => ((window._adminOrgRegistry || []).find(o => o.orgId === id) || (adminOrgs || []).find(o => o.orgId === id) || {}).name || id;
   const below = list.filter(p => p.belowTarget || p.belowMap).length;
-  const targets = [st.targetIncome != null ? `income ${pricingMoney_(st.targetIncome)}/item` : "", st.targetHourly != null ? `${pricingMoney_(st.targetHourly)}/hr` : ""].filter(Boolean).join(" and ");
+  const targets = [st.targetIncome != null ? `income ${pricingMoney_(st.targetIncome)}/item` : "",
+    st.targetHourly != null ? `${pricingMoney_(st.targetHourly)}/hr${st.targetHourlySource === "shopRate" ? ` after overhead (shop rate ${pricingMoney_(st.shopRate.rate)}/hr − overhead ${pricingMoney_(st.shopRate.overheadPerHour)}/hr)` : ""}` : ""].filter(Boolean).join(" and ");
+  const overheadNote = st.shopRate ? `Overhead: run time × ${pricingMoney_(st.shopRate.overheadPerHour)}/hr (Finance → Shop rate); income is after it. ` : "";
   body.style.color = "var(--ink,#111)";
   body.innerHTML = `<div style="font-size:12px;color:#555;margin-bottom:10px;line-height:1.5;">Costs per item: blank (vendor price, else average cost) + card ${st.cardPct}% + $${Number(st.cardFixed).toFixed(2)} + ${st.taxMode === "exclusive" ? `no sales tax (it's added on top of your prices; the card fee includes it)` : `sales tax ${st.taxRateBps / 100}% (taxable products)`} + DTF / transfers + shop supplies $${Number(st.supplies).toFixed(2)} (unless the product sets its own).
-      ${targets ? `Targets: <b>${escapeHtml(targets)}</b>. ` : `No targets set — add them in Global settings → Pricing to flag items. `}${list.length > 1 ? `<b style="color:${below ? "#b03a2e" : "#166534"};">${below} of ${list.length} product${list.length === 1 ? "" : "s"} below target.</b>` : ""}</div>
+      ${escapeHtml(overheadNote)}${targets ? `Targets: <b>${escapeHtml(targets)}</b>. ` : `No targets set — add them in Global settings → Pricing to flag items. `}${list.length > 1 ? `<b style="color:${below ? "#b03a2e" : "#166534"};">${below} of ${list.length} product${list.length === 1 ? "" : "s"} below target.</b>` : ""}</div>
     ${list.map(a => `<details class="pa-product" ${list.length === 1 || a.belowTarget || a.belowMap ? "open" : ""} style="border:1px solid ${a.belowTarget || a.belowMap ? "#fca5a5" : "#e5e7eb"};border-radius:6px;padding:6px 10px;margin-bottom:8px;">
       <summary style="cursor:pointer;font-size:13px;"><b>${escapeHtml(a.name)}</b>${params && params.org ? "" : ` <span style="color:#666;">(${escapeHtml(orgName(a.orgId))})</span>`}${a.visible ? "" : ` <span style="color:#888;">· hidden</span>`} — ${pricingLineHtml_(a)}
         ${a.runMinutes != null ? `<span style="color:#666;"> · run ${a.runMinutes} min</span>` : ""}${a.avgRunMinutes != null ? `<span style="color:#666;"> · avg ${a.avgRunMinutes} min (${a.avgRunPieces} piece${a.avgRunPieces === 1 ? "" : "s"})</span>` : ""}
@@ -8537,7 +8541,8 @@ async function renderGlobalSettings(app){
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
           <label style="flex:0 0 220px;">Target effective hourly rate ($/hr)
-            <input type="number" id="gPriceTargetHourly" min="0" step="0.01" value="${pv(pricing.targetHourly)}" placeholder="optional">
+            <input type="number" id="gPriceTargetHourly" min="0" step="0.01" value="${pv(pricing.targetHourly)}" placeholder="${pricing.shopRate ? `${Number(pricing.shopRate.target).toFixed(2)} from Shop rate` : "optional"}">
+            ${pricing.shopRate ? `<span class="admin-note" id="gPriceShopRateNote" style="display:block;font-weight:400;">Blank = <b>$${Number(pricing.shopRate.target).toFixed(2)}/hr after overhead</b> from <a href="#shoprate">Finance → Shop rate</a> ($${Number(pricing.shopRate.rate).toFixed(2)}/hr). Type a figure to use your own instead.</span>` : ""}
           </label>
           <label style="flex:0 0 220px;">Target income per item ($)
             <input type="number" id="gPriceTargetIncome" min="0" step="0.01" value="${pv(pricing.targetIncome)}" placeholder="optional">
@@ -15560,6 +15565,148 @@ function mapStatementRows_(rows, mp){
     out.push({ date, description: String(r[mp.desc] || "").trim(), amount: Math.round(amt * 100) / 100 });
   });
   return { lines: out, errors };
+}
+
+// ---- Shop rate (Finance → Shop rate) -----------------------------------------------------------------------------
+// What an hour of production costs: a year of running costs from the expenses, equipment spread over its life, your
+// pay and profit, divided by the hours you work. Every figure can be changed; the server works the numbers out
+// (getShopRate, with the page's choices) so they always match what pricing uses once saved (saveShopRate).
+const srMoney_ = (v) => v == null ? "—" : "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+async function renderShopRate(app){
+  adminSetHash("shoprate");
+  document.title = adminTitle_("Shop rate");
+  app.innerHTML = `${adminPageHead_("Shop rate")}
+    <div class="admin-panel" id="srPanel" style="--org-accent:var(--accent);max-width:980px;margin:8px auto 60px;"><div class="admin-summary">Loading&hellip;</div></div>`;
+  let d;
+  try { d = await hoopApi_({ action: "getShopRate" }); } catch (e) { document.getElementById("srPanel").innerHTML = `<div class="admin-error">${escapeHtml(e.message)}</div>`; return; }
+  window._sr = { input: d.input || {}, view: d.shopRate };
+  shopRateDraw_();
+}
+// The page's choices, read from its fields: what getShopRate / saveShopRate take.
+function shopRateChoices_(){
+  const $ = (id) => document.getElementById(id), num = (el) => el && el.value !== "" ? Number(el.value) : null;
+  const v = window._sr.view, categories = {}, lives = {};
+  document.querySelectorAll("#srRunning tr[data-cat]").forEach(tr => {
+    const id = tr.dataset.cat, row = v.running.find(c => String(c.categoryId) === id) || {};
+    const on = tr.querySelector(".sr-inc").checked, amt = num(tr.querySelector(".sr-amt"));
+    if (!on) categories[id] = { excluded: true };
+    else if (amt != null && Math.round(amt * 100) !== Math.round((row.fromExpenses || 0) * 100)) categories[id] = { cents: Math.round(amt * 100) };
+    else if (row.excludedByDefault) categories[id] = { included: true };
+  });
+  document.querySelectorAll("#srEquipment tr[data-exp]").forEach(tr => {
+    const e = v.equipment.find(x => String(x.expenseId) === tr.dataset.exp) || {}, life = num(tr.querySelector(".sr-life"));
+    if (life != null && life !== e.defaultLife) lives[tr.dataset.exp] = life;
+  });
+  const extras = [...document.querySelectorAll("#srExtras .sr-extra")].map(r => ({ label: r.querySelector(".sr-xlabel").value.trim(), cents: Math.round((num(r.querySelector(".sr-xamt")) || 0) * 100) })).filter(x => x.label || x.cents);
+  return { period: $("srPeriod").value, categories, lives, extras, ownerPayCents: Math.round((num($("srPay")) || 0) * 100), profitPct: num($("srProfit")) || 0,
+    hoursPerWeek: num($("srHours")) || 0, weeksPerYear: num($("srWeeks")) || 0 };
+}
+function shopRateDraw_(){
+  const { view: v, input: i } = window._sr, panel = document.getElementById("srPanel");
+  const inp = "font-size:13px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
+  const th = "text-align:left;font-size:12px;color:#555;font-weight:700;padding:4px 6px;border-bottom:1px solid #ddd;";
+  const td = "padding:4px 6px;font-size:13px;border-bottom:1px solid #f0f0f0;";
+  const year = new Date().getFullYear();
+  const periods = [["last12", "Last 12 months"], [String(year), String(year)], [String(year - 1), String(year - 1)], [String(year - 2), String(year - 2)]];
+  const sec = (t) => `<h3 style="margin:20px 0 6px;font-size:15px;">${t}</h3>`;
+  panel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+      <div class="admin-note" style="max-width:600px;margin:0;">What an hour of production costs to run, from your expenses. Change any figure: your number is kept (✎) and the expense total stays beside it. Saved, it's used by price analysis.</div>
+      <label style="font-size:12px;font-weight:600;">Based on<br><select id="srPeriod" style="${inp}">${periods.map(([k, l]) => `<option value="${k}"${k === v.period.key ? " selected" : ""}>${l}</option>`).join("")}</select>
+        <span style="font-weight:400;color:#666;">${escapeHtml(v.period.from)} – ${escapeHtml(v.period.to)}</span></label>
+    </div>
+    ${sec("Running costs (a year)")}
+    <table style="border-collapse:collapse;width:100%;"><thead><tr><th style="${th}">Count</th><th style="${th}">Category</th><th style="${th}text-align:right;">From expenses</th><th style="${th}">Use</th><th style="${th}text-align:right;">Counted</th></tr></thead>
+      <tbody id="srRunning">${v.running.map(c => `<tr data-cat="${c.categoryId}">
+        <td style="${td}"><input type="checkbox" class="sr-inc"${c.excluded ? "" : " checked"} aria-label="Count ${escapeHtml(c.name)}"></td>
+        <td style="${td}">${escapeHtml(c.name)}${c.excludedByDefault ? `<div style="font-size:11px;color:#666;">Already in each product's "shop supplies" cost — left out unless you tick it.</div>` : ""}</td>
+        <td style="${td}text-align:right;">${srMoney_(c.fromExpenses)}</td>
+        <td style="${td}"><input type="number" class="sr-amt" min="0" step="0.01" value="${c.overridden ? c.amount : c.fromExpenses}" style="${inp}width:110px;"${c.excluded ? " disabled" : ""}>${c.overridden ? ` <span title="Your figure — the expenses say ${srMoney_(c.fromExpenses)}">✎</span>` : ""}</td>
+        <td style="${td}text-align:right;" class="sr-counted">${c.excluded ? "—" : srMoney_(c.amount)}</td></tr>`).join("") || `<tr><td colspan="5" style="${td}color:#666;">No expenses in this period.</td></tr>`}</tbody></table>
+    <div id="srExtras" style="margin-top:6px;">${(v.extras.length ? v.extras : []).map(x => shopRateExtraHtml_(x, inp)).join("")}</div>
+    <button type="button" class="admin-btn admin-btn-secondary" id="srAddExtra" style="padding:3px 10px;font-size:12px;margin-top:4px;">+ Add a cost not in expenses</button>
+    <div style="text-align:right;font-size:13px;margin-top:6px;">Running costs <b id="srRunningTotal">${srMoney_(v.running_total)}</b></div>
+    ${sec("Equipment, spread over its life")}
+    <table style="border-collapse:collapse;width:100%;"><thead><tr><th style="${th}">Item</th><th style="${th}">Bought</th><th style="${th}text-align:right;">Cost</th><th style="${th}">Life (years)</th><th style="${th}text-align:right;">A year</th></tr></thead>
+      <tbody id="srEquipment">${v.equipment.map(e => `<tr data-exp="${e.expenseId}"><td style="${td}">${escapeHtml(e.description)}</td><td style="${td}">${escapeHtml(e.date)}</td>
+        <td style="${td}text-align:right;">${srMoney_(e.cost)}</td><td style="${td}"><input type="number" class="sr-life" min="1" max="50" step="1" value="${e.life}" style="${inp}width:70px;">${e.lifeOverridden ? ` <span title="Your figure — ${e.defaultLife} years from the expense's depreciation choice">✎</span>` : ""}</td>
+        <td style="${td}text-align:right;" class="sr-peryear">${srMoney_(e.perYear)}</td></tr>`).join("") || `<tr><td colspan="5" style="${td}color:#666;">No equipment expenses still within their life.</td></tr>`}</tbody></table>
+    <div class="admin-note" style="margin-top:4px;">The life starts from the depreciation choice on the expense (MACRS 5 or 7 years; 5 otherwise). Equipment counts every year until its life is used up, also when bought before the period.</div>
+    <div style="text-align:right;font-size:13px;margin-top:6px;">Equipment <b id="srEquipmentTotal">${srMoney_(v.equipment_total)}</b> a year</div>
+    ${sec("Your pay and profit (optional)")}
+    <div style="display:flex;gap:16px;flex-wrap:wrap;">
+      <label style="font-size:13px;">What you want to pay yourself a year ($)<br><input type="number" id="srPay" min="0" step="100" value="${i.ownerPayCents ? i.ownerPayCents / 100 : ""}" placeholder="0" style="${inp}width:150px;"></label>
+      <label style="font-size:13px;">Profit on top (%)<br><input type="number" id="srProfit" min="0" max="500" step="1" value="${i.profitPct || ""}" placeholder="0" style="${inp}width:90px;"></label>
+    </div>
+    ${sec("Hours")}
+    <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
+      <label style="font-size:13px;">Production hours a week<br><input type="number" id="srHours" min="0" max="168" step="0.5" value="${i.hoursPerWeek || ""}" style="${inp}width:90px;"></label>
+      <label style="font-size:13px;">Weeks a year<br><input type="number" id="srWeeks" min="0" max="52" step="1" value="${i.weeksPerYear || ""}" placeholder="48" style="${inp}width:90px;"></label>
+      <div style="font-size:13px;padding-bottom:6px;">= <b id="srHoursTotal">${v.hours || 0}</b> hours a year</div>
+    </div>
+    <div class="admin-note" style="margin-top:4px;">Timed on Run order over the same period: <b>${v.timedHours}</b> hours (machine time actually recorded).</div>
+    ${sec("Shop rate")}
+    <div id="srResult">${shopRateResultHtml_(v)}</div>
+    <div id="srError" class="admin-error"></div>
+    <div class="admin-actions" style="margin-top:14px;align-items:center;">
+      <button type="button" class="admin-btn" id="srSave">Save shop rate</button>
+      <span id="srSaved" style="font-size:12px;color:#666;">${v.saved ? `Saved ${escapeHtml(new Date(v.saved.savedAt).toLocaleDateString())}: ${srMoney_(v.saved.rate)}/hour` : "Not saved yet: price analysis doesn't use it."}</span>
+    </div>`;
+  shopRateWire_();
+}
+function shopRateExtraHtml_(x, inp){
+  return `<div class="sr-extra" style="display:flex;gap:8px;align-items:center;margin-bottom:4px;"><input type="text" class="sr-xlabel" maxlength="100" placeholder="e.g. Electricity share" value="${escapeHtml((x && x.label) || "")}" style="${inp}flex:1 1 220px;">
+    <input type="number" class="sr-xamt" min="0" step="0.01" placeholder="a year" value="${x && x.amount != null ? x.amount : ""}" style="${inp}width:110px;"><button type="button" class="admin-btn admin-btn-secondary sr-xdel" style="padding:2px 8px;font-size:12px;" aria-label="Remove">×</button></div>`;
+}
+function shopRateResultHtml_(v){
+  const row = (l, a, b, strong) => `<div style="display:flex;gap:10px;font-size:14px;padding:3px 0;${strong ? "font-weight:700;border-top:1px solid #ddd;margin-top:4px;padding-top:6px;" : ""}"><span style="flex:1;">${l}</span><span style="min-width:140px;text-align:right;color:#555;">${a}</span><span style="min-width:120px;text-align:right;">${b}</span></div>`;
+  if (!(v.hours > 0)) return `<div class="admin-note">Enter the hours a week and the weeks a year to work out the rate.</div>`;
+  return row("Overhead <span style='font-size:12px;color:#666;'>— charged on each product: run time × this</span>", `${srMoney_(v.overhead)} ÷ ${v.hours} h`, srMoney_(v.overheadPerHour) + "/hour")
+    + row("+ your pay", `${srMoney_(v.ownerPay)} ÷ ${v.hours} h`, srMoney_(v.payPerHour) + "/hour")
+    + row(`+ profit ${v.profitPct || 0}%`, "", srMoney_(v.profitPerHour) + "/hour")
+    + row("Shop rate <span style='font-size:12px;color:#666;font-weight:400;'>— what an hour of production must earn</span>", "", `<span id="srRate">${srMoney_(v.rate)}</span>/hour`, true);
+}
+let _srTimer = null;
+function shopRateWire_(){
+  const panel = document.getElementById("srPanel");
+  const refresh = (redraw) => {
+    clearTimeout(_srTimer);
+    _srTimer = setTimeout(async () => {
+      try {
+        const d = await hoopApi_({ action: "getShopRate", shopRate: shopRateChoices_() });
+        window._sr.view = d.shopRate;
+        if (redraw) { window._sr.input = { ...window._sr.input, ...shopRateChoices_() }; shopRateDraw_(); return; }
+        shopRateUpdateTotals_(d.shopRate);
+      } catch (e) { document.getElementById("srError").textContent = e.message; }
+    }, redraw ? 0 : 350);
+  };
+  panel.querySelector("#srPeriod").onchange = () => refresh(true);
+  panel.addEventListener("input", (e) => { if (e.target.id !== "srPeriod") refresh(false); });
+  panel.addEventListener("change", (e) => {
+    if (e.target.classList.contains("sr-inc")) { const a = e.target.closest("tr").querySelector(".sr-amt"); a.disabled = !e.target.checked; refresh(false); }
+  });
+  panel.querySelector("#srAddExtra").onclick = () => {
+    document.getElementById("srExtras").insertAdjacentHTML("beforeend", shopRateExtraHtml_(null, "font-size:13px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;"));
+    document.querySelector("#srExtras .sr-extra:last-child .sr-xlabel").focus();
+  };
+  panel.addEventListener("click", (e) => { if (e.target.classList.contains("sr-xdel")) { e.target.closest(".sr-extra").remove(); refresh(false); } });
+  panel.querySelector("#srSave").onclick = async () => {
+    const err = document.getElementById("srError"); err.textContent = "";
+    try {
+      const d = await hoopApi_({ action: "saveShopRate", shopRate: shopRateChoices_() });
+      window._sr = { input: d.input || {}, view: d.shopRate };
+      shopRateDraw_();
+      showToast(`Shop rate saved: ${srMoney_(d.shopRate.rate)}/hour.` + (d.belowTarget && d.belowTarget.length ? ` ${d.belowTarget.length} product${d.belowTarget.length === 1 ? " is" : "s are"} now below it — Price analysis shows which.` : ""), !!(d.belowTarget && d.belowTarget.length));
+    } catch (e) { err.textContent = e.message; }
+  };
+}
+// After a change: the totals and each row's counted figure, without redrawing the fields being typed in.
+function shopRateUpdateTotals_(v){
+  const set = (id, t) => { const e = document.getElementById(id); if (e) e.textContent = t; };
+  document.querySelectorAll("#srRunning tr[data-cat]").forEach(tr => { const c = v.running.find(x => String(x.categoryId) === tr.dataset.cat); if (c) tr.querySelector(".sr-counted").textContent = c.excluded ? "—" : srMoney_(c.amount); });
+  document.querySelectorAll("#srEquipment tr[data-exp]").forEach(tr => { const e = v.equipment.find(x => String(x.expenseId) === tr.dataset.exp); if (e) tr.querySelector(".sr-peryear").textContent = srMoney_(e.perYear); });
+  set("srRunningTotal", srMoney_(v.running_total)); set("srEquipmentTotal", srMoney_(v.equipment_total)); set("srHoursTotal", String(v.hours || 0));
+  const r = document.getElementById("srResult"); if (r) r.innerHTML = shopRateResultHtml_(v);
 }
 
 // ---- Account viewer (Finance → Account viewer) --------------------------------------------------

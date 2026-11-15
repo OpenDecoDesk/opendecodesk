@@ -159,7 +159,7 @@ const KEY = (c) => "receipts/2026/" + c.repeat(32) + ".pdf";
   await w.loadAdminScript();
   w.eval('adminKey = "cookie"');
   const nav = w.eval("ADMIN_NAV_GROUPS.find(g => g.label === 'Finance').items.map(i => i[0] + '=' + i[1]).join('|')");
-  ok("Finance menu: Account viewer comes after Accounts & money and Reconcile", nav === "expenses=Expenses|money=Accounts & money|reconcile=Reconcile|accountviewer=Account viewer");
+  ok("Finance menu: Account viewer comes after Accounts & money and Reconcile, then Shop rate", nav === "expenses=Expenses|money=Accounts & money|reconcile=Reconcile|accountviewer=Account viewer|shoprate=Shop rate");
   const app = w.document.getElementById("app");
   const regCalls = () => calls.filter(c => c.action === "getAccountRegister");
   await w.renderAccountViewer(app);

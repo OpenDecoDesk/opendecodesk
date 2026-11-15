@@ -400,6 +400,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     ],
     bookkeeping: [
       "listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory", "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses", "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense", // Expenses
+      "getShopRate", "saveShopRate", // Shop rate
       "listAccounts", "saveAccount", "saveMoneyDefaults", "listMoney", "saveMoneyEntry", "deleteMoneyEntry", "setPaymentAccount", // Accounts & money
       "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount",                       // Account viewer, Change account…
       "getReconciliation", "importStatement", "autoMatchStatement", "matchStatementLine", "unmatchStatementLine", "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth", "listCashoutPayments", // Reconcile

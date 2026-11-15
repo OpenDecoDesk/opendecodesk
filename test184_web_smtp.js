@@ -74,7 +74,7 @@ const MSG = { to: "pat@cust.test", fromName: "Acme Tees", replyTo: "owner@acme.t
   ok("port 25 and a made-up server name are refused before connecting", !(await SMTP.smtpVerify({ ...GMAIL, port: 25 }, "x")).ok &&
     /Port 25/.test((await SMTP.smtpVerify({ ...GMAIL, port: 25 }, "x")).message) && /server's name/.test((await SMTP.smtpVerify({ ...GMAIL, host: "not a host" }, "x")).message));
   r = await SMTP.smtpSend(GMAIL, "app-pass", { ...MSG, attachments: [{ filename: "x.exe", contentType: "application/x-msdownload", contentBase64: "AAAA" }] }, { connect: fakeSmtp().connect });
-  ok("only pictures and PDFs can be attached", !r.ok && /Only pictures and PDFs/.test(r.message));
+  ok("only pictures, PDFs and design files can be attached", !r.ok && /Only pictures, PDFs and design files/.test(r.message));
 
   console.log("\n=== The same rules as the desktop's mailbox ===");
   const { cleanSmtpSettings } = require("./desktop/mailer.js");

@@ -223,7 +223,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); };
   {
     const host = new Function(strip(read("functions/_lib/hostConfig.js")) + "\nreturn { desktopLockedFeatures };")();
     ok("design approval is locked off without email, and unlocked with it", host.desktopLockedFeatures(off).includes("designVerification") && !host.desktopLockedFeatures(on).includes("designVerification") &&
-      host.desktopLockedFeatures({ ...on, SHIPPO_API_KEY: "k" }).join() === "storefront");
+      host.desktopLockedFeatures({ ...on, SHIPPO_API_KEY: "k" }).join() === "storefront,digital");
     r = await post(off, { action: "updateFeatures", key: "x", features: { designVerification: true } });
     ok("…turning it on without email says to set up the mailbox", r.status === 400 && /Design approval needs email — set up your mailbox under Global settings → Email/.test(r.body.message));
     const stored = { "uploads/verify/abc123.png": png };

@@ -133,13 +133,15 @@ export async function onRequestPost(context){
       for(const it of items){
         const p = typeof it.productId === "string" ? byId.get(it.productId) : null;
         if(!p) return jsonResponse({status:"error", message:"An item in your cart is no longer available — please refresh the page."}, 400);
-        cart.push({ productId: it.productId, qty: it.qty, weightOz: p.shipWeightOz > 0 ? p.shipWeightOz : Number(p.weightOz) > 0 ? Number(p.weightOz) : 0, type: p.type || "" });
+        cart.push({ productId: it.productId, qty: it.qty, weightOz: p.shipWeightOz > 0 ? p.shipWeightOz : Number(p.weightOz) > 0 ? Number(p.weightOz) : 0, type: p.type || "", digital: !!p.digital });
       }
       items = cart;
     }
   }
 
-  const totalWeightOz = items.reduce((sum, item) => {
+  // Digital products (migrations/0086) are in the cart (and the signed quote's cart) but not in the parcel.
+  const parcelItems = items.filter(it => !it.digital);
+  const totalWeightOz = parcelItems.reduce((sum, item) => {
     const w = (typeof item.weightOz === "number" && item.weightOz > 0)
       ? item.weightOz : DEFAULT_ITEM_WEIGHT_OZ;
     return sum + w * item.qty;
@@ -164,7 +166,7 @@ export async function onRequestPost(context){
 
   // Select the smallest box that fits the order's item types + quantities.
   // If no box matches, return a manual-shipping notice instead of Shippo rates.
-  const boxResult = parcelOverride ? { box: parcelOverride, packing: 0 } : selectBox(items, boxPresets, packAs);
+  const boxResult = parcelOverride ? { box: parcelOverride, packing: 0 } : selectBox(parcelItems, boxPresets, packAs);
   if(!boxResult){
     return jsonResponse({
       status: "ok",

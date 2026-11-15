@@ -121,9 +121,11 @@ import {
   getAccountRegister, getReceiptRecords, receiptTargets, getRecordReceipt, setReceiptFile, receiptAccountBlockers, setReceiptAccount,
   lineQty, QTY_MESSAGE, zipStates, SHIPPING_QUOTE_PENDING, byId_,
   getRushSettings, setRushSettings, getRushFeesToSet, rushRuleView, resolveRushRule, rushFeeFor, cleanShopRush, setOrgRushFee, setOrderRushFee, rushPayByFor, localToday,
-  getEmailSettings, setEmailSettings, getEmailMailbox, setEmailMailbox, emailMailboxForBrowser, splitTaxInclusive, addTaxExclusive, orderAmounts,
+  getEmailSettings, setEmailSettings, getEmailMailbox, setEmailMailbox, emailMailboxForBrowser,
+  getDigitalSettings, setDigitalSettings, listProductFiles, addProductFile, deleteProductFile, listDownloadGrants, resetOrderDownloads, revokeOrderDownloads, getDownloadsEmailedAt, grantBlocked, splitTaxInclusive, addTaxExclusive, orderAmounts,
 } from "../_lib/db.js";
 import { smtpCleanSettings, smtpVerify } from "../_lib/smtp.js";
+import { deliverOrderDownloads } from "../_lib/digital.js";
 import {
   sendOrderReceivedEmail,
   sendPaymentConfirmedEmail, sendCancellationEmail, sendShippedEmail,
@@ -192,6 +194,9 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "getShipFromAddress", "updateShipFromAddress", "getBusinessProfile", "updateBusinessProfile",
   "getLocaleSettings", "updateLocaleSettings", "getFeatures", "updateFeatures",
   "getShopRate", "saveShopRate",
+  // Digital products (migrations/0086): the delivery defaults, a product's files, an order's downloads.
+  "getDigitalSettings", "updateDigitalSettings", "listProductFiles", "deleteProductFile", "addProductFileFromDesign",
+  "getOrderDownloads", "resendDownloads", "resetDownloads", "revokeDownloads",
   "getEmailSettings", "updateEmailSettings", "checkMailbox", "previewCustomerEmail", "samplePdf", "sendSampleEmail",
   "getSalesTaxSettings", "updateSalesTaxSettings",
   "getBoxPresets", "setBoxPresets",
@@ -273,6 +278,10 @@ function checkCosting_(b) {
 // `before` is the stored product on an update (only what's sent is checked there).
 function checkProductPrice_(body, before) {
   const mode = body.pricingMode !== undefined ? body.pricingMode : (before ? before.pricingMode : undefined);
+  // A digital product (migrations/0086) is one file set at one price: no sizes, colors or options.
+  const digital = body.digital !== undefined ? !!body.digital : !!(before && before.digital);
+  if (digital && mode && mode !== "flat") return "A digital product has one price — set Pricing to one price for all.";
+  if (digital && (body.configurable === true || (body.configurable === undefined && before && before.configurable))) return "A digital product can't have options to choose — untick Configurable.";
   const money = (v) => v !== null && v !== "" && v !== undefined && Number.isFinite(Number(v)) && Number(v) >= 0;
   if (mode === "flat") {
     if (body.flatPrice === undefined && before) return "";
@@ -299,9 +308,12 @@ const ADMIN_ONLY_ACTIONS = [
   "updateEmailSettings", "sendSampleEmail",   // Global settings → Customer emails
   "checkMailbox",                             // Global settings → Email: signs in to the owner's mailbox with a password typed there
   "getShopRate", "saveShopRate",              // Finance → Shop rate: the business's costs, and the target every price is held to
+  "updateDigitalSettings",                    // Global settings → Digital products: the delivery defaults
 ];
 const MANAGER_ACTIONS = [
   "getRushSettings", "setRushFee",                                // rush fees (migrations/0082)
+  "listProductFiles", "deleteProductFile", "addProductFileFromDesign", // a digital product's files (migrations/0086)
+  "getDigitalSettings", "getOrderDownloads", "resendDownloads", "resetDownloads", "revokeDownloads", // and its buyers' downloads
   "getEmailSettings", "previewCustomerEmail", "samplePdf",       // Global settings → Customer emails: preview and sample PDF
   "getPublishState", "getPreviewLink",                            // publish per shop (migrations/0076)
   "previewDiscardShopChanges", "discardShopChanges",              // Discard changes… (back to the published shop)
@@ -390,6 +402,10 @@ const FEATURE_ACTIONS = {
   ],
   designVerification: [
     "sendDesignVerification", "listDesignVerifications",
+  ],
+  digital: [
+    "getDigitalSettings", "updateDigitalSettings", "listProductFiles", "deleteProductFile", "addProductFileFromDesign",
+    "getOrderDownloads", "resendDownloads", "resetDownloads", "revokeDownloads",
   ],
 };
 const ACTION_FEATURE = {};
@@ -486,6 +502,13 @@ export async function onRequestPost(context) {
   // Routine actions: written in context.waitUntil() so the runtime keeps the
   // D1 write alive after the response is sent. A failure is logged loudly,
   // never silently swallowed.
+  // Digital products (migrations/0086): an order that may just have been paid gets its files granted and emailed. A
+  // failure is logged, not the action's: the download page grants them too when it's opened.
+  const deliverDigital_ = async (orderId) => {
+    if (typeof deliverOrderDownloads !== "function") return null;   // a test harness without digital.js
+    try { const d = await deliverOrderDownloads(env, orderId, { origin: new URL(request.url).origin }); return d; }
+    catch (e) { console.error("Delivering the downloads failed for", orderId, e); return null; }
+  };
   const audit = (args) => context.waitUntil(insertAuditLog(env.DB, auditEntry(args))
     .catch((e) => console.error("AUDIT WRITE FAILED:", args.action, args.orderId || "", e)));
   // Vendor names come from the vendor list (migrations/0084): an action that records one gets the list's spelling, and
@@ -1762,6 +1785,8 @@ export async function onRequestPost(context) {
       if (sent) await setOrderEmailTimestamp(env.DB, body.orderId, "confirmedEmailAt", new Date().toISOString());
     }
     audit({ orgId: body.org, orderId: body.orderId, action: "order.marked_paid", detail: { paidAt, amountRecorded: recorded } });
+    // Digital products (migrations/0086): paid now, so the files are granted and emailed.
+    await deliverDigital_(body.orderId);
     return jsonResponse({ status: "ok" });
   }
 
@@ -1839,6 +1864,7 @@ export async function onRequestPost(context) {
 
     const updated = await getOrderById(env.DB, orderId);
     audit({ orgId: body.org, orderId, action: "payment.added", detail: { amount, note, method, reference, date: body.date || "" } });
+    if (updated && updated.paid) await deliverDigital_(orderId);
     return jsonResponse({ status: "ok", orderId,
       amountReceived: updated.amountReceived, balanceDue: updated.balanceDue,
       discountAmount: updated.discountAmount, discountNote: updated.discountNote,
@@ -2150,6 +2176,7 @@ export async function onRequestPost(context) {
     const auditErr = await auditStrict({ orgId, orderId, action: "order.voided", detail: snapshot });
     if (auditErr) return auditErr;
     await voidOrder(env.DB, orderId, reason);
+    try { await revokeOrderDownloads(env.DB, orderId); } catch (e) { /* digital products (migrations/0086): none to revoke */ }
     return jsonResponse({ status: "ok", orderId, voided: true });
   }
 
@@ -2848,7 +2875,7 @@ export async function onRequestPost(context) {
 
     // Catalog/price edits are audited: what changed, from → to. Only the
     // fields that actually differ are recorded, so a price change reads as one line in the Audit Log.
-    const PRODUCT_AUDIT_FIELDS = ["name", "sub", "type", "pricingMode", "flatPrice", "sizePricing", "colorGroups", "personalizationPrice", "noDesignNeeded", "noBlankNeeded", "runMinutes", "transferCost", "suppliesCost",
+    const PRODUCT_AUDIT_FIELDS = ["name", "sub", "type", "pricingMode", "flatPrice", "sizePricing", "colorGroups", "personalizationPrice", "noDesignNeeded", "noBlankNeeded", "digital", "digitalDelivery", "runMinutes", "transferCost", "suppliesCost",
       "customDesign", "customDesignPrice", "personalizationOptions", "images", "features", "visible", "sortOrder", "weightOz", "taxable", "versionGroup", "versionLabel", "fixedTransfers", "mockupGraphics"];
     const ORG_AUDIT_FIELDS = ["subdomain", "name", "eyebrow", "accent", "desc", "ready", "shippingEnabled", "deliveryOptions", "enabledPayments",
       "orderDeadline", "closedMessage", "allowOrdersAfterDeadline", "designImageShirt", "designImageCap", "designImageDetail", "rushFee"];
@@ -3546,6 +3573,65 @@ export async function onRequestPost(context) {
     // The preview is built by the same functions that send the real emails (email.js build…Email), from
     // a made-up order (sampleOrder_) priced with this install's sales tax and paid by the method picked —
     // nothing is saved. "Send me this sample" sends it to the owner's inbox, marked [Sample].
+    // ---- Digital products (migrations/0086) ----
+    if (body.action === "getDigitalSettings") return jsonResponse({ status: "ok", digital: await getDigitalSettings(env.DB) });
+    if (body.action === "updateDigitalSettings") {
+      const before = await getDigitalSettings(env.DB);
+      const digital = await setDigitalSettings(env.DB, body.digital || {});
+      audit({ orgId: null, orderId: null, action: "settings.digital_set", detail: { from: before, to: digital } });
+      return jsonResponse({ status: "ok", digital });
+    }
+    if (body.action === "listProductFiles" || body.action === "deleteProductFile" || body.action === "addProductFileFromDesign") {
+      const org = String(body.org || ""), productId = String(body.productId || "");
+      const prod = await env.DB.prepare("SELECT digital FROM products WHERE orgId = ? AND productId = ?").bind(org, productId).first().catch(() => null);
+      if (!prod) return jsonResponse({ status: "error", message: "Product not found" }, 404);
+      if (body.action === "deleteProductFile") {
+        const gone = await deleteProductFile(env.DB, org, productId, body.fileId);
+        if (!gone) return jsonResponse({ status: "error", message: "That file isn't on this product." }, 404);
+        // An upload of its own that nothing else uses (no other product, no order still able to download it) is deleted.
+        if (!gone.stillUsed && gone.fileKey.startsWith("digital/") && env.DESIGNS && typeof env.DESIGNS.delete === "function") await env.DESIGNS.delete(gone.fileKey).catch(() => {});
+        audit({ orgId: org, orderId: null, action: "product.file_removed", detail: { productId, file: gone.fileName } });
+      }
+      if (body.action === "addProductFileFromDesign") {
+        if (!Number(prod.digital)) return jsonResponse({ status: "error", message: "Tick “Digital product” and save before adding files." }, 400);
+        // A Designs library version's machine or design file, shared (not copied).
+        // The version named, else the design's latest.
+        const v = body.versionId
+          ? await env.DB.prepare("SELECT id, fileKey, fileName, fileExt, designFileKey, designFileName, designFileExt FROM design_versions WHERE id = ?").bind(Number(body.versionId)).first()
+          : await env.DB.prepare("SELECT id, fileKey, fileName, fileExt, designFileKey, designFileName, designFileExt FROM design_versions WHERE designId = ? ORDER BY uploadedAt DESC, id DESC LIMIT 1").bind(Number(body.designId)).first();
+        if (!v) return jsonResponse({ status: "error", message: "Design version not found" }, 404);
+        const which = body.which === "design" && v.designFileKey ? { key: v.designFileKey, name: v.designFileName, ext: v.designFileExt } : { key: v.fileKey, name: v.fileName, ext: v.fileExt };
+        if (!which.key) return jsonResponse({ status: "error", message: "That design version has no file." }, 400);
+        const have = await listProductFiles(env.DB, org, productId);
+        if (have.some(f => f.fileKey === which.key)) return jsonResponse({ status: "error", message: "That file is already on this product." }, 400);
+        if (have.length >= 20) return jsonResponse({ status: "error", message: "A product can have at most 20 files." }, 400);
+        let bytes = 0;
+        try { const h = env.DESIGNS && typeof env.DESIGNS.head === "function" ? await env.DESIGNS.head(which.key) : null; bytes = h && h.size ? Number(h.size) : 0; } catch (e) { bytes = 0; }
+        await addProductFile(env.DB, org, productId, { fileKey: which.key, fileName: which.name || ("design." + which.ext), fileExt: which.ext, bytes });
+        audit({ orgId: org, orderId: null, action: "product.file_added", detail: { productId, file: which.name, fromDesignVersion: v.id } });
+      }
+      return jsonResponse({ status: "ok", files: await listProductFiles(env.DB, org, productId) });
+    }
+    if (body.action === "getOrderDownloads" || body.action === "resendDownloads" || body.action === "resetDownloads" || body.action === "revokeDownloads") {
+      const orderId = String(body.orderId || "");
+      if (!ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
+      const o = await getOrderById(env.DB, orderId);
+      if (!o) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+      let sent = null;
+      if (body.action === "resetDownloads") { await resetOrderDownloads(env.DB, orderId); audit({ orgId: o.orgId, orderId, action: "order.downloads_reset", detail: {} }); }
+      if (body.action === "revokeDownloads") { const n = await revokeOrderDownloads(env.DB, orderId); audit({ orgId: o.orgId, orderId, action: "order.downloads_revoked", detail: { grants: n } }); }
+      if (body.action === "resendDownloads") {
+        if (!o.paid) return jsonResponse({ status: "error", message: "The order isn't paid yet — the files go out once it is." }, 400);
+        if (!o.contact || !o.contact.includes("@")) return jsonResponse({ status: "error", message: "No email address on this order." }, 400);
+        const d = await deliverOrderDownloads(env, orderId, { resend: true, origin: new URL(request.url).origin });
+        if (d.status !== "emailed") return jsonResponse({ status: "error", message: d.status === "none" ? "No files to send on this order." : "The email couldn't be sent — see Communications." }, 400);
+        sent = { attached: d.attached || 0, tooBig: !!d.tooBig };
+        audit({ orgId: o.orgId, orderId, action: "order.downloads_resent", detail: sent });
+      }
+      const grants = await listDownloadGrants(env.DB, orderId);
+      return jsonResponse({ status: "ok", grants: grants.map(g => ({ ...g, blocked: grantBlocked(g) })), emailedAt: await getDownloadsEmailedAt(env.DB, orderId), ...(sent ? { sent } : {}) });
+    }
+
     // A cloud install also says how it sends (Global settings → Email): a hosted service or the owner's
     // own mailbox (db.js getEmailMailbox; the password never leaves the server).
     if (body.action === "getEmailSettings") {
@@ -6164,6 +6250,16 @@ export async function onRequestPost(context) {
     return jsonResponse({ status: "error", message: e && e.userFacing ? e.message : "We couldn't price your order — please refresh the page and try again." }, 400);
   }
 
+  // Digital products (migrations/0086) aren't delivered: a cart of only those needs no delivery choice, and they add
+  // nothing to a mixed cart's parcel.
+  let digitalIds = new Set();
+  try {
+    const { results: dr } = await env.DB.prepare("SELECT productId FROM products WHERE orgId = ? AND digital = 1").bind(orgId).all();
+    digitalIds = new Set((dr || []).map(r => String(r.productId)));
+  } catch (e) { digitalIds = new Set(); }   // a database from before the migration: none
+  const digitalOnly = pricedItems.length > 0 && pricedItems.every(it => digitalIds.has(String(it.productId)));
+  if (digitalOnly && !featureOn("digital")) return jsonResponse({ status: "error", message: "Downloads aren't available right now — please contact the shop." }, 400);
+
   // Shipping: a carrier rate is only accepted via a signed quote bound to
   // this org, this cart and this ZIP. No token = no carrier charge (either
   // local pickup, or a manual quote the admin bills separately later).
@@ -6186,7 +6282,7 @@ export async function onRequestPost(context) {
   const offersShipping = country === "US" && featureOn("shipping") && delivery.some(o => o.type === "shipping");
   // "Shipping, quote to follow": the cart fits no box, so there is no carrier rate to sign and the
   // shop sets the shipping afterwards. Only the server decides that (below) — the request merely asks.
-  const manualShipping = !shippingQuoteToken && !!body.manualShipping && !!cleanAddr;
+  const manualShipping = !digitalOnly && !shippingQuoteToken && !!body.manualShipping && !!cleanAddr;
   if ((shippingQuoteToken || manualShipping) && !offersShipping) {
     return jsonResponse({ status: "error", message: country === "US" ? "This shop doesn't offer shipping — please choose another delivery option."
       : "Carrier shipping isn't available for this shop's region — please choose another delivery option." }, 400);
@@ -6223,7 +6319,12 @@ export async function onRequestPost(context) {
     }
     serverShippingMethod = SHIPPING_QUOTE_PENDING;
   }
-  if (!shippingQuoteToken && !manualShipping) {
+  if (digitalOnly) {
+    // Nothing to ship or pick up: no address kept (it would only decide the tax of something that isn't sent).
+    serverShippingMethod = "Digital delivery";
+    cleanAddr = null;
+  }
+  if (!digitalOnly && !shippingQuoteToken && !manualShipping) {
     const wanted = body.deliveryOptionId == null ? "" : String(body.deliveryOptionId);
     const choices = delivery.filter(o => o.type !== "shipping");
     // No id = a page loaded before the list existed: it could only mean local pickup.
@@ -6239,7 +6340,7 @@ export async function onRequestPost(context) {
     // kept: a made-up out-of-state address on a pickup order would otherwise drop the order's tax.
     cleanAddr = null;
   }
-  if (shippingQuoteToken) {
+  if (shippingQuoteToken && !digitalOnly) {
     const q = await verifyQuote(env, shippingQuoteToken);
     if (!q.ok) return jsonResponse({ status: "error", message: q.reason }, 400);
     const cartKey = canonicalItems(items);
@@ -6289,6 +6390,7 @@ export async function onRequestPost(context) {
     const products = await getProductsByOrg(env.DB, orgId, false);
     const byId = Object.fromEntries(products.map(p => [p.productId, p]));
     serverWeightOz = pricedItems.reduce((sum, it) => {
+      if (digitalIds.has(String(it.productId))) return sum;
       const w = productShipWeightOz(byId[it.productId], it.size);
       return sum + (w > 0 ? w : 8) * it.qty;
     }, 0);

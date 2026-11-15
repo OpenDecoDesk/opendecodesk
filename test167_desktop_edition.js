@@ -78,8 +78,8 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
   await migrate(d1, src);
   const lib = new Function(strip(read("functions/_lib/db.js")) + "\n" + strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/desktop.js")) +
     "\nreturn { getFeatures, setFeatures, getAllOrgs, ensureDesktopReady, DESKTOP_DEFAULT_SHOP };")();
-  ok("the locked features are the storefront, carrier shipping and design approval", host.desktopLockedFeatures({ EDITION: "desktop" }).join() === "storefront,shipping,designVerification");
-  ok("…and carrier shipping is unlocked once the program has a Shippo key", host.desktopLockedFeatures({ EDITION: "desktop", SHIPPO_API_KEY: "k" }).join() === "storefront,designVerification");
+  ok("the locked features are the storefront, digital products, carrier shipping and design approval", host.desktopLockedFeatures({ EDITION: "desktop" }).join() === "storefront,digital,shipping,designVerification");
+  ok("…and carrier shipping is unlocked once the program has a Shippo key", host.desktopLockedFeatures({ EDITION: "desktop", SHIPPO_API_KEY: "k" }).join() === "storefront,digital,designVerification");
   let s = await lib.ensureDesktopReady({ DB: d1 });
   let f = await lib.getFeatures(d1);
   ok("the start-up step saves them off", s.changed && f.storefront === false && f.shipping === false && f.designVerification === false);
@@ -109,7 +109,7 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
   };
   const env = { DB: d1, EDITION: "desktop" };
   let r = await post(env, { action: "getFeatures", key: "x" });
-  ok("the admin is told which switches are locked", r.status === 200 && r.body.locked.join() === "storefront,shipping,designVerification");
+  ok("the admin is told which switches are locked", r.status === 200 && r.body.locked.join() === "storefront,digital,shipping,designVerification");
   r = await post(env, { action: "updateFeatures", key: "x", features: { storefront: true } });
   ok("turning a locked feature on is refused, in plain words", r.status === 400 && r.body.message === "Storefront isn't part of the desktop version." && (await lib.getFeatures(d1)).storefront === false);
   r = await post(env, { action: "updateFeatures", key: "x", features: { production: false } });

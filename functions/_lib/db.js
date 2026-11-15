@@ -857,6 +857,7 @@ export async function createProduct(db, orgId, p) {
     ).run();
   if (p.noDesignNeeded !== undefined) await setProductNoDesignNeeded_(db, orgId, p.productId, !!p.noDesignNeeded);
   if (p.noBlankNeeded !== undefined) await setProductNoBlankNeeded_(db, orgId, p.productId, !!p.noBlankNeeded);
+  if (p.digital !== undefined || p.digitalDelivery !== undefined) await setProductDigital_(db, orgId, p.productId, p.digital, p.digitalDelivery);
   if (p.versionGroup !== undefined || p.versionLabel !== undefined) await setProductVersion(db, orgId, p.productId, { group: p.versionGroup, label: p.versionLabel });
   if (p.customDesign !== undefined) await setProductCustomDesign_(db, orgId, p.productId, p.customDesign, p.customDesignPrice);
   await setProductConfig_(db, orgId, p);
@@ -1051,6 +1052,163 @@ async function setProductNoDesignNeeded_(db, orgId, productId, on) {
     .catch((e) => { if (!/no such column/i.test(String(e && e.message))) throw e; });
 }
 
+// ---- Digital products (migrations/0086) ---------------------------------------------------------------------
+// A product sold as files (digitized designs, PDFs): no blank, no production, no shipping. Once its order is paid each
+// line gets a grant per file (grantOrderDownloads): the order's download page (/api/download, its link made by http.js
+// downloadToken) and the "Your downloads" email (email.js), within the delivery limits — the product's own, else the
+// global ones (Global settings → Digital products).
+//   days       the link works for this many days after the order is paid (null = no limit)
+//   downloads  each file can be downloaded this many times (null = no limit)
+//   attach     the email carries the files too, when they're no bigger than attachMb in all (else the link only)
+//   email      email the link (and files) when the order is paid; off = only the page after a card payment
+export const DIGITAL_DEFAULTS = { days: 7, downloads: 5, attach: true, email: true, attachMb: 10 };
+const DIGITAL_LIMIT_ = { days: 3650, downloads: 1000, attachMb: 20 };
+// Only the keys given (`partial`, a product's overrides) or every key with its default.
+function cleanDigitalDelivery_(d, partial) {
+  d = d && typeof d === "object" ? d : {};
+  const out = {};
+  const lim = (k) => {
+    if (!(k in d)) { if (!partial) out[k] = DIGITAL_DEFAULTS[k]; return; }
+    const v = d[k];
+    if (v === null || v === "" || v === undefined) { out[k] = k === "attachMb" ? DIGITAL_DEFAULTS.attachMb : null; return; }
+    const n = Math.round(Number(v));
+    out[k] = Number.isFinite(n) && n >= 1 ? Math.min(n, DIGITAL_LIMIT_[k]) : (k === "attachMb" ? DIGITAL_DEFAULTS.attachMb : null);
+  };
+  lim("days"); lim("downloads"); lim("attachMb");
+  for (const k of ["attach", "email"]) { if (k in d) out[k] = d[k] !== false; else if (!partial) out[k] = DIGITAL_DEFAULTS[k]; }
+  return out;
+}
+export async function getDigitalSettings(db) {
+  const raw = await getSettingRaw(db, "digital").catch(() => null);
+  return cleanDigitalDelivery_(tryParse_(raw, {}) || {}, false);
+}
+export async function setDigitalSettings(db, s) {
+  const clean = cleanDigitalDelivery_(s, false);
+  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('digital', ?)").bind(JSON.stringify(clean)).run();
+  return clean;
+}
+// A product's delivery: the global settings with its own overrides on top.
+export function digitalDeliveryFor(product, global) {
+  return { ...(global || DIGITAL_DEFAULTS), ...cleanDigitalDelivery_((product && product.digitalDelivery) || {}, true) };
+}
+// Digital on: no blank and no design are needed (nothing is made). Off leaves those as they were.
+async function setProductDigital_(db, orgId, productId, digital, delivery) {
+  const sets = [], binds = [];
+  if (digital !== undefined) { sets.push("digital=?"); binds.push(digital ? 1 : 0); if (digital) sets.push("noBlankNeeded=1", "noDesignNeeded=1"); }
+  if (delivery !== undefined) { sets.push("digitalDeliveryJson=?"); binds.push(JSON.stringify(cleanDigitalDelivery_(delivery || {}, true))); }
+  if (!sets.length) return;
+  await db.prepare(`UPDATE products SET ${sets.join(", ")} WHERE orgId=? AND productId=?`).bind(...binds, orgId, productId).run()
+    .catch((e) => { if (!/no such column/i.test(String(e && e.message))) throw e; });
+}
+const PRODUCT_FILE_COLS_ = "id, orgId, productId, fileKey, fileName, fileExt, bytes, sortOrder, createdAt";
+const parseProductFile_ = (r) => ({ id: Number(r.id), fileKey: r.fileKey, fileName: r.fileName || "", fileExt: r.fileExt || "", bytes: Number(r.bytes) || 0, sortOrder: Number(r.sortOrder) || 0 });
+export async function listProductFiles(db, orgId, productId) {
+  const { results } = await db.prepare(`SELECT ${PRODUCT_FILE_COLS_} FROM product_files WHERE orgId=? AND productId=? ORDER BY sortOrder, id`).bind(orgId, productId).all()
+    .catch(() => ({ results: [] }));
+  return (results || []).map(parseProductFile_);
+}
+export async function addProductFile(db, orgId, productId, { fileKey, fileName, fileExt, bytes }) {
+  const n = await db.prepare("SELECT COALESCE(MAX(sortOrder), -1) + 1 AS n FROM product_files WHERE orgId=? AND productId=?").bind(orgId, productId).first();
+  const r = await db.prepare(`INSERT INTO product_files (orgId, productId, fileKey, fileName, fileExt, bytes, sortOrder, createdAt) VALUES (?,?,?,?,?,?,?,?) RETURNING id`)
+    .bind(orgId, productId, String(fileKey), String(fileName || "").slice(0, 200), String(fileExt || "").toLowerCase().slice(0, 10), Math.max(0, Math.round(Number(bytes) || 0)),
+      Number(n && n.n) || 0, new Date().toISOString()).first();
+  return Number(r.id);
+}
+// Removed from the product (orders already granted keep their grants). The row, so the caller can delete an uploaded
+// file nothing else uses; null when there's no such file.
+export async function deleteProductFile(db, orgId, productId, id) {
+  const row = await db.prepare(`SELECT ${PRODUCT_FILE_COLS_} FROM product_files WHERE id=? AND orgId=? AND productId=?`).bind(Number(id), orgId, productId).first();
+  if (!row) return null;
+  await db.prepare("DELETE FROM product_files WHERE id=?").bind(Number(id)).run();
+  const used = await db.prepare(`SELECT (SELECT count(*) FROM product_files WHERE fileKey=?) + (SELECT count(*) FROM download_grants WHERE fileKey=? AND revokedAt IS NULL) AS n`)
+    .bind(row.fileKey, row.fileKey).first();
+  return { ...parseProductFile_(row), stillUsed: Number(used && used.n) > 0 };
+}
+// The order's lines that are digital products, with the products' current files and delivery.
+export async function orderDigitalLines(db, orderId) {
+  const { results } = await db.prepare(`SELECT oi.id AS itemId, oi.orgId, oi.productId, oi.name, oi.qty, p.digitalDeliveryJson
+    FROM order_items oi JOIN products p ON p.orgId = oi.orgId AND p.productId = oi.productId
+    WHERE oi.orderId = ? AND oi.cancelDate IS NULL AND p.digital = 1 ORDER BY oi.id`).bind(orderId).all().catch(() => ({ results: [] }));
+  const out = [];
+  for (const r of results || []) out.push({ itemId: Number(r.itemId), orgId: r.orgId, productId: r.productId, name: r.name, qty: Number(r.qty) || 1,
+    digitalDelivery: cleanDigitalDelivery_(tryParse_(r.digitalDeliveryJson, {}) || {}, true), files: await listProductFiles(db, r.orgId, r.productId) });
+  return out;
+}
+// The order's download salt (http.js downloadToken), made the first time it's needed. `fresh` draws a new one (Resend
+// link): the old link stops working.
+export async function orderDownloadSalt(db, orderId, { fresh = false } = {}) {
+  const salt = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+  if (fresh) await db.prepare("UPDATE orders SET downloadSalt=? WHERE orderId=?").bind(salt, orderId).run();
+  else await db.prepare("UPDATE orders SET downloadSalt=? WHERE orderId=? AND downloadSalt IS NULL").bind(salt, orderId).run();
+  const r = await db.prepare("SELECT downloadSalt FROM orders WHERE orderId=?").bind(orderId).first();
+  return (r && r.downloadSalt) || "";
+}
+// Once the order is paid (and not voided): a grant per digital line × file, with the limits as they are now. Safe to
+// call again — an existing grant isn't touched. { paid, created, grants }.
+export async function grantOrderDownloads(db, orderId, { now = new Date() } = {}) {
+  const o = await db.prepare("SELECT paid, paidAt, voidedAt FROM orders WHERE orderId=?").bind(orderId).first();
+  if (!o || !Number(o.paid) || o.voidedAt) return { paid: !!(o && Number(o.paid) && !o.voidedAt), created: 0, grants: await listDownloadGrants(db, orderId) };
+  const global = await getDigitalSettings(db);
+  const nowIso = now.toISOString();
+  let created = 0;
+  for (const line of await orderDigitalLines(db, orderId)) {
+    const d = { ...global, ...line.digitalDelivery };
+    const expiresAt = d.days ? new Date(now.getTime() + d.days * 864e5).toISOString() : null;
+    for (const f of line.files) {
+      const r = await db.prepare(`INSERT OR IGNORE INTO download_grants (orderId, itemId, fileKey, fileName, fileExt, bytes, expiresAt, maxDownloads, downloads, createdAt)
+        VALUES (?,?,?,?,?,?,?,?,0,?)`).bind(orderId, line.itemId, f.fileKey, f.fileName, f.fileExt, f.bytes, expiresAt, d.downloads == null ? null : d.downloads, nowIso).run();
+      if (r && r.meta && r.meta.changes > 0) created++;
+    }
+  }
+  if (created) await orderDownloadSalt(db, orderId);
+  return { paid: true, created, grants: await listDownloadGrants(db, orderId) };
+}
+const parseGrant_ = (r) => ({ id: Number(r.id), orderId: r.orderId, itemId: Number(r.itemId), fileKey: r.fileKey, fileName: r.fileName || "", fileExt: r.fileExt || "",
+  bytes: Number(r.bytes) || 0, expiresAt: r.expiresAt || null, maxDownloads: r.maxDownloads == null ? null : Number(r.maxDownloads), downloads: Number(r.downloads) || 0,
+  lastDownloadAt: r.lastDownloadAt || null, revokedAt: r.revokedAt || null, createdAt: r.createdAt });
+export async function listDownloadGrants(db, orderId) {
+  const { results } = await db.prepare("SELECT * FROM download_grants WHERE orderId=? ORDER BY itemId, id").bind(orderId).all().catch(() => ({ results: [] }));
+  return (results || []).map(parseGrant_);
+}
+// Why a grant can't be downloaded now: "" (it can), "revoked", "expired" or "used".
+export function grantBlocked(g, now = new Date()) {
+  if (!g || g.revokedAt) return "revoked";
+  if (g.expiresAt && g.expiresAt <= now.toISOString()) return "expired";
+  if (g.maxDownloads != null && g.downloads >= g.maxDownloads) return "used";
+  return "";
+}
+// Counts one download, atomically: refused (false) once revoked, expired or used up, however many arrive at once.
+export async function recordDownload(db, grantId, { now = new Date(), network = "", userAgent = "" } = {}) {
+  const at = now.toISOString();
+  const r = await db.prepare(`UPDATE download_grants SET downloads = downloads + 1, lastDownloadAt = ?
+    WHERE id = ? AND revokedAt IS NULL AND (expiresAt IS NULL OR expiresAt > ?) AND (maxDownloads IS NULL OR downloads < maxDownloads)`).bind(at, Number(grantId), at).run();
+  if (!(r && r.meta && r.meta.changes > 0)) return false;
+  await db.prepare("INSERT INTO download_log (grantId, at, network, userAgent) VALUES (?,?,?,?)").bind(Number(grantId), at, String(network).slice(0, 64), String(userAgent).slice(0, 300)).run();
+  return true;
+}
+// The admin's actions on an order's downloads. Reset: the counts back to 0 and the expiry from today (the limits as the
+// product has them now). Revoke: no further downloads (a refund or void does it too). Restore undoes a revoke.
+export async function resetOrderDownloads(db, orderId, { now = new Date() } = {}) {
+  const global = await getDigitalSettings(db);
+  const lines = new Map((await orderDigitalLines(db, orderId)).map(l => [l.itemId, l]));
+  for (const g of await listDownloadGrants(db, orderId)) {
+    const d = { ...global, ...((lines.get(g.itemId) || {}).digitalDelivery || {}) };
+    await db.prepare("UPDATE download_grants SET downloads = 0, revokedAt = NULL, expiresAt = ?, maxDownloads = ? WHERE id = ?")
+      .bind(d.days ? new Date(now.getTime() + d.days * 864e5).toISOString() : null, d.downloads == null ? null : d.downloads, g.id).run();
+  }
+}
+export async function revokeOrderDownloads(db, orderId, { now = new Date() } = {}) {
+  const r = await db.prepare("UPDATE download_grants SET revokedAt = ? WHERE orderId = ? AND revokedAt IS NULL").bind(now.toISOString(), orderId).run().catch(() => null);
+  return (r && r.meta && r.meta.changes) || 0;
+}
+export async function setDownloadsEmailedAt(db, orderId, at) {
+  await db.prepare("UPDATE orders SET downloadsEmailedAt = ? WHERE orderId = ?").bind(at, orderId).run().catch(() => {});
+}
+export async function getDownloadsEmailedAt(db, orderId) {
+  const r = await db.prepare("SELECT downloadsEmailedAt FROM orders WHERE orderId = ?").bind(orderId).first().catch(() => null);
+  return (r && r.downloadsEmailedAt) || null;
+}
+
 // migrations/0054 — the customer may upload their own design: kind '' (off) | 'embroidery' |
 // 'transfer', and the add-on per piece in dollars (null = free). Only written when the caller sends
 // `customDesign`; safe on a pre-0054 database.
@@ -1109,6 +1267,7 @@ export async function updateProduct(db, orgId, p) {
   if (p.colorGroupsCents !== undefined) await setProductColorGroups_(db, orgId, p.productId, p.colorGroupsCents);
   if (p.noDesignNeeded !== undefined) await setProductNoDesignNeeded_(db, orgId, p.productId, !!p.noDesignNeeded);
   if (p.noBlankNeeded !== undefined) await setProductNoBlankNeeded_(db, orgId, p.productId, !!p.noBlankNeeded);
+  if (p.digital !== undefined || p.digitalDelivery !== undefined) await setProductDigital_(db, orgId, p.productId, p.digital, p.digitalDelivery);
   if (p.versionGroup !== undefined || p.versionLabel !== undefined) await setProductVersion(db, orgId, p.productId, { group: p.versionGroup, label: p.versionLabel });
   if (p.customDesign !== undefined) await setProductCustomDesign_(db, orgId, p.productId, p.customDesign, p.customDesignPrice);
   await setProductConfig_(db, orgId, p);
@@ -1167,6 +1326,8 @@ function parseProduct_(row) {
     personalizationOptionDesigns: tryParse_(row.personalizationOptionDesigns, {}) || {},
     noDesignNeeded: !!Number(row.noDesignNeeded),   // migrations/0034
     noBlankNeeded: !!Number(row.noBlankNeeded),     // migrations/0057
+    digital: !!Number(row.digital),                 // migrations/0086: sold as files
+    digitalDelivery: cleanDigitalDelivery_(tryParse_(row.digitalDeliveryJson, {}) || {}, true),
     blockedGraphicColors: tryParse_(row.blockedGraphicColorsJson, []) || [],   // migrations/0050: [{graphicId, color}] not offered
     // migrations/0054 — the customer's own design: '' off | 'embroidery' | 'transfer', and its add-on.
     customDesign: CUSTOM_DESIGN_KINDS.includes(row.customDesign) ? row.customDesign : "",
@@ -2821,6 +2982,8 @@ export const FEATURES = [
     description: "Carrier shipping through Shippo: rate quotes at checkout, buying labels, package sizes, the ship-from address, tracking checks in the morning roll-up and the “your order has shipped” email. Off: shops offer local pickup and their own delivery options only." },
   { key: "designVerification", label: "Design approval",
     description: "Emailing a customer a design proof to approve, and the “Design approved” stage on orders. Off: no order waits for a customer's approval, and links already sent say approval isn't available." },
+  { key: "digital", label: "Digital products",
+    description: "Selling files customers download — digitized designs, PDFs: once paid, a download page for the order and an email with the link and the files, within a time and download limit. Off: digital products can't be ordered and their links don't open." },
 ];
 const FEATURE_KEYS_ = FEATURES.map(f => f.key);
 // { production: true, … } from whatever was saved: only an explicit false turns a feature off.
@@ -11741,6 +11904,7 @@ function parseOrder_(row, items, payments, labels) {
     parcelHeight: Number(row.parcelHeight) || 0,
     trackingNumber: row.trackingNumber || "",
     receivedEmailAt: row.receivedEmailAt || "",
+    hasDownloads: !!row.downloadSalt,   // digital products (migrations/0086): a download link was made for it
     confirmedEmailAt: row.confirmedEmailAt || "",
     blankOrderedAt: row.blankOrderedAt || "",
     blankVendor: row.blankVendor || "",

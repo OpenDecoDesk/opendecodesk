@@ -74,7 +74,8 @@ function smtpAttachments_(list) {
   const attachments = [];
   for (const a of list) {
     const type = String((a && a.contentType) || "");
-    if (!/^(image\/(jpeg|png|gif|webp|heic|heif)|application\/pdf)$/.test(type)) return { error: "Only pictures and PDFs can be attached." };
+    // Pictures and PDFs, and a digital product's own files (embroidery formats, sent as application/octet-stream).
+    if (!/^(image\/(jpeg|png|gif|webp|heic|heif)|application\/(pdf|octet-stream))$/.test(type)) return { error: "Only pictures, PDFs and design files can be attached." };
     const b64 = String((a && a.contentBase64) || "").replace(/\s+/g, "");
     const bytes = Math.floor(b64.length * 3 / 4) - (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
     total += bytes;

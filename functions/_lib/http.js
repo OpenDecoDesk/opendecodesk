@@ -46,6 +46,25 @@ export function verifyOrderToken(env, orderId, token){
     }));
 }
 
+// ---- A paid order's download link (digital products, migrations/0086) ------------------------------
+// /api/download?o=<orderId>&t=<token>: the token is an HMAC of the order id and the order's own random salt
+// (orders.downloadSalt) under the install's signing secret, so it can be made again whenever it's needed and
+// nothing that opens it is stored; a new salt (Resend link) retires the old link. "" without a secret or salt.
+export function downloadToken(env, orderId, salt){
+  const secret = orderTokenSecret_(env);
+  if(!secret || !orderId || !salt) return Promise.resolve("");
+  return orderTokenMac_(secret, String(orderId) + "|" + String(salt), "odd-download-v1:");
+}
+export function verifyDownloadToken(env, orderId, salt, token){
+  if(typeof token !== "string" || !/^[0-9a-f]{64}$/.test(token)) return Promise.resolve(false);
+  return downloadToken(env, orderId, salt).then(expected => {
+    if(!expected) return false;
+    let diff = 0;
+    for(let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ token.charCodeAt(i);
+    return diff === 0;
+  });
+}
+
 export function jsonResponse(obj, status){
   return new Response(JSON.stringify(obj), {
     status: status || 200,

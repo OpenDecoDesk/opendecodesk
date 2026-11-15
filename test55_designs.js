@@ -31,6 +31,7 @@ const designSrc = read("functions/api/design.js")
   .replace(/import \{ requireAdmin, timingSafeEqual \} from ["'].*["'];\n?/, "")
   .replace(/import \{ jsonResponse[^}]*\} from ["'].*["'];\n?/, "")
   .replace(/import \{ readBodyWithLimit, hasValidMagicBytes \} from ["'].*["'];\n?/, "")
+  .replace(/import \{ addProductFile, listProductFiles \} from ["'].*["'];\n?/, "")
   .replace(/export (async function|function|const)/g, "$1");
 const hostConfigSrc = strip(read("functions/_lib/hostConfig.js"));
 const designApi = new Function(hostConfigSrc + "\n" + rateLimitSrc + "\n" + adminAuthSrc + "\n" + httpSrc + "\n" + fileUploadSrc + "\n" + designSrc +

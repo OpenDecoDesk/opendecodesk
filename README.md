@@ -207,6 +207,10 @@ change is written to the audit log.
 - **Design approval** — emailing a customer a design proof to approve, and the "Design approved" stage.
   Off: no order waits for an approval, the stage can't be set, and a link already emailed tells the
   customer that approval isn't available.
+- **Digital products** — selling files customers download (digitized designs, PDFs): once the order is
+  paid, a download page for the order (straight after paying by card) and an email with the link and the
+  files, within a time and download limit (see docs/shops-and-domains.md). Off: digital products can't
+  be ordered and their download links don't open.
 
 **Inventory is always on.** Stock of blanks and transfers, and cost of goods, are part of making an order
 (marking it manufactured uses the blanks), so there is no switch for them in this release.

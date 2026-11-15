@@ -1109,6 +1109,45 @@ export function buildShippedEmail(env, order, shipment = {}) {
   return { to: order.contact, subject, html, text };
 }
 
+// ---- Digital products: "Your downloads" (functions/_lib/digital.js deliverOrderDownloads) ---------------------
+// Once an order with digital products is paid: the order's download link with each file's limits, and the files
+// attached when they're small enough (`attachments`; `tooBig` says why they aren't).
+const fileSize_ = (b) => b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB";
+function downloadLimits_(g) {
+  const parts = [];
+  if (g.maxDownloads != null) parts.push(`${g.maxDownloads} download${g.maxDownloads === 1 ? "" : "s"}`);
+  if (g.expiresAt) parts.push(`until ${new Date(g.expiresAt).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" })}`);
+  return parts.join(", ");
+}
+export function buildDownloadsEmail(env, order, { link = "", grants = [], attachments = [], tooBig = false } = {}) {
+  const subject = `Your downloads — ${order.orderId}`;
+  const attached = attachments.length > 0;
+  const rows = grants.map(g => `<tr><td style="padding:4px 8px;border-bottom:1px solid #eee">${escHtml(g.fileName || "File")}</td>
+      <td style="padding:4px 8px;border-bottom:1px solid #eee;color:#555">${escHtml(fileSize_(g.bytes || 0))}</td>
+      <td style="padding:4px 8px;border-bottom:1px solid #eee;color:#555">${escHtml(downloadLimits_(g) || "no limit")}</td></tr>`).join("");
+  const note = attached ? "The files are attached to this email, and you can download them from the link too."
+    : tooBig ? "The files are too large to attach to an email — download them from the link."
+    : "Download them from the link.";
+  const html = `<div style="font-family:sans-serif;max-width:600px;margin:auto">
+    <h2 style="color:#15803d">Your files are ready</h2>
+    <p>Hi ${escHtml(order.customerName || "")}, thank you for your order. ${escHtml(note)}</p>
+    <p><strong>Order ID:</strong> ${escHtml(order.orderId)}</p>
+    ${link ? `<p><a href="${escHtml(link)}" style="display:inline-block;background:#15803d;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none">Download your files</a></p>` : ""}
+    <table style="border-collapse:collapse;font-size:14px;margin:8px 0"><thead><tr><th style="text-align:left;padding:4px 8px">File</th><th style="text-align:left;padding:4px 8px">Size</th><th style="text-align:left;padding:4px 8px">The link works for</th></tr></thead><tbody>${rows}</tbody></table>
+    <p style="font-size:13px;color:#555">Keep this email: the link is yours. If it runs out, reply and we'll send a new one.</p>
+    %%FOOTER_HTML%%
+  </div>`;
+  const text = `Your downloads — ${order.orderId}\n\nHi ${order.customerName || ""}, thank you for your order. ${note}\n` +
+    (link ? `\nDownload your files: ${link}\n` : "") +
+    grants.map(g => `- ${g.fileName || "File"} (${fileSize_(g.bytes || 0)})${downloadLimits_(g) ? " — " + downloadLimits_(g) : ""}`).join("\n") +
+    `\n\nKeep this email: the link is yours. If it runs out, reply and we'll send a new one.\n\n%%FOOTER_TEXT%%`;
+  return { to: order.contact, subject, html, text, ...(attached ? { attachments } : {}) };
+}
+export async function sendDownloadsEmail(env, order, opts) {
+  if (!order || !order.contact || !String(order.contact).includes("@")) return false;
+  return send_(env, buildDownloadsEmail(env, order, opts));
+}
+
 // Sent to owner when Stripe auto-confirms a payment (webhook path).
 export async function sendStripePaymentNotification(env, orderId, orgId, amountPaid) {
   const subject = `Payment confirmed (Stripe) — ${orgId} — ${orderId}`;

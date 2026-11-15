@@ -345,3 +345,24 @@ date more than a year ahead, and anything that would land in a closed month. A r
 that was made inactive is skipped and reported as a problem in the roll-up until the account is active
 again. The roll-up and Communications list what was recorded. Part of Bookkeeping: nothing is recorded
 while it's switched off.
+
+## Shop rate
+
+Finance → **Shop rate** (admins) works out what an hour of production costs, from your expenses:
+
+- **Running costs:** each expense category's total over the period (the last 12 months, or a calendar
+  year), at its business-use share. Change any figure, untick a category to leave it out, or add a cost
+  that isn't in the expenses (a share of the household electricity). Shop supplies start left out, since
+  each product already carries a supplies cost.
+- **Equipment** (the Depreciation categories) is spread over its life: 7 years for MACRS 7, otherwise 5,
+  and you can change any item's life. An item counts in full every year until its life is used up, also
+  when it was bought before the period.
+- **Your pay and profit:** what you want to pay yourself a year, and a profit % on top. Both are optional.
+- **Hours:** production hours a week × weeks a year. The machine time actually timed on Run order over the
+  same period is shown beside them as a guide.
+
+The result is the **overhead per hour**, your pay and profit per hour, and the **shop rate**. **Save shop
+rate** keeps the figures and your changes, and price analysis then uses them (see Pricing in
+[shops-and-domains.md](shops-and-domains.md#pricing-what-an-item-costs-and-leaves)). The page works the
+numbers out again as you type; nothing is used until it's saved. Part of Bookkeeping.
+

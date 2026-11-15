@@ -142,11 +142,11 @@ const order = (o = {}) => Object.assign({
   {
     // The details at the top right: a long order number or shop name must not run over its label.
     const long = order({ orderId: "ACME-MW2YAAVH-RTWEUZ", customerName: "Alexandra Sample-Montgomery" });
-    const pd = await pdfjs.getDocument({ data: new Uint8Array((await M.orderPdf(env, long, { kind: "invoice", orgName: "Northside Home Renovations of Southeast Michigan" })).bytes), verbosity: 0 }).promise;
+    const pd = await pdfjs.getDocument({ data: new Uint8Array((await M.orderPdf(env, long, { kind: "invoice", orgName: "Northside Home Improvement Cooperative of the Valley" })).bytes), verbosity: 0 }).promise;
     const items = (await (await pd.getPage(1)).getTextContent()).items.filter(i => i.str.trim()).map(i => ({ s: i.str, x: i.transform[4], y: Math.round(i.transform[5]), r: i.transform[4] + i.width }));
     const labels = items.filter(i => ["Invoice no.", "Date", "Order date", "Shop", "Payment"].includes(i.s));
     const clash = labels.some(l => items.some(v => v !== l && v.y === l.y && v.x > l.x && v.x < l.r + 4));
-    const shop = items.filter(i => /Renovations|Michigan/.test(i.s));
+    const shop = items.filter(i => /Improvement|Cooperative|Valley/.test(i.s));
     ok("the invoice's details don't run over their labels: a long order number and shop name sit to the right, the name wraps", labels.length >= 4 && !clash &&
       items.some(i => i.s === "ACME-MW2YAAVH-RTWEUZ") && shop.length >= 1 && shop.every(i => i.r <= M.pdfDocument({ pageSize: "Letter" }).width - 50 + 1));
   }

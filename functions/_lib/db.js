@@ -1045,6 +1045,17 @@ async function hasFromStockColumn_(db) {
 async function fromStockLine_(db) {
   return (await hasFromStockColumn_(db)) ? (alias) => `COALESCE(${alias}.fromStock, 0) = 1` : () => "0";
 }
+// SQL for "this line (alias) is a digital product" (products.digital, migrations/0086): sold as files, so there's
+// nothing to make, pack or ship for it — the order's stages and the production backlog leave it out. A constant "no"
+// on a database from before the migration; only a "yes" is remembered, like the checks above.
+const _hasDigitalColumn = new WeakSet();
+async function digitalLine_(db) {
+  if (!_hasDigitalColumn.has(db)) {
+    try { await db.prepare("SELECT digital FROM products LIMIT 0").all(); _hasDigitalColumn.add(db); }
+    catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; return () => "0"; }
+  }
+  return (alias) => `EXISTS (SELECT 1 FROM products dg WHERE dg.orgId = ${alias}.orgId AND dg.productId = ${alias}.productId AND dg.digital = 1)`;
+}
 
 // migrations/0034 — a product that never needs an embroidery design (DTF, …).
 async function setProductNoDesignNeeded_(db, orgId, productId, on) {
@@ -1637,12 +1648,16 @@ export async function getCatalogIssues(db, orgId = null) {
     if (prod && orderLineDrift_(prod, tryParse_(r.configJson, null), graphicById).length) staleBy[r.orgId + "|" + r.productId] = (staleBy[r.orgId + "|" + r.productId] || 0) + 1;
   }
   const designName = (id) => (designById[id] && designById[id].name) || ("#" + id);
+  // Digital products (migrations/0086) with at least one file — one with none isn't shown in the shop (catalog.js).
+  const withFiles = new Set((await q("SELECT DISTINCT orgId, productId FROM product_files" + orgFilter, ...ob)).map(r => r.orgId + "|" + r.productId));
   for (const p of products) {
     const key = p.orgId + "|" + p.productId;
     // A hidden product is checked too (a copy or an import usually starts hidden), but its problems are only
     // warnings until it's shown — unless it's on an open order.
     const hiddenOnly = !Number(p.visible) && !openBy[key];
     const list = [];
+    if (Number(p.digital) && !withFiles.has(key))
+      list.push({ code: "digitalNoFiles", level: "error", text: "A digital product with no files — it isn't shown in the shop until one is added (Digital product → Files)" });
     const used = pdBy[key] || (p.designId != null ? [Number(p.designId)] : []);
     // A product the customer supplies the design for (migrations/0054) is made from their upload.
     // A configurable product whose designs are the options offered at its spots (graphics) needs no design of its own.
@@ -5354,8 +5369,11 @@ const CUSTOM_EMBROIDERY_SQL_ = `EXISTS (SELECT 1 FROM order_items cx WHERE cx.or
 async function stageSql_(db) {
   // A line filled from finished stock (migrations/0060) is already made: it needs no digitizing or approval.
   const fs = await hasFromStockColumn_(db);
-  const skipStock = (sql) => fs ? sql.replace(/ax\.cancelDate IS NULL/g, "ax.cancelDate IS NULL AND COALESCE(ax.fromStock, 0) = 0")
-    .replace(/dx\.cancelDate IS NULL/g, "dx.cancelDate IS NULL AND COALESCE(dx.fromStock, 0) = 0") : sql;
+  // A line sold as files (products.digital, migrations/0086) has no stitch file to make: it needs no digitizing.
+  const dg = (await digitalLine_(db))("x") !== "0";
+  const skipStock = (sql) => (fs ? sql.replace(/ax\.cancelDate IS NULL/g, "ax.cancelDate IS NULL AND COALESCE(ax.fromStock, 0) = 0")
+    .replace(/dx\.cancelDate IS NULL/g, "dx.cancelDate IS NULL AND COALESCE(dx.fromStock, 0) = 0") : sql)
+    .replace(/pdx\.designId IS NULL/g, dg ? "pdx.designId IS NULL AND COALESCE(pdx.digital, 0) = 0" : "pdx.designId IS NULL");
   if (!(await orderItemsHasConfigCol_(db))) return { approval: skipStock(NEEDS_DESIGN_APPROVAL_SQL_), digitizing: skipStock(NEEDS_DIGITIZING_SQL_) };
   return {
     approval: `(${featureOnSql_("designVerification")} AND (${skipStock(FREE_FORM_TEXT_SQL_)} OR ${CUSTOM_EMBROIDERY_SQL_}))`,
@@ -5365,7 +5383,7 @@ async function stageSql_(db) {
 
 export async function getProductionQueue(db) {
   const stage = await stageSql_(db);
-  const nb = await noBlankLine_(db), fs = await fromStockLine_(db);
+  const nb = await noBlankLine_(db), fs = await fromStockLine_(db), dg = await digitalLine_(db);
   const { results } = await db.prepare(`
     SELECT oi.id AS itemId, oi.orderId, oi.orgId, o.customerName, o.placedAt, o.dueDate, oi.qty,
            COALESCE(oi.manufacturedQty,0) AS manufacturedQty, oi.productId,
@@ -5399,6 +5417,7 @@ export async function getProductionQueue(db) {
            AND (o.digitizingCompleteAt IS NOT NULL OR NOT ${stage.digitizing})))
       AND COALESCE(oi.manufacturedQty,0) < oi.qty
       AND NOT ${fs("oi")}   -- filled from finished stock (0060): nothing to run
+      AND NOT ${dg("oi")}   -- sold as files (0086): nothing to make
     ORDER BY (o.dueDate IS NULL), o.dueDate, blankProductType, blankName, oi.size, o.placedAt
   `).all();
   const jobs = results.map(parseQueueRow_);
@@ -5980,9 +5999,10 @@ async function blankShipmentsByOrder_(db, scope) {
 // real, not voided/completed, not yet manufactured, with at least one active line. Soonest-due
 // first, undated after all dated, then oldest-placed. blankReceived lets the UI flag what's ready.
 export async function getPaidUnrunOrders(db) {
+  const dg = await digitalLine_(db);   // a line sold as files (migrations/0086) is nothing to run
   const orders = await loadOrders_(db,
     `(o.paid = 1 OR o.paidForWork = 1) AND o.isTest = 0 AND o.voidedAt IS NULL AND o.manufacturedAt IS NULL AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL
-     AND EXISTS (SELECT 1 FROM order_items ai WHERE ai.orderId = o.orderId AND ai.cancelDate IS NULL)`,
+     AND EXISTS (SELECT 1 FROM order_items ai WHERE ai.orderId = o.orderId AND ai.cancelDate IS NULL AND NOT ${dg("ai")})`,
     [], "(o.dueDate IS NULL) ASC, o.dueDate ASC, placedAt ASC");
   const orgNames = {};
   for (const org of await getAllOrgs(db)) orgNames[org.orgId] = org.name || org.orgId;
@@ -5995,7 +6015,7 @@ export async function getPaidUnrunOrders(db) {
     blanksInStock: !o.blankOrderedAt && !!(stock[o.orderId] && stock[o.orderId].covered),
     needsBlanks: o.needsBlanks !== false,   // false: nothing on it uses a blank (migrations/0057)
     allFromStock: !!o.allFromStock,         // every line comes from finished stock (migrations/0060)
-    items: o.items.filter(it => !it.cancelDate).map(it => ({ name: it.name, size: it.size, qty: it.qty })),
+    items: o.items.filter(it => !it.cancelDate && !it.digital).map(it => ({ name: it.name, size: it.size, qty: it.qty })),
   }));
 }
 
@@ -8986,9 +9006,9 @@ async function loadOrders_(db, where, binds, orderBy) {
   for (const r of orderRows) r.orderDesignsMissing = missing[r.orderId] || 0;
 
   const sub = `SELECT o.orderId FROM orders o WHERE ${where}`;
-  const nb = await noBlankLine_(db);
+  const nb = await noBlankLine_(db), dg = await digitalLine_(db);
   const { results: itemRows } = await db.prepare(
-    `SELECT oi.*, ${nb("oi")} AS noBlank FROM order_items oi WHERE oi.orderId IN (${sub}) ORDER BY oi.id`
+    `SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId IN (${sub}) ORDER BY oi.id`
   ).bind(...binds).all();
 
   const { results: paymentRows } = await db.prepare(
@@ -9039,9 +9059,9 @@ export async function getOrderById(db, orderId) {
   const row = await db.prepare(`SELECT o.*, ${stage.approval} AS needsDesignApproval, ${stage.digitizing} AS needsDigitizing FROM orders o WHERE o.orderId=?`).bind(orderId).first();
   if (!row) return null;
   row.orderDesignsMissing = (await orderDesignsMissingBy_(db, "o.orderId=?", [orderId]))[orderId] || 0;
-  const nb = await noBlankLine_(db);
+  const nb = await noBlankLine_(db), dg = await digitalLine_(db);
   const { results: itemRows } = await db.prepare(
-    `SELECT oi.*, ${nb("oi")} AS noBlank FROM order_items oi WHERE oi.orderId=? ORDER BY oi.id`
+    `SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId=? ORDER BY oi.id`
   ).bind(orderId).all();
   const { results: paymentRows } = await db.prepare(
     "SELECT * FROM order_payments WHERE orderId=? ORDER BY receivedAt ASC"
@@ -9320,6 +9340,8 @@ export async function setOrderDates(db, orderId, changes) {
 
 export function stagePrereqError(o, stage) {
   if (!o) return "order not found";
+  // Downloads only (migrations/0086): no stage applies — once it's paid, it's completed.
+  if (o.digitalOnly) return "everything on this order is a digital product, so there's nothing to make or ship — mark it completed once it's paid";
   // The typed-in name has to be digitized and uploaded (Edit items → Files → Order design) before
   // digitizing counts as done or the design can be approved.
   if ((stage === "digitizingComplete" || stage === "designApproved") && Number(o.orderDesignsMissing) > 0) {
@@ -9452,7 +9474,8 @@ export function whyNotCompletable_(o) {
   if (o.voidedAt) return "the order is voided";
   if (o.completedAt) return "already completed";
   if (!Number(o.activeItems)) return "every item is cancelled";
-  if (!o.deliveredAt) return "not delivered yet";
+  // Downloads only (migrations/0086): nothing is delivered — paid in full is enough.
+  if (!o.deliveredAt && !(o.digitalOnly === true || (o.physicalItems != null && Number(o.physicalItems) === 0))) return "not delivered yet";
   if (!o.paid) return "a balance is still due";
   return "";
 }
@@ -9462,10 +9485,12 @@ export function whyNotCompletable_(o) {
 export async function setOrdersCompleted(db, orderIds, completed, at = null) {
   const out = { updated: [], skipped: [] };
   const now = at || new Date().toISOString();
+  const dg = await digitalLine_(db);
   for (const orderId of orderIds) {
     const o = await db.prepare(
       `SELECT o.orderId, o.orgId, o.voidedAt, o.completedAt, o.deliveredAt, o.paid,
-              (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL) AS activeItems
+              (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL) AS activeItems,
+              (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND NOT ${dg("i")}) AS physicalItems
          FROM orders o WHERE o.orderId = ?`).bind(orderId).first();
     if (!o) { out.skipped.push({ orderId, reason: "order not found" }); continue; }
     if (completed) {
@@ -11921,6 +11946,11 @@ function parseOrder_(row, items, payments, labels) {
     needsBlanks: !(items || []).some(it => !it.cancelDate) || (items || []).some(it => !it.cancelDate && !it.noBlank),
     // Every active line is filled from the shop's finished stock (migrations/0060): "made" = pulled from stock.
     allFromStock: (items || []).some(it => !it.cancelDate) && (items || []).filter(it => !it.cancelDate).every(it => it.fromStock),
+    // Digital products (migrations/0086). digitalOnly: every active line is sold as files — there's nothing to make,
+    // pack or ship, so the order goes from paid straight to completed (stagePrereqError, whyNotCompletable_).
+    // hasDigital: some active line is — its downloads go out once the order is paid.
+    digitalOnly: (items || []).some(it => !it.cancelDate) && (items || []).filter(it => !it.cancelDate).every(it => it.digital),
+    hasDigital: (items || []).some(it => !it.cancelDate && it.digital),
     blankCondition: row.blankCondition || "",
     manufacturedAt: row.manufacturedAt || "",
     digitizingCompleteAt: row.digitizingCompleteAt || "",
@@ -11950,6 +11980,7 @@ function parseItem_(row) {
     // the blank steps don't apply to this line.
     noBlank: !!Number(row.noBlank),
     fromStock: !!Number(row.fromStock),   // filled from the shop's finished stock (migrations/0060)
+    digital: !!Number(row.digital),       // its product is sold as files (migrations/0086): nothing to make or ship
     name: row.name,
     type: row.type,
     size: row.size || "",

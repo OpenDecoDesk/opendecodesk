@@ -271,6 +271,20 @@ export async function onRequestGet(context){
       console.error("ready_to_ship fetch failed:", e);
     }
   }
+  // Digital products (migrations/0086) are only shown with at least one file to download, and not at all while the
+  // Digital products feature is off (they can't be ordered then). Files are read fresh, like stock: adding one shows the
+  // product at once. If they can't be read, the digital products are left out rather than sold with nothing to send.
+  let shownProducts = org.products;
+  if(shownProducts.some(p => p.digital)){
+    let withFiles = new Set();
+    if(env.DB && features.digital !== false){
+      try{
+        const { results } = await env.DB.prepare("SELECT DISTINCT productId FROM product_files WHERE orgId = ?").bind(orgId).all();
+        withFiles = new Set((results || []).map(r => String(r.productId)));
+      }catch(e){ console.error("product files fetch failed:", e); }
+    }
+    shownProducts = shownProducts.filter(p => !p.digital || withFiles.has(String(p.productId)));
+  }
   // "Ready to decorate": the linked blank's free stock per color + size (display only; non-fatal).
   let blankReady = {};
   if(env.DB){
@@ -295,8 +309,8 @@ export async function onRequestGet(context){
       // the Shipping feature is switched off.
       deliveryOptions: (org.deliveryOptions || []).filter(o => carrierShipping || o.type !== "shipping").map(o => ({ id: o.id, type: o.type, label: o.label, fee: o.fee })),
       // The storefront's sections, in the managed order (migrations/0056) — only the ones this shop uses.
-      categories: (catalogData.categories || []).filter(c => org.products.some(p => p.type === c.key)).map(c => ({ key: c.key, label: c.label })),
-      products: org.products.map(p => ({ ...toClientProduct(p), stock: stockByProduct[p.productId] || null,
+      categories: (catalogData.categories || []).filter(c => shownProducts.some(p => p.type === c.key)).map(c => ({ key: c.key, label: c.label })),
+      products: shownProducts.map(p => ({ ...toClientProduct(p), stock: stockByProduct[p.productId] || null,
         ...(stockByVariant[p.productId] ? { stockVariants: stockByVariant[p.productId] } : {}), blankStock: blankReady[p.productId] || null })),
       // Configurable-product option catalog + tier prices (migrations/0036); only present when the
       // org has configurable products. Image URLs re-normalised on the way out.

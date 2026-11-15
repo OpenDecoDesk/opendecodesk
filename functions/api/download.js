@@ -21,14 +21,23 @@ const size = (b) => b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1
 const day = (iso) => new Date(iso).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
 const HEADERS = { "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" };
 
-function page(title, body, { status = 200, refresh = 0 } = {}) {
+// The page's one script (the file list only), allowed by a nonce: a Download button greys out at once ("Downloading…") and
+// the page reloads a moment later, so what's left is shown as soon as the download has started — the file itself comes
+// as an attachment, which leaves the page as it was. Without it a used-up button stayed live, and every click looked like
+// another download. The buttons have no `download` attribute: a refusal ("All downloads used") is a page the browser
+// then shows, instead of saving it as the file.
+const RELOAD_SCRIPT = `document.querySelectorAll("a.btn").forEach(function(a){a.addEventListener("click",function(e){
+if(a.dataset.busy){e.preventDefault();return}a.dataset.busy="1";a.textContent="Downloading\u2026";a.style.opacity=".6";a.style.cursor="default";
+setTimeout(function(){location.reload()},2500)})});`;
+function page(title, body, { status = 200, refresh = 0, script = "" } = {}) {
+  const nonce = script ? Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("") : "";
   return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">${refresh ? `<meta http-equiv="refresh" content="${refresh}">` : ""}<title>${esc(title)}</title>
 <style>body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;color:#111;background:#fafafa}
 h1{font-size:22px}table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #e5e7eb;border-radius:8px}
 td,th{padding:10px;border-bottom:1px solid #eee;text-align:left;font-size:14px}a.btn{background:#15803d;color:#fff;padding:7px 14px;border-radius:6px;text-decoration:none;white-space:nowrap}
-.muted{color:#666;font-size:13px}.off{color:#b03a2e;font-size:13px}</style></head><body>${body}</body></html>`,
-    { status, headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'", ...HEADERS } });
+.muted{color:#666;font-size:13px}.off{color:#b03a2e;font-size:13px}</style></head><body>${body}${script ? `<script nonce="${nonce}">${script}</script>` : ""}</body></html>`,
+    { status, headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline';${script ? ` script-src 'nonce-${nonce}';` : ""} base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, ...HEADERS } });
 }
 const notFound = () => page("Link not found", `<h1>This download link doesn't work</h1><p>Check you used the whole link from your email. If it still doesn't work, reply to that email and the shop will send a new one.</p>`, { status: 404 });
 
@@ -65,10 +74,10 @@ export async function onRequestGet(context) {
       const blocked = grantBlocked(g);
       const left = [g.maxDownloads != null ? `${Math.max(0, g.maxDownloads - g.downloads)} of ${g.maxDownloads} downloads left` : "", g.expiresAt ? `until ${day(g.expiresAt)}` : ""].filter(Boolean).join(", ");
       return `<tr><td><b>${esc(g.fileName || "File")}</b><div class="muted">${esc(size(g.bytes))}${left ? " · " + esc(left) : ""}</div></td>
-        <td style="text-align:right">${blocked ? `<span class="off">${esc(why[blocked])}</span>` : `<a class="btn" href="${esc(base + "&f=" + g.id)}" download>Download</a>`}</td></tr>`;
+        <td style="text-align:right">${blocked ? `<span class="off">${esc(why[blocked])}</span>` : `<a class="btn" href="${esc(base + "&f=" + g.id)}">Download</a>`}</td></tr>`;
     }).join("");
     return page(`Your downloads — ${orderId}`, `<h1>Your downloads</h1><p>Order <b>${esc(orderId)}</b> from ${esc(shop)}.</p><table>${rows}</table>
-      <p class="muted">Save the files somewhere safe. If a link runs out, reply to your order email and ${esc(shop)} can send a new one.</p>`);
+      <p class="muted">Save the files somewhere safe. If a link runs out, reply to your order email and ${esc(shop)} can send a new one.</p>`, { script: RELOAD_SCRIPT });
   }
 
   // One file.

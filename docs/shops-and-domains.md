@@ -394,8 +394,10 @@ the product's form. It then needs no blank, no design and no shipping, and has o
 - **Files:** once the product is saved, upload its files on the form (any embroidery format, PDFs and
   zip files, up to 20 MB each, at most 20), or add a design from the Designs library (its latest
   version's file). They're kept in the private `DESIGNS` bucket.
-- **In the shop:** it shows **Instant download**. A cart of only digital products skips the delivery
-  step. A mixed cart is delivered as usual for the rest, and the files add nothing to the parcel.
+- **In the shop:** it shows **Instant download**, but only once it has at least one file. Until then it
+  isn't shown, and its product lists the problem. While Digital products is switched off, no digital
+  product is shown. A cart of only digital products skips the delivery step. A mixed cart is delivered
+  as usual for the rest, and the files add nothing to the parcel.
 - **Once the order is paid** each file is granted to the order, with the limits as they are then:
   - Card payments are paid as soon as Stripe confirms them, and the customer lands straight on the
     order's **download page**.
@@ -407,8 +409,13 @@ the product's form. It then needs no blank, no design and no shipping, and has o
 - **Limits:** the link works for a number of days, and each file can be downloaded a number of times
   (7 days and 5 downloads unless you change them in Global settings → Features → Digital products, or
   on the product). Blank means no limit. Emailed files don't use up downloads.
-- **On the order:** **Downloads…** shows each file's downloads and expiry. **Resend link** emails a new
-  link, and the old one stops working. **Reset downloads** sets the counts back to 0 with a new expiry.
+- **An order of only downloads** has no stages: there's nothing to make, pack or ship. It goes from
+  received to paid to completed: once it's paid, its row offers **Mark completed**, with no stage list,
+  shipping or rush. It isn't in Run Order's backlog either. An order with downloads and other items
+  goes through its stages as usual for the rest.
+- **On the order:** once it's paid, **Resend downloads** on its row emails the customer a new link, with
+  the files when they fit; the old link stops working. **Downloads…** shows each file's downloads and
+  expiry, with the same **Resend link**. **Reset downloads** sets the counts back to 0 with a new expiry.
   **Revoke** stops the downloads; voiding the order does too. A refund doesn't revoke on its own: use
   Revoke if you want it to.
 

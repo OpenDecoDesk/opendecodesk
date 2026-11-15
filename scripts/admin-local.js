@@ -78,7 +78,9 @@ const buildHandler = () => new Function("sendTestEmail",
   strip(read("functions/_lib/fileUpload.js")) + "\n" + strip(read("functions/_lib/vendorImages.js")) + "\n" + strip(read("functions/_lib/orphanImages.js")) + "\n" +
   strip(read("functions/_lib/promostandards.js")) + "\n" + strip(read("functions/_lib/vendorCredentials.js")) + "\n" + strip(read("functions/_lib/vendorLog.js")) + "\n" + strip(read("functions/_lib/supplierOrders.js")) + "\n" +
   strip(read("functions/_lib/setupStatus.js")) + "\n" +
-  strip(read("functions/_lib/db.js")) + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")(buildTestEmail());
+  // Digital products (migrations/0086): granting and the "Your downloads" email, which isn't sent locally (no provider).
+  "const sendDownloadsEmail = async () => false;\n" +
+  strip(read("functions/_lib/db.js")) + "\n" + strip(read("functions/_lib/digital.js")) + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")(buildTestEmail());
 // The shop page's catalog (functions/api/catalog.js) on the published catalog, as demo.example.com sees it.
 const buildCatalog = () => new Function(
   strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/db.js")) + "\n" +
@@ -91,9 +93,11 @@ const buildCustomerDesign = () => new Function(
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const getCatalogData = async (env) => ({ subdomainMap: " + SHOP_MAP + ", orgs: {}, features: await getFeatures(env.DB) });\n" +
   strip(read("functions/api/customer-design.js")) + "\nreturn onRequestPost;")();
-// The admin's private-file endpoint (functions/api/design.js): uploads, signed links, downloads.
+// The admin's private-file endpoint (functions/api/design.js): uploads, signed links, downloads — and a digital
+// product's files (migrations/0086), which it records with db.js.
 const buildDesign = () => new Function(
   strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/fileUpload.js")) + "\n" +
+  strip(read("functions/_lib/db.js")) + "\n" +
   "const requireAdmin = async () => null; const timingSafeEqual = (a, b) => a === b;\n" +
   strip(read("functions/api/design.js")) + "\nreturn { post: onRequestPost, get: onRequestGet };")();
 // The customer's invoice page (functions/api/invoice.js), with the real db.js, email.js and quote signing.
@@ -108,7 +112,10 @@ const memoryBucket = () => {
   const m = new Map();
   return {
     put: async (key, bytes, opts = {}) => { m.set(key, { bytes: new Uint8Array(bytes), httpMetadata: opts.httpMetadata || {}, customMetadata: opts.customMetadata || {} }); },
-    get: async (key) => { const o = m.get(key); return o ? { body: o.bytes, httpMetadata: o.httpMetadata, customMetadata: o.customMetadata } : null; },
+    // Like R2's object: its size, and its bytes as an ArrayBuffer (the downloads email attaches the files from it).
+    get: async (key) => { const o = m.get(key); return o ? { body: o.bytes, size: o.bytes.byteLength, httpMetadata: o.httpMetadata, customMetadata: o.customMetadata,
+      arrayBuffer: async () => o.bytes.buffer.slice(o.bytes.byteOffset, o.bytes.byteOffset + o.bytes.byteLength) } : null; },
+    head: async (key) => { const o = m.get(key); return o ? { size: o.bytes.byteLength, httpMetadata: o.httpMetadata, customMetadata: o.customMetadata } : null; },
     delete: async (key) => { m.delete(key); },
   };
 };

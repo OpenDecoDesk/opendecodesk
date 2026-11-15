@@ -1030,13 +1030,15 @@ function renderPickerOrgButtons(panel){
 // Admin home dashboard: every open order across every shop (not completed, not voided, not a
 // test, not fully cancelled), oldest first, each with where it is in fulfillment.
 const DASH_STATUSES_ = [
-  ["unpaid", "Awaiting payment"], ["notStarted", "Paid — not started"], ["blankOrderedAt", "Blank ordered"],
+  ["unpaid", "Awaiting payment"], ["notStarted", "Paid — not started"], ["digitalPaid", "Paid — downloads only, ready to complete"], ["blankOrderedAt", "Blank ordered"],
   ["digitizingCompleteAt", "Digitizing done"], ["blankReceivedAt", "Blank received"], ["designApprovedAt", "Design approved"],
   ["manufacturedAt", "Manufactured"], ["qaPackedAt", "QA & packed"], ["shippedAt", "Shipped"], ["deliveredAt", "Delivered"],
 ];
 // The furthest milestone an order has reached (later stages win), else paid/unpaid.
 function dashOrderStatus_(o){
-  for (let i = DASH_STATUSES_.length - 1; i >= 2; i--) if (o[DASH_STATUSES_[i][0]]) return DASH_STATUSES_[i][0];
+  // Downloads only (migrations/0086): no stages — once it's paid, it's ready to complete.
+  if (o.digitalOnly) return o.paid ? "digitalPaid" : "unpaid";
+  for (let i = DASH_STATUSES_.length - 1; i >= 3; i--) if (o[DASH_STATUSES_[i][0]]) return DASH_STATUSES_[i][0];
   return o.paid ? "notStarted" : "unpaid";
 }
 window._dashFilter = window._dashFilter || "";
@@ -1917,9 +1919,10 @@ function toggleIncludeCancelled(orgId, on){
   window._orderView.includeCancelled = !!on;
   selectAdminOrg(orgId);
 }
-// Delivered, paid in full, not voided, something still active, not already completed.
+// Delivered, paid in full, not voided, something still active, not already completed. Downloads only (digital
+// products, migrations/0086): nothing is delivered, so paid in full is enough.
 function canCompleteOrder(o){
-  return !!o && !o.voidedAt && !o.completedAt && !!o.deliveredAt && !!o.paid && (o.items || []).some(it => !it.cancelDate);
+  return !!o && !o.voidedAt && !o.completedAt && (!!o.deliveredAt || !!o.digitalOnly) && !!o.paid && (o.items || []).some(it => !it.cancelDate);
 }
 // Close out (or reopen) orders, then repaint the list — completed ones drop out of the default view.
 // `at`: when it was completed (asked for when completing — see completeOrdersAsk_); reopening needs no date.
@@ -3526,9 +3529,14 @@ function adminActionCell(org, o){
   // The two customer emails are "Order received" and "Payment received" (email.js) — the button says which.
   const resendLabel = !o.paid ? (o.receivedEmailAt ? "Resend “Order received”" : "Send “Order received”") :
                       (o.confirmedEmailAt ? "Resend “Payment received”" : "Send “Payment received”");
-  // Digital products (migrations/0086): the order's downloads — what's been used, Resend / Reset / Revoke.
-  const dlBtn = o.hasDownloads && featureOn_("digital") ? `<button class="admin-btn" ${dataAttrs} onclick="showDownloadsModal_(this.dataset.org,this.dataset.order)" title="The customer's download link and files" style="margin-top:4px;">Downloads…</button>` : "";
-  const rushBtn = `<button class="admin-btn" ${dataAttrs} onclick="showRushFeeModal_(this.dataset.org,this.dataset.order)" title="Rush this order, or change its rush fee" style="margin-top:4px;">${o.rushRequested ? "Rush…" : "+ Rush…"}</button>`;
+  // Digital products (migrations/0086): the order's downloads — what's been used, Resend / Reset / Revoke — and, once
+  // it's paid, Resend downloads straight from the row (a new link, emailed with the files when they fit).
+  const digitalOn = featureOn_("digital");
+  const dlBtn = (o.hasDownloads || o.hasDigital) && digitalOn ? `<button class="admin-btn" ${dataAttrs} onclick="showDownloadsModal_(this.dataset.org,this.dataset.order)" title="The customer's download link and files: what's been used, Reset, Revoke" style="margin-top:4px;">Downloads…</button>` : "";
+  const resendDlBtn = o.hasDigital && digitalOn && (o.paid || o.paidForWork) && adminCan_("manager")
+    ? `<button class="admin-btn" ${dataAttrs} onclick="resendDownloadsNow_(this.dataset.org,this.dataset.order)" title="Email the customer a new download link, with the files attached when they fit (the old link stops working)" style="margin-top:4px;">Resend downloads</button>` : "";
+  // Downloads only: nothing to make or ship, so no rush, no shipping and no stages — paid, then completed.
+  const rushBtn = o.digitalOnly ? "" : `<button class="admin-btn" ${dataAttrs} onclick="showRushFeeModal_(this.dataset.org,this.dataset.order)" title="Rush this order, or change its rush fee" style="margin-top:4px;">${o.rushRequested ? "Rush…" : "+ Rush…"}</button>`;
 
   // Paid for everything but a rush fee (migrations/0082) counts as paid for the work: the stages go on.
   if(!o.paid && !o.paidForWork){
@@ -3545,7 +3553,9 @@ function adminActionCell(org, o){
   const waitingUpload = s => Number(o.orderDesignsMissing) > 0 && (s.stage === "digitizingComplete" || s.stage === "designApproved");
   const eligible = eligibleAll.filter(s => !waitingUpload(s));
   const waiting = eligibleAll.filter(waitingUpload);
-  const stageEl = eligible.length === 0 && waiting.length === 0
+  const stageEl = o.digitalOnly
+    ? `<span class="mono" style="font-size:11px;color:var(--ink-soft);" title="Everything on this order is a digital product: nothing to make or ship">Downloads only</span>`
+    : eligible.length === 0 && waiting.length === 0
     ? `<span class="mono" style="font-size:11px;color:var(--ink-soft);">All stages ✓</span>`
     : `<select ${dataAttrs} onchange="if(this.value){setFulfillmentStage(this.dataset.org,this.dataset.order,this.value);this.value=''}" style="font-size:12px;padding:4px 6px;border:1px solid var(--border,#ccc);border-radius:4px;background:var(--surface,#fff);color:var(--ink,#111);cursor:pointer;display:block;width:100%;margin-bottom:4px;">
         <option value="">— Stage —</option>
@@ -3554,17 +3564,27 @@ function adminActionCell(org, o){
       </select>`;
   const emailBtn = adminDesktopNoEmail_() ? "" : `<button class="admin-btn" ${dataAttrs} onclick="resendEmail(this.dataset.org, this.dataset.order)" style="margin-top:4px;">${resendLabel}</button>`;
   const hasAddr = o.shippingAddress && o.shippingAddress.line1;
-  const shipBtn = `<button class="admin-btn" ${dataAttrs} onclick="setShippingInfo(this.dataset.org,this.dataset.order)" style="margin-top:4px;">${hasAddr ? "Edit shipping" : "Set shipping"}</button>`;
+  const shipBtn = o.digitalOnly ? "" : `<button class="admin-btn" ${dataAttrs} onclick="setShippingInfo(this.dataset.org,this.dataset.order)" style="margin-top:4px;">${hasAddr ? "Edit shipping" : "Set shipping"}</button>`;
   const editBtn = `<button class="admin-btn" ${dataAttrs} onclick="editOrder(this.dataset.org,this.dataset.order)" style="margin-top:4px;">Edit items</button>`;
   const datesBtn = `<button class="admin-btn" ${dataAttrs} onclick="showOrderDates_(this.dataset.org,this.dataset.order)" title="Every date on this order — change or clear any of them" style="margin-top:4px;">Dates…</button>`;
   const completeBtn = o.completedAt
     ? `<div class="mono" style="font-size:11px;color:var(--ink-soft);margin-top:4px;">Completed ${escapeHtml(new Date(o.completedAt).toLocaleDateString())}</div><button class="admin-btn" ${dataAttrs} onclick="completeOrders(this.dataset.org, [this.dataset.order], false)" style="margin-top:4px;">Reopen</button>`
     : canCompleteOrder(o)
-      ? `<button class="admin-btn" ${dataAttrs} onclick="completeOrdersAsk_(this.dataset.org, [this.dataset.order])" title="Delivered and paid in full — close it out" style="margin-top:4px;background:#166534;color:#fff;border-color:#166534;">Mark completed</button>`
+      ? `<button class="admin-btn" ${dataAttrs} onclick="completeOrdersAsk_(this.dataset.org, [this.dataset.order])" title="${o.digitalOnly ? "Paid in full, and its downloads have gone out" : "Delivered and paid in full"} — close it out" style="margin-top:4px;background:#166534;color:#fff;border-color:#166534;">Mark completed</button>`
       : "";
   // The rush fee still owed (the rest is paid): Mark as paid settles it.
   const payRushBtn = !o.paid && Number(o.balanceDue) > 0 ? `<button class="admin-btn" ${dataAttrs} onclick="markOrderPaid(this.dataset.org, this.dataset.order)" title="Record the rest of the balance — the rush fee — as paid" style="margin-top:4px;">Mark as paid</button>` : "";
-  return stageEl + completeBtn + payRushBtn + emailBtn + invoiceCell_(org, o) + shipBtn + editBtn + datesBtn + rushBtn + dlBtn + paymentsBtn + deleteBtn;
+  return stageEl + completeBtn + payRushBtn + resendDlBtn + emailBtn + invoiceCell_(org, o) + shipBtn + editBtn + datesBtn + rushBtn + dlBtn + paymentsBtn + deleteBtn;
+}
+
+// The order row's Resend downloads (digital products, migrations/0086): a new download link, emailed with the files
+// when they fit — the same as Resend link in Downloads…; the old link stops working.
+async function resendDownloadsNow_(orgId, orderId){
+  if (!(await askConfirm_("Email the customer their downloads again?\n\nThey get a new link, with the files attached when they fit. The old link stops working.", { confirmLabel: "Resend downloads" }))) return;
+  try {
+    const r = await hoopApi_({ action: "resendDownloads", orderId, org: orgId });
+    showToast("Downloads emailed" + (r.sent && r.sent.attached ? " with the files." : r.sent && r.sent.tooBig ? " (the files are too large to attach, so just the link)." : "."));
+  } catch (e) { showToast("Couldn't resend the downloads: " + (e.message || "unknown error"), true); }
 }
 
 // "⚡ RUSH · needed by 11/20 · fee to follow" on an order's row and card (migrations/0082).
@@ -12516,7 +12536,7 @@ function digitalProductCardHtml_(product, isEdit){
               <label style="font-size:13px;">Attach the files<br>${tri("prodDigAttach", "attach")}</label>
             </div>
             ${isEdit ? `<div style="font-size:13px;font-weight:700;margin:10px 0 6px;">Files</div><div id="digitalFilesSection"><em style="color:#888;font-size:13px;">Loading files&hellip;</em></div>`
-              : `<div class="admin-note">Add the files once the product is created.</div>`}
+              : `<div class="admin-note">Add the files once the product is created. It isn't shown in the shop until it has at least one.</div>`}
           </div>
         </section>`;
 }
@@ -12542,7 +12562,7 @@ async function loadDigitalFiles_(orgId, product){
     section.innerHTML = `${files.length ? `<table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:8px;">${files.map(f => `<tr>
         <td style="padding:4px 6px;border-bottom:1px solid #eee;">${escapeHtml(f.fileName)}</td><td style="padding:4px 6px;border-bottom:1px solid #eee;color:#666;">${escapeHtml(digitalFileSize_(f.bytes))}</td>
         <td style="padding:4px 6px;border-bottom:1px solid #eee;text-align:right;"><button type="button" class="admin-btn admin-btn-secondary dig-del" data-id="${f.id}" style="padding:2px 8px;font-size:12px;">Remove</button></td></tr>`).join("")}</table>`
-        : `<div class="admin-note">No files yet: customers can't order it until it has at least one.</div>`}
+        : `<div class="admin-note" style="color:#b03a2e;">No files yet: it isn't shown in the shop until it has at least one.</div>`}
       ${product.digital ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
         <input type="file" id="digFileInput" style="font-size:12px;"><button type="button" class="admin-btn admin-btn-secondary" id="digUpload" style="padding:3px 10px;font-size:12px;">Upload</button>
         ${featureOn_("production") ? `<select id="digDesign" style="font-size:12px;max-width:220px;"><option value="">Add from the Designs library…</option></select>` : ""}

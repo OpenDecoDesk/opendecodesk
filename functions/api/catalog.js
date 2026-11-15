@@ -102,6 +102,8 @@ function toClientProduct(p){
   }
   // Only said when it isn't (the cart's tax estimate skips the line); taxable is the default.
   if(p.taxable === false) out.taxable = false;
+  // Sold as files (migrations/0086): no delivery, an "Instant download" tag.
+  if(p.digital) out.digital = true;
   // The customer may upload their own design (migrations/0054): how it's made, its add-on per piece
   // (null = free), and whether the product can only be ordered with one.
   if(p.customDesign){

@@ -38,6 +38,8 @@
  * maintain a product catalog in two places.
  */
 
+import { orderDigitalLines } from "../_lib/db.js";
+import { downloadLink } from "../_lib/digital.js";
 import { classifyHost } from "../_lib/hostConfig.js";
 import { getCatalogData } from "../_lib/catalogCache.js";
 import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
@@ -145,7 +147,12 @@ export async function onRequestPost(context){
   const origin = new URL(request.url).origin;
   // Paying from an invoice page (/?invoice=<token>, functions/api/invoice.js) returns the customer
   // to that page (its token was checked against this order above).
-  const successUrl = viaInvoice ? origin + "/?invoice=" + invoiceToken + "&paid=1"
+  // An order with digital products (migrations/0086) returns to its download page, which shows the files as soon as
+  // Stripe confirms the payment.
+  let downloadUrl = "";
+  try { if ((await orderDigitalLines(env.DB, orderId)).length) downloadUrl = await downloadLink(env, orderId, orderOrgId, { origin }); }
+  catch (e) { console.error("Couldn't make the download link for", orderId, e); }
+  const successUrl = downloadUrl ? downloadUrl : viaInvoice ? origin + "/?invoice=" + invoiceToken + "&paid=1"
     : origin + "/?stripe=success&orderId=" + encodeURIComponent(orderId) + "&org=" + encodeURIComponent(orderOrgId);
   const cancelUrl  = viaInvoice ? origin + "/?invoice=" + invoiceToken
     : origin + "/?stripe=cancel&orderId=" + encodeURIComponent(orderId) + "&org=" + encodeURIComponent(orderOrgId);

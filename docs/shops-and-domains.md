@@ -385,6 +385,39 @@ the blank (nothing in stock, no cost) instead of being left out.
 editable design file and a known project format can't be the machine file. Tajima `.dst` and Barudan
 `.dsb` files get needle stops and previews.
 
+## Digital products: selling files
+
+A product can be sold as **files the customer downloads**: a digitized design in the formats people
+ask for (DST, PES, JEF…), a PDF of instructions, or a zip with all of them. Tick **Digital product** on
+the product's form. It then needs no blank, no design and no shipping, and has one price.
+
+- **Files:** once the product is saved, upload its files on the form (any embroidery format, PDFs and
+  zip files, up to 20 MB each, at most 20), or add a design from the Designs library (its latest
+  version's file). They're kept in the private `DESIGNS` bucket.
+- **In the shop:** it shows **Instant download**. A cart of only digital products skips the delivery
+  step. A mixed cart is delivered as usual for the rest, and the files add nothing to the parcel.
+- **Once the order is paid** each file is granted to the order, with the limits as they are then:
+  - Card payments are paid as soon as Stripe confirms them, and the customer lands straight on the
+    order's **download page**.
+  - For Venmo, Zelle or check, the files are granted when you record the payment (Mark paid or Add
+    payment).
+- **The email:** the customer gets one **"Your downloads"** email with the link. The files are attached
+  too when they fit (10 MB in all by default: mailboxes refuse messages over about 25 MB, and attaching
+  makes files a third bigger). Over that, the email says they're too large to attach and to use the link.
+- **Limits:** the link works for a number of days, and each file can be downloaded a number of times
+  (7 days and 5 downloads unless you change them in Global settings → Features → Digital products, or
+  on the product). Blank means no limit. Emailed files don't use up downloads.
+- **On the order:** **Downloads…** shows each file's downloads and expiry. **Resend link** emails a new
+  link, and the old one stops working. **Reset downloads** sets the counts back to 0 with a new expiry.
+  **Revoke** stops the downloads; voiding the order does too. A refund doesn't revoke on its own: use
+  Revoke if you want it to.
+
+The download link is the customer's key: there's no sign-in. It's long, random, specific to the order,
+and never cached or indexed. Every download is logged with the time and the customer's network, in case
+of a dispute. Whether digital goods carry sales tax depends on the state: the product's **Taxable**
+box decides it here, as for any product. The desktop version doesn't sell online, so it has no digital
+products.
+
 ## Pricing: what an item costs and leaves
 
 Managers see, on a product's form, what each item costs the shop under its price and what's left:

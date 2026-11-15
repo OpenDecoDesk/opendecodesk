@@ -1158,7 +1158,7 @@ const ADMIN_PAGE_FEATURE = {
   packages: "shipping",
 };
 // Names for the "turned off" page; replaced by the server's own list once Global settings has loaded it.
-let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval" };
+let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products" };
 function adminFeatureOn_(key){ return typeof featureOn_ !== "function" || featureOn_(key); }
 function adminPageFeature_(hash){ return ADMIN_PAGE_FEATURE[String(hash || "").replace(/^#\/?/, "").split("/")[0]] || ""; }
 function adminPageOn_(hash){ const f = adminPageFeature_(hash); return !adminDesktopHides_(hash) && (!f || adminFeatureOn_(f)); }
@@ -1226,6 +1226,19 @@ function gProductionPanelHtml_(machineSettings, loaded){
             <div class="admin-note" style="margin-bottom:8px;">The Machine Files screen can show a <strong>Delete</strong> button on each file. Deleting over the machine protocol is currently disabled in the machines' firmware (the command exists but always refuses — see the machine agent's <a href="${MACHINE_AGENT_HOME}/blob/main/PROTOCOL.md" target="_blank" rel="noopener">PROTOCOL.md</a>), so the button is hidden by default. Turn it on only if a firmware update enables delete.</div>
             <label class="checkbox-row"><input type="checkbox" id="gMachShowDelete" ${machineSettings.showDeleteButton ? "checked" : ""}> Show delete buttons on Machine Files</label>
           </div>`;
+}
+// Digital products (migrations/0086): the delivery defaults each digital product uses unless it sets its own.
+function gDigitalPanelHtml_(d){
+  d = d || { days: 7, downloads: 5, email: true, attach: true, attachMb: 10 };
+  return `<div class="admin-note" style="margin-bottom:8px;">What a buyer gets once the order is paid: a download page for the order (straight after paying by card) and, if set, an email with the link and the files. Each product can set its own (product form → Digital product).</div>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;">
+              <label style="font-size:13px;">The link works for (days)<br><input type="number" id="gDigDays" min="1" max="3650" value="${d.days == null ? "" : d.days}" placeholder="no limit" style="width:100px;"></label>
+              <label style="font-size:13px;">Downloads per file<br><input type="number" id="gDigDownloads" min="1" max="1000" value="${d.downloads == null ? "" : d.downloads}" placeholder="no limit" style="width:100px;"></label>
+              <label style="font-size:13px;">Attach up to (MB)<br><input type="number" id="gDigAttachMb" min="1" max="20" value="${d.attachMb || 10}" style="width:80px;"></label>
+            </div>
+            <label class="checkbox-row"><input type="checkbox" id="gDigEmail"${d.email !== false ? " checked" : ""}> Email the download link when the order is paid</label>
+            <label class="checkbox-row"><input type="checkbox" id="gDigAttach"${d.attach !== false ? " checked" : ""}> Attach the files to that email when they fit (the link is always there)</label>
+            <div class="admin-note">Mailboxes refuse messages over about 25 MB, and attaching makes files a third bigger, so keep this at 10–15 MB. Blank days or downloads = no limit.</div>`;
 }
 // Shipping: the Shippo key (typed in the desktop version; a server secret on a cloud install), then
 // the ship-from address — all required while Shipping is on.
@@ -1302,6 +1315,7 @@ function globalFeaturesHtml_(c){
     if (c.desktop && k === "designVerification") continue;   // under Email, below
     const locked = c.lockedFeatures.includes(k) && !(c.desktop && k === "shipping");
     const panel = k === "production" ? gProductionPanelHtml_(c.machineSettings, c.machineLoaded)
+      : k === "digital" ? gDigitalPanelHtml_(c.digitalSettings)
       : k === "shipping" ? gShippingPanelHtml_(c) : "";
     rows.push(gFeatureRowHtml_(k, { label: f.label, desc: desc(k), checked: on(k) && !locked, panel, hidden: c.desktop && locked, disabled: locked }));
   }
@@ -3512,6 +3526,8 @@ function adminActionCell(org, o){
   // The two customer emails are "Order received" and "Payment received" (email.js) — the button says which.
   const resendLabel = !o.paid ? (o.receivedEmailAt ? "Resend “Order received”" : "Send “Order received”") :
                       (o.confirmedEmailAt ? "Resend “Payment received”" : "Send “Payment received”");
+  // Digital products (migrations/0086): the order's downloads — what's been used, Resend / Reset / Revoke.
+  const dlBtn = o.hasDownloads && featureOn_("digital") ? `<button class="admin-btn" ${dataAttrs} onclick="showDownloadsModal_(this.dataset.org,this.dataset.order)" title="The customer's download link and files" style="margin-top:4px;">Downloads…</button>` : "";
   const rushBtn = `<button class="admin-btn" ${dataAttrs} onclick="showRushFeeModal_(this.dataset.org,this.dataset.order)" title="Rush this order, or change its rush fee" style="margin-top:4px;">${o.rushRequested ? "Rush…" : "+ Rush…"}</button>`;
 
   // Paid for everything but a rush fee (migrations/0082) counts as paid for the work: the stages go on.
@@ -3520,7 +3536,7 @@ function adminActionCell(org, o){
       (adminDesktopNoEmail_() ? "" : `<button class="admin-btn" ${dataAttrs} onclick="resendEmail(this.dataset.org, this.dataset.order)" style="margin-top:4px;">${resendLabel}</button>`) +
       invoiceCell_(org, o) +
       `<button class="admin-btn" ${dataAttrs} onclick="editOrder(this.dataset.org,this.dataset.order)" style="margin-top:4px;">Edit items</button>` +
-      rushBtn + paymentsBtn + deleteBtn;
+      rushBtn + dlBtn + paymentsBtn + deleteBtn;
   }
 
   const eligibleAll = FULFILLMENT_STAGES.filter(s => (s.prereqMet ? s.prereqMet(o) : s.prereqCheck(o[s.prereqField])) && (!s.prereq2 || s.prereq2(o)) && !o[FULFILLMENT_FIELD[s.stage]]);
@@ -3548,7 +3564,7 @@ function adminActionCell(org, o){
       : "";
   // The rush fee still owed (the rest is paid): Mark as paid settles it.
   const payRushBtn = !o.paid && Number(o.balanceDue) > 0 ? `<button class="admin-btn" ${dataAttrs} onclick="markOrderPaid(this.dataset.org, this.dataset.order)" title="Record the rest of the balance — the rush fee — as paid" style="margin-top:4px;">Mark as paid</button>` : "";
-  return stageEl + completeBtn + payRushBtn + emailBtn + invoiceCell_(org, o) + shipBtn + editBtn + datesBtn + rushBtn + paymentsBtn + deleteBtn;
+  return stageEl + completeBtn + payRushBtn + emailBtn + invoiceCell_(org, o) + shipBtn + editBtn + datesBtn + rushBtn + dlBtn + paymentsBtn + deleteBtn;
 }
 
 // "⚡ RUSH · needed by 11/20 · fee to follow" on an order's row and card (migrations/0082).
@@ -3573,6 +3589,42 @@ function rushPayBySuggest_(due, days){
 
 // Orders → Rush…: rush on or off for this order, its fee or "to follow", and the due date. Works on any order,
 // whether or not its shop offers rush. With "Email the customer an invoice" ticked, the invoice window opens next.
+// An order's downloads (digital products, migrations/0086): each file, its downloads and expiry, and Resend link (a new
+// link, emailed with the files; the old one stops working), Reset (counts back to 0, a new expiry) and Revoke.
+async function showDownloadsModal_(orgId, orderId){
+  const { ov, close } = inventoryModal_("Downloads — " + escapeHtml(orderId), `<div id="dlBody" style="font-size:13px;color:#666;">Loading&hellip;</div>`, 640);
+  const body = ov.querySelector("#dlBody");
+  const day = (iso) => iso ? new Date(iso).toLocaleDateString() : "";
+  const draw = (d, msg) => {
+    const why = { revoked: "revoked", expired: "expired", used: "used up" };
+    body.style.color = "var(--ink,#111)";
+    body.innerHTML = `${(d.grants || []).length ? `<table style="border-collapse:collapse;width:100%;">${d.grants.map(g => `<tr>
+        <td style="padding:4px 6px;border-bottom:1px solid #eee;">${escapeHtml(g.fileName)}</td>
+        <td style="padding:4px 6px;border-bottom:1px solid #eee;">${g.downloads}${g.maxDownloads != null ? " of " + g.maxDownloads : ""} downloads${g.expiresAt ? " · until " + escapeHtml(day(g.expiresAt)) : ""}</td>
+        <td style="padding:4px 6px;border-bottom:1px solid #eee;color:${g.blocked ? "#b03a2e" : "#166534"};">${g.blocked ? why[g.blocked] : "available"}</td></tr>`).join("")}</table>`
+        : `<div class="admin-note">Nothing granted yet: the files are granted once the order is paid.</div>`}
+      <div class="admin-note" style="margin-top:6px;">${d.emailedAt ? "Emailed " + escapeHtml(day(d.emailedAt)) + "." : "Not emailed yet."}</div>
+      ${adminCan_("manager") ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+        <button type="button" class="admin-btn" data-dl="resendDownloads">Resend link</button>
+        <button type="button" class="admin-btn admin-btn-secondary" data-dl="resetDownloads">Reset downloads</button>
+        <button type="button" class="admin-btn admin-btn-secondary" data-dl="revokeDownloads">Revoke</button></div>` : ""}
+      <div class="admin-error" style="margin-top:6px;">${escapeHtml(msg || "")}</div>`;
+    body.querySelectorAll("[data-dl]").forEach(b => b.onclick = async () => {
+      const act = b.dataset.dl;
+      const ask = act === "resendDownloads" ? "Email the customer a new download link (and the files, if they fit)?\n\nThe old link stops working."
+        : act === "resetDownloads" ? "Reset the downloads?\n\nEach file's count goes back to 0 and the link works for the product's full period again, from today."
+        : "Revoke the downloads?\n\nThe link stops working for every file.";
+      if (!(await askConfirm_(ask))) return;
+      try {
+        const r = await hoopApi_({ action: act, orderId, org: orgId });
+        draw(r);
+        showToast(act === "resendDownloads" ? "Link emailed" + (r.sent && r.sent.attached ? " with the files." : r.sent && r.sent.tooBig ? " (the files are too large to attach)." : ".") : act === "resetDownloads" ? "Downloads reset." : "Downloads revoked.");
+      } catch (e) { draw(d, e.message); }
+    });
+  };
+  try { draw(await hoopApi_({ action: "getOrderDownloads", orderId, org: orgId })); }
+  catch (e) { body.innerHTML = `<div class="admin-error">${escapeHtml(e.message)}</div>`; }
+}
 function showRushFeeModal_(orgId, orderId){
   const caches = window._ordersCache || {};
   const o = (caches[orgId] || []).find(x => x.orderId === orderId) || Object.values(caches).flat().find(x => x && x.orderId === orderId);
@@ -8445,7 +8497,8 @@ async function renderGlobalSettings(app){
     const ctx = window._gSettingsCtx = { desktop, featureList, features, lockedFeatures, shipFrom, us, machineSettings, machineLoaded: productionOn,
       keySet: desktop ? !!(await adminDesktopHasShippoKey_()) : false, cloudKey: window._gShippoKey,
       emailSaved: desktop ? (await adminDesktopEmailSettings_()) || null : null, suppliersOn: desktop && adminDesktopSuppliers_(),
-      emailSending: desktop ? null : emailSending };
+      emailSending: desktop ? null : emailSending,
+      digitalSettings: desktop ? null : await hoopApi_({ action: "getDigitalSettings" }).then(r => r.digital).catch(() => null) };
     document.getElementById("adminPanel").innerHTML = `
       <div class="admin-form">
         ${setupStatusHtml_(setupItems)}
@@ -8918,6 +8971,13 @@ async function submitGlobalSettings(){
         if(mailbox && mailbox.via === "mailbox"){ const pass = document.getElementById("gEmailPass"); if(pass && pass.scrollIntoView) pass.scrollIntoView({ block: "center" }); }
         return;
       }
+    }
+    // Digital products (migrations/0086): the delivery defaults, while the feature is on.
+    if(document.getElementById("gDigDays") && stillOn("digital") && adminCan_("admin")){
+      const v = (id) => document.getElementById(id).value.trim();
+      try{ await hoopApi_({ action: "updateDigitalSettings", digital: { days: v("gDigDays") === "" ? null : Number(v("gDigDays")), downloads: v("gDigDownloads") === "" ? null : Number(v("gDigDownloads")),
+        email: document.getElementById("gDigEmail").checked, attach: document.getElementById("gDigAttach").checked, attachMb: Number(v("gDigAttachMb")) || 10 } }); }
+      catch(e){ if(errEl) errEl.textContent = e.message || "Could not save the digital product settings."; return; }
     }
     if(machShown && stillOn("production")){
     const machRes = await fetch("/api/orders", {
@@ -10848,6 +10908,7 @@ function renderProductForm(app, orgId, product){
           <div id="prodRunPreview" class="prod-run-preview"><em style="color:#888;font-size:13px;">Working out what Run Order will do&hellip;</em></div>
         </section>
         ` : ""}
+        ${featureOn_("digital") ? digitalProductCardHtml_(product, isEdit) : ""}
         <section class="prod-card" id="prodCardBlank" data-card="prodCardBlank">
           <div class="prod-card-head"><h3>Blank &amp; colors</h3><span class="prod-card-flag"></span></div>
           <div class="prod-card-note">The blanks it's made on (for stock and cost). For a product the customer picks a color on, its colors come from these blanks. Saved with Save changes.</div>
@@ -10993,6 +11054,7 @@ function renderProductForm(app, orgId, product){
   { const panel = app.querySelector(".admin-panel"); if (panel) { const dirty = () => { window._prodFormDirty = true; }; panel.addEventListener("input", dirty); panel.addEventListener("change", dirty); } }
   if (isEdit) {
     loadBlankLinksSection(orgId, product); loadProductDesignSection(orgId, product); loadProductConfigSection(orgId, product);
+    if (document.getElementById("digitalFilesSection")) loadDigitalFiles_(orgId, product);
     wireProductMode_(app, product); loadRunPreview_(orgId, product);
     loadColorGroupsSection_(orgId, product);
     loadPricingSection_(orgId, product);
@@ -11499,6 +11561,7 @@ async function submitProductForm(orgId, isEdit){
     taxable: document.getElementById("prodFormTaxable").checked,
     noDesignNeeded: document.getElementById("prodFormNoDesign").checked,
     noBlankNeeded: document.getElementById("prodFormNoBlank").checked,
+    ...digitalProductFormValues_(),
     sortOrder: Number(document.getElementById("prodFormSortOrder").value) || 0
   };
   // Pricing awareness (migrations/0067): run time, extra DTF / transfer cost, supplies override — blank clears.
@@ -12432,6 +12495,90 @@ function offerCopyFromBlank_(allBlanks, myLinks) {
     window._prodFormDirty = true;
     showToast("Copied from the blank — edit as you like, then Save changes.");
   };
+}
+
+// ---- Digital products (migrations/0086): sold as files ------------------------------------------------------
+// The product form's card: the switch, the delivery limits (blank = Global settings → Digital products) and, once
+// the product exists, its files — uploaded here, or a design from the Designs library (its latest version's file).
+function digitalProductCardHtml_(product, isEdit){
+  const d = (product && product.digitalDelivery) || {}, on = !!(product && product.digital);
+  const num = (id, key, ph, max) => `<input type="number" id="${id}" min="1" max="${max}" step="1" value="${d[key] != null ? d[key] : ""}" placeholder="${ph}" style="width:90px;">`;
+  const tri = (id, key) => `<select id="${id}"><option value=""${d[key] === undefined ? " selected" : ""}>Default</option><option value="1"${d[key] === true ? " selected" : ""}>Yes</option><option value="0"${d[key] === false ? " selected" : ""}>No</option></select>`;
+  return `<section class="prod-card" id="prodCardDigital" data-card="prodCardDigital">
+          <div class="prod-card-head"><h3>Digital product</h3><span class="prod-card-flag"></span></div>
+          <label class="checkbox-row"><input type="checkbox" id="prodFormDigital"${on ? " checked" : ""}> Sold as files the customer downloads (digitized designs, PDFs) — no blank, no production, no shipping, one price</label>
+          <div id="prodDigitalBody"${on ? "" : " hidden"}>
+            <div class="admin-note">Once the order is paid the customer gets a download page for the order (straight after paying by card) and an email with the link and the files. Blank = the defaults in Global settings → Digital products.</div>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;margin:8px 0;">
+              <label style="font-size:13px;">Link works for (days)<br>${num("prodDigDays", "days", "default", 3650)}</label>
+              <label style="font-size:13px;">Downloads per file<br>${num("prodDigDownloads", "downloads", "default", 1000)}</label>
+              <label style="font-size:13px;">Email the link<br>${tri("prodDigEmail", "email")}</label>
+              <label style="font-size:13px;">Attach the files<br>${tri("prodDigAttach", "attach")}</label>
+            </div>
+            ${isEdit ? `<div style="font-size:13px;font-weight:700;margin:10px 0 6px;">Files</div><div id="digitalFilesSection"><em style="color:#888;font-size:13px;">Loading files&hellip;</em></div>`
+              : `<div class="admin-note">Add the files once the product is created.</div>`}
+          </div>
+        </section>`;
+}
+// What the form sends for it: nothing when the card isn't there (the feature is off).
+function digitalProductFormValues_(){
+  const box = document.getElementById("prodFormDigital");
+  if (!box) return {};
+  const v = (id) => { const e = document.getElementById(id); return e ? e.value.trim() : ""; };
+  const delivery = {};
+  if (v("prodDigDays") !== "") delivery.days = Number(v("prodDigDays"));
+  if (v("prodDigDownloads") !== "") delivery.downloads = Number(v("prodDigDownloads"));
+  if (v("prodDigEmail") !== "") delivery.email = v("prodDigEmail") === "1";
+  if (v("prodDigAttach") !== "") delivery.attach = v("prodDigAttach") === "1";
+  return { digital: box.checked, digitalDelivery: delivery };
+}
+const digitalFileSize_ = (b) => b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round((b || 0) / 1024)) + " KB";
+async function loadDigitalFiles_(orgId, product){
+  const box = document.getElementById("prodFormDigital"), body = document.getElementById("prodDigitalBody");
+  if (box && body) box.addEventListener("change", () => { body.hidden = !box.checked; });
+  const section = document.getElementById("digitalFilesSection");
+  if (!section) return;
+  const draw = (files, msg) => {
+    section.innerHTML = `${files.length ? `<table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:8px;">${files.map(f => `<tr>
+        <td style="padding:4px 6px;border-bottom:1px solid #eee;">${escapeHtml(f.fileName)}</td><td style="padding:4px 6px;border-bottom:1px solid #eee;color:#666;">${escapeHtml(digitalFileSize_(f.bytes))}</td>
+        <td style="padding:4px 6px;border-bottom:1px solid #eee;text-align:right;"><button type="button" class="admin-btn admin-btn-secondary dig-del" data-id="${f.id}" style="padding:2px 8px;font-size:12px;">Remove</button></td></tr>`).join("")}</table>`
+        : `<div class="admin-note">No files yet: customers can't order it until it has at least one.</div>`}
+      ${product.digital ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input type="file" id="digFileInput" style="font-size:12px;"><button type="button" class="admin-btn admin-btn-secondary" id="digUpload" style="padding:3px 10px;font-size:12px;">Upload</button>
+        ${featureOn_("production") ? `<select id="digDesign" style="font-size:12px;max-width:220px;"><option value="">Add from the Designs library…</option></select>` : ""}
+      </div><div class="admin-note">Embroidery files in any format, PDFs and zip files, up to 20 MB each.</div>` : `<div class="admin-note">Tick “Digital product” and save, then add the files.</div>`}
+      <div id="digErr" class="admin-error">${escapeHtml(msg || "")}</div>`;
+    section.querySelectorAll(".dig-del").forEach(b => b.onclick = async () => {
+      if (!(await askConfirm_("Remove this file from the product?\n\nOrders already paid keep their downloads.", { confirmLabel: "Remove" }))) return;
+      try { draw((await hoopApi_({ action: "deleteProductFile", org: orgId, productId: product.productId, fileId: Number(b.dataset.id) })).files || []); }
+      catch (e) { draw(files, e.message); }
+    });
+    const up = document.getElementById("digUpload");
+    if (up) up.onclick = async () => {
+      const f = document.getElementById("digFileInput").files[0];
+      if (!f) { document.getElementById("digErr").textContent = "Choose a file."; return; }
+      const ext = (f.name.split(".").pop() || "").toLowerCase();
+      up.disabled = true; up.textContent = "Uploading…";
+      try {
+        const r = await fetch(`/api/design?org=${encodeURIComponent(orgId)}&productId=${encodeURIComponent(product.productId)}&ext=${encodeURIComponent(ext)}&name=${encodeURIComponent(f.name)}`,
+          { method: "POST", headers: { "X-Admin-Key": adminKey || "", "Content-Type": "application/octet-stream" }, body: f });
+        const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
+        if (!r.ok || d.status === "error") throw new Error(d.message || "Upload failed");
+        draw(d.files || []);
+      } catch (e) { draw(files, e.message); }
+    };
+    const sel = document.getElementById("digDesign");
+    if (sel) {
+      hoopApi_({ action: "listDesigns", org: orgId }).then(r => { (r.designs || []).forEach(dz => { const o = document.createElement("option"); o.value = dz.id; o.textContent = dz.name; sel.appendChild(o); }); }).catch(() => {});
+      sel.onchange = async () => {
+        if (!sel.value) return;
+        try { draw((await hoopApi_({ action: "addProductFileFromDesign", org: orgId, productId: product.productId, designId: Number(sel.value) })).files || []); }
+        catch (e) { draw(files, e.message); }
+      };
+    }
+  };
+  try { draw((await hoopApi_({ action: "listProductFiles", org: orgId, productId: product.productId })).files || []); }
+  catch (e) { section.innerHTML = `<div class="admin-error">${escapeHtml(e.message)}</div>`; }
 }
 
 async function loadBlankLinksSection(orgId, product) {

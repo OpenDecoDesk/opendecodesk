@@ -52,9 +52,9 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU", SECRET3 = "MFRG
   const gateCalls = [...ordersJs.matchAll(/requireAdmin\(([^\n]*)\)/g)].map(m => m[1]).filter(a => a.trim());
   ok("every gate call in the orders endpoint passes that action's role", gateCalls.length > 50 && gateCalls.every(a => /, ACTION_ROLE\[body\.action\]$/.test(a)));
   // Every API file is either open to the public on purpose, or names the role it needs.
-  const PUBLIC = ["admin-session", "catalog", "checkout", "customer-design", "daily-digest", "image-proxy", "invoice", "shipping", "stripe-webhook", "upload-verify", "verify"];
+  const PUBLIC = ["admin-session", "catalog", "checkout", "customer-design", "daily-digest", "download", "image-proxy", "invoice", "shipping", "stripe-webhook", "upload-verify", "verify"];
   const NEEDS = { "orders": /ACTION_ROLE\[body\.action\]/, "admin-users": /self \? "staff" : "admin"/, "admin-2fa": /"staff", \{ pending: \["2fa"\] \}/, "admin-password": /"staff", \{ pending: \["account", "password"\] \}/,
-    "agent": /, "staff"$/, "design": /, "staff"$/, "receipt": /, "staff"$/, "shippo-label": /, "staff"$/, "upload": /, "staff"$/ };
+    "agent": /, "staff"$/, "design": /, "(staff|manager)"$/, "receipt": /, "staff"$/, "shippo-label": /, "staff"$/, "upload": /, "staff"$/ };
   const files = fs.readdirSync(__dirname + "/functions/api").filter(f => f.endsWith(".js")).map(f => f.replace(/\.js$/, ""));
   const loose = files.filter(f => { const src = read("functions/api/" + f + ".js"), calls = [...src.matchAll(/await requireAdmin\(([\s\S]*?)\);/g)].map(m => m[1]);
     return PUBLIC.includes(f) ? calls.length > 0 : !(NEEDS[f] && calls.length > 0 && calls.every(a => NEEDS[f].test(a))); });

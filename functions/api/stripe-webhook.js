@@ -112,6 +112,7 @@ import {
   setCardFeeByRef
 } from "../_lib/db.js";
 import { sendStripePaymentNotification, sendRefundNotification, sendDisputeNotification } from "../_lib/email.js";
+import { deliverOrderDownloads } from "../_lib/digital.js";
 
 // Stripe's webhook signature verification — pure Web Crypto, no SDK needed.
 // Spec: https://stripe.com/docs/webhooks/signatures
@@ -361,6 +362,12 @@ export async function onRequestPost(context){
           const inserted = amountPaid ? await addOrderPayment(env.DB, orderId, amountPaid, note, paymentRef, { method: "card", feeCents, receivedAt: eventTime }) : 0;
           // Only notify on the first delivery of this payment.
           if(inserted) await sendStripePaymentNotification(env, orderId, orgId, amountPaid);
+          // Digital products (migrations/0086): paid now, so the files are granted and emailed — after the response,
+          // like the fee lookup; the download page the customer lands on grants them too if this hasn't run yet.
+          if(inserted && typeof deliverOrderDownloads === "function"){
+            const deliver = deliverOrderDownloads(env, orderId).catch((e) => console.error("Delivering the downloads failed for", orderId, e));
+            if(typeof context.waitUntil === "function") context.waitUntil(deliver); else await deliver;
+          }
           // Stripe often hasn't created the fee record yet when this fires; look again shortly, after
           // the response has gone out. (The daily scheduled run is the safety net if this misses.)
           if(inserted && feeCents === 0 && typeof context.waitUntil === "function"){

@@ -30,7 +30,8 @@ export const RESERVED_SUBDOMAINS = ["www", "api", "images", "mail", "admin", "al
 export function desktopLockedFeatures(env){
   // Carrier shipping needs a Shippo key; design approval needs email (the proof goes out as an email
   // the customer replies to — there is no page for them to open).
-  return ["storefront", ...(env && env.SHIPPO_API_KEY ? [] : ["shipping"]), ...(desktopEmailOn(env) ? [] : ["designVerification"])];
+  // Digital products are sold through the storefront, which the desktop version doesn't have.
+  return ["storefront", "digital", ...(env && env.SHIPPO_API_KEY ? [] : ["shipping"]), ...(desktopEmailOn(env) ? [] : ["designVerification"])];
 }
 export function isDesktopEdition(env){
   return String((env && env.EDITION) || "").trim().toLowerCase() === "desktop";

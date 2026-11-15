@@ -24,6 +24,7 @@ import * as customerDesign from "../functions/api/customer-design.js";
 import { cleanUpVendorApiLog } from "../functions/_lib/vendorLog.js";
 import * as dailyDigest from "../functions/api/daily-digest.js";
 import * as design from "../functions/api/design.js";
+import * as download from "../functions/api/download.js";
 import * as imageProxy from "../functions/api/image-proxy.js";
 import * as invoice from "../functions/api/invoice.js";
 import * as orders from "../functions/api/orders.js";
@@ -57,6 +58,7 @@ export const ROUTES = {
   "customer-design": customerDesign,
   "daily-digest": dailyDigest,
   "design": design,
+  "download": download,
   "image-proxy": imageProxy,
   "invoice": invoice,
   "orders": orders,

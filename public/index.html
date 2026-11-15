@@ -1346,7 +1346,13 @@ function deliveryOptions_(org){
 }
 function offersShipping_(org){ return deliveryOptions_(org).some(o => o.type === "shipping"); }
 // What's chosen right now → {kind: "quote"|"manual"|"option"|"none", fee, label, option}.
+// Digital products (migrations/0086): a cart of only those has nothing to deliver.
+function cartDigitalOnly_(org){
+  const prods = (org && org.products) || [];
+  return cart.length > 0 && cart.every(c => { const p = prods.find(x => x.id === c.productId); return !!(p && p.digital); });
+}
 function currentDelivery_(org){
+  if(cartDigitalOnly_(org)) return {kind:"digital", fee:0, label:"Instant download"};
   if(offersShipping_(org) && shippingQuote) return {kind:"quote", fee:shippingQuote.amount, label:shippingQuote.provider + " " + shippingQuote.service};
   if(offersShipping_(org) && shippingManual && shippingManualPicked) return {kind:"manual", fee:0, label:"Shipping — quote to follow"};
   const choices = deliveryOptions_(org).filter(o => o.type !== "shipping");
@@ -2125,6 +2131,7 @@ function renderProductRow(p, org){
 
   const sizeOptions = isSized
     ? `<select id="size-${p.id}" aria-label="Size for ${escapeHtml(p.name)}" data-pid="${p.id}">${sizeChoices.map(s=>`<option value="${s}">${s}</option>`).join("")}</select>`
+    : p.digital ? `<span class="stock-badge">Instant download</span>`
     : `<span class="mono" style="font-size:13px; color:var(--ink-soft);">One size fits all</span>`;
 
   // Stock badge for the current size: finished "N in stock", else "N ready to decorate" (readyBadgeHtml_).
@@ -2738,6 +2745,11 @@ document.addEventListener("input", (e)=>{
 // from. A shop that only offers free local pickup shows nothing.
 function renderShippingSection(org){
   if(!org) return "";
+  if(cartDigitalOnly_(org)) return `
+    <div class="shipping-section">
+      <div class="shipping-section-label">Delivery</div>
+      <div class="shipping-option">Instant download — the files are emailed to you, and paying by card takes you straight to them.</div>
+    </div>`;
   const options = deliveryOptions_(org);
   if(options.length === 1 && options[0].type === "pickup") return "";
   const ships = offersShipping_(org);

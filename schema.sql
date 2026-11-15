@@ -101,6 +101,9 @@ CREATE TABLE IF NOT EXISTS products (
   fixedTransfersJson        TEXT NOT NULL DEFAULT '[]',
   -- migrations/0069: embroidered graphics shown on mockups only — [{locationId, graphicId}].
   mockupGraphicsJson        TEXT NOT NULL DEFAULT '[]',
+  -- migrations/0086: sold as files (digital) and its own delivery settings ('{}' = the global ones).
+  digital                   INTEGER NOT NULL DEFAULT 0 CHECK (digital IN (0, 1)),
+  digitalDeliveryJson       TEXT NOT NULL DEFAULT '{}',
   PRIMARY KEY (orgId, productId)
 );
 
@@ -230,7 +233,9 @@ CREATE TABLE IF NOT EXISTS orders (
   rushFeeTaxable      INTEGER NOT NULL DEFAULT 0 CHECK (rushFeeTaxable IN (0, 1)),
   rushFeeTaxCents     INTEGER NOT NULL DEFAULT 0 CHECK (rushFeeTaxCents >= 0),
   paidForWork         INTEGER NOT NULL DEFAULT 0 CHECK (paidForWork IN (0, 1)),
-  rushPayBy           TEXT                        -- migrations/0083: full payment due by (YYYY-MM-DD) to keep a rush date
+  rushPayBy           TEXT,                       -- migrations/0083: full payment due by (YYYY-MM-DD) to keep a rush date
+  downloadSalt        TEXT,                       -- migrations/0086: makes the order's download link (http.js downloadToken)
+  downloadsEmailedAt  TEXT                        -- migrations/0086: when the "Your downloads" email went out
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -1451,3 +1456,45 @@ CREATE TABLE IF NOT EXISTS vendor_api_log (
 );
 CREATE INDEX IF NOT EXISTS idx_vendor_api_log_conn ON vendor_api_log(connectionId, id);
 CREATE INDEX IF NOT EXISTS idx_vendor_api_log_at ON vendor_api_log(at);
+
+-- Digital products: a product's files, each paid order line's download grants, and each download (migrations/0086).
+CREATE TABLE IF NOT EXISTS product_files (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  orgId      TEXT    NOT NULL,
+  productId  TEXT    NOT NULL,
+  fileKey    TEXT    NOT NULL CHECK (length(fileKey) > 0),
+  fileName   TEXT    NOT NULL DEFAULT '',
+  fileExt    TEXT    NOT NULL DEFAULT '',
+  bytes      INTEGER NOT NULL DEFAULT 0 CHECK (bytes >= 0),
+  sortOrder  INTEGER NOT NULL DEFAULT 0,
+  createdAt  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_product_files_product ON product_files(orgId, productId, sortOrder);
+
+CREATE TABLE IF NOT EXISTS download_grants (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  orderId        TEXT    NOT NULL REFERENCES orders(orderId) ON DELETE CASCADE,
+  itemId         INTEGER NOT NULL REFERENCES order_items(id) ON DELETE CASCADE,
+  fileKey        TEXT    NOT NULL,
+  fileName       TEXT    NOT NULL DEFAULT '',
+  fileExt        TEXT    NOT NULL DEFAULT '',
+  bytes          INTEGER NOT NULL DEFAULT 0,
+  expiresAt      TEXT,
+  maxDownloads   INTEGER CHECK (maxDownloads IS NULL OR maxDownloads >= 0),
+  downloads      INTEGER NOT NULL DEFAULT 0 CHECK (downloads >= 0),
+  lastDownloadAt TEXT,
+  revokedAt      TEXT,
+  createdAt      TEXT    NOT NULL
+);
+-- One grant per line and file: granting twice (a webhook retry, a second payment) adds nothing.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_download_grants_item_file ON download_grants(itemId, fileKey);
+CREATE INDEX IF NOT EXISTS idx_download_grants_order ON download_grants(orderId);
+
+CREATE TABLE IF NOT EXISTS download_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  grantId    INTEGER NOT NULL REFERENCES download_grants(id) ON DELETE CASCADE,
+  at         TEXT    NOT NULL,
+  network    TEXT    NOT NULL DEFAULT '',
+  userAgent  TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_download_log_grant ON download_log(grantId, at);

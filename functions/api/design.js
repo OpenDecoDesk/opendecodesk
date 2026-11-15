@@ -30,6 +30,7 @@ import { classifyHost } from "../_lib/hostConfig.js";
 import { requireAdmin, timingSafeEqual } from "../_lib/adminAuth.js";
 import { jsonResponse, featureOffResponse, featureIsOff } from "../_lib/http.js";
 import { readBodyWithLimit, hasValidMagicBytes } from "../_lib/fileUpload.js";
+import { addProductFile, listProductFiles } from "../_lib/db.js";
 
 // Embroidery file formats: ANY embroidery extension is accepted. There are dozens of
 // formats across brands, so instead of an allowlist a file is accepted when its extension is a plain
@@ -53,7 +54,11 @@ const IMAGE_EXTS = new Set(Object.values(IMAGE_TYPES));
 
 const MAX_BYTES = 20 * 1024 * 1024;
 const LINK_TTL_SECONDS = 60;
-export const DESIGN_KEY_RE = /^(designs|order-files)\/[a-z0-9-]+\/[a-z0-9]{32}\.[a-z0-9]{1,10}$/;
+export const DESIGN_KEY_RE = /^((designs|order-files)\/[a-z0-9-]+|digital\/[a-z0-9-]+\/[a-z0-9-]+)\/[a-z0-9]{32}\.[a-z0-9]{1,10}$/;
+// A digital product's files (migrations/0086): any embroidery format, and PDFs and zip bundles (a design in several
+// formats, instructions).
+const DIGITAL_EXTRA_EXTS = new Set(["pdf", "zip"]);
+const keyPart_ = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60) || "x";
 
 export async function onRequestPost({ request, env }) {
   const url = new URL(request.url);
@@ -81,6 +86,9 @@ export async function onRequestPost({ request, env }) {
     const sig = await hmacHex(secret, key + "|" + exp);
     return jsonResponse({ status: "ok", url: `/api/design?key=${encodeURIComponent(key)}&exp=${exp}&sig=${sig}` });
   }
+
+  // ---- Upload: a digital product's file (?org&productId&ext&name) → stored and added to the product ----
+  if (url.searchParams.get("productId")) return uploadProductFile_(request, env, url);
 
   // ---- Upload ----
   const designId = url.searchParams.get("designId") || "";
@@ -136,6 +144,34 @@ export async function onRequestPost({ request, env }) {
     return jsonResponse({ status: "error", message: "Upload failed — could not store the file." }, 502);
   }
   return jsonResponse({ status: "ok", key, name, ext: reqExt });
+}
+
+async function uploadProductFile_(request, env, url) {
+  // Products are a manager's to change (orders.js ACTION_ROLE).
+  const denied = await requireAdmin(env, classifyHost(url.hostname, null, env), request.headers.get("X-Admin-Key"), request, "Not available here.", "manager");
+  if (denied) return denied;
+  if (await featureIsOff(env, "digital")) return featureOffResponse("digital", "Digital products");
+  const org = String(url.searchParams.get("org") || ""), productId = String(url.searchParams.get("productId") || "");
+  const p = await env.DB.prepare("SELECT digital FROM products WHERE orgId = ? AND productId = ?").bind(org, productId).first().catch(() => null);
+  if (!p) return jsonResponse({ status: "error", message: "Product not found" }, 404);
+  if (!Number(p.digital)) return jsonResponse({ status: "error", message: "Tick “Digital product” and save before adding files." }, 400);
+  const ext = String(url.searchParams.get("ext") || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!isEmbroideryExt(ext) && !DIGITAL_EXTRA_EXTS.has(ext)) return jsonResponse({ status: "error", message: `A .${ext || "?"} file can't be sold as a download (embroidery files, PDFs and zip files can).` }, 400);
+  const files = await listProductFiles(env.DB, org, productId);
+  if (files.length >= 20) return jsonResponse({ status: "error", message: "A product can have at most 20 files." }, 400);
+  let result;
+  try { result = await readBodyWithLimit(request, MAX_BYTES); }
+  catch { return jsonResponse({ status: "error", message: "Could not read the uploaded file." }, 400); }
+  if (result.tooLarge) return jsonResponse({ status: "error", message: "File is too large (max 20 MB)." }, 400);
+  const bytes = result.bytes;
+  if (!bytes || bytes.byteLength === 0) return jsonResponse({ status: "error", message: "No file uploaded." }, 400);
+  const id = crypto.randomUUID().replace(/[^a-z0-9]/gi, "").slice(0, 32).toLowerCase();
+  const key = `digital/${keyPart_(org)}/${keyPart_(productId)}/${id}.${ext}`;
+  const name = String(url.searchParams.get("name") || "").replace(/[^\w .()-]/g, "").trim().slice(0, 120) || `file.${ext}`;
+  try { await env.DESIGNS.put(key, bytes, { httpMetadata: { contentType: "application/octet-stream" }, customMetadata: { name } }); }
+  catch { return jsonResponse({ status: "error", message: "Upload failed — could not store the file." }, 502); }
+  await addProductFile(env.DB, org, productId, { fileKey: key, fileName: name, fileExt: ext, bytes: bytes.byteLength });
+  return jsonResponse({ status: "ok", key, name, ext, files: await listProductFiles(env.DB, org, productId) });
 }
 
 export async function onRequestGet({ request, env }) {

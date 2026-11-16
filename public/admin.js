@@ -913,6 +913,7 @@ async function fetchOrders(orgId){
     }
     const rows = Array.isArray(data) ? data : (data.orders || []);
     rows.sort((a,b)=> new Date(b.placedAt) - new Date(a.placedAt));
+    (window._ordersMore = window._ordersMore || {})[orgId] = data && data.more ? rows.length : 0;
     return rows;
   }catch(e){
     console.error("Admin orders fetch threw an exception:", e);
@@ -4453,6 +4454,14 @@ function ordersDefaultDates_(){
 }
 window._ordersFilter = window._ordersFilter || ordersDefaultDates_();
 
+// The server returns at most its newest N orders per shop (functions/api/orders.js ORDERS_LIST_MAX); when it
+// left some out, say so above the list. orgIds: the shops on screen.
+function ordersMoreNote_(orgIds){
+  const cut = (orgIds || []).map(id => (window._ordersMore || {})[id]).filter(Boolean);
+  if(!cut.length) return "";
+  return `<div class="admin-note" style="margin-bottom:10px;color:#b45309;">Only the newest ${cut[0].toLocaleString()} orders${orgIds.length > 1 ? " per shop" : ""} were loaded for these dates. Narrow the date range to see older ones.</div>`;
+}
+
 // Keep only orders whose placedAt falls in the filter's [from, to] (inclusive). Empty = unbounded.
 function ordersDateFilter_(orders){
   const f = window._ordersFilter || {};
@@ -4727,9 +4736,11 @@ async function renderOrdersPage(app, opts){
     window._verifCache = window._verifCache || {};
     const verifByOrder = {};
     let merged = [];
+    window._ordersMore = window._ordersMore || {};
     for(const shop of (data.shops || [])){
       const org = (adminOrgs || []).find(x => x.orgId === shop.orgId) || { orgId: shop.orgId, name: shop.name };
       const orders = Array.isArray(shop.orders) ? shop.orders : [];
+      window._ordersMore[shop.orgId] = shop.more ? orders.length : 0;
       window._ordersCache[shop.orgId] = orders;
       const vm = {};
       (shop.verifications || []).forEach(v => { vm[v.orderId] = v; });
@@ -4753,6 +4764,7 @@ async function renderOrdersPage(app, opts){
     panel.innerHTML = `
       <div class="admin-summary"><strong>${activeOrders.length}</strong> order${activeOrders.length===1?"":"s"} across ${orgs.length} shop${orgs.length===1?"":"s"} &middot; <strong>$${grandTotal.toFixed(2)}</strong> active total &middot; <strong style="color:${balanceDue>0.005?"#b03a2e":"var(--ink-soft)"};">$${balanceDue.toFixed(2)}</strong> balance due</div>
       <div class="admin-note" style="margin-bottom:10px;">Pick a single shop above to enable bulk actions, packing/mailing labels, the spreadsheet export, and the blank-order breakdown.</div>
+      ${ordersMoreNote_((data.shops || []).map(x => x.orgId))}
       ${capped ? `<div class="admin-note" style="margin-bottom:10px;color:#b45309;">Showing the ${RENDER_CAP} most recent of ${shown.length} matching orders — narrow the date range or pick a shop to see the rest.</div>` : ""}
       ${ordersListHtml_(toRender, (o) => o._org, (o) => verifByOrder[o._org.orgId + "|" + o.orderId], true)}`;
     window._refreshOrderFinancials = null;
@@ -4825,6 +4837,7 @@ function renderAdminOrders(app, org, opts){
 
     panel.innerHTML = `
       <div id="ordSummaryBar" class="admin-summary"><strong>${activeOrders.length}</strong> order${activeOrders.length===1?"":"s"} &middot; <strong>$${grandTotal.toFixed(2)}</strong> active total &middot; <strong style="color:${activeOrders.reduce((s,o)=>s+(o.balanceDue||0),0)>0.005?"#b03a2e":"var(--ink-soft)"};">$${activeOrders.reduce((s,o)=>s+(o.balanceDue||0),0).toFixed(2)}</strong> balance due</div>
+      ${ordersMoreNote_([org.orgId])}
       <div id="bulkBar" class="bulk-bar" style="display:none;">
         <span id="bulkBarCount" class="bulk-bar-count"></span>
         <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankOrdered" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Blank ordered</button>

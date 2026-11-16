@@ -1018,6 +1018,9 @@ CREATE TABLE IF NOT EXISTS closed_periods (
   closedBy TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_orders_reportable ON orders(isTest, voidedAt, placedAt);
+-- Open orders only (migrations/0087): the open-orders screen and the queues, without walking the history.
+CREATE INDEX IF NOT EXISTS idx_orders_open ON orders(isTest, voidedAt, placedAt) WHERE completedAt IS NULL AND voidedAt IS NULL;
+CREATE INDEX IF NOT EXISTS idx_orders_manufactured ON orders(manufacturedAt);
 
 -- Owner notices queued for the 6 AM daily roll-up (migrations/0011; 'delivered' added in 0016).
 CREATE TABLE IF NOT EXISTS owner_notices (

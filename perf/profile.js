@@ -17,6 +17,7 @@ const { READS, WRITES, makeContext } = require("./lib/ops.js");
 const { OWNER } = require("./lib/server.js");
 const { makeAuth } = require("../testlib/auth-harness.js");
 const { writeReport } = require("./lib/report.js");
+const { migrate, readSources } = require("../desktop/migrate.js");
 
 const ROOT = path.join(__dirname, "..");
 const DEFAULT_OPS = ["open-orders", "production-queue", "transfer-queue", "blanks-to-order", "orders-30d", "orders-all-shops-30d",
@@ -49,6 +50,10 @@ async function main() {
   const file = path.join(tmp, "db.sqlite");
   for (const ext of ["", "-wal", "-shm"]) if (fs.existsSync(src + ext)) fs.copyFileSync(src + ext, file + ext);
   const D = openNativeD1(file);
+  // Migrations added since the data was kept (a new index, say) go onto the copy, so the profile
+  // shows the code and schema as they are now, the way the program would update the database.
+  const { applied } = await migrate(D.d1, readSources(ROOT));
+  if (applied.length) console.log("Applied to the copy: " + applied.join(", "));
   const orders = D.db.prepare("SELECT count(*) AS n FROM orders").get().n;
   const sqlite = D.db.prepare("SELECT sqlite_version() AS v").get().v;
   console.log(`Profiling ${orders.toLocaleString()} orders (SQLite ${sqlite}) on a copy in ${tmp}`);

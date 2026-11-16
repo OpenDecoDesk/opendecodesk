@@ -114,7 +114,7 @@ import {
   getPublishedOrg, setOrgReady, getShopWizard, saveShopWizard, deleteShopWizard, listShopWizards, setProductLinksFromBlank, publishShop, getPublishState, getDraftCatalogShop, signPreviewToken,
   planDiscardShopChanges, discardShopChanges, applyProductPrices,
   getBrandRules, setBrandRules, DEFAULT_BRAND_RULES, brandRuleFor_, listBrandApprovals, addBrandApproval, revokeBrandApproval, getBrandApproval,
-  nextSupplierPoNumber, insertSupplierOrder, claimSupplierOrderRetry, setSupplierOrderResult, getSupplierOrder, listSupplierOrders, markItemsBlankOrdered, cancelSupplierOrder, getInventoryValuation, getCogsReport, planBlankCatchUp, applyBlankCatchUp, voidInventoryMovement, getInventoryMovementById, restoreInventoryMovement, getInventoryRestoreBlocker, removeBlankColorImages, analyzePricing, planProductPreview, getPricingSettingsView, pricingBelowTargetForBlanks, setPricingSettings, getShopRate, computeShopRate, setShopRate,
+  nextSupplierPoNumber, insertSupplierOrder, claimSupplierOrderRetry, setSupplierOrderResult, getSupplierOrder, listSupplierOrders, markItemsBlankOrdered, cancelSupplierOrder, getInventoryValuation, getInventoryValuations, getCogsReport, planBlankCatchUp, applyBlankCatchUp, voidInventoryMovement, getInventoryMovementById, restoreInventoryMovement, getInventoryRestoreBlocker, removeBlankColorImages, analyzePricing, planProductPreview, getPricingSettingsView, pricingBelowTargetForBlanks, setPricingSettings, getShopRate, computeShopRate, setShopRate,
   voidOrder, voidPayment, getClosedPeriods, isMonthClosed, closePeriod, reopenPeriod, monthOf,
   orderMonth, itemOrderMonth, paymentMonth, movementMonth, getCashReport, getAccountantExport,
   bumpCatalogVersion, listStockPurchases,
@@ -137,6 +137,8 @@ import { selectBox } from "../_lib/boxSize.js";
 import { verifyTurnstile } from "../_lib/turnstile.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9\-]{1,64}$/;
+// The most orders one shop's list returns (getOrders, getOrdersAllShops): the newest that many.
+const ORDERS_LIST_MAX = 2000;
 // "Quote pending" is a note for the shop, not a carrier: wherever a shipping method is printed for
 // a customer (the shipped email, a shipping payment link) it reads as no method.
 const shownMethod_ = (m) => (m === SHIPPING_QUOTE_PENDING ? "" : String(m || ""));
@@ -742,14 +744,18 @@ export async function onRequestPost(context) {
   }
 
   // ---- getOrders -------------------------------------------------------------
+  // At most ORDERS_LIST_MAX orders per shop come back, the newest: with the dates cleared a big shop's
+  // whole history (hundreds of MB) would otherwise be read and sent. `more: true` says some were left
+  // out; the page says so and asks for narrower dates.
   if (body.action === "getOrders") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
     if (denied) return denied;
     const org = body.org;
     if (!org) return jsonResponse({ status: "error", message: "Unknown org" }, 404);
     // Optional date window (the Orders page's filter) — see getOrdersByOrg.
-    const orders = await getOrdersByOrg(env.DB, org, { from: body.dateFrom, to: body.dateTo });
-    return jsonResponse({ status: "ok", orders });
+    const orders = await getOrdersByOrg(env.DB, org, { from: body.dateFrom, to: body.dateTo }, { limit: ORDERS_LIST_MAX + 1 });
+    const more = orders.length > ORDERS_LIST_MAX;
+    return jsonResponse({ status: "ok", orders: more ? orders.slice(0, ORDERS_LIST_MAX) : orders, more, max: ORDERS_LIST_MAX });
   }
 
   // ---- getOrdersAllShops — the "All shops" Orders page in ONE request ----
@@ -763,12 +769,13 @@ export async function onRequestPost(context) {
     const range = { from: body.dateFrom, to: body.dateTo };
     const shops = await Promise.all(orgs.map(async (o) => {
       const [orders, verifications] = await Promise.all([
-        getOrdersByOrg(env.DB, o.orgId, range),
+        getOrdersByOrg(env.DB, o.orgId, range, { limit: ORDERS_LIST_MAX + 1 }),
         getLatestVerificationsByOrg(env.DB, o.orgId).catch(() => []),
       ]);
-      return { orgId: o.orgId, name: o.name || o.orgId, orders, verifications };
+      const more = orders.length > ORDERS_LIST_MAX;
+      return { orgId: o.orgId, name: o.name || o.orgId, orders: more ? orders.slice(0, ORDERS_LIST_MAX) : orders, more, verifications };
     }));
-    return jsonResponse({ status: "ok", shops });
+    return jsonResponse({ status: "ok", shops, max: ORDERS_LIST_MAX });
   }
 
   // ---- getOpenOrders — admin home dashboard: every open order across all orgs ----
@@ -5407,9 +5414,8 @@ export async function onRequestPost(context) {
       }
       // Beginning inventory = end of the day before dateFrom; ending = end of dateTo.
       const dayBefore = new Date(Date.parse(dateFrom + "T00:00:00.000Z") - 1).toISOString();
-      const [beginning, ending, cogs, taxedResale, tBeginning, tEnding, tCogs, fBeginning, fEnding] = await Promise.all([
-        getInventoryValuation(env.DB, dayBefore),
-        getInventoryValuation(env.DB, dateTo + "T23:59:59.999Z"),
+      const [[beginning, ending], cogs, taxedResale, tBeginning, tEnding, tCogs, fBeginning, fEnding] = await Promise.all([
+        getInventoryValuations(env.DB, [dayBefore, dateTo + "T23:59:59.999Z"]),   // one read of the history for both
         getCogsReport(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z"),
         getTaxedResalePurchases(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z"),
         getTransferValuation(env.DB, dayBefore),

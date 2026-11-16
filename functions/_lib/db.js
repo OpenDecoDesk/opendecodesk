@@ -1491,11 +1491,19 @@ export function brandApprovalCovers_(approvals, orgId, productId, brand, pieces)
   const a = approvals && approvals.get(orgId + "|" + productId + "|" + brandKey_(brand));
   return !!a && (a.maxQty == null || Number(pieces) <= a.maxQty);
 }
-// What the checks need, read once: the rules, approvals, every blank link and the blanks' brand / style.
-export async function brandContext_(db) {
+// What the checks need, read once: the rules, approvals, the blank links and the blanks' brand / style.
+// Given `lines` (order_items rows), only the links of those lines' products are read: one order's
+// check (getOrderById, once per order in a bulk change) no longer reads the whole links table.
+export async function brandContext_(db, lines) {
+  const keys = lines ? [...new Set(lines.filter(l => l && l.productId).map(l => JSON.stringify([String(l.orgId), String(l.productId)])))] : null;
+  const linkSql = "SELECT l.orgId, l.productId, l.productColor, l.productSize, l.blankId FROM product_blank_links l";
+  const readLinks = !keys ? db.prepare(linkSql).all()
+    : !keys.length ? Promise.resolve({ results: [] })
+    : db.prepare(`${linkSql} JOIN json_each(?) k ON l.orgId = json_extract(k.value, '$[0]') AND l.productId = json_extract(k.value, '$[1]')`)
+      .bind("[" + keys.join(",") + "]").all();
   const [rules, approvals, links, blanks] = await Promise.all([
     getBrandRules(db), activeBrandApprovals_(db),
-    db.prepare("SELECT orgId, productId, productColor, productSize, blankId FROM product_blank_links").all().then(r => r.results).catch(() => []),
+    readLinks.then(r => r.results).catch(() => []),
     db.prepare("SELECT id, name, brand, sku FROM blanks").all().then(r => r.results).catch(() => []),
   ]);
   const linkAt = new Map(links.map(l => [[l.orgId, l.productId, l.productColor || "", l.productSize || ""].join("\u0001"), Number(l.blankId)]));
@@ -7114,16 +7122,38 @@ export async function restoreInventoryMovement(db, id) {
 // Each row says whether its blank is for testing / shop use (migrations/0060), and `groups` totals the two
 // blank groups — blanks for sale and blanks for testing — by today's flag on the blank.
 export async function getInventoryValuation(db, asOf) {
+  return (await getInventoryValuations(db, [asOf]))[0];
+}
+
+// The valuation at several moments from ONE read of the movement history (up to the latest of them):
+// the running state is snapshotted as the read passes each moment. A report's beginning and ending
+// inventory used to read the whole history twice. Returns one valuation per moment, in the order given.
+export async function getInventoryValuations(db, asOfList) {
+  const moments = asOfList.map((asOf, i) => ({ asOf, i })).sort((a, b) => (a.asOf < b.asOf ? -1 : a.asOf > b.asOf ? 1 : 0));
+  const last = moments[moments.length - 1].asOf;
   const { results } = await db.prepare(
-    "SELECT blankId, blankName, color, size, qtyDelta, unitCostCents, kind FROM inventory_movements WHERE occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id"
-  ).bind(asOf).all();
+    "SELECT blankId, blankName, color, size, qtyDelta, unitCostCents, kind, occurredAt FROM inventory_movements WHERE occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id"
+  ).bind(last).all();
   let testingIds = new Set();
   try { testingIds = new Set((await db.prepare("SELECT id FROM blanks WHERE forTesting = 1").all()).results.map(r => Number(r.id))); }
   catch (e) { if (!/no such column/i.test(String(e && e.message))) throw e; }
   // Each blank by its CURRENT name; the name saved on its movements only for a blank since deleted.
   const current = await currentBlankNames_(db);
   const state = new Map();
+  const out = new Array(asOfList.length);
+  const snapshot = (asOf) => {
+    const rows = [...state.values()].filter(r => r.qty !== 0)
+      .map(r => ({ blankId: r.blankId, name: r.name, color: r.color, size: r.size, qty: r.qty, avgCost: fromCents(r.avg), value: fromCents(Math.max(0, r.qty) * r.avg),
+        forTesting: testingIds.has(r.blankId) }))
+      .sort((a, b) => (a.name + a.color + a.size).localeCompare(b.name + b.color + b.size));
+    const group = (list) => ({ units: list.reduce((s, r) => s + r.qty, 0), value: fromCents(list.reduce((s, r) => s + toCents(r.value), 0)) });
+    return { asOf, rows, units: rows.reduce((s, r) => s + r.qty, 0),
+      value: fromCents(rows.reduce((s, r) => s + toCents(r.value), 0)),
+      groups: { forSale: group(rows.filter(r => !r.forTesting)), testing: group(rows.filter(r => r.forTesting)) } };
+  };
+  let next = 0;
   for (const m of results) {
+    while (next < moments.length && m.occurredAt > moments[next].asOf) { out[moments[next].i] = snapshot(moments[next].asOf); next++; }
     const key = m.blankId + "|" + (m.color || "") + "|" + m.size;
     const st = state.get(key) || { blankId: Number(m.blankId), name: m.blankName, color: m.color || "", size: m.size, qty: 0, avg: 0 };
     const d = Number(m.qtyDelta);
@@ -7135,14 +7165,8 @@ export async function getInventoryValuation(db, asOf) {
     st.name = current.get(Number(m.blankId)) || m.blankName || st.name;
     state.set(key, st);
   }
-  const rows = [...state.values()].filter(r => r.qty !== 0)
-    .map(r => ({ blankId: r.blankId, name: r.name, color: r.color, size: r.size, qty: r.qty, avgCost: fromCents(r.avg), value: fromCents(Math.max(0, r.qty) * r.avg),
-      forTesting: testingIds.has(r.blankId) }))
-    .sort((a, b) => (a.name + a.color + a.size).localeCompare(b.name + b.color + b.size));
-  const group = (list) => ({ units: list.reduce((s, r) => s + r.qty, 0), value: fromCents(list.reduce((s, r) => s + toCents(r.value), 0)) });
-  return { asOf, rows, units: rows.reduce((s, r) => s + r.qty, 0),
-    value: fromCents(rows.reduce((s, r) => s + toCents(r.value), 0)),
-    groups: { forSale: group(rows.filter(r => !r.forTesting)), testing: group(rows.filter(r => r.forTesting)) } };
+  for (; next < moments.length; next++) out[moments[next].i] = snapshot(moments[next].asOf);
+  return out;
 }
 
 // COGS for a period by month: blanks consumed (at average cost, by the
@@ -7195,10 +7219,13 @@ export async function getCogsReport(db, dateFrom, dateTo) {
        FROM finished_goods_movements WHERE occurredAt >= ? AND occurredAt <= ? AND voidedAt IS NULL GROUP BY month, kind`
     ).bind(dateFrom, dateTo).all());
   } catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
+  // These two find the period's orders by manufacturedAt (idx_orders_manufactured, migrations/0087). The
+  // unary + on isTest / voidedAt keeps SQLite from choosing idx_orders_reportable for them instead,
+  // which (with no statistics) looks selective but walks every live order in the history.
   const { results: est } = await db.prepare(
     `SELECT substr(o.manufacturedAt, 1, 7) AS month, SUM(i.cogsCents) AS cents, SUM(i.qty) AS units
      FROM order_items i JOIN orders o ON o.orderId = i.orderId
-     WHERE i.cogsSource = 'estimate' AND o.manufacturedAt >= ? AND o.manufacturedAt <= ? AND o.isTest = 0
+     WHERE i.cogsSource = 'estimate' AND o.manufacturedAt >= ? AND o.manufacturedAt <= ? AND +o.isTest = 0
      GROUP BY month`
   ).bind(dateFrom, dateTo).all();
   const { results: missing } = await db.prepare(
@@ -7208,7 +7235,7 @@ export async function getCogsReport(db, dateFrom, dateTo) {
                       AND l.productSize = i.size) AS linkedNow
      FROM order_items i JOIN orders o ON o.orderId = i.orderId
      WHERE o.manufacturedAt >= ? AND o.manufacturedAt <= ? AND i.cancelDate IS NULL AND i.cogsCents IS NULL
-       AND o.isTest = 0 AND o.voidedAt IS NULL AND NOT ${nb("i")} ORDER BY o.manufacturedAt`
+       AND +o.isTest = 0 AND +o.voidedAt IS NULL AND NOT ${nb("i")} ORDER BY o.manufacturedAt`
   ).bind(dateFrom, dateTo).all();
   const months = {};
   const at = (m) => (months[m] = months[m] || { month: m, cogsBlanks: 0, cogsFinished: 0, estimated: 0, unitsUsed: 0, purchases: 0,
@@ -8941,13 +8968,14 @@ export async function importProductsCsv(db, orgId, rawRows, opts = {}) {
 // admin Orders page (default: last 30 days) doesn't load a shop's whole history on every visit.
 // Padded a day each side — the dates are the admin's local calendar days and placedAt
 // is UTC — and the browser still applies the exact range (ordersDateFilter_), so nothing shown changes.
-export async function getOrdersByOrg(db, orgId, range = {}) {
+// opts.limit: at most that many orders, the newest (the handler's cap on a window with no dates).
+export async function getOrdersByOrg(db, orgId, range = {}, opts = {}) {
   const day = (s, add) => { const d = new Date(String(s) + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + add); return d.toISOString(); };
   const valid = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || "")) && !isNaN(Date.parse(s));
   const where = ["o.orgId = ?"], params = [orgId];
   if (valid(range.from)) { where.push("o.placedAt >= ?"); params.push(day(range.from, -1)); }
   if (valid(range.to))   { where.push("o.placedAt < ?");  params.push(day(range.to, 2)); }
-  return loadOrders_(db, where.join(" AND "), params, "placedAt DESC");
+  return loadOrders_(db, where.join(" AND "), params, "placedAt DESC", opts.limit);
 }
 
 // Every open order across all orgs: not completed, not voided, not a test, and at least one
@@ -8959,14 +8987,11 @@ export async function getOpenOrders(db) {
     [], "placedAt ASC");
 }
 
-// Loads full orders (items, payments, labels) matching a WHERE clause on `orders o`. The child
-// tables are filtered with the same clause as a subquery rather than an IN (?, ?, …) list, so the
-// number of orders is never limited by D1's cap on bound parameters per query.
 // How many active lines with typed-in (free-form) personalization — or the customer's own design to
 // stitch (migrations/0054) — have NO order-specific design uploaded yet (migrations/0032) — per
-// order, for the orders matched by `where` on `orders o`. Digitizing complete and Design approved
+// order, for the orders `sub` (a SELECT of order ids, or a single ?) returns. Digitizing complete and Design approved
 // wait for those uploads (stagePrereqError). {} on a database without order_item_designs.
-async function orderDesignsMissingBy_(db, where, binds) {
+async function orderDesignsMissingBy_(db, sub, binds) {
   const out = byId_();
   const hasConfig = await orderItemsHasConfigCol_(db);
   const hasLoc = await orderItemDesignsHasLocation_(db);
@@ -8978,7 +9003,7 @@ async function orderDesignsMissingBy_(db, where, binds) {
               (SELECT json_group_array(${hasLoc ? "z.location" : "''"}) FROM order_item_designs z WHERE z.itemId = ax.id) AS designLocs
        FROM order_items ax
        LEFT JOIN products px ON px.orgId = ax.orgId AND px.productId = ax.productId
-       WHERE ax.orderId IN (SELECT o.orderId FROM orders o WHERE ${where})
+       WHERE ax.orderId IN (${sub})
          AND ${featureOnSql_("production")}
          AND ax.cancelDate IS NULL
          AND (ax.personalized = 1${hasConfig ? ` OR ax.configJson LIKE '%"custom":true%'` : ""})`).bind(...binds).all();
@@ -8995,17 +9020,30 @@ async function orderDesignsMissingBy_(db, where, binds) {
 // or "toString" would find Object's own members there, and listing orders would fail for good.
 export function byId_() { return Object.create(null); }
 
-async function loadOrders_(db, where, binds, orderBy) {
+// Loads full orders (items, payments, labels) matching a WHERE clause on `orders o`. The orders are
+// searched ONCE; the child tables are then read for exactly those ids, passed as one JSON array
+// (json_each), so D1's cap on bound parameters per query never limits the number of orders, and a
+// slow search (open orders across a long history) isn't repeated for every child table. A very
+// long list (the whole history of a big shop) falls back to repeating the search as a subquery,
+// which keeps the bound value well under D1's size limit for one string.
+// `limit`: at most that many, the first in `orderBy` (no more than ORDER_ID_LIST_MAX).
+const ORDER_ID_LIST_MAX = 5000;
+async function loadOrders_(db, where, binds, orderBy, limit) {
   const stage = await stageSql_(db);
+  const lim = Number.isInteger(limit) && limit > 0 ? limit : 0;
   const { results: orderRows } = await db.prepare(
-    `SELECT o.*, ${stage.approval} AS needsDesignApproval, ${stage.digitizing} AS needsDigitizing FROM orders o WHERE ${where} ORDER BY ${orderBy}`
+    `SELECT o.*, ${stage.approval} AS needsDesignApproval, ${stage.digitizing} AS needsDigitizing FROM orders o WHERE ${where} ORDER BY ${orderBy}${lim ? " LIMIT " + lim : ""}`
   ).bind(...binds).all();
 
   if (!orderRows.length) return [];
-  const missing = await orderDesignsMissingBy_(db, where, binds);
+  const byList = orderRows.length <= ORDER_ID_LIST_MAX;
+  if (!byList && lim) throw new Error("loadOrders_: a limit above " + ORDER_ID_LIST_MAX + " can't be read by id list");
+  const sub = byList ? "SELECT value FROM json_each(?)" : `SELECT o.orderId FROM orders o WHERE ${where}`;
+  binds = byList ? [JSON.stringify(orderRows.map(r => r.orderId))] : binds;
+
+  const missing = await orderDesignsMissingBy_(db, sub, binds);
   for (const r of orderRows) r.orderDesignsMissing = missing[r.orderId] || 0;
 
-  const sub = `SELECT o.orderId FROM orders o WHERE ${where}`;
   const nb = await noBlankLine_(db), dg = await digitalLine_(db);
   const { results: itemRows } = await db.prepare(
     `SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId IN (${sub}) ORDER BY oi.id`
@@ -9040,7 +9078,7 @@ async function loadOrders_(db, where, binds, orderBy) {
   const invoices = await invoicesByOrder_(db, sub, binds);   // the invoice link emailed for it, if any (0053)
   // Restricted brands it has a large number of, and whether the supplier approved the logo (migrations/0075).
   let reviews = new Map();
-  try { reviews = brandReviewsForLines_(await brandContext_(db), itemRows); } catch (e) { console.error("brand review check failed:", e); }
+  try { reviews = brandReviewsForLines_(await brandContext_(db, itemRows), itemRows); } catch (e) { console.error("brand review check failed:", e); }
   let drift = new Map();
   try { drift = await catalogDriftForLines_(db, itemRows); } catch (e) { console.error("catalog drift check failed:", e); }
 
@@ -9058,7 +9096,7 @@ export async function getOrderById(db, orderId) {
   const stage = await stageSql_(db);
   const row = await db.prepare(`SELECT o.*, ${stage.approval} AS needsDesignApproval, ${stage.digitizing} AS needsDigitizing FROM orders o WHERE o.orderId=?`).bind(orderId).first();
   if (!row) return null;
-  row.orderDesignsMissing = (await orderDesignsMissingBy_(db, "o.orderId=?", [orderId]))[orderId] || 0;
+  row.orderDesignsMissing = (await orderDesignsMissingBy_(db, "?", [orderId]))[orderId] || 0;
   const nb = await noBlankLine_(db), dg = await digitalLine_(db);
   const { results: itemRows } = await db.prepare(
     `SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId=? ORDER BY oi.id`
@@ -9072,7 +9110,7 @@ export async function getOrderById(db, orderId) {
   const order = parseOrder_(row, itemRows.map(parseItem_), paymentRows.map(parsePayment_), labelRows.map(parseLabel_));
   order.blankShipments = await getBlankShipmentsForOrder(db, orderId).catch(() => []);
   order.invoice = (await invoicesByOrder_(db, "?", [orderId]))[orderId] || null;
-  try { order.brandReview = brandReviewsForLines_(await brandContext_(db), itemRows).get(orderId) || []; } catch (e) { order.brandReview = []; }
+  try { order.brandReview = brandReviewsForLines_(await brandContext_(db, itemRows), itemRows).get(orderId) || []; } catch (e) { order.brandReview = []; }
   try { order.catalogDrift = row.manufacturedAt || row.completedAt || row.voidedAt ? [] : (await catalogDriftForLines_(db, itemRows)).get(orderId) || []; } catch (e) { order.catalogDrift = []; }
   return order;
 }
@@ -10331,7 +10369,7 @@ export async function getAccountantExport(db, dateFrom, dateTo) {
   // Inventory by group at the start and end of the period (migrations/0060): blanks for sale, blanks for
   // testing / shop use, finished stock (Schedule C Part III, beginning and ending inventory).
   const before = new Date(new Date(dateFrom).getTime() - 1).toISOString();
-  const [b0, b1, f0, f1] = await Promise.all([getInventoryValuation(db, before), getInventoryValuation(db, dateTo),
+  const [[b0, b1], f0, f1] = await Promise.all([getInventoryValuations(db, [before, dateTo]),
     getFinishedGoodsValuation(db, before), getFinishedGoodsValuation(db, dateTo)]);
   const inventoryGroups = [
     { group: "Blanks for sale", beginning: b0.groups.forSale.value, ending: b1.groups.forSale.value },

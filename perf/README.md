@@ -63,4 +63,4 @@ Every operation is the same request `public/admin.js` sends to `/api/orders`. Ea
 
 - **Growth** is the slope of log(time) against log(orders): about 0 is flat, 1 grows in step with the history, and above 1.2 is flagged.
 - **A fixed window that slows down** is the clearest kind of problem. This is a 30-day list, open orders or a queue whose answer stays the same size while it takes longer: it reads more than its window.
-- **Where the time goes** comes from `npm run perf:profile`. It runs the same requests through the app's handler code on Node's own SQLite against a copy of the kept database, timing every statement, and shows each statement's call count and query plan. A full table scan is marked.
+- **Where the time goes** comes from `npm run perf:profile`. It runs the same requests through the app's handler code on Node's own SQLite against a copy of the kept database, timing every statement, and shows each statement's call count and query plan. A full table scan is marked. Migrations added since the data was kept (a new index, say) are applied to the copy first, so a fix can be profiled on the old data.

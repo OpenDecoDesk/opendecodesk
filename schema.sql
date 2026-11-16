@@ -235,7 +235,9 @@ CREATE TABLE IF NOT EXISTS orders (
   paidForWork         INTEGER NOT NULL DEFAULT 0 CHECK (paidForWork IN (0, 1)),
   rushPayBy           TEXT,                       -- migrations/0083: full payment due by (YYYY-MM-DD) to keep a rush date
   downloadSalt        TEXT,                       -- migrations/0086: makes the order's download link (http.js downloadToken)
-  downloadsEmailedAt  TEXT                        -- migrations/0086: when the "Your downloads" email went out
+  downloadsEmailedAt  TEXT,                       -- migrations/0086: when the "Your downloads" email went out
+  source              TEXT NOT NULL DEFAULT '',   -- migrations/0087: '' = made here; 'etsy' / 'shopify' / 'csv' = imported
+  externalOrderId     TEXT                        -- migrations/0087: the store's own order number
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -1501,3 +1503,6 @@ CREATE TABLE IF NOT EXISTS download_log (
   userAgent  TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_download_log_grant ON download_log(grantId, at);
+
+-- Orders imported from another store (migrations/0087): the same store order is only imported once per shop.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_external ON orders(orgId, source, externalOrderId) WHERE externalOrderId IS NOT NULL;

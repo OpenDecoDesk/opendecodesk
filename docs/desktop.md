@@ -37,6 +37,7 @@ carrier shipping ([Shipping](#shipping)) or turn on [supplier connections](#supp
 | Shipping an order: address, carrier, charge, tracking number | yes | yes, typed in (Local sale → Ship this order) |
 | Carrier rates, buying labels, tracking checks (Shippo) | optional | optional, with a Shippo key and the internet |
 | Orders entered by hand (Local sale), production, inventory, cost of goods | yes | yes |
+| Orders from Etsy, Shopify or a sheet (Orders → Import orders…, from the store's CSV export) | yes | yes |
 | Expenses, accounts, reconciling, closing months, the accountant export | yes | yes |
 | Pictures, receipts, design files | R2 buckets | ordinary files in the data folder |
 | Several people signing in | yes | yes, on that one computer |

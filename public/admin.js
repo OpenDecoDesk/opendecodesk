@@ -4489,6 +4489,7 @@ function ordersFilterBar_(selectedOrgId){
       </div>
       <button class="admin-btn" onclick="rerenderOrdersView()">Refresh</button>
       ${selectedOrgId ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" onclick="createLocalSale(this.dataset.org)">+ Local sale</button>
+        ${adminCan_("manager") ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" onclick="pickOrderImportFile_(this.dataset.org)" title="Orders from Etsy, Shopify or a sheet">Import orders…</button>` : ""}
         ${adminCan_("manager") ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" onclick="createTestTransaction(this.dataset.org)">Create test transaction</button>` : ""}` : ""}
     </div>`;
 }
@@ -4552,7 +4553,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         </td>` : ""}
         <td data-date-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${new Date(o.placedAt).toLocaleDateString()} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="editOrderDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Edit date">✎</button></td>
         <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="editOrderDueDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
-        <td>${escapeHtml(o.customerName)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</td>
+        <td>${escapeHtml(o.customerName)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</td>
         <td>${escapeHtml(o.orderId)}</td>
         <td>${escapeHtml(it.name)}</td>
         <td>${itemHasSize_(it) ? escapeHtml(it.size) : "OSFA"}</td>
@@ -4663,7 +4664,7 @@ function orderCardHtml_(o, org, verif, showShop){
     <div class="oc-head">
       ${!showShop && active.length ? `<input type="checkbox" class="order-select" ${ids} data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" onchange="updateBulkBar(this.dataset.org)" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
       <div class="oc-who">
-        <div class="oc-name">${escapeHtml(o.customerName)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</div>
+        <div class="oc-name">${escapeHtml(o.customerName)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</div>
         <div class="oc-dim">${escapeHtml(o.orderId)} · ${new Date(o.placedAt).toLocaleDateString()} <button type="button" class="oc-icon-btn" ${ids} onclick="editOrderDate(this)" title="Edit date" aria-label="Edit order date">✎</button></div>
         <div class="oc-dim">Due: ${o.dueDate ? escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : "—"} <button type="button" class="oc-icon-btn" ${ids} onclick="editOrderDueDate(this)" title="Set due date" aria-label="Set due date">✎</button></div>
         ${showShop ? `<div class="oc-dim">${escapeHtml(org.name || org.orgId)}</div>` : ""}
@@ -19099,7 +19100,7 @@ async function showThreadImportModal_(file, onDone){
   body.querySelector("#thiGo").onclick = async () => {
     const err = body.querySelector("#thiErr"), btn = body.querySelector("#thiGo");
     const rows = parsed.rows.filter((r, i) => body.querySelector(`.thi-on[data-i="${i}"]`).checked);
-    if (!rows.length) { err.textContent = "Tick at least one row."; return; }
+    if (!rows.length) { err.textContent = `Tick at least one ${noun}.`; return; }
     btn.disabled = true; btn.textContent = "Importing…";
     try {
       const r = await threadApi_({ action: "importThreadChart", rows });
@@ -20004,13 +20005,15 @@ async function showCsvImportModal_(cfg){
   try { parsed = csvToObjects_(await cfg.file.text()); }
   catch (e) { fail("Could not read that file."); return; }
   if (!parsed.rows.length) { fail("That file has no rows under its header line. Save the sheet as CSV (comma separated) and try again."); return; }
+  // cfg.prepare(parsed) → {rows, headers} or {error}: turns the file's rows into what's sent (orders: one per order).
+  if (cfg.prepare) { const p = cfg.prepare(parsed); if (p.error) { fail(p.error); return; } parsed = { headers: p.headers, rows: p.rows }; }
   if (!parsed.headers.some(h => h.toLowerCase() === cfg.keyColumn)) {
     fail(`That file has no <b>${escapeHtml(cfg.keyColumn)}</b> column, so the rows can't be told apart. Its columns are: ${escapeHtml(parsed.headers.filter(Boolean).join(", ") || "(none)")}.`); return; }
   // A long file goes up in batches (each its own request, so no single request does too much):
   // rowOffset keeps the row numbers matching the spreadsheet, seen = keys in earlier batches, so a
   // repeated key further down is still caught. Results are stitched back into one list.
   // With cfg.colorRows (blanks), a row with a `color` is keyed style|color — one row per color is allowed.
-  const BATCH = 20, keyOf = (r) => {
+  const BATCH = cfg.batch || 20, keyOf = (r) => {
     const col = (name) => { const k = Object.keys(r).find(h => h.toLowerCase() === name); return String(k ? r[k] : "").trim().toLowerCase(); };
     const key = col(cfg.keyColumn), color = cfg.colorRows ? col("color") : "";
     return key && color ? key + "|" + color : key;
@@ -20022,7 +20025,8 @@ async function showCsvImportModal_(cfg){
       if (onProgress) onProgress(Math.min(i + BATCH, rows.length), rows.length);
       const r = await hoopApi_({ action: cfg.action, rows: part, rowOffset: i, seen, ...(cfg.extraBody || {}), ...extra });
       // Row numbers: the position in the FILE (not in the ticked subset) when the caller gives it.
-      r.results.forEach((x, j) => { if (indexes) x.row = indexes[i + j] + 2; total.results.push(x); });
+      // (cfg.prepare'd rows carry the file's row number themselves, which the server returns.)
+      r.results.forEach((x, j) => { if (indexes && !cfg.prepare) x.row = indexes[i + j] + 2; total.results.push(x); });
       for (const k of ["created", "updated", "skipped", "linked"]) total[k] += Number(r[k]) || 0;
       part.forEach(row => { const k = keyOf(row); if (k) seen.push(k); });
     }
@@ -20052,9 +20056,11 @@ async function showCsvImportModal_(cfg){
         ${r.notes.map(x => `<div style="color:#666;">· ${escapeHtml(x)}</div>`).join("")}</td>
     </tr>`).join("");
   const bad = plan.results.filter(r => r.problems.length).length;
+  // cfg.noun: what one ticked line is ("row" unless said); cfg.createOnly: nothing is ever updated (orders).
+  const noun = cfg.noun || "row", nouns = (n) => `${n} ${noun}${n === 1 ? "" : "s"}`;
   body.innerHTML = `
-    <div style="font-size:13px;color:#333;margin-bottom:8px;">${plan.results.length} row${plan.results.length === 1 ? "" : "s"}: <b>${plan.created}</b> new, <b>${plan.updated}</b> to update${bad ? `, <b style="color:#b03a2e;">${bad}</b> that can't be imported` : ""}.
-      Nothing is saved until you press Import. Untick any row to leave it out.</div>
+    <div style="font-size:13px;color:#333;margin-bottom:8px;">${nouns(plan.results.length)}: <b>${plan.created}</b> new${cfg.createOnly ? "" : `, <b>${plan.updated}</b> to update`}${bad ? `, <b style="color:#b03a2e;">${bad}</b> that can't be imported` : ""}.
+      Nothing is saved until you press Import. Untick any ${noun} to leave it out.</div>
     ${cfg.intro ? cfg.intro(plan) : ""}
     ${typeof cfg.controls === "function" ? cfg.controls(ctx) : (cfg.controls || "")}
     <div style="overflow:auto;max-height:52vh;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:13px;">
@@ -20069,7 +20075,7 @@ async function showCsvImportModal_(cfg){
       <button type="button" class="admin-btn" id="csvImpGo"></button></div>`;
   const goBtn = body.querySelector("#csvImpGo");
   const ticked = () => [...body.querySelectorAll(".csv-on:checked")].map(c => Number(c.dataset.i));
-  const relabel = () => { const n = ticked().length; goBtn.textContent = `Import ${n} row${n === 1 ? "" : "s"}`; goBtn.disabled = n === 0; };
+  const relabel = () => { const n = ticked().length; goBtn.textContent = `Import ${nouns(n)}`; goBtn.disabled = n === 0; };
   body.querySelector("#csvImpAll").addEventListener("change", (e) => { body.querySelectorAll(".csv-on:not(:disabled)").forEach(c => { c.checked = e.target.checked; }); relabel(); });
   body.querySelectorAll(".csv-on").forEach(c => c.addEventListener("change", relabel));
   relabel();
@@ -20184,6 +20190,70 @@ async function showProductCsvImportModal_(orgId, file, onDone){
     done: (r) => `Products imported: ${r.created} new, ${r.updated} updated${r.skipped ? `, ${r.skipped} skipped` : ""}. ${adminCan_("manager") ? "Press Publish to put them on the storefront." : "They reach the storefront when a manager publishes the catalog."}` +
       ((r.belowMap || []).length ? ` ⚠ ${r.belowMap.length} priced below a blank's MAP — raise ${r.belowMap.length === 1 ? "it" : "them"} before publishing: ${r.belowMap.map(p => p.name).join(", ")}.` : ""),
   });
+}
+
+// ---- Orders → Import orders (migrations/0087) ----------------------------------
+// Another store's export, one row per item: an Etsy "Order Items" CSV, a Shopify orders export, or a plain sheet with
+// an `order` column (db.js importOrdersCsv reads them). The rows are grouped into one unit per order here, so a batch
+// never splits an order: {order, row (the file's row of its first item), lines: [its rows]}.
+const ORDER_IMPORT_KEY_ = { etsy: "order id", shopify: "name", csv: "order" };
+function orderImportFormat_(headers){
+  const h = new Set((headers || []).map(x => String(x).trim().toLowerCase()));
+  if (h.has("order id") && h.has("sale date") && h.has("item name")) return "etsy";
+  if (h.has("name") && h.has("lineitem name")) return "shopify";
+  if (h.has("order")) return "csv";
+  return "";
+}
+function groupOrderRows_(parsed){
+  const format = orderImportFormat_(parsed.headers);
+  if (!format) return { error: `That file isn't an Etsy "Order Items" file, a Shopify orders export or a sheet with an <b>order</b> column. Its columns are: ${escapeHtml(parsed.headers.filter(Boolean).join(", ") || "(none)")}.` };
+  const keyCol = parsed.headers.find(h => h.trim().toLowerCase() === ORDER_IMPORT_KEY_[format]);
+  const byKey = new Map(), rows = [];
+  let last = null;
+  parsed.rows.forEach((r, i) => {
+    const key = String(r[keyCol] || "").trim();
+    // Shopify leaves an order's later item rows without most order values; one with no order number joins the one above.
+    const unit = key ? byKey.get(key.toLowerCase()) : last;
+    if (unit) { unit.lines.push(r); last = unit; return; }
+    last = { order: key, row: i + 2, lines: [r] };
+    if (key) byKey.set(key.toLowerCase(), last);
+    rows.push(last);
+  });
+  return { format, headers: ["order"], rows };
+}
+const ORDER_IMPORT_SOURCE_ = { etsy: "Etsy", shopify: "Shopify", csv: "a sheet" };
+// An imported order's store and its order number there, next to the customer's name on Orders.
+function importedPill_(o){
+  if (!o || !o.source) return "";
+  const store = { etsy: "Etsy", shopify: "Shopify" }[o.source] || "Imported";
+  return ` <span title="Imported from ${escapeHtml(store === "Imported" ? "a sheet" : store)}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#f3f4f6;color:#374151;">${escapeHtml(store)}${o.externalOrderId ? " " + escapeHtml(o.externalOrderId) : ""}</span>`;
+}
+function showOrderCsvImportModal_(orgId, file, onDone){
+  let format = "";
+  return showCsvImportModal_({
+    title: "Import orders", file, action: "importOrders", keyColumn: "order", keyLabel: "Order", onDone, extraBody: { org: orgId }, batch: 10,
+    noun: "order", createOnly: true,
+    prepare: (parsed) => { const g = groupOrderRows_(parsed); format = g.format || ""; return g; },
+    columnsHelp: `<b>Etsy:</b> Shop Manager → Settings → Options → Download Data → Orders, type <b>Order Items</b> (one month per file).
+      <b>Shopify:</b> Orders → Export → <b>Plain CSV</b>. <b>Any other store or a sheet of your own:</b> one row per item, with
+      <b>order</b> (the order number, the same on each of its rows), <b>date</b>, <b>customer</b>, <b>email</b>, <b>sku</b>, <b>item</b> (its name),
+      <b>size</b>, <b>qty</b>, <b>price</b> (each), <b>personalization</b>, <b>shipping</b>, <b>paid</b> (yes/no), <b>shipped</b> (yes, or the date),
+      and the address: <b>address1</b>, <b>address2</b>, <b>city</b>, <b>state</b>, <b>zip</b>, <b>country</b>.<br>
+      Each item's SKU is matched to a product's SKU in this shop; an item with no match comes in as a custom line at the store's price.
+      Sales tax the store charged isn't added again. An order the store has already shipped comes in as shipped, a paid one with its payment.
+      Downloads bought on the store were delivered by it — no download link is sent from here.
+      Importing the same file again skips the orders that are already in.`,
+    intro: () => `<div style="font-size:12px;color:#555;margin-bottom:8px;">Reading this as ${ORDER_IMPORT_SOURCE_[format] ? `<b>${ORDER_IMPORT_SOURCE_[format]}</b>` : "an orders file"}.</div>`,
+    detail: (r) => [r.lines && r.lines.length ? r.lines.map(escapeHtml).join("<br>") : "", [r.total, r.paid ? "paid" : r.action !== "skip" ? "unpaid" : "", r.shipped ? "shipped" : ""].filter(Boolean).join(" · ")]
+      .filter(Boolean).join("<br>"),
+    done: (r) => `Orders imported: ${r.created}${r.skipped ? `, ${r.skipped} skipped` : ""}.`,
+  });
+}
+function pickOrderImportFile_(orgId){
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = ".csv,text/csv"; inp.style.display = "none";
+  inp.onchange = () => { const f = inp.files[0]; inp.remove(); if (f) showOrderCsvImportModal_(orgId, f, () => rerenderOrdersView()); };
+  document.body.appendChild(inp); inp.click();
 }
 
 // ---- Hoop catalog (migrations/0022) — global, shared across every shop ---------

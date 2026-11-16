@@ -53,6 +53,9 @@ and the tax and shipping features are built around a US business (see [Region](#
   from blanks ordered to delivered, packing and mailing labels, shipping labels and tracking.
 - Local sales and orders entered by hand; payment links and invoices emailed to a customer (the
   invoice page lets them choose delivery and pay).
+- Orders from another store: **Import orders…** on Orders reads an Etsy "Order Items" file, a Shopify
+  orders export or a sheet of your own, matches each item to a product by SKU, and skips orders
+  already imported.
 - Design approval: email a customer a proof, they approve or ask for changes from a link.
 - Embroidery production: threads, hoops, designs and their stitch files, machines, a Run Order queue
   with timed runs, and a run-time report; stitch counts per run and machine maintenance by stitches or

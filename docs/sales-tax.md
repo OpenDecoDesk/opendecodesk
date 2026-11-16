@@ -14,6 +14,10 @@ Tools → Global settings → **Sales tax**:
   `OTHER`, it is your region's name as free text.)
 - **Prices include sales tax**, or **sales tax is added at checkout.**
 
+Orders imported from another store (Orders → Import orders…) get **no** sales tax here: Etsy and
+Shopify charged their own, and the order is recorded as tax-exempt so it isn't charged twice. The
+import window names the tax the store charged.
+
 Changing any of them affects **new orders only**. Every order keeps the rate, the mode and its
 shop's exemption as they were when it was placed, so past reports don't change.
 

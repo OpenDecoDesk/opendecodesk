@@ -7,7 +7,7 @@
 //
 // downloadLink(env, order) is the order's page, /api/download?o=<orderId>&t=<token> on the shop's own address.
 
-import { grantOrderDownloads, orderDigitalLines, orderDownloadSalt, getDigitalSettings, getDownloadsEmailedAt, setDownloadsEmailedAt, getOrderById, getOrgById } from "./db.js";
+import { grantOrderDownloads, orderDigitalLines, orderDownloadSalt, getDigitalSettings, getDownloadsEmailedAt, setDownloadsEmailedAt, getOrderById, getOrgById, getOrderSource } from "./db.js";
 import { downloadToken } from "./http.js";
 import { rootDomain } from "./hostConfig.js";
 import { sendDownloadsEmail } from "./email.js";
@@ -57,6 +57,8 @@ async function attachmentsFor_(env, grants, capBytes) {
 export async function deliverOrderDownloads(env, orderId, { resend = false, origin = "", now = new Date() } = {}) {
   const lines = await orderDigitalLines(env.DB, orderId);
   if (!lines.length) return { status: "none", grants: [] };
+  // An order imported from another store (migrations/0087): that store delivered the files, so nothing is granted or sent.
+  if (typeof getOrderSource === "function" && await getOrderSource(env.DB, orderId)) return { status: "none", grants: [] };
   const g = await grantOrderDownloads(env.DB, orderId, { now });
   if (!g.paid) return { status: "unpaid", grants: g.grants };
   const live = g.grants.filter(x => !x.revokedAt);

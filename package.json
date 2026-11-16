@@ -9,7 +9,9 @@
     "db:migrate": "npx wrangler d1 migrations apply DB --remote",
     "db:pending": "npx wrangler d1 migrations list DB --remote",
     "db:backup:now": "bash scripts/d1-backup.sh",
-    "scan": "bash scripts/scan-private.sh"
+    "scan": "bash scripts/scan-private.sh",
+    "perf": "node --disable-warning=ExperimentalWarning perf/scale.js",
+    "perf:profile": "node --disable-warning=ExperimentalWarning perf/profile.js"
   },
   "cloudflare": {
     "label": "OpenDecoDesk",

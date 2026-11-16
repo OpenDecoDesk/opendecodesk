@@ -8935,6 +8935,252 @@ export async function importProductsCsv(db, orgId, rawRows, opts = {}) {
   return { dryRun, results: out, created, updated, skipped, linked, newLocations };
 }
 
+// ---- Orders → Import orders (migrations/0087) ---------------------------------
+// Orders from another store, from that store's own export: an Etsy "Order Items" CSV (Shop Manager → Settings →
+// Options → Download Data), a Shopify orders export (Orders → Export), or a plain sheet with an `order` column. Every
+// format is one row per item; the browser groups an order's rows into one unit ({order, row, lines}) so a batch never
+// splits an order. Each line is matched to a product by SKU (the product id, as the products import makes it); a line
+// with no match is a custom line at the store's price. The store's sales tax isn't added here (the order is tax-exempt
+// in this system), and its files were delivered by the store, so no download link is ever sent (digital.js).
+export const ORDER_IMPORT_SOURCES = { etsy: "Etsy", shopify: "Shopify", csv: "CSV" };
+const ORDER_IMPORT_MAX_LINES_ = 100;
+
+// Which store's export these columns are (lower-case header names): "etsy", "shopify", "csv", or "" for none of them.
+export function orderImportFormat(headers) {
+  const h = new Set((headers || []).map(x => String(x).replace(/^﻿/, "").trim().toLowerCase()));
+  if (h.has("order id") && h.has("sale date") && h.has("item name")) return "etsy";
+  if (h.has("name") && h.has("lineitem name")) return "shopify";
+  if (h.has("order")) return "csv";
+  return "";
+}
+// The column that holds each format's order number.
+export const ORDER_IMPORT_KEY = { etsy: "order id", shopify: "name", csv: "order" };
+
+// "11/02/26", "11/02/2026", "2026-11-02", "2026-11-02 10:15:00 -0500" → ISO; "" → null; anything else → NaN.
+function importDate_(v) {
+  const t = String(v || "").trim();
+  if (!t) return null;
+  let m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+  if (m) {
+    const y = m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3]);
+    const d = new Date(Date.UTC(y, Number(m[1]) - 1, Number(m[2]), 12));
+    return d.getUTCMonth() === Number(m[1]) - 1 ? d.toISOString() : NaN;
+  }
+  m = t.match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}(?::\d{2})?)\s*(Z|[+-]\d{2}:?\d{2})?)?$/);
+  if (m) {
+    const zone = m[3] ? (m[3] === "Z" ? "Z" : m[3].replace(/^([+-]\d{2}):?(\d{2})$/, "$1:$2")) : "Z";
+    const d = new Date(m[2] ? `${m[1]}T${m[2].length === 5 ? m[2] + ":00" : m[2]}${zone}` : `${m[1]}T12:00:00Z`);
+    return Number.isNaN(d.getTime()) ? NaN : d.toISOString();
+  }
+  return NaN;
+}
+// A store's size words → this site's sizes: "Large" → L, "X-Large" → XL, "XXL" → 2XL, "2X" → 2XL.
+function importOrderSize_(v) {
+  const t = String(v || "").trim().toUpperCase().replace(/[\s_]+/g, " ");
+  const words = { "X SMALL": "XS", "X-SMALL": "XS", "EXTRA SMALL": "XS", SMALL: "S", MEDIUM: "M", LARGE: "L",
+    "X LARGE": "XL", "X-LARGE": "XL", "EXTRA LARGE": "XL", "XX LARGE": "2XL", "XX-LARGE": "2XL", "2X-LARGE": "2XL", "XXX LARGE": "3XL", "XXX-LARGE": "3XL", "3X-LARGE": "3XL",
+    "ONE SIZE": "OSFA", "ONESIZE": "OSFA", OS: "OSFA" };
+  if (words[t]) return words[t];
+  const x = t.match(/^(X{2,6})L$/); if (x) return x[1].length + "XL";
+  const n = t.match(/^(\d)X$/); if (n) return n[1] + "XL";
+  return t.slice(0, 20);
+}
+// Etsy's Variations ("Size:Large,Personalization:Sam") → [{name, value}]. A value may itself hold a comma, so a part
+// with no "Name:" is glued back onto the one before it.
+function importVariations_(v) {
+  const out = [];
+  for (const part of String(v || "").split(",")) {
+    const m = part.match(/^\s*([^:]{1,40}):\s*(.*)$/);
+    if (m) out.push({ name: m[1].trim(), value: m[2].trim() });
+    else if (out.length) out[out.length - 1].value += "," + part;
+  }
+  return out.filter(o => o.value);
+}
+
+// One line of the file → what the order and the item say, for the three formats.
+function readOrderLine_(format, r) {
+  if (format === "etsy") {
+    const opts = importVariations_(r.variations);
+    const pick = (re) => { const i = opts.findIndex(o => re.test(o.name)); return i < 0 ? "" : opts.splice(i, 1)[0].value; };
+    const pers = pick(/personali[sz]ation/i), size = pick(/^size$/i);
+    return {
+      orderNo: r["order id"], date: r["sale date"], customer: r["ship name"] || r.buyer, email: "",
+      paid: !!String(r["date paid"] || "").trim(), paidAt: r["date paid"], shippedAt: r["date shipped"], cancelled: "",
+      shipping: r["order shipping"], discount: r["discount amount"], tax: r["order sales tax"], currency: r.currency,
+      address: { name: r["ship name"], line1: r["ship address1"], line2: r["ship address2"], city: r["ship city"], state: r["ship state"],
+        zip: r["ship zipcode"], country: r["ship country"] },
+      item: { sku: r.sku, name: r["item name"], qty: r.quantity, price: r.price, size, personalization: pers, options: opts },
+    };
+  }
+  if (format === "shopify") {
+    // Shopify's "Lineitem name" is "Club Tee - Navy / L" for a variant; the size is the part after the last " / " when
+    // it reads as one.
+    const name = String(r["lineitem name"] || "");
+    const variant = name.includes(" - ") ? name.slice(name.lastIndexOf(" - ") + 3) : "";
+    const parts = variant.split(" / ").map(s => s.trim()).filter(Boolean);
+    const sizeAt = parts.findIndex(p => /^(XS|S|M|L|XL|\d?X{0,5}L|\d+XL|OSFA|ONE SIZE|SMALL|MEDIUM|LARGE|X-LARGE|XX-LARGE)$/i.test(p));
+    const size = sizeAt < 0 ? "" : parts.splice(sizeAt, 1)[0];
+    const fin = String(r["financial status"] || "").toLowerCase();
+    return {
+      orderNo: r.name, date: r["created at"], customer: r["shipping name"] || r["billing name"], email: r.email,
+      paid: ["paid", "partially_refunded"].includes(fin), paidAt: r["paid at"],
+      shippedAt: r["fulfilled at"] || (String(r["fulfillment status"] || "").toLowerCase() === "fulfilled" ? r["created at"] : ""),
+      cancelled: r["cancelled at"], refunded: fin === "refunded",
+      shipping: r.shipping, discount: r["discount amount"], tax: r.taxes, currency: r.currency, note: r.notes,
+      address: { name: r["shipping name"], line1: r["shipping address1"] || r["shipping street"], line2: r["shipping address2"], city: r["shipping city"],
+        state: r["shipping province"], zip: r["shipping zip"], country: r["shipping country"], phone: r["shipping phone"] },
+      item: { sku: r["lineitem sku"], name: sizeAt >= 0 || parts.length ? name.slice(0, name.lastIndexOf(" - ")) : name, qty: r["lineitem quantity"],
+        price: r["lineitem price"], size, personalization: "", options: parts.map(p => ({ name: "", value: p })) },
+    };
+  }
+  return {
+    orderNo: r.order, date: r.date || r.order_date, customer: r.customer || r.customer_name || r.ship_name, email: r.email,
+    paid: importBool_(r.paid, false), paidAt: "", shippedAt: r.shipped && !/^(no|false|0)$/i.test(r.shipped) ? (/^(yes|true|1|x)$/i.test(r.shipped) ? (r.date || r.order_date) : r.shipped) : "",
+    cancelled: "", shipping: r.shipping, discount: r.discount, tax: "", currency: "",
+    address: { name: r.ship_name || r.customer, line1: r.address1 || r.address, line2: r.address2, city: r.city, state: r.state, zip: r.zip, country: r.country, phone: r.phone },
+    item: { sku: r.sku, name: r.item || r.product || r.item_name, qty: r.qty || r.quantity, price: r.price, size: r.size, personalization: r.personalization, options: [] },
+  };
+}
+
+// units: [{order, row, lines: [the file's rows]}]. Same contract as the products import: `dryRun` reports exactly what
+// would happen and writes nothing; `seen` = order numbers already sent in an earlier batch.
+export async function importOrdersCsv(db, orgId, units, opts = {}) {
+  const dryRun = !!opts.dryRun;
+  const list = (units || []).slice(0, IMPORT_MAX_ROWS);
+  const rowOffset = Math.max(0, Math.floor(Number(opts.rowOffset) || 0));
+  const seen = new Set((opts.seen || []).map(x => String(x).toLowerCase()));
+  const products = await getProductsByOrg(db, orgId, false);
+  const byId = new Map(products.map(p => [p.productId, p]));
+  const country = (await getLocaleSettings(db)).country;
+  // Months already filed can't gain sales, payments or cost of goods (migrations/0010).
+  const closed = new Set((await getClosedPeriods(db).catch(() => [])).map(p => p.month));
+  const org = orgId.replace(/[^A-Za-z0-9]/g, "").slice(0, 4).toUpperCase() || "ORD";
+  const out = [];
+  let created = 0, skipped = 0;
+  for (let i = 0; i < list.length; i++) {
+    const u = list[i] || {};
+    const raw = (Array.isArray(u.lines) ? u.lines : []).slice(0, ORDER_IMPORT_MAX_LINES_ + 1).map(importRow_);
+    const format = opts.format || orderImportFormat(Object.keys(raw[0] || {}));
+    const res = { row: Number(u.row) || rowOffset + i + 2, sku: "", name: "", action: "skip", problems: [], notes: [],
+      format, orderNo: "", lines: [], total: "", paid: false, shipped: false, orderId: "" };
+    out.push(res);
+    if (!format) { res.problems.push("These columns aren't an Etsy, Shopify or plain orders file"); skipped++; continue; }
+    if (!raw.length) { res.problems.push("No items"); skipped++; continue; }
+    if (raw.length > ORDER_IMPORT_MAX_LINES_) { res.problems.push(`More than ${ORDER_IMPORT_MAX_LINES_} items on one order`); skipped++; continue; }
+    const read = raw.map(r => readOrderLine_(format, r));
+    // Order-level values: Shopify fills them on an order's first row only, Etsy on every row.
+    const first = (k) => { for (const x of read) if (x[k] != null && String(x[k]).trim() !== "") return x[k]; return ""; };
+    const orderNo = String(first("orderNo")).trim().slice(0, 40);
+    res.orderNo = orderNo;
+    res.sku = (ORDER_IMPORT_SOURCES[format] === "CSV" ? "" : ORDER_IMPORT_SOURCES[format] + " ") + orderNo;
+    res.name = String(first("customer") || "").slice(0, 200);
+    if (!orderNo) { res.problems.push("No order number"); skipped++; continue; }
+    const key = orderNo.toLowerCase();
+    if (seen.has(key)) { res.problems.push("This order is in the file more than once"); skipped++; continue; }
+    seen.add(key);
+    const placedAt = importDate_(first("date"));
+    if (placedAt == null) res.problems.push("No order date");
+    else if (Number.isNaN(placedAt)) res.problems.push(`Order date "${first("date")}" isn't a date`);
+    if (first("cancelled")) res.problems.push("Cancelled in " + ORDER_IMPORT_SOURCES[format]);
+    if (read.some(x => x.refunded)) res.problems.push("Refunded in " + ORDER_IMPORT_SOURCES[format]);
+    const cur = String(first("currency") || "").toUpperCase();
+    if (cur && cur !== "USD") res.notes.push(`Amounts are in ${cur}, recorded as they are`);
+    const money = (label, v) => { const n = importMoney_(v); if (Number.isNaN(n)) { res.problems.push(`${label} isn't an amount ("${v}")`); return 0; } return n || 0; };
+    const shipping = money("Shipping", first("shipping")), discount = money("Discount", first("discount")), tax = money("Sales tax", first("tax"));
+
+    // The lines.
+    const items = [];
+    let physical = 0;   // lines that aren't downloads (an order of only downloads has no shipping stage)
+    for (const [n, x] of read.entries()) {
+      const it = x.item, where = read.length > 1 ? `Item ${n + 1}: ` : "";
+      const qty = Number(String(it.qty || "1").trim());
+      if (!Number.isInteger(qty) || qty < 1 || qty > 10000) { res.problems.push(`${where}quantity "${it.qty}" isn't a whole number`); continue; }
+      const price = importMoney_(it.price);
+      if (price == null || Number.isNaN(price)) { res.problems.push(`${where}price "${it.price || ""}" isn't an amount`); continue; }
+      const extras = (it.options || []).map(o => o.name ? `${o.name}: ${o.value}` : o.value).join(", ");
+      const pers = String(it.personalization || "").slice(0, 200);
+      const sku = String(it.sku || "").trim();
+      const p = sku ? byId.get(sku.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")) : null;
+      let size = it.size ? importOrderSize_(it.size) : "";
+      let line = null;
+      if (p) {
+        if (p.pricingMode === "sized") {
+          const listed = Object.keys(p.sizePricing || {}).find(s => s.toUpperCase() === size);
+          if (listed) size = listed;
+          else res.notes.push(`${where}${p.name} has no size ${size ? `"${it.size}"` : "given"} — imported as a custom line`);
+          if (listed) line = { productId: p.productId, name: p.name, type: p.type, size };
+        } else line = { productId: p.productId, name: p.name, type: p.type, size: "OSFA" };
+      } else if (sku) res.notes.push(`${where}no product with SKU ${sku} — imported as a custom line`);
+      if (!line) {
+        const name = String(it.name || "").trim();
+        if (!name) { res.problems.push(`${where}no item name`); continue; }
+        line = { productId: "__custom__", name, type: "custom", size: size || "OSFA", taxable: false };
+      }
+      line.name = (extras ? `${line.name} (${extras})` : line.name).slice(0, 200);
+      if (!(p && p.digital && line.productId === p.productId)) physical++;
+      items.push({ ...line, qty, unitPrice: price, personalized: !!pers, persName: pers, personalizationFee: 0, lineTotal: price * qty });
+      res.lines.push(`${qty} × ${line.name}${line.size !== "OSFA" ? " " + line.size : ""}${pers ? ` — "${pers}"` : ""}${line.productId === "__custom__" ? " (custom)" : ""}`);
+    }
+    if (!items.length && !res.problems.length) res.problems.push("No items");
+
+    // The address: a US one is checked as a storefront order's is; one abroad is kept as written.
+    const a = read[0].address || {};
+    const abroad = a.country && !/^(US|USA|UNITED STATES)$/i.test(String(a.country).trim());
+    const ac = cleanShippingAddress({ ...a, country: abroad ? String(a.country).slice(0, 2) : (a.country ? "US" : "") }, abroad ? "OTHER" : country);
+    let address = ac.address || null;
+    if (ac.error) { res.notes.push(`Address not kept: ${ac.error}`); address = null; }
+
+    const subtotal = items.reduce((s, it) => s + it.lineTotal, 0);
+    res.total = importMoneyText_(Math.max(0, subtotal + shipping - discount));
+    res.paid = !!first("paid");
+    res.shipped = !!first("shippedAt") && physical > 0;
+    const shippedAt = res.shipped ? importDate_(first("shippedAt")) : null;
+    const paidAt = res.paid ? (importDate_(first("paidAt")) || placedAt) : null;
+    if (tax > 0) res.notes.push(`Sales tax ${importMoneyText_(tax)} was charged by ${ORDER_IMPORT_SOURCES[format] === "CSV" ? "the store" : ORDER_IMPORT_SOURCES[format]} — not added here`);
+    if (discount > subtotal + shipping) res.problems.push("The discount is more than the order");
+    for (const at of [placedAt, paidAt, shippedAt]) {
+      const m = typeof at === "string" ? at.slice(0, 7) : "";
+      if (m && closed.has(m)) { res.problems.push(`Falls in ${m}, a month that's closed`); break; }
+    }
+    if (res.problems.length) { skipped++; continue; }
+
+    // Already imported? (The unique index is the real guard; this is so the preview can say so.)
+    const had = await db.prepare("SELECT orderId FROM orders WHERE orgId=? AND source=? AND externalOrderId=?").bind(orgId, format, orderNo).first().catch(() => null);
+    if (had) { res.problems.push(`Already imported (order ${had.orderId})`); skipped++; continue; }
+    res.action = "create";
+    if (dryRun) { created++; continue; }
+
+    const orderId = `${org}-${format === "csv" ? "IMP" : format.toUpperCase()}-${orderNo.replace(/[^A-Za-z0-9]/g, "").slice(0, 24) || "X"}-${crypto.randomUUID().replace(/-/g, "").slice(0, 4).toUpperCase()}`;
+    const order = {
+      orderId, orgId, customerName: res.name || ORDER_IMPORT_SOURCES[format] + " customer", contact: String(first("email") || "").slice(0, 200),
+      paymentMethod: ORDER_IMPORT_SOURCES[format] === "CSV" ? "" : ORDER_IMPORT_SOURCES[format],
+      subtotal, shippingCost: shipping, total: subtotal + shipping, shippingMethod: "", shippingAddress: address, totalWeightOz: 0,
+      placedAt, source: format, externalOrderId: orderNo,
+    };
+    try { await insertOrder(db, order, items, { fillFromStock: true, taxExempt: true }); }
+    catch (e) {
+      if (/UNIQUE/i.test(String(e && e.message))) { res.action = "skip"; res.problems.push("Already imported"); skipped++; continue; }
+      throw e;
+    }
+    res.orderId = orderId;
+    if (discount > 0) await setOrderDiscount(db, orderId, discount, ORDER_IMPORT_SOURCES[format] + " discount");
+    if (res.paid) await settleOrderBalance(db, orderId, "Paid on " + (ORDER_IMPORT_SOURCES[format] === "CSV" ? "the store" : ORDER_IMPORT_SOURCES[format]), paidAt);
+    // Shipped by the store already: its stock lines are handed over and the order is marked shipped.
+    if (res.shipped) {
+      await pullStockLines(db, orderId, shippedAt || placedAt);
+      await setFulfillmentStage(db, orderId, "shipped", { at: shippedAt || placedAt });
+    }
+    created++;
+  }
+  return { dryRun, results: out, created, updated: 0, skipped };
+}
+
+// The store an order was imported from ('' for one made here), for digital.js.
+export async function getOrderSource(db, orderId) {
+  const r = await db.prepare("SELECT source FROM orders WHERE orderId=?").bind(orderId).first().catch(() => null);
+  return (r && r.source) || "";
+}
+
 // ---- Order helpers -----------------------------------------------------
 
 // range = {from, to} as YYYY-MM-DD (either optional): only orders placed in that window, so the
@@ -9106,7 +9352,8 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
     getSalesTaxSettings(db),
     db.prepare("SELECT taxExempt FROM orgs WHERE orgId=?").bind(order.orgId).first(),
   ]);
-  const taxExempt = orgRow && orgRow.taxExempt ? 1 : 0;
+  // opts.taxExempt: an order from another store (importOrdersCsv), whose sales tax that store charged — none is added here.
+  const taxExempt = opts.taxExempt || (orgRow && orgRow.taxExempt) ? 1 : 0;
   const orderRateBps = Number(taxSettings.rateBps) || 0;
   // Tax in the listed prices, or added to them: today's setting, kept on the order (migrations/0057).
   const mode = taxMode_(order.taxMode || taxSettings.taxMode);
@@ -9141,6 +9388,8 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   }
   if (order.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(order.dueDate)) { extraCols.push("dueDate"); extraBinds.push(order.dueDate); }
   if (order.rushRequested && order.rushPayBy && /^\d{4}-\d{2}-\d{2}$/.test(order.rushPayBy)) { extraCols.push("rushPayBy"); extraBinds.push(order.rushPayBy); }
+  // An imported order (migrations/0087): the store it came from and that store's order number.
+  if (order.source) { extraCols.push("source", "externalOrderId"); extraBinds.push(order.source, order.externalOrderId || null); }
   stmts.push(db.prepare(`INSERT INTO orders
     (orderId,orgId,customerName,contact,paymentMethod,subtotalCents,shippingCostCents,totalCents,
      shippingMethod,shippingAddress,totalWeightOz,placedAt,taxExempt,taxRateBps,isTest${extraCols.map(c => "," + c).join("")})
@@ -11907,6 +12156,8 @@ function parseOrder_(row, items, payments, labels) {
     voidedAt: row.voidedAt || "",
     voidReason: row.voidReason || "",
     isTest: !!row.isTest,
+    source: row.source || "",                       // migrations/0087: the store it was imported from ('' = made here)
+    externalOrderId: row.externalOrderId || "",     // …and that store's order number
     taxRate: (Number(row.taxRateBps) || 0) / 100,
     taxMode,                              // "inclusive": salesTax is inside the item prices; "exclusive": added on top
     salesTax: fromCents(salesTaxCents),

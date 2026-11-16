@@ -55,7 +55,7 @@ import {
   getBoxPresets, setBoxPresets,
   addShippingPaidAmount, setShippingPaidAmount,
   getAllInventory, createInventoryItem, updateInventoryItem, deleteInventoryItem,
-  getAllBlanks, createBlank, updateBlank, deleteBlank, mergeBlanks, getBlanksToOrder, getFreeShippingCandidates, getBlankLowStock, getVendorShipping, vendorShippingFor, listVendors, saveVendor, deleteVendor, resolveVendorName, ensureVendor, recordRestockOrder, listRestockOrders, cancelRestockOrder, importBlanksCsv, importProductsCsv, IMPORT_MAX_ROWS,
+  getAllBlanks, createBlank, updateBlank, deleteBlank, mergeBlanks, getBlanksToOrder, getFreeShippingCandidates, getBlankLowStock, getVendorShipping, vendorShippingFor, listVendors, saveVendor, deleteVendor, resolveVendorName, ensureVendor, recordRestockOrder, listRestockOrders, cancelRestockOrder, importBlanksCsv, importProductsCsv, IMPORT_MAX_ROWS, importOrdersCsv,
   listThreads, createThread, updateThread, deleteThread, importThreadChart,
   listSpoolSizes, saveSpoolSize, deleteSpoolSize, saveThreadInventory, deleteThreadInventory,
   listNeedleSizes, saveNeedleSize, deleteNeedleSize, listNeedleTypes, saveNeedleType, deleteNeedleType, needleTypeExists,
@@ -312,6 +312,7 @@ const ADMIN_ONLY_ACTIONS = [
 ];
 const MANAGER_ACTIONS = [
   "getRushSettings", "setRushFee",                                // rush fees (migrations/0082)
+  "importOrders",                                                 // Orders → Import orders (Etsy, Shopify, a sheet; migrations/0087)
   "listProductFiles", "deleteProductFile", "addProductFileFromDesign", // a digital product's files (migrations/0086)
   "getDigitalSettings", "getOrderDownloads", "resendDownloads", "resetDownloads", "revokeDownloads", // and its buyers' downloads
   "getEmailSettings", "previewCustomerEmail", "samplePdf",       // Global settings → Customer emails: preview and sample PDF
@@ -2319,6 +2320,24 @@ export async function onRequestPost(context) {
     audit({ orgId: org, orderId, action: "order.created_local_sale",
       detail: { customerName: order.customerName, total: subtotal, paid: !!body.paid, items: pricedItems.length } });
     return jsonResponse({ status: "ok", orderId });
+  }
+
+  // ---- importOrders — Orders → Import orders (migrations/0087) ----------------
+  // Another store's orders from its export (db.js importOrdersCsv). `rows` are orders, each {order, row, lines}: the
+  // browser groups the file's item rows by order number. `dryRun` is the preview; the real run takes the ticked ones.
+  if (body.action === "importOrders") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    if (denied) return denied;
+    if (!body.org || !(await getOrgById(env.DB, body.org))) return jsonResponse({ status: "error", message: "Unknown org" }, 404);
+    const rows = Array.isArray(body.rows) ? body.rows.filter(r => r && typeof r === "object" && Array.isArray(r.lines)) : [];
+    if (!rows.length) return jsonResponse({ status: "error", message: "No orders to import" }, 400);
+    if (rows.length > IMPORT_MAX_ROWS) return jsonResponse({ status: "error", message: `Too many orders in one request (${rows.length}) — send up to ${IMPORT_MAX_ROWS} at a time` }, 400);
+    const dryRun = !!body.dryRun;
+    const result = await importOrdersCsv(env.DB, body.org, rows,
+      { dryRun, rowOffset: Number(body.rowOffset) || 0, seen: Array.isArray(body.seen) ? body.seen.slice(0, 5000).map(String) : [] });
+    if (!dryRun && result.created) audit({ orgId: body.org, orderId: null, action: "orders.imported",
+      detail: { created: result.created, skipped: result.skipped, orderIds: result.results.filter(x => x.orderId).map(x => x.orderId).slice(0, 200) } });
+    return jsonResponse({ status: "ok", ...result });
   }
 
   // ---- createTestTransaction -------------------------------------------------

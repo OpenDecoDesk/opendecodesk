@@ -29,3 +29,6 @@ node_modules
 
 # The desktop program's data, when run from here with node desktop/server.js
 desktop-data/
+
+# Scale test (npm run perf): its reports stay on this computer
+perf/results/

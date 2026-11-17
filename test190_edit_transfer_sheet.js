@@ -164,6 +164,15 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   const mgr = src.match(/const MANAGER_ACTIONS = \[[\s\S]*?\];/)[0], staff = src.match(/const STAFF_ACTIONS = \[[\s\S]*?\];/)[0];
   ok("editing needs the manager role; reading a sheet is staff", /"editTransferSheet"/.test(mgr) && !/"editTransferSheet"/.test(staff) && /"getTransferSheet"/.test(staff));
 
+  // The account that paid for the sheets opens in the account viewer. transfer_movements has no size or color column, and
+  // grouping a sheet's rows into one receipt line used to ask for size, which failed with a 500.
+  console.log("\n=== Account viewer for the paying account ===");
+  r = await call({ action: "getAccountRegister", accountId: acct, dateFrom: "2026-01-01", dateTo: "2026-12-31" });
+  const sheetRow = r.status === 200 && r.body.rows.find(x => x.category === "Transfers (stock)" && x.parts && x.parts.length > 1);
+  ok("the paying account's register opens, with a sheet as one line", r.status === 200 && sheetRow && /^Transfer sheets — DTF Co #S1/.test(sheetRow.description));
+  r = await call({ action: "getReconciliation", accountId: acct, month: "2026-09" });
+  ok("reconciling that account's month works too", r.status === 200);
+
   console.log(failed ? `\n${failed} FAILED` : "\nAll passed");
   process.exit(failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

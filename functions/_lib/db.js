@@ -11414,8 +11414,9 @@ async function receiptGroups_(db, moves) {
     }
     return rows;
   };
-  for (const [src, table, nameCol, colorCol, kind] of [["blanks", "inventory_movements", "blankName", "color", "blanks"], ["transfer_sheet", "transfer_movements", "transferName", "''", "transfers"]]) {
-    const cols = `id, ${nameCol} AS name, ${colorCol} AS color, size, qtyDelta, vendor, vendorRef, accountId, paidPersonally, receiptKey, occurredAt, createdAt`;
+  // transfer_movements has no color or size column, so those come back blank for a transfer sheet.
+  for (const [src, table, nameCol, colorCol, sizeCol, kind] of [["blanks", "inventory_movements", "blankName", "color", "size", "blanks"], ["transfer_sheet", "transfer_movements", "transferName", "''", "''", "transfers"]]) {
+    const cols = `id, ${nameCol} AS name, ${colorCol} AS color, ${sizeCol} AS size, qtyDelta, vendor, vendorRef, accountId, paidPersonally, receiptKey, occurredAt, createdAt`;
     const rows = await read((q) => `SELECT ${cols}, receiptGroup FROM ${table} WHERE id IN (${q})`, (q) => `SELECT ${cols}, NULL AS receiptGroup FROM ${table} WHERE id IN (${q})`, ids(src));
     const legacy = new Map();
     for (const r of rows) {

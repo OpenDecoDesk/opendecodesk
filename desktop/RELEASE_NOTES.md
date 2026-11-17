@@ -6,16 +6,19 @@ inventory and cost of goods, and the books, with everything kept on your own com
 
 **New in this release:**
 
-- **Vendors are one list.** Every vendor box (blanks, receiving, expenses, transfer sheets) picks
-  from it, with **Manage…** to add, rename or hide one. Free shipping is set on each vendor.
-- **Finished stock per combination:** a product with color and graphic choices is stocked per
-  color + graphic, and Make for stock takes the transfers each piece carries out of stock.
-- **Rush fees:** a rule in Global settings, and **Orders → Rush…** to set one on an order, with a
-  "full payment received by" date.
-- **Customer emails** list prices before tax, say how to pay, end with your business's details,
-  and attach a PDF: an invoice while something is owed, a receipt once paid (Global settings →
-  Customer emails, where **Preview emails** shows each one).
-- The invoice PDF no longer runs a long order number or shop name over its label.
+- **Import orders from Etsy, Shopify or a sheet** (Orders → Import orders…), from the store's own
+  CSV export. Every order is shown before anything is saved. Items are matched to your products by
+  SKU, with the store's size words read ("Large" → L). Paid orders come in with their payment,
+  shipped ones come in shipped, and no sales tax is added (the store charged it). Importing the
+  same file again skips the orders already in. Cancelled and refunded orders, and orders in a
+  closed month, aren't imported.
+- **Order screens stay fast as the history grows.** Open orders, the production, blanks and
+  transfer queues, changing the stage of many orders at once and the accountant export no longer
+  slow down with years of orders (tested up to 250,000). The Orders list shows the newest 2,000
+  orders of a shop at a time, and says so when there are more: narrow the dates to see older ones.
+- **Shop rate** (Finance → Shop rate): what an hour of production costs, worked out from your
+  expenses, equipment, hours and the pay and profit you want. Price analysis charges each item's
+  run time at that rate.
 
 ## Downloads
 

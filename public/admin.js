@@ -13606,13 +13606,13 @@ async function showTransferCatchUp_(onDone){
   const shops = [...new Set(d.lines.map(l => l.orgId))];
   const shopName = (s) => (d.lines.find(l => l.orgId === s) || {}).orgName || s;
   const row = (l) => `<tr>
-      <td style="${td}"><input type="checkbox" data-tcu="${l.itemId}" data-shop="${escapeHtml(l.orgId)}" ${l.locked ? "disabled" : l.source === "order" ? "checked" : ""}></td>
+      <td style="${td}"><input type="checkbox" data-tcu="${l.itemId}" data-shop="${escapeHtml(l.orgId)}" ${l.locked ? "disabled" : l.source === "order" && l.voidedUse == null ? "checked" : ""}></td>
       <td style="${td}">${escapeHtml(String(l.useDate).slice(0, 10))}</td>
       <td style="${td}">${escapeHtml(l.orderId)}<div style="color:#777;">${escapeHtml(l.customerName || "")}</div></td>
       <td style="${td}">${escapeHtml(l.name)}${l.size ? " (" + escapeHtml(l.size) + ")" : ""} × ${l.qty}</td>
       <td style="${td}">${l.uses.map(u => `${escapeHtml(u.name)} × ${u.qty} @ ${fmt(u.unitCost)}`).join("<br>")}</td>
       <td style="${td}text-align:right;">${fmt(l.cost)}</td>
-      <td style="${td}">${l.source === "product" ? `<span style="color:#78350f;">From the product today — the order didn't save its transfers.</span> ` : ""}<span style="color:#b03a2e;">${l.locked ? "Month closed. " : ""}${l.shortBy > 0 ? "Short " + l.shortBy + " in stock. " : ""}${escapeHtml(l.uses.map(u => u.note).filter(Boolean).join(" "))}</span></td>
+      <td style="${td}">${l.voidedUse != null ? `<span style="color:#78350f;">Its use was voided${l.voidedUse ? " (" + escapeHtml(l.voidedUse) + ")" : ""} — tick it once its transfer is here.</span> ` : ""}${l.source === "product" ? `<span style="color:#78350f;">From the product today — the order didn't save its transfers.</span> ` : ""}<span style="color:#b03a2e;">${l.locked ? "Month closed. " : ""}${l.shortBy > 0 ? "Short " + l.shortBy + " in stock. " : ""}${escapeHtml(l.uses.map(u => u.note).filter(Boolean).join(" "))}</span></td>
     </tr>`;
   body.innerHTML = `
     <div style="font-size:13px;color:#333;margin-bottom:10px;">These order lines are made (or shipped/delivered) but never took their transfers out of stock. Applying takes each one out dated the day the order was made, at the transfer's average cost <em>on that day</em>, and adds it to the line's cost of goods sold.
@@ -21235,15 +21235,21 @@ async function renderTransfers(app){
         <td style="padding:4px 6px;">${escapeHtml((m.occurredAt || "").slice(0, 10))}</td><td style="padding:4px 6px;">${escapeHtml(m.kind)}</td>
         <td style="padding:4px 6px;">${m.qtyDelta}</td><td style="padding:4px 6px;">$${Number(m.unitCost).toFixed(2)}</td>
         <td style="padding:4px 6px;">${where(m)}</td>
-        <td style="padding:4px 6px;white-space:nowrap;">${!m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" onclick="transferVoid_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) && m.voidReason !== "Sheet edited" ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : "") + " — click to make this entry count again")}" onclick="transferRestore_(this.dataset.mid)">Undo void</button>` : ""}${m.voidedAt && m.voidReason === "Sheet edited" ? `<span style="font-size:11px;color:#999;">replaced by an edit</span>` : ""}</td>
+        <td style="padding:4px 6px;white-space:nowrap;">${!m.voidedAt && (["purchase", "adjust", "writeoff"].includes(m.kind) || (m.kind === "consume" && m.itemId && m.reason !== "finished")) ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" onclick="transferVoid_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && m.kind === "consume" ? `<span style="font-size:11px;color:#999;" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : ""))}">voided</span>` : ""}${m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) && m.voidReason !== "Sheet edited" ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : "") + " — click to make this entry count again")}" onclick="transferRestore_(this.dataset.mid)">Undo void</button>` : ""}${m.voidedAt && m.voidReason === "Sheet edited" ? `<span style="font-size:11px;color:#999;">replaced by an edit</span>` : ""}</td>
       </tr>`).join("")}</tbody></table></div>`, 820);
     window.transferOpenSheet_ = (mid) => { close(); openTransferSheet_(Number(mid), load); };
     window.transferOpenOrder_ = (org, order) => { close(); openOrderFromDashboard_(org, order); };
     window.transferVoid_ = async (mid) => {
-      const ans = await confirmModal_({ title: "Void this entry?", text: "It stays in history (struck through) but stops counting toward stock or cost.", reason: "required", confirmLabel: "Void", danger: true });
+      const m = moves.find(x => String(x.id) === String(mid));
+      const use = m && m.kind === "consume";
+      const ans = await confirmModal_({ title: use ? `Void this use for order ${m.orderId}?` : "Void this entry?",
+        text: use ? `The transfer goes back into stock and its cost ($${(Math.abs(m.qtyDelta) * Number(m.unitCost)).toFixed(2)}) comes off the order line's cost of goods sold. Use this when the order was made without this transfer. The line shows up again in Inventory & COGS → Use transfers for past orders…, so it can be recorded once the transfer is here.`
+          : "It stays in history (struck through) but stops counting toward stock or cost.",
+        reason: "required", confirmLabel: "Void", danger: true });
       if (!ans.ok) return;
       const reason = ans.reason;
-      try { await hoopApi_({ action: "voidTransferMovement", movementId: Number(mid), reason }); showToast("Voided."); close(); await load(); } catch (e) { showToast(e.message, true); } };
+      try { const r = await hoopApi_({ action: "voidTransferMovement", movementId: Number(mid), reason });
+        showToast(r.recosted ? `Voided — ${r.recosted} later use${r.recosted === 1 ? "" : "s"} re-costed.` : "Voided."); close(); await load(); } catch (e) { showToast(e.message, true); } };
     // Undo a void: the entry counts toward stock and cost again. The server refuses in a closed month, or
     // when restoring a write-off would take stock below zero.
     window.transferRestore_ = async (mid) => {

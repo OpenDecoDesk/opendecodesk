@@ -7002,6 +7002,8 @@ export async function applyBlankCatchUp(db, itemIds) {
 // turned on). The first uses the transfers its options name ("order"); the second the transfers its
 // product carries today — the reorder QR and printed transfers ("product"), so you check those before
 // applying. A line with saved options that name no transfer is left alone: it was made without one.
+// A line whose use was voided by hand (Transfers → History) is listed again, with the reason, so it can be
+// caught up once its transfer arrives; the window starts it unticked.
 // Each use is dated when the order was made and priced at the transfer's average cost THEN (replaying its
 // history), and, because a use dated in the past changes how many were on hand when later sheets came in,
 // later uses whose cost moves are re-costed too — except in a closed month and made-for-stock uses.
@@ -7011,6 +7013,7 @@ export async function planTransferCatchUp(db, itemIds = null) {
   const { results: rows } = await db.prepare(
     `SELECT i.id AS itemId, i.orderId, i.orgId, i.name, i.size, i.qty, i.configJson, o.customerName, g.name AS orgName,
             p.productId AS hasProduct, p.reorderQr, p.fixedTransfersJson,
+            (SELECT m.voidReason FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS voidedUse,
             COALESCE(o.manufacturedAt, o.shippedAt, o.deliveredAt) AS useDate
      FROM order_items i
      JOIN orders o ON o.orderId = i.orderId
@@ -7019,7 +7022,7 @@ export async function planTransferCatchUp(db, itemIds = null) {
      WHERE COALESCE(i.cancelDate, '') = '' AND o.voidedAt IS NULL AND o.isTest = 0
        AND COALESCE(o.manufacturedAt, o.shippedAt, o.deliveredAt) IS NOT NULL
        AND NOT ${fs("i")} AND NOT ${dg("i")}
-       AND NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume')
+       AND NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL)
      ORDER BY useDate, i.id`).all();
   const want = itemIds ? new Set(itemIds.map(Number)) : null;
   const orgQr = new Map();
@@ -7060,7 +7063,7 @@ export async function planTransferCatchUp(db, itemIds = null) {
         let unit = avg, note = "";
         if (!unit) { unit = Number(t.purchasePriceCents) || 0; note = unit ? "no sheet before that date — used the transfer's current cost" : "no cost known for this transfer"; }
         const line = lines.get(Number(c.itemId)) || { itemId: Number(c.itemId), orderId: c.orderId, orgId: c.orgId, orgName: c.orgName || c.orgId, customerName: c.customerName || "", name: c.name,
-          size: c.size || "", qty: q, useDate: c.useDate, source: c.source, uses: [], costCents: 0, shortBy: 0 };
+          size: c.size || "", qty: q, useDate: c.useDate, source: c.source, voidedUse: c.voidedUse == null ? null : String(c.voidedUse), uses: [], costCents: 0, shortBy: 0 };
         line.uses.push({ transferId: tid, name: t.name || "", unitCostCents: unit, qty: q, note });
         line.costCents += unit * q;
         line.shortBy = Math.max(line.shortBy, Math.max(0, Math.min(q, q - Math.max(0, qty))));
@@ -7619,21 +7622,51 @@ async function recomputeTransferFromHistory_(db, transferId) {
     .bind(qty, avg, new Date().toISOString(), Number(transferId)).run();
 }
 
-// Void a mistaken transfer movement (purchase/adjust/writeoff only); recompute from what's left.
+// Which transfer movements can be voided by hand: purchases, adjustments and write-offs, and an order's use
+// (a "consume" with an order line) — say a line marked made before its transfer existed. A use that made
+// finished stock can't: its cost is inside the finished pieces (void that finished-stock entry instead).
+export function transferMovementVoidable(row) {
+  if (!row) return false;
+  if (["purchase", "adjust", "writeoff"].includes(row.kind)) return true;
+  return row.kind === "consume" && !!row.itemId && row.reason !== "finished";
+}
+
+// Void a mistaken transfer movement; recompute from what's left. Voiding an order's use gives the transfer
+// back to stock and takes its cost off the order line, and — since fewer were then on hand when later sheets
+// came in — re-costs later uses whose average moves (not in a closed month, not made for stock).
 export async function voidTransferMovement(db, id, reason) {
   const row = await db.prepare("SELECT * FROM transfer_movements WHERE id=?").bind(Number(id)).first();
-  if (!row || row.voidedAt || !["purchase", "adjust", "writeoff"].includes(row.kind)) return null;
-  await db.prepare("UPDATE transfer_movements SET voidedAt=?, voidReason=? WHERE id=? AND voidedAt IS NULL")
-    .bind(new Date().toISOString(), String(reason || "").slice(0, 300), Number(id)).run();
-  await recomputeTransferFromHistory_(db, row.transferId);
-  return row;
+  if (!row || row.voidedAt || !transferMovementVoidable(row)) return null;
+  const now = new Date().toISOString();
+  if (row.kind !== "consume") {
+    await db.prepare("UPDATE transfer_movements SET voidedAt=?, voidReason=? WHERE id=? AND voidedAt IS NULL")
+      .bind(now, String(reason || "").slice(0, 300), Number(id)).run();
+    await recomputeTransferFromHistory_(db, row.transferId);
+    return row;
+  }
+  const live = (await db.prepare("SELECT id, qtyDelta, unitCostCents, kind, reason, itemId, orderId, occurredAt FROM transfer_movements WHERE transferId = ? AND voidedAt IS NULL AND id <> ?")
+    .bind(Number(row.transferId), Number(id)).all()).results;
+  const closed = new Set();
+  for (const m of new Set(live.filter(m => Number(m.qtyDelta) < 0).map(m => monthOf(m.occurredAt)))) if (await isMonthClosed(db, m)) closed.add(m);
+  const r = replayTransferCosts(live, closed);
+  const stmts = [
+    db.prepare("UPDATE transfer_movements SET voidedAt=?, voidReason=? WHERE id=? AND voidedAt IS NULL").bind(now, String(reason || "").slice(0, 300), Number(id)),
+    db.prepare("UPDATE order_items SET cogsCents = MAX(0, COALESCE(cogsCents, 0) - ?) WHERE id = ?").bind(-Number(row.qtyDelta) * Number(row.unitCostCents), Number(row.itemId)),
+  ];
+  for (const c of r.changes) {
+    stmts.push(db.prepare("UPDATE transfer_movements SET unitCostCents = ? WHERE id = ? AND voidedAt IS NULL").bind(c.newUnit, c.movementId));
+    if (c.kind === "consume" && c.itemId) stmts.push(db.prepare("UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ? WHERE id = ?").bind((c.newUnit - c.oldUnit) * c.qty, c.itemId));
+  }
+  stmts.push(db.prepare("UPDATE transfers SET quantity = ?, purchasePriceCents = ?, updatedAt = ? WHERE id = ?").bind(r.qty, r.avg, now, Number(row.transferId)));
+  await db.batch(stmts);
+  return { ...row, recosted: r.changes.length };
 }
 
 export async function getTransferMovementById(db, id) {
   const r = await db.prepare("SELECT * FROM transfer_movements WHERE id=?").bind(Number(id)).first();
   if (!r) return null;
   return { id: Number(r.id), transferId: Number(r.transferId), transferName: r.transferName || "", qtyDelta: Number(r.qtyDelta),
-    unitCost: fromCents(r.unitCostCents), kind: r.kind, orderId: r.orderId || "", vendor: r.vendor || "", vendorRef: r.vendorRef || "",
+    unitCost: fromCents(r.unitCostCents), kind: r.kind, orderId: r.orderId || "", itemId: r.itemId ? Number(r.itemId) : null, reason: r.reason || "", vendor: r.vendor || "", vendorRef: r.vendorRef || "",
     note: r.note || "", occurredAt: r.occurredAt, voidedAt: r.voidedAt || "", voidReason: r.voidReason || "" };
 }
 
@@ -7648,6 +7681,7 @@ export async function transferMovementMonth(db, id) {
 export async function getTransferRestoreBlocker(db, row) {
   if (!row) return "Entry not found";
   if (!row.voidedAt) return "That entry isn't voided";
+  if (row.kind === "consume" && row.itemId && row.reason !== "finished") return "An order's use can't be restored here. To record it again, use Inventory & COGS → Use transfers for past orders…";
   if (!["purchase", "adjust", "writeoff"].includes(row.kind)) return "This entry was generated automatically (from an order) and was never voidable.";
   // Replaced by a corrected sheet (editTransferSheet): restoring it would count the sheet twice.
   if (row.kind === "purchase" && row.voidReason === "Sheet edited") return "This entry was replaced when its sheet was edited — restoring it would count the sheet twice. Open the sheet and edit it instead.";

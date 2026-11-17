@@ -67,6 +67,7 @@ import {
   listGraphics, getGraphic, createGraphic, updateGraphic, graphicGlobalProblem, setProductGraphicColorBlocked, deleteGraphic,
   getTierPrices, setTierPrices, setOrgReorderQr, setOrgReorderQrTransfer,
   listTransfers, createTransfer, updateTransfer, deleteTransfer, receiveTransferSheet, transferSheetShares, SHEET_PCT_TOLERANCE,
+  getTransferSheet, editTransferSheet, transferSheetLabel,
   writeOffTransfers, getTransferMovements, voidTransferMovement, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferCogs,
   getTransferQueue, setTransferReceived, getGangSheet, makeTransferLine, setTransfersApplied, lineHasEmbroidery, refreshOrderLinesFromCatalog,
   listDesigns, getDesign, saveDesign, deleteDesign, listDesignVersions, addDesignVersion, updateDesignVersionThreads, setProductDesign,
@@ -229,7 +230,7 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "getBlankLinks", "setBlankLink", "saveBlankLinks", "deleteBlankLink",
   "getReadyToShip", "setReadyToShipQty", "makeForStock", "getFinishedGoodsMovements", "voidFinishedGoodsMovement",
   "listGraphics", "saveGraphic", "deleteGraphic", "setProductGraphicColorBlocked", "getTierPrices", "setTierPrices",
-  "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers",
+  "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "getTransferSheet", "editTransferSheet",
   "getTransferMovements", "voidTransferMovement", "restoreTransferMovement",
   "getTransferQueue", "setTransferReceived", "getGangSheet", "makeTransferLine", "setTransfersApplied", "refreshOrderFromCatalog",
 ]);
@@ -330,7 +331,7 @@ const MANAGER_ACTIONS = [
   "listCashoutPayments", "analyzePricing", "getPricingSettings", "saveVendor", "deleteVendor",
   "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",   // recurring expenses (migrations/0085)
   "getBrandRules", "addBrandApproval", "revokeBrandApproval",   // brand rules (migrations/0075)
-  "recomputeBlankAverageCosts", "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount", "saveExpenseCategory", "deleteExpenseCategory", "closePeriod", "reopenPeriod", "getAccountantExport",
+  "recomputeBlankAverageCosts", "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount", "editTransferSheet", "saveExpenseCategory", "deleteExpenseCategory", "closePeriod", "reopenPeriod", "getAccountantExport",
 ];
 const STAFF_ACTIONS = [
   "listBrandApprovals",
@@ -349,7 +350,7 @@ const STAFF_ACTIONS = [
   "markHoopingDone", "getRunReportByDesign", "receiveBlanks", "receiveBlankOrder", "addBlankSizes", "readInvoiceWithAi", "markBlankPricesChecked", "confirmProductPrices", "getBlankVendorPriceHistory", "writeOffBlanks", "getBlankMovements", "voidInventoryMovement",
   "restoreInventoryMovement", "getInventoryReport", "previewBlankCatchUp", "applyBlankCatchUp", "getBlankLinks", "setBlankLink", "saveBlankLinks", "deleteBlankLink", "previewProductHoopings",
   "getReadyToShip", "setReadyToShipQty", "makeForStock", "getFinishedGoodsMovements", "voidFinishedGoodsMovement", "listGraphics", "saveGraphic", "deleteGraphic", "setProductGraphicColorBlocked", "getTierPrices",
-  "setTierPrices", "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "getTransferMovements",
+  "setTierPrices", "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "getTransferMovements", "getTransferSheet",
   "voidTransferMovement", "restoreTransferMovement", "getTransferQueue", "setTransferReceived", "getGangSheet", "makeTransferLine",
   "setTransfersApplied", "refreshOrderFromCatalog", "listOrgs", "getOrders", "getOrdersAllShops", "getOpenOrders", "getRevenueReport",
   "listAccounts", "setPaymentAccount", "listExpenseCategories", "listExpenses", "getExpenseReport", "saveExpense", "previewExpenseImport",
@@ -522,7 +523,7 @@ export async function onRequestPost(context) {
   const checkVendors_ = async () => {
     try {
       const a = body.action;
-      if (["createBlank", "updateBlank", "receiveBlanks", "receiveBlankOrder", "receiveTransferSheet", "recordRestockOrder",
+      if (["createBlank", "updateBlank", "receiveBlanks", "receiveBlankOrder", "receiveTransferSheet", "editTransferSheet", "recordRestockOrder",
         "createFromStatementLine", "setFulfillmentStage", "bulkSetFulfillmentStage", "addBlankShipment"].includes(a) && typeof body.vendor === "string") body.vendor = await vendorName_(body.vendor);
       if (a === "saveExpense" && body.expense && typeof body.expense.vendor === "string") body.expense.vendor = await vendorName_(body.expense.vendor);
       if (a === "saveRecurringExpense" && body.recurring && typeof body.recurring.vendor === "string") body.recurring.vendor = await vendorName_(body.recurring.vendor);
@@ -598,6 +599,11 @@ export async function onRequestPost(context) {
     if (["voidPayment", "deletePayment", "setRefundShipping"].includes(a) && b.paymentId) months.push(await paymentMonth(env.DB, b.paymentId));
     if ((a === "voidInventoryMovement" || a === "restoreInventoryMovement") && b.movementId) months.push(await movementMonth(env.DB, b.movementId));
     if ((a === "voidTransferMovement" || a === "restoreTransferMovement") && b.movementId) months.push(await transferMovementMonth(env.DB, b.movementId));
+    // Editing a sheet changes its own month and, if the date moves, the new one.
+    if (a === "editTransferSheet") {
+      if (b.movementId) months.push(await transferMovementMonth(env.DB, b.movementId));
+      if (/^\d{4}-\d{2}-\d{2}$/.test(String(b.receivedAt || ""))) months.push(String(b.receivedAt).slice(0, 7));
+    }
     // Finished stock (migrations/0060): Make for stock by its date; a void by the entry's month.
     if (a === "makeForStock" && b.occurredAt) { const t = actionTime(b, "occurredAt"); if (t && t.at) months.push(t.at.slice(0, 7)); }
     if (a === "voidFinishedGoodsMovement" && b.movementId) {
@@ -4710,50 +4716,57 @@ export async function onRequestPost(context) {
       try { await deleteTransfer(env.DB, id); audit({ orgId: null, orderId: null, action: "transfer.deleted", detail: { id } }); return jsonResponse({ status: "ok" }); }
       catch (e) { return jsonResponse({ status: "error", message: e.message }, 400); }
     }
-    if (body.action === "receiveTransferSheet") {
-      const locked = await periodGuard(body); if (locked) return locked;
-      const date = String(body.receivedAt || "");
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(Date.parse(date + "T00:00:00Z"))) return jsonResponse({ status: "error", message: "Date must be YYYY-MM-DD" }, 400);
-      const rows = Array.isArray(body.rows) ? body.rows : [];
-      if (!rows.length) return jsonResponse({ status: "error", message: "Add at least one row" }, 400);
-      const totalCents = Math.round((Number(body.total) || 0) * 100);
-      // The sheet is split three ways, each a percentage of it: rows (become inventory), WRITTEN OFF (an expense)
-      // and PERSONAL use (an owner draw). The three must add up to 100% — nothing is spread over the rows by
-      // default, and nothing is left unaccounted for. Written off / personal each need a description.
+    // The checks a sheet must pass, received or edited (one set of rules, so the two can't drift apart). The sheet
+    // is split three ways, each a percentage of it: rows (become inventory), WRITTEN OFF (an expense) and PERSONAL
+    // use (an owner draw). The three must add up to 100% — nothing is spread over the rows by default, and nothing
+    // is left unaccounted for. Written off / personal each need a description. Returns {error: Response} or the values.
+    const checkTransferSheet_ = async (b) => {
+      const bad = (message, status = 400, extra = {}) => ({ error: jsonResponse({ status: "error", message, ...extra }, status) });
+      const date = String(b.receivedAt || "");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(Date.parse(date + "T00:00:00Z"))) return bad("Date must be YYYY-MM-DD");
+      const rows = Array.isArray(b.rows) ? b.rows : [];
+      if (!rows.length) return bad("Add at least one row");
+      const totalCents = Math.round((Number(b.total) || 0) * 100);
       const counted = rows.filter(r => Number(r.transferId) && Math.floor(Number(r.count) || 0) > 0);
-      if (!counted.length) return jsonResponse({ status: "error", message: "Add at least one row with a count" }, 400);
+      if (!counted.length) return bad("Add at least one row with a count");
       const pcts = counted.map(r => Math.max(0, Number(r.pctOfSheet) || 0));
       const rowsPct = pcts.reduce((a, x) => a + x, 0);
-      const wo = body.writeoff && typeof body.writeoff === "object" ? body.writeoff : {};
-      const pe = body.personal && typeof body.personal === "object" ? body.personal : {};
+      const wo = b.writeoff && typeof b.writeoff === "object" ? b.writeoff : {};
+      const pe = b.personal && typeof b.personal === "object" ? b.personal : {};
       const woPct = Math.max(0, Number(wo.pct) || 0), pePct = Math.max(0, Number(pe.pct) || 0);
       const woWhat = String(wo.description || "").trim().slice(0, 200), peWhat = String(pe.description || "").trim().slice(0, 200);
       const allPct = rowsPct + woPct + pePct, fmtPct = (x) => (Math.round(x * 100) / 100).toString() + "%";
       if (woPct > 100 || pePct > 100 || allPct > 100 + SHEET_PCT_TOLERANCE) {
-        return jsonResponse({ status: "error", message: `The rows${woPct || pePct ? ", written-off and personal parts" : ""} add up to ${fmtPct(allPct)} — more than the whole sheet. Reduce them to 100% in total.` }, 400);
+        return bad(`The rows${woPct || pePct ? ", written-off and personal parts" : ""} add up to ${fmtPct(allPct)} — more than the whole sheet. Reduce them to 100% in total.`);
       }
       if (allPct < 100 - SHEET_PCT_TOLERANCE) {
-        return jsonResponse({ status: "error", message: `Only ${fmtPct(allPct)} of the sheet is accounted for. The rows, the written-off part and the personal part must add up to 100% — ${fmtPct(100 - allPct)} is left over.` }, 400);
+        return bad(`Only ${fmtPct(allPct)} of the sheet is accounted for. The rows, the written-off part and the personal part must add up to 100% — ${fmtPct(100 - allPct)} is left over.`);
       }
       if ((woPct > 0 || pePct > 0) && !featureOn("bookkeeping")) {
-        return jsonResponse({ status: "error", feature: "bookkeeping", message: "A written-off or personal part of the sheet is recorded as an expense or an owner draw, which need Bookkeeping. It is turned off — turn it on under Tools → Global settings → Features, or put the whole sheet into stock." }, 403);
+        return bad("A written-off or personal part of the sheet is recorded as an expense or an owner draw, which need Bookkeeping. It is turned off — turn it on under Tools → Global settings → Features, or put the whole sheet into stock.", 403, { feature: "bookkeeping" });
       }
-      if (woPct > 0 && !woWhat) return jsonResponse({ status: "error", message: "Describe what was written off (it's kept on the record)." }, 400);
-      if (pePct > 0 && !peWhat) return jsonResponse({ status: "error", message: "Describe the personal part (it's kept on the record)." }, 400);
-      if ((woPct > 0 || pePct > 0) && !body.paidPersonally && !Number(body.accountId)) {
-        return jsonResponse({ status: "error", message: "Choose what the sheet was paid from, so the written-off / personal part can be recorded." }, 400);
+      if (woPct > 0 && !woWhat) return bad("Describe what was written off (it's kept on the record).");
+      if (pePct > 0 && !peWhat) return bad("Describe the personal part (it's kept on the record).");
+      if ((woPct > 0 || pePct > 0) && !b.paidPersonally && !Number(b.accountId)) {
+        return bad("Choose what the sheet was paid from, so the written-off / personal part can be recorded.");
       }
       let woCat = null;
       if (woPct > 0) {
         woCat = await getExpenseCategory(env.DB, Number(wo.categoryId));
-        if (!woCat) return jsonResponse({ status: "error", message: "Choose an expense category for the written-off part" }, 400);
+        if (!woCat) return bad("Choose an expense category for the written-off part");
       }
+      return { date, rows, totalCents, pcts, woPct, pePct, woWhat, peWhat, woCat };
+    };
+    if (body.action === "receiveTransferSheet") {
+      const locked = await periodGuard(body); if (locked) return locked;
+      const chk = await checkTransferSheet_(body); if (chk.error) return chk.error;
+      const { date, rows, totalCents, pcts, woPct, pePct, woWhat, peWhat, woCat } = chk;
       const { writeoffCents, personalCents } = transferSheetShares(pcts, woPct, pePct, totalCents);
       const receiptGroup = newReceiptGroup_();
       const ids = await receiveTransferSheet(env.DB, { rows, totalCents, writeoffPct: woPct, personalPct: pePct, receiptGroup,
         vendor: body.vendor, vendorRef: body.vendorRef, receivedAt: date,
         accountId: body.accountId, paidPersonally: !!body.paidPersonally, note: body.note, receiptKey: body.receiptKey, receiptName: body.receiptName });
-      const sheet = (String(body.vendor || "").trim() || "Transfer sheet").slice(0, 120) + (body.vendorRef ? ` #${String(body.vendorRef).slice(0, 60)}` : "");
+      const sheet = transferSheetLabel(body.vendor, body.vendorRef);
       const accountId = body.paidPersonally ? null : Number(body.accountId);
       let woRecorded = null, peRecorded = null;
       if (woPct > 0) {
@@ -4775,6 +4788,45 @@ export async function onRequestPost(context) {
       audit({ orgId: null, orderId: null, action: "transfer.received", detail: { rows, total: Number(body.total) || 0, vendorRef: body.vendorRef || "",
         ...(woRecorded ? { writeoff: woRecorded } : {}), ...(peRecorded ? { personal: peRecorded } : {}) } });
       return jsonResponse({ status: "ok", ids, writeoff: woRecorded, personal: peRecorded, transfers: await listTransfers(env.DB, body.org || null) });
+    }
+    // One received sheet, read back as the Receive form's fields (Accounts & money → Edit sheet…, Transfers → History).
+    if (body.action === "getTransferSheet") {
+      const sheet = await getTransferSheet(env.DB, Number(body.movementId));
+      if (!sheet) return jsonResponse({ status: "error", message: "That sheet wasn't found — it may have been voided." }, 404);
+      return jsonResponse({ status: "ok", sheet });
+    }
+    // Correct a received sheet: its rows (item, count, % of sheet), total, written-off and personal parts, date,
+    // vendor and payer. Held to the Receive rules (checkTransferSheet_) and to closed months (periodGuard: the
+    // sheet's month and the new date's). With preview it only reports what would change: each row's per-item
+    // price before → after, each transfer's average, and the order lines re-costed. The audit row goes first.
+    if (body.action === "editTransferSheet") {
+      const locked = await periodGuard(body); if (locked) return locked;
+      const movementId = Number(body.movementId);
+      if (!movementId || !Number.isInteger(movementId)) return jsonResponse({ status: "error", message: "Which sheet? (movementId)" }, 400);
+      const chk = await checkTransferSheet_(body); if (chk.error) return chk.error;
+      const x = { rows: chk.rows, totalCents: chk.totalCents, writeoffPct: chk.woPct, personalPct: chk.pePct,
+        writeoff: { description: chk.woWhat, categoryId: chk.woCat ? chk.woCat.id : null, deductionType: chk.woCat ? chk.woCat.deductionType : null },
+        personal: { description: chk.peWhat }, date: chk.date,
+        vendor: String(body.vendor || "").trim().slice(0, 100), vendorRef: String(body.vendorRef || "").trim().slice(0, 100),
+        accountId: body.paidPersonally ? null : Number(body.accountId) || null, paidPersonally: !!body.paidPersonally,
+        receiptKey: body.receiptKey ? String(body.receiptKey).slice(0, 300) : "", receiptName: String(body.receiptName || "").slice(0, 200) };
+      try {
+        const plan = await editTransferSheet(env.DB, movementId, x, { preview: true });
+        if (body.preview) return jsonResponse({ status: "ok", preview: plan });
+        const before = await getTransferSheet(env.DB, movementId);
+        const refused = await auditStrict({ orgId: null, orderId: null, action: "transfer.sheet_edited", detail: { movementId,
+          before: { date: before.date, vendor: before.vendor, vendorRef: before.vendorRef, total: before.total, rows: before.rows.map(r => ({ transferId: r.transferId, count: r.count, pctOfSheet: r.pctOfSheet })),
+            writeoff: before.writeoff && { pct: before.writeoff.pct, amount: before.writeoff.amount }, personal: before.personal && { pct: before.personal.pct, amount: before.personal.amount } },
+          after: { date: x.date, vendor: x.vendor, vendorRef: x.vendorRef, total: chk.totalCents / 100, rows: chk.rows.map(r => ({ transferId: Number(r.transferId), count: Math.floor(Number(r.count) || 0), pctOfSheet: Number(r.pctOfSheet) || 0 })),
+            writeoff: chk.woPct ? { pct: chk.woPct, amount: plan.writeoffAfter } : null, personal: chk.pePct ? { pct: chk.pePct, amount: plan.personalAfter } : null },
+          recost: { linesRecosted: plan.linesRecosted, cogsChange: plan.cogsChange, orders: plan.orders.slice(0, 200), skippedClosed: plan.skippedClosed, skippedFinished: plan.skippedFinished } } });
+        if (refused) return refused;
+        const result = await editTransferSheet(env.DB, movementId, x, { newReceiptGroup: newReceiptGroup_() });
+        return jsonResponse({ status: "ok", result, transfers: await listTransfers(env.DB, body.org || null) });
+      } catch (e) {
+        if (e && e.sheetError) return jsonResponse({ status: "error", message: e.message }, 400);
+        throw e;
+      }
     }
     if (body.action === "writeOffTransfers") {
       const locked = await periodGuard(body); if (locked) return locked;

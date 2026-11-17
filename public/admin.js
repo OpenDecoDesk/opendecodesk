@@ -15520,22 +15520,26 @@ async function mnLoad_(){
       <tbody>${rows.length ? rows.join("") : `<tr><td colspan="${heads.length}" style="${td}color:#888;">${empty}</td></tr>`}</tbody></table></div>`;
 
   // Blanks & transfers bought this year (listStockPurchases): inventory, not expenses — each becomes cost
-  // of goods sold as it's used. One row per receive, with its receipt. Edited and voided where it was
-  // received (Blanks → History, Transfers → History), not here.
+  // of goods sold as it's used. One row per receive, with its receipt. A blank purchase is voided where it was
+  // received (Blanks → History); a transfer sheet is corrected here with Edit sheet… (also Transfers → History).
   const stock = d.stockPurchases || [];
   const stockTotal = (k) => stock.filter(x => !k || x.kind === k).reduce((t, x) => t + Number(x.total || 0), 0);
   const stockSection = `
     <h2 style="font-size:17px;margin:0 0 6px;">Blanks &amp; transfers bought</h2>
-    <p style="font-size:13px;color:#555;margin:0 0 8px;">Stock bought for orders — garment blanks and transfer sheets. It isn't an expense: it's inventory, and becomes cost of goods sold as it's used (see <a href="#cogs">Inventory &amp; COGS</a>). Amounts include shipping spread into the cost; an R&amp;D or personal part of the same order is listed under Expenses or Owner draws. If the wrong account was chosen, <strong>Change account…</strong> fixes the whole receipt at once (every blank on it, plus its R&amp;D expense and personal draw). To void one, use the history on <a href="#inventory">Blanks</a> or <a href="#transfers">Transfers</a>.</p>
-    ${stock.length ? `<div style="font-size:13px;color:#555;margin:0 0 8px;">${stock.length} purchase${stock.length === 1 ? "" : "s"} · ${fmt(stockTotal())} (blanks ${fmt(stockTotal("blanks"))}, transfers ${fmt(stockTotal("transfers"))})</div>` : ""}
-    <div id="mnStock" style="margin-bottom:24px;">${table(["Date", "Bought", "Vendor", "Paid from", "Amount", ""], stock.map(x => `<tr>
+    <p style="font-size:13px;color:#555;margin:0 0 8px;">Stock bought for orders — garment blanks and transfer sheets. It isn't an expense: it's inventory, and becomes cost of goods sold as it's used (see <a href="#cogs">Inventory &amp; COGS</a>). Amounts include shipping spread into the cost; an R&amp;D or personal part of the same order is listed under Expenses or Owner draws. If the wrong account was chosen, <strong>Change account…</strong> fixes the whole receipt at once (every blank on it, plus its R&amp;D expense and personal draw). <strong>Edit sheet…</strong> corrects what was on a transfer sheet — its items, counts and % of the sheet, which set each transfer's per-item price — and re-costs the orders that used them. To void a blank purchase, use the history on <a href="#inventory">Blanks</a>.</p>
+    ${stock.length ? `<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 8px;">
+      <div role="group" aria-label="Show" style="display:inline-flex;border:1px solid #ccc;border-radius:6px;overflow:hidden;">${[["", "All"], ["blanks", "Blanks"], ["transfers", "Transfer sheets"]].map(([k, l]) =>
+        `<button type="button" class="mn-stock-kind" data-k="${k}" style="padding:4px 10px;font-size:12px;border:0;border-right:1px solid #ccc;cursor:pointer;background:#fff;color:#111;">${l}</button>`).join("")}</div>
+      <span id="mnStockSum" style="font-size:13px;color:#555;"></span></div>` : ""}
+    <div id="mnStock" style="margin-bottom:24px;">${table(["Date", "Bought", "Vendor", "Paid from", "Amount", ""], stock.map(x => `<tr class="mn-stock-row" data-kind="${escapeHtml(x.kind)}" id="sheet-${Number(x.ids[0])}">
         <td style="${td}white-space:nowrap;">${escapeHtml(x.date)}</td>
         <td style="${td}"><span style="font-size:11px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.04em;">${x.kind === "transfers" ? "Transfers" : "Blanks"}</span><br>${x.items.map(escapeHtml).join("<br>")}${(x.extras || []).map(e => `<div style="font-size:12px;color:#555;">+ ${escapeHtml(e.label)} ${fmt(e.amount)}</div>`).join("")}</td>
         <td style="${td}">${escapeHtml(x.vendor || "—")}${x.vendorRef ? `<div style="font-size:12px;color:#666;">#${escapeHtml(x.vendorRef)}</div>` : ""}${x.vendorChargedTax ? `<div style="font-size:11px;color:#b45309;">sales tax charged</div>` : ""}</td>
         <td style="${td}">${x.paidPersonally ? "Personal funds" : x.accountId ? escapeHtml(x.accountName || name(x.accountId)) : `<span style="color:#b45309;">not set</span>`}</td>
         <td style="${td}text-align:right;white-space:nowrap;">${fmt(x.total)}</td>
         <td style="${td}">${x.receiptKey ? `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" title="${escapeHtml(x.receiptName || "Receipt")}" data-key="${escapeHtml(x.receiptKey)}" onclick="expViewReceipt_(this.dataset.key)">📎 Receipt</button>` : `<span style="font-size:12px;color:#999;">no receipt</span>`}
-          <div style="margin-top:4px;"><button type="button" class="admin-btn mn-stock-acct" style="padding:3px 8px;font-size:12px;" data-kind="${escapeHtml(x.kind)}" data-id="${Number(x.ids[0])}">Change account…</button></div></td></tr>`),
+          <div style="margin-top:4px;"><button type="button" class="admin-btn mn-stock-acct" style="padding:3px 8px;font-size:12px;" data-kind="${escapeHtml(x.kind)}" data-id="${Number(x.ids[0])}">Change account…</button></div>
+          ${x.kind === "transfers" ? `<div style="margin-top:4px;"><button type="button" class="admin-btn mn-stock-sheet" style="padding:3px 8px;font-size:12px;" data-id="${Number(x.ids[0])}">Edit sheet…</button></div>` : ""}</td></tr>`),
       "No blanks or transfers bought in " + escapeHtml(yr) + ".")}</div>`;
 
   el.style.color = "var(--ink,#111)";
@@ -15640,6 +15644,18 @@ async function mnLoad_(){
     catch (e) { err.textContent = e.message; }
   });
   el.querySelectorAll(".mn-stock-acct").forEach(b => b.onclick = () => mnChangeReceiptAccount_(b.dataset.kind, Number(b.dataset.id)));
+  el.querySelectorAll(".mn-stock-sheet").forEach(b => b.onclick = () => openTransferSheet_(Number(b.dataset.id), () => mnLoad_()));
+  // Show all stock bought, just blanks, or just transfer sheets (remembered on this browser). The count and total follow.
+  const showStock = (k) => {
+    el.querySelectorAll(".mn-stock-row").forEach(tr => { tr.style.display = !k || tr.dataset.kind === k ? "" : "none"; });
+    el.querySelectorAll(".mn-stock-kind").forEach(b => { const on = b.dataset.k === k; b.style.background = on ? "var(--accent,#2563eb)" : "#fff"; b.style.color = on ? "#fff" : "#111"; b.setAttribute("aria-pressed", on ? "true" : "false"); });
+    const list = stock.filter(x => !k || x.kind === k), sum = el.querySelector("#mnStockSum");
+    if (sum) sum.textContent = `${list.length} purchase${list.length === 1 ? "" : "s"} · ${fmt(stockTotal(k))}` + (k ? "" : ` (blanks ${fmt(stockTotal("blanks"))}, transfers ${fmt(stockTotal("transfers"))})`);
+    try { localStorage.setItem("mnStockKind", k); } catch (e) {}
+  };
+  el.querySelectorAll(".mn-stock-kind").forEach(b => b.onclick = () => showStock(b.dataset.k));
+  let stockKind = ""; try { stockKind = localStorage.getItem("mnStockKind") || ""; } catch (e) {}
+  showStock(["", "blanks", "transfers"].includes(stockKind) ? stockKind : "");
   el.querySelectorAll(".mn-del").forEach(b => b.onclick = async () => {
     if (!await askConfirm_("Delete this entry? It's removed from all totals (kept in the audit log).")) return;
     err.textContent = "";
@@ -16642,7 +16658,7 @@ async function renderExpenses(app){
           <button type="button" class="admin-btn" id="expCancel" style="display:none;font-size:13px;">Cancel edit</button>
           <span id="expFormErr" style="color:#b03a2e;font-size:13px;"></span>
         </div>
-        <div style="font-size:12px;color:#777;margin-top:10px;">Don't enter Stripe fees, Shippo postage, or blanks bought through Blanks → Receive — those are already recorded automatically.</div>
+        <div style="font-size:12px;color:#777;margin-top:10px;">Don't enter Stripe fees, Shippo postage, or blanks and transfer sheets bought through Receive — those are already recorded automatically. Blanks and transfer sheets are stock, not expenses: review them, and correct a transfer sheet's items and per-item prices, under <a href="#money">Accounts &amp; money → Blanks &amp; transfers bought</a>.</div>
       </div>
       <div id="expRecurring"></div>
 
@@ -21122,13 +21138,30 @@ async function renderTransfers(app){
   window.transferHistory_ = async (id) => {
     const t = transfers.find(x => x.id === Number(id)); if (!t) return;
     let moves = []; try { moves = (await hoopApi_({ action: "getTransferMovements", transferId: t.id })).movements || []; } catch (e) { showToast(e.message, true); return; }
+    // Where each entry came from: a purchase names its sheet (vendor, invoice, % of the sheet) with Open sheet to
+    // review or correct it; a use names its order. A sheet that was edited shows its old entries voided "Sheet edited".
+    const where = (m) => {
+      if (m.kind === "purchase") {
+        const sheet = [m.vendor, m.vendorRef ? "#" + m.vendorRef : ""].filter(Boolean).join(" ") || "Sheet";
+        return `${escapeHtml(sheet)}${m.pctOfSheet != null ? `<span style="color:#666;"> · ${Number(m.pctOfSheet)}% of sheet</span>` : ""}` +
+          (!m.voidedAt ? ` <button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" onclick="transferOpenSheet_(this.dataset.mid)">Open sheet</button>` : "");
+      }
+      if (m.kind === "consume" && m.orderId) return m.orderOrgId
+        ? `<button type="button" class="admin-btn" style="padding:1px 6px;font-size:11px;" data-org="${escapeHtml(m.orderOrgId)}" data-order="${escapeHtml(m.orderId)}" onclick="transferOpenOrder_(this.dataset.org, this.dataset.order)">Order ${escapeHtml(m.orderId)}</button>`
+        : `Order ${escapeHtml(m.orderId)}`;
+      if (m.kind === "consume" && m.reason === "finished") return `<span style="color:#666;">Made for stock</span>`;
+      return m.note ? `<span style="color:#666;">${escapeHtml(m.note)}</span>` : "";
+    };
     const { ov, close } = inventoryModal_("History — " + escapeHtml(t.name), `<div style="max-height:60vh;overflow:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;">
-      <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:4px 6px;">Date</th><th style="padding:4px 6px;">Kind</th><th style="padding:4px 6px;">Qty</th><th style="padding:4px 6px;">Unit</th><th style="padding:4px 6px;"></th></tr></thead>
-      <tbody>${moves.map(m => `<tr style="border-bottom:1px solid #eee;${m.voidedAt ? "text-decoration:line-through;color:#999;" : ""}">
+      <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:4px 6px;">Date</th><th style="padding:4px 6px;">Kind</th><th style="padding:4px 6px;">Qty</th><th style="padding:4px 6px;">Unit</th><th style="padding:4px 6px;">Sheet / order</th><th style="padding:4px 6px;"></th></tr></thead>
+      <tbody>${moves.map(m => `<tr style="border-bottom:1px solid #eee;${m.voidedAt ? "text-decoration:line-through;color:#999;" : ""}"${m.voidedAt && m.voidReason ? ` title="${escapeHtml("Voided: " + m.voidReason)}"` : ""}>
         <td style="padding:4px 6px;">${escapeHtml((m.occurredAt || "").slice(0, 10))}</td><td style="padding:4px 6px;">${escapeHtml(m.kind)}</td>
         <td style="padding:4px 6px;">${m.qtyDelta}</td><td style="padding:4px 6px;">$${Number(m.unitCost).toFixed(2)}</td>
-        <td style="padding:4px 6px;white-space:nowrap;">${!m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" onclick="transferVoid_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : "") + " — click to make this entry count again")}" onclick="transferRestore_(this.dataset.mid)">Undo void</button>` : ""}</td>
-      </tr>`).join("")}</tbody></table></div>`, 560);
+        <td style="padding:4px 6px;">${where(m)}</td>
+        <td style="padding:4px 6px;white-space:nowrap;">${!m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" onclick="transferVoid_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) && m.voidReason !== "Sheet edited" ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : "") + " — click to make this entry count again")}" onclick="transferRestore_(this.dataset.mid)">Undo void</button>` : ""}${m.voidedAt && m.voidReason === "Sheet edited" ? `<span style="font-size:11px;color:#999;">replaced by an edit</span>` : ""}</td>
+      </tr>`).join("")}</tbody></table></div>`, 820);
+    window.transferOpenSheet_ = (mid) => { close(); openTransferSheet_(Number(mid), load); };
+    window.transferOpenOrder_ = (org, order) => { close(); openOrderFromDashboard_(org, order); };
     window.transferVoid_ = async (mid) => {
       const ans = await confirmModal_({ title: "Void this entry?", text: "It stays in history (struck through) but stops counting toward stock or cost.", reason: "required", confirmLabel: "Void", danger: true });
       if (!ans.ok) return;
@@ -21175,54 +21208,87 @@ function parseInvoiceTotal_(items){
   for (const t of lines) { let m; re.lastIndex = 0; while ((m = re.exec(t))) { const v = pdfNum_(m[1]); if (v > best) best = v; } }
   return best;
 }
-function showReceiveTransferModal_(transfers, onDone){
+function showReceiveTransferModal_(transfers, onDone){ return showTransferSheetModal_(transfers, onDone, null); }
+
+// Opens the sheet that transfer movement `movementId` belongs to for editing (Accounts & money → Edit sheet…,
+// Transfers → History → Open sheet). Loads the sheet and the transfer list, then shows the same form as Receive.
+async function openTransferSheet_(movementId, onDone){
+  try {
+    const [s, t] = await Promise.all([hoopApi_({ action: "getTransferSheet", movementId: Number(movementId) }), hoopApi_({ action: "listTransfers" })]);
+    showTransferSheetModal_(t.transfers || [], onDone, s.sheet);
+  } catch (e) { showToast(e.message, true); }
+}
+
+// Receive a transfer sheet — or, with `existing` (getTransferSheet), correct one already received. Each row's
+// % of the sheet ÷ its count is that transfer's per-item price. An edit is previewed first (per-item price before
+// → after, the order lines that will be re-costed), then saved as one change on the server (editTransferSheet).
+function showTransferSheetModal_(transfers, onDone, existing){
+  const ed = existing || null;
   const inp = "font-size:13px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;";
-  const opt = transfers.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join("");
-  const rowHtml = () => `<tr class="trRow">
-    <td style="padding:3px 4px;"><select class="trItem" style="${inp}">${opt}</select></td>
-    <td style="padding:3px 4px;"><input class="trCount" type="number" min="1" style="${inp}width:70px;"></td>
-    <td style="padding:3px 4px;"><input class="trPct" type="number" min="0" max="100" step="0.1" style="${inp}width:70px;"></td>
+  // An item on the sheet that's missing from the list (hidden, renamed) still gets its option.
+  const items = [...transfers];
+  if (ed) for (const r of ed.rows) if (!items.some(t => Number(t.id) === Number(r.transferId))) items.push({ id: r.transferId, name: r.name });
+  const opt = (sel) => items.map(t => `<option value="${Number(t.id)}"${Number(sel) === Number(t.id) ? " selected" : ""}>${escapeHtml(t.name)}</option>`).join("");
+  const rowHtml = (r) => `<tr class="trRow">
+    <td style="padding:3px 4px;"><select class="trItem" style="${inp}">${opt(r && r.transferId)}</select></td>
+    <td style="padding:3px 4px;"><input class="trCount" type="number" min="1" value="${r ? Number(r.count) : ""}" style="${inp}width:70px;"></td>
+    <td style="padding:3px 4px;"><input class="trPct" type="number" min="0" max="100" step="0.1" value="${r ? Number(r.pctOfSheet) : ""}" style="${inp}width:70px;"></td>
     <td style="padding:3px 4px;" class="trRowDollars">—</td>
     <td style="padding:3px 4px;" class="trRowPer">—</td>
     <td style="padding:3px 4px;"><button type="button" class="admin-btn trRm admin-btn-danger" style="padding:1px 7px;">✕</button></td></tr>`;
-  const { ov, close } = inventoryModal_("Receive a transfer sheet", `
+  const today = new Date().toLocaleDateString("en-CA");
+  const lockNote = ed && (ed.matched || ed.reconciled)
+    ? `<div style="border:1px solid #fcd34d;background:#fffbeb;border-radius:6px;padding:7px 10px;margin-bottom:10px;font-size:12px;color:#78350f;">${ed.matched ? "Part of this sheet is matched to a bank-statement line" : "This sheet's month is reconciled"}. You can change the rows (items, counts, % of sheet), but the total, date, paid-from and the written-off / personal amounts have to stay the same — ${ed.matched ? "unmatch it on Reconcile" : "reopen the month on Reconcile"} first to change those.</div>` : "";
+  const { ov, close } = inventoryModal_(ed ? "Edit transfer sheet" : "Receive a transfer sheet", `
+    ${ed ? `<div style="font-size:12px;color:#555;margin-bottom:8px;">Correct what was on this sheet. Each row's % of the sheet ÷ its count is that transfer's per-item price. Saving replaces this sheet's entries with the corrected ones; order lines that already used these transfers are re-costed to match (except in a closed month, or pieces made for stock). You'll see what changes before anything is saved.</div>` : ""}
+    ${lockNote}
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:end;">
-      <label style="font-size:12px;font-weight:600;">Date<br><input id="trDate" type="date" value="${new Date().toLocaleDateString("en-CA")}" max="${new Date().toLocaleDateString("en-CA")}" style="${inp}"></label>
-      <label style="font-size:12px;font-weight:600;">Sheet total ($)<br>$<input id="trTotal" type="number" min="0" step="0.01" style="${inp}width:100px;"></label>
-      <label style="font-size:12px;font-weight:600;">Vendor<br>${vendorPickerHtml_("trVendor", "", { style: inp + "width:150px;" })}</label>
-      <label style="font-size:12px;font-weight:600;">Invoice #<br><input id="trRef" style="${inp}width:120px;"></label>
+      <label style="font-size:12px;font-weight:600;">Date<br><input id="trDate" type="date" value="${escapeHtml(ed ? ed.date : today)}" max="${today}" style="${inp}"></label>
+      <label style="font-size:12px;font-weight:600;">Sheet total ($)<br>$<input id="trTotal" type="number" min="0" step="0.01" value="${ed ? Number(ed.total).toFixed(2) : ""}" style="${inp}width:100px;"></label>
+      <label style="font-size:12px;font-weight:600;">Vendor<br>${vendorPickerHtml_("trVendor", ed ? ed.vendor : "", { style: inp + "width:150px;" })}</label>
+      <label style="font-size:12px;font-weight:600;">Invoice #<br><input id="trRef" value="${escapeHtml(ed ? ed.vendorRef : "")}" style="${inp}width:120px;"></label>
       <label style="font-size:12px;font-weight:600;">Paid from<br><select id="trPaid" style="${inp}"><option value="">Loading…</option></select></label>
-      <label style="font-size:12px;font-weight:600;">Receipt (optional)<br><input type="file" id="trReceipt" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif,application/pdf" style="font-size:12px;"></label>
+      <label style="font-size:12px;font-weight:600;">${ed && ed.receiptKey ? "Replace receipt (optional)" : "Receipt (optional)"}<br><input type="file" id="trReceipt" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif,application/pdf" style="font-size:12px;"></label>
       <button type="button" class="admin-btn" id="trImport" style="padding:6px 10px;align-self:flex-end;">Import total from PDF…</button>
     </div>
+    ${ed && ed.receiptKey ? `<div style="font-size:11px;color:#666;margin:-6px 0 6px;">Current receipt: <button type="button" class="admin-btn" style="padding:1px 6px;font-size:11px;" data-key="${escapeHtml(ed.receiptKey)}" onclick="expViewReceipt_(this.dataset.key)">📎 ${escapeHtml(ed.receiptName || "Receipt")}</button> — kept unless you choose another file.</div>` : ""}
     <div id="trImportNote" style="font-size:11px;color:#666;min-height:14px;margin:-4px 0 8px;"></div>
-    ${transfers.length ? `<table style="width:100%;border-collapse:collapse;font-size:12px;">
+    ${items.length ? `<table style="width:100%;border-collapse:collapse;font-size:12px;">
       <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:4px;">Item</th><th style="padding:4px;">Count</th><th style="padding:4px;">% of sheet</th><th style="padding:4px;">$</th><th style="padding:4px;">per item</th><th></th></tr></thead>
-      <tbody id="trRows">${rowHtml()}</tbody></table>
+      <tbody id="trRows">${ed ? ed.rows.map(rowHtml).join("") : rowHtml()}</tbody></table>
       <div style="margin-top:6px;display:flex;justify-content:space-between;"><button type="button" class="admin-btn" id="trAddRow" style="padding:2px 10px;">+ Add row</button><span id="trSum" style="font-size:12px;color:#666;"></span></div>
       <div id="trOther" style="margin-top:8px;padding:8px 10px;border:1px solid #e5e7eb;background:#f9fafb;border-radius:6px;font-size:12px;">
         <div style="font-weight:600;margin-bottom:2px;">Not going into stock (optional)</div>
         <div style="color:#555;margin-bottom:6px;">If part of the sheet wasn't for stock, say how much. The rows, written off and personal use must add up to 100%.</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:6px;">
-          <label style="font-weight:600;">Written off %<br><input id="trWoPct" type="number" min="0" max="100" step="0.1" value="0" style="${inp}width:70px;"></label>
+          <label style="font-weight:600;">Written off %<br><input id="trWoPct" type="number" min="0" max="100" step="0.1" value="${ed && ed.writeoff ? Number(ed.writeoff.pct) : 0}" style="${inp}width:70px;"></label>
           <span id="trWoAmt" style="min-width:56px;padding-bottom:6px;color:#555;"></span>
           <label id="trWoCatWrap" style="font-weight:600;display:none;">Expense category<br><select id="trWoCat" style="${inp}"><option value="">Loading…</option></select></label>
-          <label id="trWoDescWrap" style="font-weight:600;flex:1;min-width:200px;display:none;">What was written off<br><input id="trWoDesc" maxlength="200" placeholder="e.g. test prints, misprints, scrap" style="${inp}width:100%;box-sizing:border-box;"></label>
+          <label id="trWoDescWrap" style="font-weight:600;flex:1;min-width:200px;display:none;">What was written off<br><input id="trWoDesc" maxlength="200" value="${escapeHtml(ed && ed.writeoff ? ed.writeoff.description : "")}" placeholder="e.g. test prints, misprints, scrap" style="${inp}width:100%;box-sizing:border-box;"></label>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;">
-          <label style="font-weight:600;">Personal use %<br><input id="trPePct" type="number" min="0" max="100" step="0.1" value="0" style="${inp}width:70px;"></label>
+          <label style="font-weight:600;">Personal use %<br><input id="trPePct" type="number" min="0" max="100" step="0.1" value="${ed && ed.personal ? Number(ed.personal.pct) : 0}" style="${inp}width:70px;"></label>
           <span id="trPeAmt" style="min-width:56px;padding-bottom:6px;color:#555;"></span>
-          <label id="trPeDescWrap" style="font-weight:600;flex:1;min-width:200px;display:none;">What it was for<br><input id="trPeDesc" maxlength="200" placeholder="e.g. my own shirts" style="${inp}width:100%;box-sizing:border-box;"></label>
+          <label id="trPeDescWrap" style="font-weight:600;flex:1;min-width:200px;display:none;">What it was for<br><input id="trPeDesc" maxlength="200" value="${escapeHtml(ed && ed.personal ? ed.personal.description : "")}" placeholder="e.g. my own shirts" style="${inp}width:100%;box-sizing:border-box;"></label>
         </div>
         <div style="color:#555;margin-top:6px;">Written off is recorded as an expense in the category you pick. Personal use is an owner draw (not deductible); if the sheet was paid with personal funds, nothing is recorded for it.</div>
       </div>`
       : `<div style="color:#b03a2e;">Add a transfer item first (+ New transfer).</div>`}
     <div id="trErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:6px;"></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" id="trCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button><button type="button" id="trSave" class="admin-btn">Receive</button></div>`, 640);
+    <div id="trPreview"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" id="trCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button><button type="button" id="trSave" class="admin-btn">${ed ? "Preview changes" : "Receive"}</button></div>`, 640);
   loadAccounts_().then(d => { const cc = d.accounts.find(a => a.type === "credit_card" && a.active);
-    ov.querySelector("#trPaid").innerHTML = accountOptions_(d.accounts, (cc && cc.id) || "", { personal: true, blank: !cc }); })
+    const sel = ed ? (ed.paidPersonally ? "personal" : (ed.accountId || "")) : ((cc && cc.id) || "");
+    ov.querySelector("#trPaid").innerHTML = accountOptions_(d.accounts, sel, { personal: true, blank: ed ? !ed.accountId && !ed.paidPersonally : !cc }); })
     .catch(() => { ov.querySelector("#trPaid").innerHTML = `<option value="">(accounts unavailable)</option>`; });
+  // An edit is previewed before it's saved; changing anything after a preview asks for a fresh one.
+  let previewed = false;
+  const unpreview = () => {
+    if (!ed || !previewed) return;
+    previewed = false; ov.querySelector("#trPreview").innerHTML = ""; ov.querySelector("#trSave").textContent = "Preview changes";
+  };
   const recompute = () => {
+    unpreview();
     const total = parseFloat(ov.querySelector("#trTotal").value) || 0;
     const rows = [...ov.querySelectorAll(".trRow")];
     const pcts = rows.map(r => parseFloat(r.querySelector(".trPct").value) || 0);
@@ -21269,18 +21335,21 @@ function showReceiveTransferModal_(transfers, onDone){
     save.disabled = !!why; save.style.opacity = why ? ".5" : ""; save.title = why;
     ov.querySelector("#trErr").textContent = why && started ? why : "";
   };
-  if (transfers.length) {
+  if (items.length) {
     ov.querySelector("#trAddRow").onclick = () => { ov.querySelector("#trRows").insertAdjacentHTML("beforeend", rowHtml()); wireRows(); recompute(); };
     const wireRows = () => {
       ov.querySelectorAll(".trRm").forEach(b => b.onclick = () => { if (ov.querySelectorAll(".trRow").length > 1) { b.closest("tr").remove(); recompute(); } });
       ov.querySelectorAll(".trCount, .trPct").forEach(i => i.oninput = recompute);
+      ov.querySelectorAll(".trItem").forEach(i => i.onchange = recompute);
     };
     ov.querySelector("#trTotal").oninput = recompute;
-    ["#trWoCat", "#trPaid"].forEach(sel => ov.querySelector(sel).onchange = recompute);
-    ["#trWoPct", "#trPePct", "#trWoDesc", "#trPeDesc"].forEach(sel => ov.querySelector(sel).oninput = recompute);
+    ["#trWoCat", "#trPaid", "#trVendor", "#trDate"].forEach(sel => { const el = ov.querySelector(sel); if (el) el.onchange = recompute; });
+    ["#trWoPct", "#trPePct", "#trWoDesc", "#trPeDesc", "#trRef"].forEach(sel => ov.querySelector(sel).oninput = recompute);
+    const woCatWanted = ed && ed.writeoff ? Number(ed.writeoff.categoryId) : 0;
     (adminFeatureOn_("bookkeeping") ? mnApi_({ action: "listExpenseCategories" }) : Promise.reject(new Error("off"))).then(d => {
       const cats = d.categories || [];
-      ov.querySelector("#trWoCat").innerHTML = cats.map(c => `<option value="${c.id}"${/^supplies/i.test(c.name) ? " selected" : ""}>${escapeHtml(c.name)}</option>`).join("");
+      const pick = (c) => woCatWanted ? Number(c.id) === woCatWanted : /^supplies/i.test(c.name);
+      ov.querySelector("#trWoCat").innerHTML = cats.map(c => `<option value="${c.id}"${pick(c) ? " selected" : ""}>${escapeHtml(c.name)}</option>`).join("");
       recompute();
     }).catch(() => { ov.querySelector("#trWoCat").innerHTML = `<option value="">(categories unavailable)</option>`; });
     wireRows();
@@ -21315,19 +21384,63 @@ function showReceiveTransferModal_(transfers, onDone){
     if (!rows.length) { err.textContent = "Add at least one row with a count."; return; }
     const why = problem(); if (why) { err.textContent = why; return; }
     const woPct = Math.max(0, parseFloat(ov.querySelector("#trWoPct").value) || 0), pePct = Math.max(0, parseFloat(ov.querySelector("#trPePct").value) || 0);
-    const body = { action: "receiveTransferSheet", rows, total: parseFloat(ov.querySelector("#trTotal").value) || 0,
+    const body = { ...(ed ? { action: "editTransferSheet", movementId: ed.seedId } : { action: "receiveTransferSheet" }), rows, total: parseFloat(ov.querySelector("#trTotal").value) || 0,
       receivedAt: ov.querySelector("#trDate").value, vendor: ov.querySelector("#trVendor").value, vendorRef: ov.querySelector("#trRef").value.trim(),
       ...(paid === "personal" ? { paidPersonally: true } : paid ? { accountId: Number(paid) } : {}),
       ...(woPct > 0 ? { writeoff: { pct: woPct, description: ov.querySelector("#trWoDesc").value.trim(), categoryId: Number(ov.querySelector("#trWoCat").value) || 0 } } : {}),
       ...(pePct > 0 ? { personal: { pct: pePct, description: ov.querySelector("#trPeDesc").value.trim() } } : {}) };
+    // Editing: the first click previews what the change does; the second saves it.
+    if (ed && !previewed) {
+      save.disabled = true; save.textContent = "Working it out…";
+      try {
+        const p = (await hoopApi_({ ...body, preview: true })).preview;
+        ov.querySelector("#trPreview").innerHTML = transferSheetPreviewHtml_(p);
+        previewed = true; save.textContent = "Save changes"; err.textContent = "";
+      } catch (e) { err.textContent = e.message; save.textContent = "Preview changes"; }
+      save.disabled = false;
+      return;
+    }
     try {
       const receiptFile = ov.querySelector("#trReceipt") && ov.querySelector("#trReceipt").files[0];
       if (receiptFile) { save.textContent = "Uploading receipt…"; const r = await uploadReceipt_(receiptFile); body.receiptKey = r.key; body.receiptName = r.name; }
-      save.textContent = "Receiving…";
-      await hoopApi_(body);
-      close(); showToast("Sheet received."); onDone && onDone();
-    } catch (e) { err.textContent = e.message; save.textContent = "Receive"; }
+      save.textContent = ed ? "Saving…" : "Receiving…";
+      const res = await hoopApi_(body);
+      close();
+      if (ed) {
+        const n = res.result && res.result.linesRecosted;
+        showToast(n ? `Sheet saved — ${n} order line${n === 1 ? "" : "s"} re-costed.` : "Sheet saved.");
+      } else showToast("Sheet received.");
+      onDone && onDone();
+    } catch (e) { err.textContent = e.message; save.textContent = ed ? "Save changes" : "Receive"; }
   };
+}
+
+// What an edited sheet changes, from editTransferSheet's preview: each row's per-item price before → after, each
+// transfer's average cost, the order lines re-costed, what's left alone, and whether the sheet's money changed.
+function transferSheetPreviewHtml_(p){
+  const $ = (n) => (Number(n) < 0 ? "−$" : "$") + Math.abs(Number(n || 0)).toFixed(2);
+  const signed = (n) => (Number(n) > 0 ? "+" : "") + $(n);
+  const td = "padding:3px 6px;border-bottom:1px solid #e0e7ff;";
+  const avg = (p.transfers || []).filter(t => t.avgBefore !== t.avgAfter || t.qtyBefore !== t.qtyAfter);
+  const lines = [];
+  if (p.linesRecosted) lines.push(`<strong>${p.linesRecosted} order line${p.linesRecosted === 1 ? "" : "s"}</strong> re-costed${p.orders && p.orders.length ? ` (order${p.orders.length === 1 ? "" : "s"} ${p.orders.slice(0, 12).map(escapeHtml).join(", ")}${p.orders.length > 12 ? "…" : ""})` : ""}: cost of goods ${signed(p.cogsChange)}.`);
+  else lines.push("No order lines need re-costing.");
+  if (Number(p.writeoffChange)) lines.push(`Write-offs of these transfers: ${signed(p.writeoffChange)}.`);
+  if (p.skippedClosed) lines.push(`${p.skippedClosed} use${p.skippedClosed === 1 ? "" : "s"} in a closed month ${p.skippedClosed === 1 ? "keeps its" : "keep their"} cost (already filed).`);
+  if (p.skippedFinished) lines.push(`${p.skippedFinished} use${p.skippedFinished === 1 ? "" : "s"} that made finished stock ${p.skippedFinished === 1 ? "keeps its" : "keep their"} cost — it's already in those pieces.`);
+  lines.push(p.moneyChanged
+    ? `The sheet's money changes: stock ${$(p.stockBefore)} → ${$(p.stockAfter)}${p.writeoffBefore || p.writeoffAfter ? `, written off ${$(p.writeoffBefore)} → ${$(p.writeoffAfter)}` : ""}${p.personalBefore || p.personalAfter ? `, personal ${$(p.personalBefore)} → ${$(p.personalAfter)}` : ""}.`
+    : "The sheet's total, date and paid-from are unchanged.");
+  return `<div style="border:1px solid #c7d2fe;background:#eef2ff;border-radius:6px;padding:8px 10px;margin:0 0 10px;font-size:12px;color:#1e1b4b;">
+    <div style="font-weight:700;margin-bottom:4px;">What saving will change</div>
+    <div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;margin-bottom:6px;">
+      <thead><tr style="text-align:left;"><th style="${td}">Item</th><th style="${td}">Count</th><th style="${td}">% of sheet</th><th style="${td}">Per item</th></tr></thead>
+      <tbody>${(p.rows || []).map(r => `<tr><td style="${td}">${escapeHtml(r.name)}</td><td style="${td}">${Number(r.count)}</td><td style="${td}">${Number(r.pctOfSheet)}%</td>
+        <td style="${td}white-space:nowrap;">${r.perItemBefore == null ? "new" : $(r.perItemBefore)} → <strong>${$(r.perItem)}</strong></td></tr>`).join("")}</tbody></table></div>
+    ${avg.length ? `<div style="margin-bottom:4px;">Average cost: ${avg.map(t => `${escapeHtml(t.name)} ${$(t.avgBefore)} → <strong>${$(t.avgAfter)}</strong>${t.qtyBefore !== t.qtyAfter ? ` (on hand ${Number(t.qtyBefore)} → ${Number(t.qtyAfter)})` : ""}`).join("; ")}.</div>` : ""}
+    ${lines.map(l => `<div>${l}</div>`).join("")}
+    <div style="margin-top:4px;color:#4338ca;">Click <strong>Save changes</strong> to apply, or change anything above to preview again.</div>
+  </div>`;
 }
 
 // ---- Run Transfer Sheets (migrations/0036) — ready cards + waiting + gang sheet ------------------

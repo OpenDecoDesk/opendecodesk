@@ -65,7 +65,9 @@ and the tax and shipping features are built around a US business (see [Region](#
 **Inventory and money**
 - Blank garments and transfer sheets: receiving (with landed cost), stock by size and color, write-offs,
   and cost of goods sold worked out as orders are made. Blanks already on the shelf can be used for an
-  order in one click, and the Blanks screen shows what's set aside for orders.
+  order in one click, and the Blanks screen shows what's set aside for orders. A transfer sheet can be
+  reopened and corrected later (its items, counts and % of the sheet, which set each per-item price), and
+  the orders that already used those transfers are re-costed to match.
 - Inventory in three groups: blanks for sale, blanks for testing or shop use, and finished stock —
   pieces made ahead for a shop, which fill its orders automatically. The Inventory & COGS report and
   the year-end export show each group, cost of goods by source and write-offs by reason.

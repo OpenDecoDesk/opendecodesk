@@ -55,7 +55,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("the blank order: what was bought by size, its total, paid from checking, with its receipt", ss && ss.kind === "blanks" && ss.items.join() === "Gildan 64000 · Navy: S×4, M×6" &&
     ss.total === 35 && ss.accountId === checking && ss.accountName === "Business checking" && ss.receiptKey.endsWith(".pdf") && ss.receiptName === "ss-invoice.pdf" && ss.date === "2026-03-02");
   ok("a purchase paid personally says so, and has no receipt", wm && wm.paidPersonally && wm.accountId == null && wm.receiptKey === "" && wm.total === 8);
-  ok("the transfer sheet: each transfer and its count, the sheet's total, paid by card, with its receipt", nt && nt.kind === "transfers" && nt.items.join("|") === "Club crest ×20|Reorder QR ×30" && nt.total === 60 &&
+  ok("the transfer sheet: each transfer, its count and per-item price, the sheet's total, paid by card, with its receipt", nt && nt.kind === "transfers" && nt.items.join("|") === "Club crest ×20 @ $2.25|Reorder QR ×30 @ $0.50" && nt.total === 60 &&
     nt.accountId === card && nt.receiptName === "ninja.png");
   ok("newest first", list.map(x => x.date).join() === "2026-05-05,2026-04-10,2026-03-02");
   ok("only the year asked for", (await lib.listStockPurchases(d1, "2025-01-01", "2025-12-31")).length === 0);

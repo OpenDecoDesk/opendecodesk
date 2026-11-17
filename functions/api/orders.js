@@ -68,7 +68,7 @@ import {
   getTierPrices, setTierPrices, setOrgReorderQr, setOrgReorderQrTransfer,
   listTransfers, createTransfer, updateTransfer, deleteTransfer, receiveTransferSheet, transferSheetShares, SHEET_PCT_TOLERANCE,
   getTransferSheet, editTransferSheet, transferSheetLabel,
-  writeOffTransfers, getTransferMovements, voidTransferMovement, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferCogs,
+  writeOffTransfers, getTransferMovements, voidTransferMovement, transferMovementVoidable, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferCogs,
   getTransferQueue, setTransferReceived, getGangSheet, makeTransferLine, setTransfersApplied, lineHasEmbroidery, refreshOrderLinesFromCatalog,
   listDesigns, getDesign, saveDesign, deleteDesign, listDesignVersions, addDesignVersion, updateDesignVersionThreads, setProductDesign,
   listProductDesigns, setProductDesigns, listOrderItemDesigns, addOrderItemDesign, getCatalogIssues, getBlankReadyByOrg,
@@ -4849,17 +4849,19 @@ export async function onRequestPost(context) {
       const mv = await getTransferMovementById(env.DB, movementId);
       if (!mv) return jsonResponse({ status: "error", message: "Entry not found" }, 404);
       if (mv.voidedAt) return jsonResponse({ status: "error", message: "That entry is already voided" }, 400);
-      if (!["purchase", "adjust", "writeoff"].includes(mv.kind)) {
-        return jsonResponse({ status: "error", message: "This entry was generated automatically (from an order) and can't be voided here — fix the order instead." }, 400);
+      if (!transferMovementVoidable(mv)) {
+        return jsonResponse({ status: "error", message: mv.kind === "consume" && mv.reason === "finished"
+          ? "This was used making finished stock — its cost is in those pieces. Void the finished-stock entry instead."
+          : "This entry was generated automatically and can't be voided here." }, 400);
       }
       const reason = String(body.reason || "Entered by mistake").trim().slice(0, 300);
-      const auditErr = await auditStrict({ orgId: null, orderId: null, action: "transfer.movement_voided",
+      const auditErr = await auditStrict({ orgId: null, orderId: mv.orderId || null, action: "transfer.movement_voided",
         detail: { movementId, reason, transferName: mv.transferName, occurredAt: mv.occurredAt, unitCost: mv.unitCost, vendor: mv.vendor, vendorRef: mv.vendorRef,
-          before: { transferId: mv.transferId, qtyDelta: mv.qtyDelta, kind: mv.kind } } });
+          before: { transferId: mv.transferId, qtyDelta: mv.qtyDelta, kind: mv.kind, orderId: mv.orderId || null, itemId: mv.itemId } } });
       if (auditErr) return auditErr;
       const row = await voidTransferMovement(env.DB, movementId, reason);
       if (!row) return jsonResponse({ status: "error", message: "That entry was just changed — reload the history and try again." }, 409);
-      return jsonResponse({ status: "ok" });
+      return jsonResponse({ status: "ok", recosted: row.recosted || 0 });
     }
 
     // Undo a transfer void. Same safeguards as restoring a blank movement: closed months refuse it, the

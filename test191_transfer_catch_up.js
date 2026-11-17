@@ -93,12 +93,30 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   r = await call({ action: "previewTransferCatchUp" });
   ok("only O1's second line is left", r.status === 200 && r.body.lines.length === 1 && r.body.lines[0].itemId === item("O1", 1));
 
+  console.log("\n=== Void an order's use (Transfers → History) ===");
+  const o5use = d1.q("SELECT id FROM transfer_movements WHERE itemId = ? AND kind = 'consume'", item("O5"))[0].id;
+  r = await call({ action: "voidTransferMovement", movementId: o5use, reason: "Made without a QR" });
+  ok("an order's use can be voided", r.status === 200 && d1.q("SELECT voidedAt FROM transfer_movements WHERE id = ?", o5use)[0].voidedAt);
+  ok("the transfer goes back into stock (18) and its cost comes off the line ($4.56 → $3.00)", t().quantity === 18 && cogs(item("O5")) === 300);
+  ok("the audit row names the order", d1.q("SELECT orderId FROM audit_log WHERE action = 'transfer.movement_voided' ORDER BY id DESC LIMIT 1")[0].orderId === "O5");
+  r = await call({ action: "restoreTransferMovement", movementId: o5use });
+  ok("it can't be restored from History (record it again with the past-orders tool)", r.status === 409 && /Use transfers for past orders/.test(r.body.message));
+  r = await call({ action: "previewTransferCatchUp" });
+  const o5 = (r.body.lines || []).find(l => l.orderId === "O5");
+  ok("the line shows up again in Use transfers for past orders, with why it was voided", o5 && o5.voidedUse === "Made without a QR" && o5.source === "order");
+  d1._raw.run(`INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, orderId, itemId, reason, note, occurredAt, createdAt) VALUES (?, 'Shop QR', -1, 156, 'consume', 'O2', ?, 'finished', 'Made for stock', '2026-10-26T00:00:00Z', 't')`, [QR, item("O2")]);
+  const fin = d1.q("SELECT max(id) i FROM transfer_movements")[0].i;
+  r = await call({ action: "voidTransferMovement", movementId: fin, reason: "x" });
+  ok("a use that made finished stock can't be voided here", r.status === 400 && /finished stock/.test(r.body.message));
+  d1._raw.run("DELETE FROM transfer_movements WHERE id = ?", [fin]);
+  ok("History offers Void on an order's use", /m\.kind === "consume" && m\.itemId && m\.reason !== "finished"/.test(read("public/admin.js")));
+
   console.log("\n=== Closed month, roles ===");
   d1._raw.run("INSERT INTO closed_periods (month, closedAt, closedBy) VALUES ('2026-10','t','test')");
   r = await call({ action: "previewTransferCatchUp" });
-  ok("a line in a closed month shows locked", r.body.lines.length === 1 && r.body.lines[0].locked === true);
+  ok("a line in a closed month shows locked", r.body.lines.length === 2 && r.body.lines.every(l => l.locked === true));
   r = await call({ action: "applyTransferCatchUp", itemIds: [item("O1", 1)] });
-  ok("and can't be applied", r.status === 409 && /closed/.test(r.body.message) && t().quantity === 17);
+  ok("and can't be applied", r.status === 409 && /closed/.test(r.body.message) && t().quantity === 18);
   const src = read("functions/api/orders.js");
   const staff = src.match(/const STAFF_ACTIONS = \[[\s\S]*?\];/)[0], catalog = src.match(/const CATALOG_ADMIN_ACTIONS = new Set\(\[[\s\S]*?\]\);/)[0];
   ok("allowed for the same roles as Use blanks for past orders", /"applyTransferCatchUp"/.test(staff) && /"applyTransferCatchUp"/.test(catalog) && /"previewTransferCatchUp"/.test(staff));

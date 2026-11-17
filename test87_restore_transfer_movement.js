@@ -129,7 +129,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   console.log("\n=== The screen ===");
   const adminSrc = read("public/admin.js"), ordersSrc = read("functions/api/orders.js");
   console.log("Transfers History shows 'Undo void' on voided, voidable entries and still 'Void' on live ones:",
-    /transferRestore_/.test(adminSrc) && /m\.voidedAt && \["purchase", "adjust", "writeoff"\]/.test(adminSrc) && /!m\.voidedAt && \["purchase", "adjust", "writeoff"\]/.test(adminSrc));
+    /transferRestore_/.test(adminSrc) && /m\.voidedAt && \["purchase", "adjust", "writeoff"\]/.test(adminSrc) && /!m\.voidedAt && \(\["purchase", "adjust", "writeoff"\]\.includes\(m\.kind\) \|\| \(m\.kind === "consume" && m\.itemId && m\.reason !== "finished"\)\)/.test(adminSrc));
   console.log("it confirms first and calls the new action:", /Undo this void\?/.test(adminSrc) && /action: "restoreTransferMovement"/.test(adminSrc));
   console.log("the action is admin-only and period-guarded:", /"voidTransferMovement", "restoreTransferMovement"/.test(ordersSrc) && /a === "voidTransferMovement" \|\| a === "restoreTransferMovement"/.test(ordersSrc));
   console.log("the Audit Log has readable labels:", /"transfer\.movement_restored":\s+"Transfer entry restored/.test(adminSrc) && /"transfer\.movement_voided":\s+"Transfer entry voided"/.test(adminSrc));

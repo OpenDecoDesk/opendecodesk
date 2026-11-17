@@ -6994,6 +6994,120 @@ export async function applyBlankCatchUp(db, itemIds) {
   return { applied: chosen, totalUnits: chosen.reduce((t, l) => t + l.qty, 0), totalCents: chosen.reduce((t, l) => t + l.costCents, 0) };
 }
 
+// ---- Catch-up: use transfers for orders that never took them out of stock ----
+// A line's transfers are taken out when it's marked fully made, from the copy of its options it saved
+// when it was placed. Two kinds of made line never got there: one whose saved options name transfers but
+// that was made some other way (the order marked made / shipped directly), and one placed before its
+// product carried any transfer (no saved options at all — e.g. ordered before the shop's reorder QR was
+// turned on). The first uses the transfers its options name ("order"); the second the transfers its
+// product carries today — the reorder QR and printed transfers ("product"), so you check those before
+// applying. A line with saved options that name no transfer is left alone: it was made without one.
+// Each use is dated when the order was made and priced at the transfer's average cost THEN (replaying its
+// history), and, because a use dated in the past changes how many were on hand when later sheets came in,
+// later uses whose cost moves are re-costed too — except in a closed month and made-for-stock uses.
+// `itemIds` limits the plan to those lines (the apply); without it every candidate is planned.
+export async function planTransferCatchUp(db, itemIds = null) {
+  const fs = await fromStockLine_(db), dg = await digitalLine_(db);
+  const { results: rows } = await db.prepare(
+    `SELECT i.id AS itemId, i.orderId, i.orgId, i.name, i.size, i.qty, i.configJson, o.customerName, g.name AS orgName,
+            p.productId AS hasProduct, p.reorderQr, p.fixedTransfersJson,
+            COALESCE(o.manufacturedAt, o.shippedAt, o.deliveredAt) AS useDate
+     FROM order_items i
+     JOIN orders o ON o.orderId = i.orderId
+     LEFT JOIN products p ON p.orgId = i.orgId AND p.productId = i.productId
+     LEFT JOIN orgs g ON g.orgId = i.orgId
+     WHERE COALESCE(i.cancelDate, '') = '' AND o.voidedAt IS NULL AND o.isTest = 0
+       AND COALESCE(o.manufacturedAt, o.shippedAt, o.deliveredAt) IS NOT NULL
+       AND NOT ${fs("i")} AND NOT ${dg("i")}
+       AND NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume')
+     ORDER BY useDate, i.id`).all();
+  const want = itemIds ? new Set(itemIds.map(Number)) : null;
+  const orgQr = new Map();
+  const cands = [];
+  for (const r of rows) {
+    if (want && !want.has(Number(r.itemId))) continue;
+    const cfg = tryParse_(r.configJson, null);
+    let locs, source;
+    if (cfg && typeof cfg === "object") { locs = Array.isArray(cfg.locations) ? cfg.locations : []; source = "order"; }
+    else if (r.hasProduct) {
+      if (!orgQr.has(r.orgId)) { const t = await getTierPrices(db, r.orgId); orgQr.set(r.orgId, { transferId: t.reorderQrTransferId, graphicId: t.reorderQrGraphicId }); }
+      const qr = await reorderQrEntry_(db, r.orgId, r.reorderQr, orgQr.get(r.orgId));
+      locs = [...(qr ? [qr] : []), ...await fixedTransferEntries_(db, r.orgId, r)];
+      source = "product";
+    } else continue;
+    const tids = locs.filter(l => l && l.kind === "transfer" && Number(l.transferId)).map(l => Number(l.transferId));
+    if (tids.length) cands.push({ ...r, tids, source });
+  }
+  const empty = { lines: [], recost: [], totalUnits: 0, totalCents: 0, shortLines: 0, recostLines: 0, recostCents: 0, skippedClosed: 0, skippedFinished: 0, transfers: [] };
+  if (!cands.length) return empty;
+
+  const closedCache = new Map();
+  const isClosed = async (m) => { if (!closedCache.has(m)) closedCache.set(m, await isMonthClosed(db, m)); return closedCache.get(m); };
+  const lines = new Map(), recost = [], transfers = [];
+  let skippedClosed = 0, skippedFinished = 0;
+  for (const tid of [...new Set(cands.flatMap(c => c.tids))]) {
+    const t = await db.prepare("SELECT id, name, purchasePriceCents FROM transfers WHERE id = ?").bind(tid).first();
+    if (!t) continue;
+    const live = (await db.prepare("SELECT id, qtyDelta, unitCostCents, kind, reason, itemId, orderId, occurredAt FROM transfer_movements WHERE transferId = ? AND voidedAt IS NULL").bind(tid).all()).results;
+    const seq = live.map(m => ({ at: String(m.occurredAt || ""), id: Number(m.id), m }));
+    let n = 0;
+    for (const c of cands) for (const id of c.tids) if (id === tid) seq.push({ at: String(c.useDate), id: 1e15 + (n++), c });
+    seq.sort((a, b) => a.at < b.at ? -1 : a.at > b.at ? 1 : a.id - b.id);
+    let qty = 0, avg = 0;
+    for (const e of seq) {
+      if (e.c) {
+        const c = e.c, q = Math.max(1, Number(c.qty) || 1);
+        let unit = avg, note = "";
+        if (!unit) { unit = Number(t.purchasePriceCents) || 0; note = unit ? "no sheet before that date — used the transfer's current cost" : "no cost known for this transfer"; }
+        const line = lines.get(Number(c.itemId)) || { itemId: Number(c.itemId), orderId: c.orderId, orgId: c.orgId, orgName: c.orgName || c.orgId, customerName: c.customerName || "", name: c.name,
+          size: c.size || "", qty: q, useDate: c.useDate, source: c.source, uses: [], costCents: 0, shortBy: 0 };
+        line.uses.push({ transferId: tid, name: t.name || "", unitCostCents: unit, qty: q, note });
+        line.costCents += unit * q;
+        line.shortBy = Math.max(line.shortBy, Math.max(0, Math.min(q, q - Math.max(0, qty))));
+        lines.set(line.itemId, line);
+        qty -= q;
+        continue;
+      }
+      const m = e.m, d = Number(m.qtyDelta), unit = Number(m.unitCostCents) || 0;
+      if (d > 0 && (m.kind === "purchase" || m.kind === "adjust")) { const on = Math.max(0, qty); avg = Math.round((on * avg + d * unit) / (on + d)); }
+      else if (d < 0 && (m.kind === "consume" || m.kind === "writeoff") && unit !== avg) {
+        if (m.kind === "consume" && m.reason === "finished") skippedFinished++;
+        else if (await isClosed(monthOf(m.occurredAt))) skippedClosed++;
+        else recost.push({ movementId: Number(m.id), kind: m.kind, transferId: tid, itemId: m.itemId ? Number(m.itemId) : null, orderId: m.orderId || "", qty: -d, oldUnit: unit, newUnit: avg });
+      }
+      qty += d;
+    }
+    transfers.push({ transferId: tid, name: t.name || "", qtyAfter: qty, avgCents: avg });
+  }
+  const out = [...lines.values()].sort((a, b) => a.useDate < b.useDate ? -1 : a.useDate > b.useDate ? 1 : a.itemId - b.itemId);
+  for (const l of out) l.locked = await isClosed(monthOf(l.useDate));
+  const consumes = recost.filter(r => r.kind === "consume");
+  return { lines: out, recost, transfers,
+    totalUnits: out.reduce((a, l) => a + l.uses.reduce((b, u) => b + u.qty, 0), 0), totalCents: out.reduce((a, l) => a + l.costCents, 0),
+    shortLines: out.filter(l => l.shortBy > 0).length,
+    recostLines: new Set(consumes.filter(r => r.itemId).map(r => r.itemId)).size, recostCents: consumes.reduce((a, r) => a + (r.newUnit - r.oldUnit) * r.qty, 0),
+    skippedClosed, skippedFinished };
+}
+
+// Writes a plan made for exactly the chosen lines (planTransferCatchUp(db, itemIds), re-planned here, never trusted from
+// the browser): a dated "consume" per transfer use, its cost added to the line, the later uses re-costed, and each
+// transfer's stock and average set from the replay. Lines already done no longer qualify, so it's idempotent.
+export async function applyTransferCatchUp(db, plan) {
+  const now = new Date().toISOString(), stmts = [];
+  for (const l of plan.lines) {
+    for (const u of l.uses) stmts.push(transferMovementStmt_(db, { transferId: u.transferId, transferName: u.name, qtyDelta: -u.qty, unitCostCents: u.unitCostCents,
+      kind: "consume", orderId: l.orderId, itemId: l.itemId, note: "Used for order " + l.orderId + " (catch-up)", occurredAt: l.useDate }));
+    stmts.push(db.prepare("UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ?, cogsSource = 'consumed' WHERE id = ?").bind(l.costCents, l.itemId));
+  }
+  for (const c of plan.recost) {
+    stmts.push(db.prepare("UPDATE transfer_movements SET unitCostCents = ? WHERE id = ? AND voidedAt IS NULL").bind(c.newUnit, c.movementId));
+    if (c.kind === "consume" && c.itemId) stmts.push(db.prepare("UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ? WHERE id = ?").bind((c.newUnit - c.oldUnit) * c.qty, c.itemId));
+  }
+  for (const t of plan.transfers) stmts.push(db.prepare("UPDATE transfers SET quantity = ?, purchasePriceCents = ?, updatedAt = ? WHERE id = ?").bind(t.qtyAfter, t.avgCents, now, t.transferId));
+  if (stmts.length) await db.batch(stmts);
+  return { applied: plan.lines.length, totalUnits: plan.totalUnits, totalCents: plan.totalCents, recostLines: plan.recostLines, recostCents: plan.recostCents };
+}
+
 export async function getBlankMovements(db, blankId) {
   const { results } = await db.prepare(
     "SELECT * FROM inventory_movements WHERE blankId=? ORDER BY occurredAt DESC, id DESC LIMIT 500"

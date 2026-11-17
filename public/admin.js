@@ -21452,7 +21452,14 @@ function showTransferSheetModal_(transfers, onDone, existing){
     fi.click();
   };
   ov.querySelector("#trCancel").onclick = close;
+  // One save at a time: a second click while the first is still on its way would receive the sheet twice.
+  let busy = false;
   ov.querySelector("#trSave").onclick = async () => {
+    if (busy) return;
+    busy = true;
+    try { await saveSheet_(); } finally { busy = false; }
+  };
+  const saveSheet_ = async () => {
     const err = ov.querySelector("#trErr");
     const save = ov.querySelector("#trSave");
     const paid = ov.querySelector("#trPaid").value;
@@ -21477,6 +21484,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
       save.disabled = false;
       return;
     }
+    save.disabled = true;
     try {
       const receiptFile = ov.querySelector("#trReceipt") && ov.querySelector("#trReceipt").files[0];
       if (receiptFile) { save.textContent = "Uploading receipt…"; const r = await uploadReceipt_(receiptFile); body.receiptKey = r.key; body.receiptName = r.name; }
@@ -21488,7 +21496,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
         showToast(n ? `Sheet saved — ${n} order line${n === 1 ? "" : "s"} re-costed.` : "Sheet saved.");
       } else showToast("Sheet received.");
       onDone && onDone();
-    } catch (e) { err.textContent = e.message; save.textContent = ed ? "Save changes" : "Receive"; }
+    } catch (e) { err.textContent = e.message; save.textContent = ed ? "Save changes" : "Receive"; save.disabled = false; }
   };
 }
 

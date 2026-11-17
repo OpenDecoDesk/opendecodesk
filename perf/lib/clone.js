@@ -48,11 +48,17 @@ function describe(A) {
     if (t !== "orders" && !has("orderId") && !has("itemId")) continue;
     const pk = cols.filter(c => c.pk > 0);
     const rowidKey = pk.length === 1 && /^INTEGER$/i.test(pk[0].type) ? pk[0].name : null;
+    // One column per unique index is enough to keep a copy apart from its template: the index's last
+    // column that the copy doesn't already change and that points at no other table. In
+    // (orgId, source, externalOrderId) that is externalOrderId; tagging orgId would break its foreign key.
+    const fkCols = new Set(A.all(`PRAGMA foreign_key_list("${t}")`).map(r => r.from));
     const unique = new Set();
     for (const ix of A.all(`PRAGMA index_list("${t}")`)) {
       if (!ix.unique) continue;
       const ic = A.all(`PRAGMA index_info("${ix.name}")`).map(r => r.name);
-      for (const c of ic) if (c && c !== "orderId" && c !== "itemId" && c !== rowidKey) unique.add(c);
+      if (ic.some(c => c === "orderId" || c === "itemId" || c === rowidKey)) continue;   // new for every copy already
+      const own = ic.filter(c => c && !fkCols.has(c));
+      if (own.length) unique.add(own[own.length - 1]);
     }
     for (const c of pk) if (c.name !== rowidKey && c.name !== "orderId" && c.name !== "itemId") unique.add(c.name);
     info[t] = {

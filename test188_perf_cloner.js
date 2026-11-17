@@ -49,12 +49,21 @@ const agoIso = (n) => new Date(Date.now() - n * DAY).toISOString();
   // A migration adding a column: picked up with no change to the cloner.
   raw.run("ALTER TABLE orders ADD COLUMN perfProbe TEXT");
   raw.run("UPDATE orders SET perfProbe = 'kept' WHERE orderId = ?", [done]);
+  // An order imported from another store: unique per (orgId, source, externalOrderId). Copies must keep
+  // their shop and store and get their own store order number, not a changed orgId.
+  raw.run("UPDATE orders SET source = 'etsy', externalOrderId = '3141592653' WHERE orderId = ?", [owing]);
+  ok("of a unique index over several columns, only the store order number is made unique", info.orders.unique.includes("externalOrderId")
+    && !info.orders.unique.includes("orgId") && !info.orders.unique.includes("source"));
 
   console.log("=== Copies ===");
   const state = { next: 0 };
   const c = cloneOrders(AD, { templates: made, count: 90, perDay: 3, startAgeDays: 0, state });
   ok("90 orders were added", q("SELECT count(*) n FROM orders")[0].n === 93 && c.added === 90);
   ok("no copy breaks a foreign key", q("PRAGMA foreign_key_check").length === 0);
+  const imported = q("SELECT orgId, source, externalOrderId FROM orders WHERE externalOrderId IS NOT NULL");
+  ok("copies of an imported order keep their shop and store, each with its own order number", imported.length > 1
+    && imported.every(o => o.orgId === "acme" && o.source === "etsy")
+    && new Set(imported.map(o => o.externalOrderId)).size === imported.length);
   ok("every copy has a new, valid, unique order ID", q("SELECT count(DISTINCT orderId) n FROM orders")[0].n === 93
     && q("SELECT orderId FROM orders").every(r => /^[A-Za-z0-9\-]{1,64}$/.test(r.orderId)));
   ok("history runs backwards at the rate asked (90 orders at 3 a day ≈ 30 days)",

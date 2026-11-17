@@ -7359,6 +7359,30 @@ export function transferSheetShares(pcts, writeoffPct, personalPct, totalCents) 
 // Each part writes a `purchase` movement and updates the item's weighted-average cost + quantity in
 // one batch (atomic, race-safe), exactly like receiveBlanks. rows: [{transferId, count, pctOfSheet}].
 export async function receiveTransferSheet(db, { rows, totalCents, vendor, vendorRef, receivedAt, accountId, paidPersonally, note, receiptKey, receiptName, receiptGroup, writeoffPct = 0, personalPct = 0 }) {
+  const specs = transferSheetMovementSpecs(rows, totalCents, writeoffPct, personalPct);
+  const ids = [], names = new Map();
+  for (const p of specs) {
+    if (!names.has(p.transferId)) names.set(p.transferId, await transferName_(db, p.transferId));
+    const res = await db.batch([
+      transferMovementStmt_(db, { transferId: p.transferId, transferName: names.get(p.transferId), qtyDelta: p.qty, unitCostCents: p.unit, kind: "purchase",
+        vendor, vendorRef, note: note || "Received", pctOfSheet: p.pct, occurredAt: receivedAt,
+        accountId: paidPersonally ? null : (accountId || null), paidPersonally: !!paidPersonally, receiptKey, receiptName, receiptGroup }),
+      db.prepare(
+        `UPDATE transfers SET
+           purchasePriceCents = CAST(ROUND((MAX(quantity, 0) * purchasePriceCents + ? * ?) * 1.0 / (MAX(quantity, 0) + ?)) AS INTEGER),
+           quantity = quantity + ?, updatedAt = ? WHERE id = ?`
+      ).bind(p.unit, p.qty, p.qty, p.qty, new Date().toISOString(), p.transferId),
+    ]);
+    ids.push(Number(res[0] && res[0].meta && res[0].meta.last_row_id) || 0);
+  }
+  return ids;
+}
+
+// The purchase movements one sheet writes, as [{transferId, row, qty, unit, pct}]: each row's $ (its % of the
+// sheet, from transferSheetShares) divided across its count into whole-cent unit costs — a total that doesn't
+// divide evenly becomes two unit costs a cent apart (base first, then base + 1). Receiving a sheet and editing
+// one both write exactly these, so the per-item price can't come out differently between the two.
+export function transferSheetMovementSpecs(rows, totalCents, writeoffPct = 0, personalPct = 0) {
   const clean = (rows || []).map(r => ({ transferId: Number(r.transferId), count: Math.floor(Number(r.count) || 0), pct: Math.max(0, Number(r.pctOfSheet) || 0) }))
     .filter(r => r.transferId && r.count > 0);
   if (!clean.length) return [];
@@ -7366,28 +7390,41 @@ export async function receiveTransferSheet(db, { rows, totalCents, vendor, vendo
   // $ per row by its share of the sheet. writeoffPct / personalPct are the parts NOT put into inventory (recorded
   // by the caller as an expense / owner draw); with neither, the rows split the whole total.
   const { rowCents } = transferSheetShares(clean.map(r => r.pct), writeoffPct, personalPct, total);
-  const ids = [];
-  for (let i = 0; i < clean.length; i++) {
-    const r = clean[i], cents = rowCents[i], base = Math.floor(cents / r.count), up = cents - base * r.count;
-    const name = await transferName_(db, r.transferId);
-    const parts = [];
-    if (r.count - up > 0) parts.push({ qty: r.count - up, unit: base });
-    if (up > 0) parts.push({ qty: up, unit: base + 1 });
-    for (const p of parts) {
-      const res = await db.batch([
-        transferMovementStmt_(db, { transferId: r.transferId, transferName: name, qtyDelta: p.qty, unitCostCents: p.unit, kind: "purchase",
-          vendor, vendorRef, note: note || "Received", pctOfSheet: r.pct, occurredAt: receivedAt,
-          accountId: paidPersonally ? null : (accountId || null), paidPersonally: !!paidPersonally, receiptKey, receiptName, receiptGroup }),
-        db.prepare(
-          `UPDATE transfers SET
-             purchasePriceCents = CAST(ROUND((MAX(quantity, 0) * purchasePriceCents + ? * ?) * 1.0 / (MAX(quantity, 0) + ?)) AS INTEGER),
-             quantity = quantity + ?, updatedAt = ? WHERE id = ?`
-        ).bind(p.unit, p.qty, p.qty, p.qty, new Date().toISOString(), r.transferId),
-      ]);
-      ids.push(Number(res[0] && res[0].meta && res[0].meta.last_row_id) || 0);
+  const specs = [];
+  clean.forEach((r, i) => {
+    const cents = rowCents[i], base = Math.floor(cents / r.count), up = cents - base * r.count;
+    if (r.count - up > 0) specs.push({ transferId: r.transferId, row: i, qty: r.count - up, unit: base, pct: r.pct });
+    if (up > 0) specs.push({ transferId: r.transferId, row: i, qty: up, unit: base + 1, pct: r.pct });
+  });
+  return specs;
+}
+
+// Replays one transfer's live movements in time order (occurredAt, then id — the order every other report
+// uses) with the same weighted-average rule as receiving, and says which recorded USES of it carry a unit cost
+// that differs from the average at that moment. Used after a sheet is edited, so a corrected per-item price
+// reaches the order lines that already used those transfers. Left as they are, and counted:
+//   · uses in a closed month (already filed);
+//   · uses that made finished stock (reason 'finished') — that cost is already inside the finished pieces.
+// movements: [{id, qtyDelta, unitCostCents, kind, reason, itemId, orderId, occurredAt}]; closedMonths: a Set of YYYY-MM.
+export function replayTransferCosts(movements, closedMonths = new Set()) {
+  const at = (m) => String(m.occurredAt || "");
+  const list = [...movements].sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : Number(a.id) - Number(b.id)));
+  let qty = 0, avg = 0, skippedClosed = 0, skippedFinished = 0;
+  const changes = [];
+  for (const m of list) {
+    const d = Number(m.qtyDelta), unit = Number(m.unitCostCents) || 0;
+    if (d > 0 && (m.kind === "purchase" || m.kind === "adjust")) {
+      const onHand = Math.max(0, qty);
+      avg = Math.round((onHand * avg + d * unit) / (onHand + d));
+    } else if (d < 0 && (m.kind === "consume" || m.kind === "writeoff") && unit !== avg) {
+      if (m.kind === "consume" && m.reason === "finished") skippedFinished++;
+      else if (closedMonths.has(monthOf(m.occurredAt))) skippedClosed++;
+      else changes.push({ movementId: Number(m.id), kind: m.kind, itemId: m.itemId ? Number(m.itemId) : null, orderId: m.orderId || "",
+        qty: -d, oldUnit: unit, newUnit: avg, occurredAt: m.occurredAt });
     }
+    qty += d;
   }
-  return ids;
+  return { qty, avg, changes, skippedClosed, skippedFinished };
 }
 
 export async function writeOffTransfers(db, { transferId, qty, note, occurredAt }) {
@@ -7442,10 +7479,12 @@ async function consumeLineTransfersOnce_(db, orderId, itemId, at = null) {
 
 export async function getTransferMovements(db, transferId) {
   const { results } = await db.prepare(
-    "SELECT * FROM transfer_movements WHERE transferId=? ORDER BY occurredAt DESC, id DESC LIMIT 500"
+    `SELECT m.*, o.orgId AS orderOrgId FROM transfer_movements m LEFT JOIN orders o ON o.orderId = m.orderId
+     WHERE m.transferId=? ORDER BY m.occurredAt DESC, m.id DESC LIMIT 500`
   ).bind(Number(transferId)).all();
   return results.map(r => ({ id: Number(r.id), qtyDelta: Number(r.qtyDelta), unitCost: fromCents(r.unitCostCents), kind: r.kind,
-    orderId: r.orderId || "", vendor: r.vendor || "", vendorRef: r.vendorRef || "", note: r.note || "", pctOfSheet: r.pctOfSheet == null ? null : Number(r.pctOfSheet),
+    orderId: r.orderId || "", orderOrgId: r.orderOrgId || "", itemId: r.itemId ? Number(r.itemId) : null, receiptGroup: r.receiptGroup || "", reason: r.reason || "",
+    vendor: r.vendor || "", vendorRef: r.vendorRef || "", note: r.note || "", pctOfSheet: r.pctOfSheet == null ? null : Number(r.pctOfSheet),
     occurredAt: r.occurredAt, receiptKey: r.receiptKey || "", receiptName: r.receiptName || "", voidedAt: r.voidedAt || "", voidReason: r.voidReason || "" }));
 }
 
@@ -7496,6 +7535,8 @@ export async function getTransferRestoreBlocker(db, row) {
   if (!row) return "Entry not found";
   if (!row.voidedAt) return "That entry isn't voided";
   if (!["purchase", "adjust", "writeoff"].includes(row.kind)) return "This entry was generated automatically (from an order) and was never voidable.";
+  // Replaced by a corrected sheet (editTransferSheet): restoring it would count the sheet twice.
+  if (row.kind === "purchase" && row.voidReason === "Sheet edited") return "This entry was replaced when its sheet was edited — restoring it would count the sheet twice. Open the sheet and edit it instead.";
   const delta = Number(row.qtyDelta);
   if (delta < 0) {
     const cur = await db.prepare("SELECT quantity FROM transfers WHERE id=?").bind(Number(row.transferId)).first();
@@ -11293,7 +11334,7 @@ export async function listStockPurchases(db, dateFrom, dateTo) {
       if (!g) { groups.push(g = { kind, date: String(r.occurredAt || "").slice(0, 10), vendor: r.vendor || "", vendorRef: r.vendorRef || "",
         accountId: r.accountId == null ? null : Number(r.accountId), accountName: r.accountId == null ? "" : (accounts[r.accountId] || ""),
         paidPersonally: !!Number(r.paidPersonally), receiptKey: r.receiptKey || "", receiptName: r.receiptName || "",
-        vendorChargedTax: !!Number(r.vendorChargedTax), receiptGroup: r.receiptGroup || "", qty: 0, cents: 0, items: new Map(), ids: [], lastAt: at }); open.set(key, g); }
+        vendorChargedTax: !!Number(r.vendorChargedTax), receiptGroup: r.receiptGroup || "", qty: 0, cents: 0, items: new Map(), itemCents: new Map(), ids: [], lastAt: at }); open.set(key, g); }
       g.lastAt = at;
       g.qty += Number(r.qty) || 0;
       g.cents += (Number(r.qty) || 0) * (Number(r.unitCostCents) || 0);
@@ -11303,6 +11344,7 @@ export async function listStockPurchases(db, dateFrom, dateTo) {
       const sz = r.size || "";
       sizes.set(sz, (sizes.get(sz) || 0) + (Number(r.qty) || 0));
       g.items.set(item, sizes);
+      g.itemCents.set(item, (g.itemCents.get(item) || 0) + (Number(r.qty) || 0) * (Number(r.unitCostCents) || 0));
     }
   }
   // The other parts of the same receive (R&D / written-off expense, personal-use draw), for the receipts that are linked.
@@ -11320,10 +11362,12 @@ export async function listStockPurchases(db, dateFrom, dateTo) {
     kind: g.kind, date: g.date, vendor: g.vendor, vendorRef: g.vendorRef, accountId: g.accountId, accountName: g.accountName,
     paidPersonally: g.paidPersonally, receiptKey: g.receiptKey, receiptName: g.receiptName, vendorChargedTax: g.vendorChargedTax, qty: g.qty, ids: g.ids,
     total: fromCents(g.cents),
-    // "Gildan 64000 · Navy: S×4, M×6" — or "Crest ×25" for a transfer.
+    // "Gildan 64000 · Navy: S×4, M×6" — or "Crest ×25 @ $0.84" for a transfer (its per-item price on this sheet).
     items: [...g.items.entries()].map(([name, sizes]) => {
       const parts = [...sizes.entries()].map(([sz, q]) => (sz ? sz + "×" : "×") + q);
-      return sizes.size === 1 && !([...sizes.keys()][0]) ? `${name} ${parts[0]}` : `${name}: ${parts.join(", ")}`;
+      if (!(sizes.size === 1 && !([...sizes.keys()][0]))) return `${name}: ${parts.join(", ")}`;
+      const q = [...sizes.values()][0];
+      return g.kind === "transfers" && q > 0 ? `${name} ${parts[0]} @ $${(g.itemCents.get(name) / q / 100).toFixed(2)}` : `${name} ${parts[0]}`;
     }) }))
     .sort((a, b) => (b.date || "").localeCompare(a.date || "") || b.ids[0] - a.ids[0]);
 }
@@ -11655,6 +11699,200 @@ export async function setReceiptAccount(db, rec, target) {
   if (rec.expense) stmts.push(db.prepare("UPDATE expenses SET accountId = ?, paidPersonally = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL").bind(acct, pers, now, rec.expense.id));
   if (rec.draw && acct) stmts.push(db.prepare("UPDATE owner_transactions SET accountId = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL").bind(acct, now, rec.draw.id));
   await db.batch(stmts);
+}
+
+// ---- One transfer sheet, read back and edited ------------------------------------------------------
+// A received sheet is its purchase movements (one row of the Receive form = one or two movements a cent
+// apart), plus the written-off expense and the personal-use draw that share its receiptGroup. These read
+// it back as the form it was entered on, and save a corrected version of it: the per-item price each row
+// sets flows into the transfer's average cost, and from there into every order line that used it.
+const SHEET_WO_PREFIX_ = "Transfer sheet written off — ", SHEET_PE_PREFIX_ = "Personal items — ";
+// "Vendor #123" — how the written-off expense and the personal draw name their sheet.
+export function transferSheetLabel(vendor, vendorRef) {
+  return (String(vendor || "").trim() || "Transfer sheet").slice(0, 120) + (vendorRef ? ` #${String(vendorRef).slice(0, 60)}` : "");
+}
+const sheetPartText_ = (text, prefix, label) => {
+  let s = String(text || "");
+  if (s.startsWith(prefix)) s = s.slice(prefix.length);
+  const tail = ` (${label})`;
+  if (s.endsWith(tail)) s = s.slice(0, -tail.length);
+  return s.trim();
+};
+const sheetError_ = (message) => { const e = new Error(message); e.sheetError = true; return e; };
+
+// The sheet that purchase movement `seedId` belongs to, as the Receive form's fields: {date, vendor, vendorRef,
+// accountId, paidPersonally, receipt, total, rows: [{transferId, name, count, pctOfSheet, amount, perItem}],
+// writeoff: {pct, amount, description, categoryId, expenseId}|null, personal: {...}|null, matched, reconciled}.
+// null if it isn't a live purchase. Sheets received before % of sheet was stored get each row's % from its cost.
+export async function getTransferSheet(db, seedId) {
+  const rec = await getReceiptRecords(db, "transfers", seedId);
+  if (!rec || !rec.stock.length) return null;
+  const ids = rec.stock.map(s => s.id);
+  const moves = (await db.prepare(`SELECT * FROM transfer_movements WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id`).bind(...ids).all()).results;
+  const exp = rec.expense ? await db.prepare("SELECT * FROM expenses WHERE id = ?").bind(rec.expense.id).first() : null;
+  const draw = rec.draw ? await db.prepare("SELECT * FROM owner_transactions WHERE id = ?").bind(rec.draw.id).first() : null;
+  // Back to the form's rows: a row's second movement (if any) is the very next one, same item and %, one cent dearer.
+  const groups = [];
+  for (const m of moves) {
+    const qty = Number(m.qtyDelta), unit = Number(m.unitCostCents), pct = m.pctOfSheet == null ? null : Number(m.pctOfSheet);
+    const g = groups[groups.length - 1];
+    if (g && g.parts === 1 && g.transferId === Number(m.transferId) && g.pct === pct && unit === g.lastUnit + 1) {
+      g.count += qty; g.cents += qty * unit; g.parts = 2; g.ids.push(Number(m.id)); continue;
+    }
+    groups.push({ transferId: Number(m.transferId), name: m.transferName || "", pct, count: qty, cents: qty * unit, parts: 1, lastUnit: unit, ids: [Number(m.id)] });
+  }
+  const stockCents = groups.reduce((a, g) => a + g.cents, 0), woCents = exp ? Number(exp.amountCents) : 0, peCents = draw ? Number(draw.amountCents) : 0;
+  const totalCents = stockCents + woCents + peCents;
+  const r2 = (x) => Math.round(x * 100) / 100, r4 = (x) => Math.round(x * 10000) / 10000;
+  // The %s as typed when they reproduce exactly the cents recorded; otherwise each part's share of the total.
+  let woPct = 0, pePct = 0, usePcts = groups.every(g => g.pct != null);
+  if (usePcts) {
+    const rest = 100 - groups.reduce((a, g) => a + g.pct, 0);
+    if (woCents && peCents) { woPct = r2(rest * woCents / (woCents + peCents)); pePct = r2(rest - woPct); }
+    else if (woCents) woPct = r2(rest); else if (peCents) pePct = r2(rest);
+    const back = transferSheetShares(groups.map(g => g.pct), woPct, pePct, totalCents);
+    usePcts = back.rowCents.every((c, i) => c === groups[i].cents) && back.writeoffCents === woCents && back.personalCents === peCents;
+  }
+  if (!usePcts) {
+    for (const g of groups) g.pct = totalCents ? r4(g.cents * 100 / totalCents) : r4(100 / groups.length);
+    woPct = totalCents ? r4(woCents * 100 / totalCents) : 0;
+    pePct = totalCents ? r4(peCents * 100 / totalCents) : 0;
+  }
+  const label = transferSheetLabel(rec.vendor, rec.vendorRef);
+  const matchedN = async (src, list) => list.length ? Number((await db.prepare(`SELECT count(*) n FROM statement_matches WHERE src = ? AND srcId IN (${list.map(() => "?").join(",")})`).bind(src, ...list).first()).n || 0) : 0;
+  const matched = (await matchedN("transfer_sheet", ids) + await matchedN("expense", exp ? [Number(exp.id)] : []) + await matchedN("owner", draw ? [Number(draw.id)] : [])) > 0;
+  const month = rec.date.slice(0, 7);
+  let reconciled = false;
+  for (const a of [...new Set([rec.accountId, exp && exp.accountId, draw && draw.accountId].filter(x => x != null).map(Number))]) if (await isReconciled(db, a, month)) { reconciled = true; break; }
+  return { seedId: Number(seedId), movementIds: ids, receiptGroup: rec.group || "", date: rec.date, vendor: rec.vendor, vendorRef: rec.vendorRef,
+    accountId: rec.accountId, paidPersonally: rec.paidPersonally, receiptKey: rec.receiptKey, receiptName: rec.receiptName, note: (moves[0] && moves[0].note) || "",
+    total: fromCents(totalCents), totalCents, stockCents,
+    rows: groups.map(g => ({ transferId: g.transferId, name: g.name, count: g.count, pctOfSheet: g.pct, amount: fromCents(g.cents), perItem: r4(g.cents / g.count / 100), movementIds: g.ids })),
+    writeoff: exp ? { pct: woPct, amount: fromCents(woCents), cents: woCents, description: sheetPartText_(exp.description, SHEET_WO_PREFIX_, label), categoryId: Number(exp.categoryId), expenseId: Number(exp.id), accountId: exp.accountId == null ? null : Number(exp.accountId) } : null,
+    personal: draw ? { pct: pePct, amount: fromCents(peCents), cents: peCents, description: sheetPartText_(draw.note, SHEET_PE_PREFIX_, label), ownerEntryId: Number(draw.id), accountId: Number(draw.accountId) } : null,
+    matched, reconciled };
+}
+
+// Saves a corrected sheet (the same fields the Receive form posts, already checked by the caller), or with
+// preview only works out what would change. Saving is one batch: the old purchase movements are voided
+// ("Sheet edited") and the new ones written under the same receiptGroup; the written-off expense and the
+// personal draw are updated, added or removed; and every transfer on the sheet before or after is replayed
+// (replayTransferCosts), so its stock and average cost come out right and each order line that already used
+// it is re-costed by the difference. When the sheet's money is unchanged (same total, parts, date and payer),
+// its bank-statement match moves to the new movements; when the money changes, a matched or reconciled sheet
+// is refused — unmatch it / reopen the month first. x: {rows, totalCents, writeoffPct, personalPct,
+// writeoff: {description, categoryId, deductionType}, personal: {description}, date, vendor, vendorRef,
+// accountId, paidPersonally, receiptKey?, receiptName?}. Throws an Error with .sheetError for the owner to read.
+export async function editTransferSheet(db, seedId, x, { preview = false, newReceiptGroup = "" } = {}) {
+  const sheet = await getTransferSheet(db, seedId);
+  if (!sheet) throw sheetError_("That sheet wasn't found — it may have been voided. Reload and try again.");
+  const woPctIn = Math.max(0, Number(x.writeoffPct) || 0), pePctIn = Math.max(0, Number(x.personalPct) || 0);
+  const specs = transferSheetMovementSpecs(x.rows, x.totalCents, woPctIn, pePctIn);
+  if (!specs.length) throw sheetError_("Add at least one row with a count");
+  const pcts = [...new Map(specs.map(s => [s.row, s.pct])).values()];
+  const shares = transferSheetShares(pcts, woPctIn, pePctIn, Math.max(0, Math.round(Number(x.totalCents) || 0)));
+  const paidPersonally = !!x.paidPersonally, acct = paidPersonally ? null : (Number(x.accountId) || null);
+  const stockCents = specs.reduce((a, s) => a + s.qty * s.unit, 0);
+  const woCents = woPctIn > 0 ? shares.writeoffCents : 0;
+  const peCents = pePctIn > 0 && !paidPersonally ? shares.personalCents : 0;   // paid with personal funds: no business record at all
+  const oldWo = sheet.writeoff ? sheet.writeoff.cents : 0, oldPe = sheet.personal ? sheet.personal.cents : 0;
+  const moneyChanged = stockCents !== sheet.stockCents || woCents !== oldWo || peCents !== oldPe || x.date !== sheet.date
+    || acct !== (sheet.accountId == null ? null : Number(sheet.accountId)) || paidPersonally !== !!sheet.paidPersonally;
+  if (moneyChanged && sheet.matched) throw sheetError_("Part of this sheet is matched to a bank-statement line, so its amounts, date and paid-from can't change. You can still change the rows as long as the total stays the same — or unmatch it on Reconcile first.");
+  if (moneyChanged && sheet.reconciled) throw sheetError_(`${sheet.date.slice(0, 7)} is reconciled for the account this sheet was paid from, so its amounts, date and paid-from can't change — reopen that month on Reconcile first.`);
+  if (moneyChanged && acct && await isReconciled(db, acct, String(x.date).slice(0, 7))) throw sheetError_(`${String(x.date).slice(0, 7)} is reconciled for the account you chose — reopen that month on Reconcile first.`);
+  const oldIds = sheet.movementIds;
+  const lines = (await db.prepare(`SELECT DISTINCT lineId FROM statement_matches WHERE src = 'transfer_sheet' AND srcId IN (${oldIds.map(() => "?").join(",")})`).bind(...oldIds).all()).results.map(r => Number(r.lineId));
+  if (lines.length > 1) throw sheetError_("This sheet is matched to more than one bank-statement line. Unmatch it on Reconcile first, edit it, then match it again.");
+
+  // Replay every transfer on the sheet before or after the edit, with the old purchases swapped for the new.
+  const closedCache = new Map();
+  const isClosed = async (m) => { if (!closedCache.has(m)) closedCache.set(m, await isMonthClosed(db, m)); return closedCache.get(m); };
+  const oldSet = new Set(oldIds);
+  const tids = [...new Set([...sheet.rows.map(r => r.transferId), ...specs.map(s => s.transferId)])];
+  const transfers = [];
+  for (const tid of tids) {
+    const t = await db.prepare("SELECT id, name, quantity, purchasePriceCents FROM transfers WHERE id = ?").bind(tid).first();
+    if (!t) throw sheetError_("One of the transfers on this sheet no longer exists — choose another item for that row.");
+    const live = (await db.prepare("SELECT id, qtyDelta, unitCostCents, kind, reason, itemId, orderId, occurredAt FROM transfer_movements WHERE transferId = ? AND voidedAt IS NULL").bind(tid).all()).results;
+    const closed = new Set();
+    for (const m of new Set(live.filter(m => Number(m.qtyDelta) < 0).map(m => monthOf(m.occurredAt)))) if (await isClosed(m)) closed.add(m);
+    const next = live.filter(m => !oldSet.has(Number(m.id)))
+      .concat(specs.map((s, i) => ({ s, i })).filter(({ s }) => s.transferId === tid).map(({ s, i }) => ({ id: 1e15 + i, qtyDelta: s.qty, unitCostCents: s.unit, kind: "purchase", occurredAt: x.date })));
+    const r = replayTransferCosts(next, closed);
+    transfers.push({ transferId: tid, name: t.name || "", qtyBefore: Number(t.quantity) || 0, qtyAfter: r.qty,
+      avgBefore: fromCents(t.purchasePriceCents), avgAfter: fromCents(r.avg), avgCents: r.avg, changes: r.changes, skippedClosed: r.skippedClosed, skippedFinished: r.skippedFinished });
+  }
+  const changes = transfers.flatMap(t => t.changes);
+  const consumes = changes.filter(c => c.kind === "consume");
+  const rowsOut = [];
+  for (const s of specs) {
+    const row = rowsOut[s.row] || (rowsOut[s.row] = { transferId: s.transferId, name: (transfers.find(t => t.transferId === s.transferId) || {}).name || "", count: 0, pctOfSheet: s.pct, cents: 0 });
+    row.count += s.qty; row.cents += s.qty * s.unit;
+  }
+  const summary = {
+    rows: rowsOut.filter(Boolean).map(r => {
+      const was = sheet.rows.find(o => o.transferId === r.transferId);
+      return { transferId: r.transferId, name: r.name, count: r.count, pctOfSheet: r.pctOfSheet, amount: fromCents(r.cents),
+        perItem: Math.round(r.cents / r.count * 100) / 10000, perItemBefore: was ? was.perItem : null };
+    }),
+    transfers: transfers.map(({ changes, avgCents, ...t }) => t),
+    linesRecosted: new Set(consumes.filter(c => c.itemId).map(c => c.itemId)).size,
+    orders: [...new Set(consumes.map(c => c.orderId).filter(Boolean))],
+    cogsChange: fromCents(consumes.reduce((a, c) => a + (c.newUnit - c.oldUnit) * c.qty, 0)),
+    writeoffChange: fromCents(changes.filter(c => c.kind === "writeoff").reduce((a, c) => a + (c.newUnit - c.oldUnit) * c.qty, 0)),
+    skippedClosed: transfers.reduce((a, t) => a + t.skippedClosed, 0), skippedFinished: transfers.reduce((a, t) => a + t.skippedFinished, 0),
+    moneyChanged, stockBefore: fromCents(sheet.stockCents), stockAfter: fromCents(stockCents),
+    writeoffBefore: fromCents(oldWo), writeoffAfter: fromCents(woCents), personalBefore: fromCents(oldPe), personalAfter: fromCents(peCents),
+  };
+  if (preview) return summary;
+
+  const now = new Date().toISOString(), group = sheet.receiptGroup || String(newReceiptGroup || "").slice(0, 64);
+  if (!group) throw sheetError_("Couldn't group the sheet's records — try again.");
+  const receiptKey = x.receiptKey != null && x.receiptKey !== "" ? String(x.receiptKey) : sheet.receiptKey;
+  const receiptName = x.receiptKey != null && x.receiptKey !== "" ? String(x.receiptName || "") : sheet.receiptName;
+  const label = transferSheetLabel(x.vendor, x.vendorRef);
+  const stmts = [db.prepare(`UPDATE transfer_movements SET voidedAt = ?, voidReason = 'Sheet edited' WHERE id IN (${oldIds.map(() => "?").join(",")}) AND voidedAt IS NULL`).bind(now, ...oldIds)];
+  for (const s of specs) {
+    stmts.push(transferMovementStmt_(db, { transferId: s.transferId, transferName: (transfers.find(t => t.transferId === s.transferId) || {}).name || "", qtyDelta: s.qty, unitCostCents: s.unit,
+      kind: "purchase", vendor: x.vendor, vendorRef: x.vendorRef, note: sheet.note || "Received", pctOfSheet: s.pct, occurredAt: x.date,
+      accountId: acct, paidPersonally, receiptKey, receiptName, receiptGroup: group }));
+  }
+  for (const c of changes) {
+    stmts.push(db.prepare("UPDATE transfer_movements SET unitCostCents = ? WHERE id = ? AND voidedAt IS NULL").bind(c.newUnit, c.movementId));
+    if (c.kind === "consume" && c.itemId) stmts.push(db.prepare("UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ? WHERE id = ?").bind((c.newUnit - c.oldUnit) * c.qty, c.itemId));
+  }
+  for (const t of transfers) stmts.push(db.prepare("UPDATE transfers SET quantity = ?, purchasePriceCents = ?, updatedAt = ? WHERE id = ?").bind(t.qtyAfter, t.avgCents, now, t.transferId));
+  // The written-off part (an expense) and the personal part (an owner draw).
+  const wo = x.writeoff || {}, pe = x.personal || {};
+  if (woCents > 0) {
+    const dep = wo.deductionType === "depreciation";
+    const desc = (SHEET_WO_PREFIX_ + String(wo.description || "").trim() + ` (${label})`).slice(0, 500);
+    if (sheet.writeoff) stmts.push(db.prepare(`UPDATE expenses SET expenseDate = ?, description = ?, categoryId = ?, amountCents = ?, vendor = ?, receiptKey = ?, receiptName = ?,
+        placedInService = ?, depMethod = ?, accountId = ?, paidPersonally = ?, receiptGroup = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL`)
+      .bind(x.date, desc, Number(wo.categoryId), woCents, String(x.vendor || "").trim().slice(0, 100), receiptKey, receiptName, dep ? x.date : null, dep ? "ask_cpa" : null,
+        acct, paidPersonally ? 1 : 0, group, now, sheet.writeoff.expenseId));
+    else stmts.push(db.prepare(`INSERT INTO expenses (expenseDate, description, categoryId, amountCents, vendor, businessUsePct, receiptKey, receiptName, placedInService, depMethod,
+        vendorChargedTax, accountId, paidPersonally, refundOfId, createdAt, updatedAt, receiptGroup) VALUES (?, ?, ?, ?, ?, 100, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?)`)
+      .bind(x.date, desc, Number(wo.categoryId), woCents, String(x.vendor || "").trim().slice(0, 100), receiptKey, receiptName, dep ? x.date : null, dep ? "ask_cpa" : null,
+        acct, paidPersonally ? 1 : 0, now, now, group));
+  } else if (sheet.writeoff) stmts.push(db.prepare("UPDATE expenses SET deletedAt = ? WHERE id = ? AND deletedAt IS NULL").bind(now, sheet.writeoff.expenseId));
+  if (peCents > 0) {
+    const note = (SHEET_PE_PREFIX_ + String(pe.description || "").trim() + ` (${label})`).slice(0, 500);
+    if (sheet.personal) stmts.push(db.prepare("UPDATE owner_transactions SET txDate = ?, amountCents = ?, accountId = ?, note = ?, receiptGroup = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL")
+      .bind(x.date, peCents, acct, note, group, now, sheet.personal.ownerEntryId));
+    else stmts.push(db.prepare("INSERT INTO owner_transactions (txDate, amountCents, kind, accountId, note, createdAt, updatedAt, receiptGroup) VALUES (?, ?, 'draw', ?, ?, ?, ?, ?)")
+      .bind(x.date, peCents, acct, note, now, now, group));
+  } else if (sheet.personal) stmts.push(db.prepare("UPDATE owner_transactions SET deletedAt = ? WHERE id = ? AND deletedAt IS NULL").bind(now, sheet.personal.ownerEntryId));
+  // The bank-statement match follows the sheet to its new movements (only reached when its money is unchanged).
+  if (lines.length === 1) {
+    stmts.push(db.prepare(`DELETE FROM statement_matches WHERE src = 'transfer_sheet' AND srcId IN (${oldIds.map(() => "?").join(",")})`).bind(...oldIds));
+    stmts.push(db.prepare("INSERT INTO statement_matches (lineId, src, srcId, matchedAt, auto) SELECT ?, 'transfer_sheet', id, ?, 0 FROM transfer_movements WHERE receiptGroup = ? AND kind = 'purchase' AND voidedAt IS NULL")
+      .bind(lines[0], now, group));
+  }
+  await db.batch(stmts);
+  const ids = (await db.prepare("SELECT id FROM transfer_movements WHERE receiptGroup = ? AND kind = 'purchase' AND voidedAt IS NULL ORDER BY id").bind(group).all()).results.map(r => Number(r.id));
+  return { ...summary, ids, receiptGroup: group };
 }
 
 // ---- Statement import & reconciliation (migrations/0015) ---------------------

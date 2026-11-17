@@ -282,6 +282,19 @@ printed. An order that has shipped, been delivered or been completed drops off t
 holding blanks, even if it was never marked made. Blanks are received with **Receive order** (or Import from PDF), so
 every receipt is against a vendor order.
 
+**Correcting a transfer sheet.** Each row of a received sheet sets a per-item price: its % of the sheet ÷ its
+count. To fix a sheet, open it from **Accounts & money → Blanks & transfers bought** (filter to *Transfer
+sheets*, then **Edit sheet…**) or from **Transfers → History → Open sheet**. The list also shows each
+transfer's per-item price on its sheet, so a sheet can be checked without opening it. The edit form is the
+Receive form, filled in. **Preview changes** shows each row's per-item price before → after, each transfer's
+new average cost, and the order lines that will be re-costed; **Save changes** applies it in one step. The
+sheet's old entries are voided ("Sheet edited", and can't be restored one by one) and the corrected ones are
+recorded in their place. Its written-off expense and personal draw follow. Uses already recorded are re-costed
+to the corrected average, with two exceptions: a use in a closed month keeps its cost, and so does a piece made
+for stock (that cost is already in the finished piece). A sheet matched to a bank-statement line, or in a
+reconciled month, can still have its rows changed as long as its total, date, paid-from and written-off /
+personal amounts stay the same.
+
 ## Blanks from vendors, and their prices
 
 **Vendor prices** are kept apart from what your stock cost. On a blank's form each color and size has a

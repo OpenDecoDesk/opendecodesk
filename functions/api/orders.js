@@ -115,7 +115,7 @@ import {
   getPublishedOrg, setOrgReady, getShopWizard, saveShopWizard, deleteShopWizard, listShopWizards, setProductLinksFromBlank, publishShop, getPublishState, getDraftCatalogShop, signPreviewToken,
   planDiscardShopChanges, discardShopChanges, applyProductPrices,
   getBrandRules, setBrandRules, DEFAULT_BRAND_RULES, brandRuleFor_, listBrandApprovals, addBrandApproval, revokeBrandApproval, getBrandApproval,
-  nextSupplierPoNumber, insertSupplierOrder, claimSupplierOrderRetry, setSupplierOrderResult, getSupplierOrder, listSupplierOrders, markItemsBlankOrdered, cancelSupplierOrder, getInventoryValuation, getInventoryValuations, getCogsReport, planBlankCatchUp, applyBlankCatchUp, voidInventoryMovement, getInventoryMovementById, restoreInventoryMovement, getInventoryRestoreBlocker, removeBlankColorImages, analyzePricing, planProductPreview, getPricingSettingsView, pricingBelowTargetForBlanks, setPricingSettings, getShopRate, computeShopRate, setShopRate,
+  nextSupplierPoNumber, insertSupplierOrder, claimSupplierOrderRetry, setSupplierOrderResult, getSupplierOrder, listSupplierOrders, markItemsBlankOrdered, cancelSupplierOrder, getInventoryValuation, getInventoryValuations, getCogsReport, planBlankCatchUp, applyBlankCatchUp, planTransferCatchUp, applyTransferCatchUp, voidInventoryMovement, getInventoryMovementById, restoreInventoryMovement, getInventoryRestoreBlocker, removeBlankColorImages, analyzePricing, planProductPreview, getPricingSettingsView, pricingBelowTargetForBlanks, setPricingSettings, getShopRate, computeShopRate, setShopRate,
   voidOrder, voidPayment, getClosedPeriods, isMonthClosed, closePeriod, reopenPeriod, monthOf,
   orderMonth, itemOrderMonth, paymentMonth, movementMonth, getCashReport, getAccountantExport,
   bumpCatalogVersion, listStockPurchases,
@@ -226,7 +226,7 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "listAbortReasons", "saveAbortReason", "deleteAbortReason",
   "listActiveRuns", "startRun", "completeRun", "getRunStats", "abortRun", "markHoopingDone", "getRunReportByDesign",
   "setMachineStitchCount", "listMaintenanceTasks", "saveMaintenanceTask", "deleteMaintenanceTask", "recordMaintenance", "getMaintenanceLog", "setDesignVersionStitches", "fillDesignStitchCounts",
-  "receiveBlanks", "receiveBlankOrder", "addBlankSizes", "readInvoiceWithAi", "writeOffBlanks", "getBlankMovements", "voidInventoryMovement", "restoreInventoryMovement", "getInventoryReport", "previewBlankCatchUp", "applyBlankCatchUp",
+  "receiveBlanks", "receiveBlankOrder", "addBlankSizes", "readInvoiceWithAi", "writeOffBlanks", "getBlankMovements", "voidInventoryMovement", "restoreInventoryMovement", "getInventoryReport", "previewBlankCatchUp", "applyBlankCatchUp", "previewTransferCatchUp", "applyTransferCatchUp",
   "getBlankLinks", "setBlankLink", "saveBlankLinks", "deleteBlankLink",
   "getReadyToShip", "setReadyToShipQty", "makeForStock", "getFinishedGoodsMovements", "voidFinishedGoodsMovement",
   "listGraphics", "saveGraphic", "deleteGraphic", "setProductGraphicColorBlocked", "getTierPrices", "setTierPrices",
@@ -348,7 +348,7 @@ const STAFF_ACTIONS = [
   "listAbortReasons", "saveAbortReason", "deleteAbortReason", "listActiveRuns", "startRun", "completeRun", "getRunStats", "abortRun",
   "setMachineStitchCount", "listMaintenanceTasks", "saveMaintenanceTask", "deleteMaintenanceTask", "recordMaintenance", "getMaintenanceLog", "setDesignVersionStitches", "fillDesignStitchCounts",
   "markHoopingDone", "getRunReportByDesign", "receiveBlanks", "receiveBlankOrder", "addBlankSizes", "readInvoiceWithAi", "markBlankPricesChecked", "confirmProductPrices", "getBlankVendorPriceHistory", "writeOffBlanks", "getBlankMovements", "voidInventoryMovement",
-  "restoreInventoryMovement", "getInventoryReport", "previewBlankCatchUp", "applyBlankCatchUp", "getBlankLinks", "setBlankLink", "saveBlankLinks", "deleteBlankLink", "previewProductHoopings",
+  "restoreInventoryMovement", "getInventoryReport", "previewBlankCatchUp", "applyBlankCatchUp", "previewTransferCatchUp", "applyTransferCatchUp", "getBlankLinks", "setBlankLink", "saveBlankLinks", "deleteBlankLink", "previewProductHoopings",
   "getReadyToShip", "setReadyToShipQty", "makeForStock", "getFinishedGoodsMovements", "voidFinishedGoodsMovement", "listGraphics", "saveGraphic", "deleteGraphic", "setProductGraphicColorBlocked", "getTierPrices",
   "setTierPrices", "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "getTransferMovements", "getTransferSheet",
   "voidTransferMovement", "restoreTransferMovement", "getTransferQueue", "setTransferReceived", "getGangSheet", "makeTransferLine",
@@ -5477,6 +5477,35 @@ export async function onRequestPost(context) {
       if (auditErr) return auditErr;
       const r = await applyBlankCatchUp(env.DB, chosen.map(l => l.itemId));
       return jsonResponse({ status: "ok", applied: r.applied.length, totalUnits: r.totalUnits, total: r.totalCents / 100, blanks: await getAllBlanks(env.DB) });
+    }
+    // Use transfers for past orders: made lines that never took their transfers out of stock (planTransferCatchUp).
+    // The preview plans every line; the apply re-plans exactly the ticked ones, so the later uses it re-costs match them.
+    if (body.action === "previewTransferCatchUp" || body.action === "applyTransferCatchUp") {
+      const preview = body.action === "previewTransferCatchUp";
+      let ids = null;
+      if (!preview) {
+        ids = Array.isArray(body.itemIds) ? body.itemIds.map(Number).filter(n => Number.isInteger(n) && n > 0).slice(0, 1000) : [];
+        if (!ids.length) return jsonResponse({ status: "error", message: "Tick at least one order line" }, 400);
+      }
+      const plan = await planTransferCatchUp(env.DB, ids);
+      const money = (c) => c / 100;
+      if (preview) return jsonResponse({ status: "ok",
+        lines: plan.lines.map(l => ({ ...l, cost: money(l.costCents), uses: l.uses.map(u => ({ ...u, unitCost: money(u.unitCostCents) })) })),
+        totalUnits: plan.totalUnits, total: money(plan.totalCents), shortLines: plan.shortLines,
+        recostLines: plan.recostLines, recostTotal: money(plan.recostCents), skippedClosed: plan.skippedClosed, skippedFinished: plan.skippedFinished });
+      if (!plan.lines.length) return jsonResponse({ status: "error", message: "Nothing to apply — those lines were already done or no longer qualify" }, 400);
+      const locked = plan.lines.find(l => l.locked);
+      if (locked) {
+        const label = new Date(monthOf(locked.useDate) + "-15T12:00:00Z").toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+        return jsonResponse({ status: "error", message: `${label} is closed (already filed). Reopen it under Periods & Export, or untick those lines.` }, 409);
+      }
+      const auditErr = await auditStrict({ orgId: null, orderId: null, action: "transfer.catch_up",
+        detail: { lines: plan.lines.map(l => ({ itemId: l.itemId, orderId: l.orderId, source: l.source, useDate: l.useDate,
+          uses: l.uses.map(u => ({ transferId: u.transferId, qty: u.qty, unitCostCents: u.unitCostCents })) })),
+          recost: plan.recost.map(c => ({ movementId: c.movementId, itemId: c.itemId, oldUnit: c.oldUnit, newUnit: c.newUnit, qty: c.qty })) } });
+      if (auditErr) return auditErr;
+      const r = await applyTransferCatchUp(env.DB, plan);
+      return jsonResponse({ status: "ok", applied: r.applied, totalUnits: r.totalUnits, total: money(r.totalCents), recostLines: r.recostLines, recostTotal: money(r.recostCents) });
     }
     if (body.action === "getInventoryReport") {
       const dateFrom = String(body.dateFrom || ""), dateTo = String(body.dateTo || "");

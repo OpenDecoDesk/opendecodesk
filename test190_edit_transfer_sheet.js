@@ -164,6 +164,10 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   const mgr = src.match(/const MANAGER_ACTIONS = \[[\s\S]*?\];/)[0], staff = src.match(/const STAFF_ACTIONS = \[[\s\S]*?\];/)[0];
   ok("editing needs the manager role; reading a sheet is staff", /"editTransferSheet"/.test(mgr) && !/"editTransferSheet"/.test(staff) && /"getTransferSheet"/.test(staff));
 
+  // A double click on Receive / Save changes must not send the sheet twice: the second click is ignored until the first finishes.
+  const modalSrc = read("public/admin.js").match(/function showTransferSheetModal_[\s\S]*?\n}\n/)[0];
+  ok("the sheet form saves once per click, even on a double click", /let busy = false;/.test(modalSrc) && /if \(busy\) return;/.test(modalSrc) && /save\.disabled = true;\s*try \{\s*const receiptFile/.test(modalSrc));
+
   // The account that paid for the sheets opens in the account viewer. transfer_movements has no size or color column, and
   // grouping a sheet's rows into one receipt line used to ask for size, which failed with a 500.
   console.log("\n=== Account viewer for the paying account ===");

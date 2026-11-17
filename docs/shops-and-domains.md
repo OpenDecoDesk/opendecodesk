@@ -295,6 +295,17 @@ for stock (that cost is already in the finished piece). A sheet matched to a ban
 reconciled month, can still have its rows changed as long as its total, date, paid-from and written-off /
 personal amounts stay the same.
 
+**Transfers for past orders.** A line takes its transfers out of stock when it's marked fully made, using
+the transfers it saved when it was placed. A line placed before its product carried a transfer (say,
+before the shop's reorder QR was turned on) saved none, so making it took nothing out. **Inventory & COGS →
+Use transfers for past orders…** lists every made line whose transfers never left stock, grouped by shop. A
+line whose saved options name its transfers is ticked. A line worked out from what its product carries
+*today* is marked so and starts unticked, because it may have been made without one: tick the shop, or the
+lines, you know used it. Applying takes each one out dated the day the order was made, at the transfer's
+average cost that day, and adds it to the line's cost of goods sold. Because a use dated in the past
+changes how many were on hand when later sheets came in, later uses whose average moved are re-costed too
+(not in a closed month, and not pieces made for stock). A line in a closed month can't be applied.
+
 ## Blanks from vendors, and their prices
 
 **Vendor prices** are kept apart from what your stock cost. On a blank's form each color and size has a

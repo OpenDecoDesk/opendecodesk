@@ -13585,6 +13585,81 @@ async function showBlankCatchUp_(onDone){
   refresh();
 }
 
+// Use transfers for past orders: made lines that never took their transfers out of stock, grouped by shop.
+// A line whose saved options name its transfers is ticked; one worked out from what its product carries
+// today (it was placed before the product had a transfer) starts unticked, since it may have been made
+// without one — tick the shop, or the lines, you know used them.
+async function showTransferCatchUp_(onDone){
+  if (!adminKey) adminKey = (await adminLogin()) || "";
+  if (!adminKey) return;
+  const fmt = (n) => "$" + Number(n).toFixed(2);
+  const { ov, close } = inventoryModal_("Use transfers for past orders", `<div id="tcuBody" style="font-size:13px;color:#777;">Checking past orders…</div>`, 1100);
+  const body = ov.querySelector("#tcuBody");
+  let d;
+  try { d = await hoopApi_({ action: "previewTransferCatchUp" }); } catch (e) { body.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
+  if (!d.lines.length) {
+    body.innerHTML = `<div style="font-size:14px;color:#333;">Nothing to catch up. Every made order line that uses a transfer has taken it out of stock.</div>`;
+    return;
+  }
+  const th = "padding:5px 8px;background:#f0f0f0;color:#333;font-size:11px;font-weight:700;border-bottom:2px solid #ccc;text-align:left;";
+  const td = "padding:5px 8px;border-bottom:1px solid #e5e5e5;font-size:12px;vertical-align:top;";
+  const shops = [...new Set(d.lines.map(l => l.orgId))];
+  const shopName = (s) => (d.lines.find(l => l.orgId === s) || {}).orgName || s;
+  const row = (l) => `<tr>
+      <td style="${td}"><input type="checkbox" data-tcu="${l.itemId}" data-shop="${escapeHtml(l.orgId)}" ${l.locked ? "disabled" : l.source === "order" ? "checked" : ""}></td>
+      <td style="${td}">${escapeHtml(String(l.useDate).slice(0, 10))}</td>
+      <td style="${td}">${escapeHtml(l.orderId)}<div style="color:#777;">${escapeHtml(l.customerName || "")}</div></td>
+      <td style="${td}">${escapeHtml(l.name)}${l.size ? " (" + escapeHtml(l.size) + ")" : ""} × ${l.qty}</td>
+      <td style="${td}">${l.uses.map(u => `${escapeHtml(u.name)} × ${u.qty} @ ${fmt(u.unitCost)}`).join("<br>")}</td>
+      <td style="${td}text-align:right;">${fmt(l.cost)}</td>
+      <td style="${td}">${l.source === "product" ? `<span style="color:#78350f;">From the product today — the order didn't save its transfers.</span> ` : ""}<span style="color:#b03a2e;">${l.locked ? "Month closed. " : ""}${l.shortBy > 0 ? "Short " + l.shortBy + " in stock. " : ""}${escapeHtml(l.uses.map(u => u.note).filter(Boolean).join(" "))}</span></td>
+    </tr>`;
+  body.innerHTML = `
+    <div style="font-size:13px;color:#333;margin-bottom:10px;">These order lines are made (or shipped/delivered) but never took their transfers out of stock. Applying takes each one out dated the day the order was made, at the transfer's average cost <em>on that day</em>, and adds it to the line's cost of goods sold.
+      Lines marked <b>From the product today</b> were placed before their product carried a transfer (often the shop's reorder QR), so they start unticked — tick the ones you know were made with it.</div>
+    <div id="tcuSum" style="font-size:13px;font-weight:600;margin-bottom:8px;"></div>
+    <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;">
+      <thead><tr><th style="${th}"><input type="checkbox" id="tcuAll" title="Tick or untick every line"></th><th style="${th}">Made</th><th style="${th}">Order</th><th style="${th}">Item</th><th style="${th}">Transfers</th><th style="${th}text-align:right;">Cost</th><th style="${th}">Notes</th></tr></thead>
+      <tbody>${shops.map(s => `<tr><td colspan="7" style="${td}background:#fafafa;font-weight:700;"><label style="cursor:pointer;"><input type="checkbox" data-tcu-shop="${escapeHtml(s)}"> ${escapeHtml(shopName(s))}</label></td></tr>` +
+        d.lines.filter(l => l.orgId === s).map(row).join("")).join("")}</tbody></table></div>
+    ${d.shortLines ? `<div style="margin-top:10px;padding:8px 12px;border:1px solid #fcd34d;background:#fffbeb;border-radius:6px;font-size:12px;color:#78350f;">${d.shortLines} line${d.shortLines === 1 ? "" : "s"} would take more transfers than were in stock on that day, so that transfer's stock goes negative until you receive the sheet they came from. If you already counted those transfers by hand AFTER those orders, applying them would count them twice; untick those lines.</div>` : ""}
+    <div style="margin-top:10px;font-size:12px;color:#666;">A use dated in the past changes how many were on hand when later sheets came in, so later uses whose average moved are re-costed too (except in a closed month, and pieces made for stock).${d.recostLines ? ` With every line ticked that's ${d.recostLines} order line${d.recostLines === 1 ? "" : "s"}, ${d.recostTotal >= 0 ? "+" : "−"}${fmt(Math.abs(d.recostTotal))}.` : ""}</div>
+    <div id="tcuErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
+      <button type="button" class="admin-btn" id="tcuCancel" style="background:#fff;color:#232323;border:1px solid #999;">Cancel</button>
+      <button type="button" class="admin-btn" id="tcuApply">Apply to ticked lines</button></div>`;
+  const boxes = () => [...body.querySelectorAll("input[data-tcu]:not(:disabled)")];
+  const refresh = () => {
+    const on = boxes().filter(b => b.checked).map(b => d.lines.find(l => String(l.itemId) === b.dataset.tcu));
+    const units = on.reduce((t, l) => t + l.uses.reduce((a, u) => a + u.qty, 0), 0);
+    body.querySelector("#tcuSum").textContent = `${on.length} of ${d.lines.length} lines ticked · ${units} transfer${units === 1 ? "" : "s"} · ${fmt(on.reduce((t, l) => t + l.cost, 0))} cost of goods sold`;
+    body.querySelector("#tcuApply").disabled = !on.length;
+    for (const s of body.querySelectorAll("input[data-tcu-shop]")) {
+      const mine = boxes().filter(b => b.dataset.shop === s.dataset.tcuShop);
+      s.checked = mine.length > 0 && mine.every(b => b.checked); s.indeterminate = !s.checked && mine.some(b => b.checked);
+    }
+    const all = boxes(); body.querySelector("#tcuAll").checked = all.length > 0 && all.every(b => b.checked);
+  };
+  body.querySelectorAll("input[data-tcu]").forEach(b => b.addEventListener("change", refresh));
+  body.querySelectorAll("input[data-tcu-shop]").forEach(s => s.addEventListener("change", () => {
+    boxes().filter(b => b.dataset.shop === s.dataset.tcuShop).forEach(b => { b.checked = s.checked; }); refresh(); }));
+  body.querySelector("#tcuAll").addEventListener("change", (e) => { boxes().forEach(b => { b.checked = e.target.checked; }); refresh(); });
+  body.querySelector("#tcuCancel").onclick = close;
+  body.querySelector("#tcuApply").onclick = async () => {
+    const ids = boxes().filter(b => b.checked).map(b => Number(b.dataset.tcu));
+    if (!ids.length) return;
+    if (!await askConfirm_(`Take transfers out of stock for ${ids.length} order line${ids.length === 1 ? "" : "s"}? This changes past cost of goods sold. It is recorded in the audit log.`)) return;
+    const btn = body.querySelector("#tcuApply"); btn.disabled = true;
+    try {
+      const r = await hoopApi_({ action: "applyTransferCatchUp", itemIds: ids });
+      showToast(`Done: ${r.applied} line${r.applied === 1 ? "" : "s"}, ${r.totalUnits} transfers, ${fmt(r.total)} cost of goods sold` +
+        (r.recostLines ? `; ${r.recostLines} later line${r.recostLines === 1 ? "" : "s"} re-costed (${r.recostTotal >= 0 ? "+" : "−"}${fmt(Math.abs(r.recostTotal))}).` : "."));
+      close(); if (typeof onDone === "function") onDone();
+    } catch (e) { body.querySelector("#tcuErr").textContent = e.message; btn.disabled = false; }
+  };
+  refresh();
+}
+
 const WRITEOFF_REASONS_ = { damaged: "Damaged", lost: "Lost / miscounted", test: "Used for testing, samples, or shop scrap", other: "Other" };
 // The reason the server records for each (migrations/0060): testing use is reported apart from damage / loss.
 const WRITEOFF_REASON_KEYS_ = { damaged: "damaged", lost: "lost", test: "testing", other: "other" };
@@ -15335,7 +15410,8 @@ async function renderInventoryReport(app){
       </form>
       <div style="margin:-6px 0 18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
         <button type="button" class="admin-btn" id="cogsCatchUp" style="font-size:13px;padding:6px 14px;">Use blanks for past orders…</button>
-        <span style="font-size:12px;color:#666;">Orders made before stock was tracked (or before you entered their receipts) get their blanks taken out of stock, priced as of the day they were made.</span>
+        <button type="button" class="admin-btn" id="cogsTransferCatchUp" style="font-size:13px;padding:6px 14px;">Use transfers for past orders…</button>
+        <span style="font-size:12px;color:#666;">Orders made before stock was tracked (or before you entered their receipts or turned on a transfer) get their blanks or transfers taken out of stock, priced as of the day they were made.</span>
       </div>
       <div id="cogsResults"></div>
     </div>`;
@@ -15436,6 +15512,7 @@ async function renderInventoryReport(app){
   }
   document.getElementById("cogsFilters").addEventListener("submit", (e) => { e.preventDefault(); load(); });
   document.getElementById("cogsCatchUp").addEventListener("click", () => showBlankCatchUp_(load));
+  document.getElementById("cogsTransferCatchUp").addEventListener("click", () => showTransferCatchUp_(load));
   // The "Use blanks for past orders…" button inside the linked-now notice opens the same window.
   document.getElementById("cogsResults").addEventListener("click", (e) => { if (e.target.closest(".cogs-catchup-inline")) showBlankCatchUp_(load); });
   document.querySelectorAll(".cogsQuick").forEach(b => b.addEventListener("click", () => {
@@ -21375,7 +21452,14 @@ function showTransferSheetModal_(transfers, onDone, existing){
     fi.click();
   };
   ov.querySelector("#trCancel").onclick = close;
+  // One save at a time: a second click while the first is still on its way would receive the sheet twice.
+  let busy = false;
   ov.querySelector("#trSave").onclick = async () => {
+    if (busy) return;
+    busy = true;
+    try { await saveSheet_(); } finally { busy = false; }
+  };
+  const saveSheet_ = async () => {
     const err = ov.querySelector("#trErr");
     const save = ov.querySelector("#trSave");
     const paid = ov.querySelector("#trPaid").value;
@@ -21400,6 +21484,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
       save.disabled = false;
       return;
     }
+    save.disabled = true;
     try {
       const receiptFile = ov.querySelector("#trReceipt") && ov.querySelector("#trReceipt").files[0];
       if (receiptFile) { save.textContent = "Uploading receipt…"; const r = await uploadReceipt_(receiptFile); body.receiptKey = r.key; body.receiptName = r.name; }
@@ -21411,7 +21496,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
         showToast(n ? `Sheet saved — ${n} order line${n === 1 ? "" : "s"} re-costed.` : "Sheet saved.");
       } else showToast("Sheet received.");
       onDone && onDone();
-    } catch (e) { err.textContent = e.message; save.textContent = ed ? "Save changes" : "Receive"; }
+    } catch (e) { err.textContent = e.message; save.textContent = ed ? "Save changes" : "Receive"; save.disabled = false; }
   };
 }
 

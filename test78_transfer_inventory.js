@@ -66,6 +66,7 @@ const near = (a, b) => Math.abs(a - b) < 0.005;
   console.log("\n=== Valuation + COGS report + write-off + void ===");
   const val = await lib.getTransferValuation(d1, "2026-12-31T23:59:59Z");
   ok("valuation on hand reflects stock after the consume", val.units === 18 + 5);
+  d1._raw.run("UPDATE orders SET shippedAt = manufacturedAt WHERE manufacturedAt IS NOT NULL AND shippedAt IS NULL AND deliveredAt IS NULL AND completedAt IS NULL");   // sold the day made: COGS goes by the sale date (Global settings → Bookkeeping)
   const cogs = await lib.getTransferCogs(d1, "2026-01-01", "2027-12-31");
   const totalCogs = cogs.reduce((a, m) => a + m.cogs, 0), totalPurch = cogs.reduce((a, m) => a + m.purchases, 0);
   ok("COGS report: $4 consumed and the sheet purchases recorded", near(totalCogs, 4) && near(totalPurch, 30 + 22));

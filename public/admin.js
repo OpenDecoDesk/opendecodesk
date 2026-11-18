@@ -1224,7 +1224,7 @@ function drawHomeMoney_(d){
         <tbody>${row("Year to date", y)}${row("Month to date", m)}</tbody>
       </table>
     </div>
-    <div class="home-note">Revenue is goods sold less sales tax and discounts, by the date the order was placed; COGS is the blanks, finished stock and transfers used.</div>
+    <div class="home-note home-basis">Revenue is goods sold less sales tax and discounts; COGS is the blanks, finished stock and transfers used on those same orders — ${escapeHtml(saleDateNote_(d.saleDate))}.</div>
     ${warn}
     ${links ? `<div class="home-note">${links}</div>` : ""}`;
 }
@@ -8635,6 +8635,12 @@ async function renderGlobalSettings(app){
       const ld = await lr.json();
       if(lr.ok && ld.status === "ok"){ locale = ld.locale || locale; effectiveTz = ld.effectiveTimeZone || "UTC"; envTz = ld.envTimeZone || ""; }
     }catch(e){}
+    // Bookkeeping (Global settings → Bookkeeping): when an order counts as sold, for revenue and cost alike.
+    let accounting = { saleDate: "shipped" };
+    try{
+      const ar = await hoopApi_({ action: "getAccountingSettings" });
+      if(ar && ar.status === "ok" && ar.accounting) accounting = ar.accounting;
+    }catch(e){}
     let emailSettings = { attachPdf: true }, emailSending = null;
     try{
       const er = await hoopApi_({ action: "getEmailSettings" });
@@ -8770,6 +8776,20 @@ async function renderGlobalSettings(app){
         <label><span id="gTaxJurisdictionLabel">${us ? "State you collect sales tax for (2-letter code)" : "State / region you collect sales tax for"}</span>
           <input type="text" id="gTaxJurisdiction" maxlength="${us ? 2 : 50}" value="${escapeHtml(salesTax.jurisdiction || "")}" placeholder="${us ? "e.g. OH" : "e.g. Ontario"}" style="${us ? "max-width:80px;text-transform:uppercase;" : "max-width:320px;"}">
         </label>
+
+        <div id="gBooksExtra">
+        <h2 style="margin:22px 0 12px;">Bookkeeping</h2>
+        <label>Count a sale — its revenue and its cost — when
+          <select id="gSaleDate" style="max-width:420px;">
+            <option value="shipped" ${accounting.saleDate === "placed" ? "" : "selected"}>it ships or is delivered (recommended)</option>
+            <option value="placed" ${accounting.saleDate === "placed" ? "selected" : ""}>the order is placed</option>
+          </select>
+        </label>
+        <div class="admin-note" id="gSaleDateHelp" style="margin:-4px 0 14px;">
+          An order's revenue and the cost of its blanks and transfers always land in the same month. <strong>Ships or is delivered</strong> is the usual accounting rule: until then, blanks used on it still count as stock (pickup orders count when picked up, downloads when completed).
+          <strong>Order placed</strong> is simpler, but an order made later has no cost until it's made, so a month can look better than it was. Used by Home, the Revenue report and Inventory &amp; COGS; the sales tax report always goes by the order date.
+        </div>
+        </div>
 
         <div id="gProductionExtra"${productionOn ? "" : ' style="display:none;"'}>
         <h2 style="margin:22px 0 12px;">Pricing</h2>
@@ -9136,6 +9156,16 @@ async function submitGlobalSettings(){
     if(!taxRes.ok || taxData.status === "error"){
       if(errEl) errEl.textContent = (taxData && taxData.message) || "Could not save the sales tax rate.";
       return;
+    }
+    const saleDateSel = document.getElementById("gSaleDate");
+    if(saleDateSel){
+      let acc;
+      try{ acc = await hoopApi_({ action: "updateAccountingSettings", saleDate: saleDateSel.value }); }
+      catch(e){ acc = { status: "error", message: e.message }; }
+      if(!acc || acc.status !== "ok"){
+        if(errEl) errEl.textContent = (acc && acc.message) || "Could not save the bookkeeping setting.";
+        return;
+      }
     }
     const gv = (id) => { const e = document.getElementById(id); return e ? e.value.trim() : ""; };
     if(document.getElementById("gBizName")){
@@ -13042,6 +13072,12 @@ async function loadBlankLinksSection(orgId, product) {
 
 // ---- Blanks management --------------------------------------------------------
 
+// Which orders a money figure covers, by Global settings → Bookkeeping (getAccountingSettings).
+function saleDateNote_(basis){
+  return basis === "placed" ? "orders counted on the date they were placed"
+    : "orders counted when they ship or are delivered";
+}
+
 // ---- Revenue Report ----------------------------------------------------------
 async function renderRevenueReport(app) {
   adminSetHash("revenue");
@@ -13070,8 +13106,8 @@ async function renderRevenueReport(app) {
         <div>
           <label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">Basis</label>
           <select id="revBasis" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;background:var(--surface,#fff);color:var(--ink,#111);"
-                  title="Accrual: sales by the date the order was placed. Cash: money actually received / refunded by the date it moved.">
-            <option value="accrual">Accrual (orders placed)</option>
+                  title="Accrual: the orders sold in the range, by the sale date set in Global settings → Bookkeeping. Cash: money actually received / refunded by the date it moved.">
+            <option value="accrual">Accrual (orders sold)</option>
             <option value="cash">Cash (money received)</option>
           </select>
         </div>
@@ -13125,7 +13161,7 @@ async function renderRevenueReport(app) {
     const footL = "padding:10px 14px;text-align:left;background:#f0f0f0;color:#111;font-weight:700;border-top:2px solid #aaa;font-size:15px;";
     const dLabel = `${new Date(dateFrom + "T12:00:00").toLocaleDateString()} – ${new Date(dateTo + "T12:00:00").toLocaleDateString()}`;
     return `
-      <div style="font-size:13px;color:#555;margin-bottom:10px;">${dLabel}</div>
+      <div style="font-size:13px;color:#555;margin-bottom:10px;">${dLabel} · ${escapeHtml(saleDateNote_(data.saleDate))}</div>
       <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;">
         <table style="width:100%;border-collapse:collapse;font-size:14px;">
           <thead>
@@ -13222,6 +13258,7 @@ const AUDIT_ACTION_LABELS = {
   "transfer.movement_voided":    "Transfer entry voided",
   "transfer.movement_restored":  "Transfer entry restored (void undone)",
   "settings.sales_tax_set":   "Sales tax rate set",
+  "settings.accounting_set":  "Bookkeeping sale date set",
   "org.tax_exemption_set":    "Tax exemption set",
   "report.accountant_export": "Accountant export",
   "payments.stripe_fees_backfilled": "Stripe fees backfilled",
@@ -15606,6 +15643,7 @@ async function renderInventoryReport(app){
       const finishedRows = (d.finished && d.finished.ending && d.finished.ending.rows) || [];
       const checkOff = rf && Math.abs(rf.check) >= 0.05;
       el.innerHTML = `
+        <div class="cogs-basis" style="font-size:13px;color:#555;margin-bottom:6px;">COGS: ${escapeHtml(saleDateNote_(d.saleDate))} (Global settings → Bookkeeping), the same as their revenue.</div>
         <div style="font-size:13px;color:#555;margin-bottom:10px;">At weighted-average cost. Blanks come out of stock when pieces are made (or decorated for stock); finished stock leaves when an order is made. Stock history starts when inventory tracking was switched on; costs for orders made before then are estimates from their linked blanks.</div>
         ${g ? `<h3 style="margin:0 0 8px;font-size:15px;">Inventory by group</h3>
         <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;margin-bottom:16px;"><table class="cogs-groups" style="width:100%;border-collapse:collapse;font-size:14px;">
@@ -15614,6 +15652,7 @@ async function renderInventoryReport(app){
             <tr><td style="${td}text-align:left;">Blanks for sale</td><td style="${td}">${unitsVal(g.forSale.beginning)}</td><td style="${td}">${unitsVal(g.forSale.ending)}</td></tr>
             <tr><td style="${td}text-align:left;">Blanks for testing / shop use <div style="font-size:11px;color:#777;">Could still be sold — marked on the blank (Blanks → Edit)</div></td><td style="${td}">${unitsVal(g.testing.beginning)}</td><td style="${td}">${unitsVal(g.testing.ending)}</td></tr>
             <tr><td style="${td}text-align:left;">Finished stock <div style="font-size:11px;color:#777;">Decorated for a shop, listed as in stock on its site (Products → Stock)</div></td><td style="${td}">${unitsVal(g.finished.beginning)}</td><td style="${td}">${unitsVal(g.finished.ending)}</td></tr>
+            ${d.notYetSold && (d.notYetSold.beginning || d.notYetSold.ending) ? `<tr class="cogs-not-sold"><td style="${td}text-align:left;">${d.saleDate === "placed" ? "Counted as sold, not made yet" : "Made, not yet shipped"} <div style="font-size:11px;color:#777;">${d.saleDate === "placed" ? "Orders placed, whose blanks aren't used yet — their cost is already in COGS" : "Blanks and finished stock used on orders that haven't shipped or been delivered — their cost moves to COGS when they do"} (Global settings → Bookkeeping)</div></td><td style="${td}">${fmt(d.notYetSold.beginning)}</td><td style="${td}">${fmt(d.notYetSold.ending)}</td></tr>` : ""}
             <tr><td style="${td}text-align:left;font-weight:700;">All inventory</td><td style="${td}font-weight:700;">${fmt(rf ? rf.beginning : d.beginning.value)}</td><td style="${td}font-weight:700;">${fmt(rf ? rf.ending : d.ending.value)}</td></tr>
           </tbody></table></div>` : ""}
         <h3 style="margin:0 0 8px;font-size:15px;">Roll-forward <span style="font-weight:400;color:#777;font-size:12px;">(Schedule C Part III)</span></h3>

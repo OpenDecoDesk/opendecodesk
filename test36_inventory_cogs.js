@@ -115,6 +115,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
       request: { url: "https://admin.example.com/api/orders", json: async () => Object.assign({ key: "x" }, body), headers: { get: () => null } } });
     return { status: res.status, body: JSON.parse(await res.text()) };
   };
+  d1._raw.run("UPDATE orders SET shippedAt = manufacturedAt WHERE manufacturedAt IS NOT NULL AND shippedAt IS NULL AND deliveredAt IS NULL AND completedAt IS NULL");   // sold the day made: COGS goes by the sale date (Global settings → Bookkeeping)
   let r = await call({ action: "getInventoryReport", dateFrom: "2026-01-01", dateTo: "2099-12-31" });
   const aug = r.body.cogs.rows.find(x => x.month === "2026-08");
   console.log("August: $10.47 estimated COGS for the order made before tracking (2 × $3.49 + 1 × $3.49):", !!aug && aug.cogs === 10.47 && aug.estimatedPart === 10.47);
@@ -124,6 +125,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   console.log("…as NOT linked (link the size first):", r.body.cogs.missingCost.every(m => m.reason === "notLinked"));
   const mugSizes = d1.q("SELECT DISTINCT size FROM order_items WHERE productId='mug'").map(x => x.size);
   for (const sz of mugSizes) d1._raw.run("INSERT INTO product_blank_links (orgId, productId, productSize, blankId, blankSize) VALUES ('prime','mug',?,1,'S')", [sz]);
+  d1._raw.run("UPDATE orders SET shippedAt = manufacturedAt WHERE manufacturedAt IS NOT NULL AND shippedAt IS NULL AND deliveredAt IS NULL AND completedAt IS NULL");   // sold the day made: COGS goes by the sale date (Global settings → Bookkeeping)
   let r2 = await call({ action: "getInventoryReport", dateFrom: "2026-01-01", dateTo: "2099-12-31" });
   console.log("once the size is linked, the same lines say 'linked now' (made before the link — use Use blanks for past orders):",
     r2.body.cogs.missingCost.length === 2 && r2.body.cogs.missingCost.every(m => m.reason === "linkedNow"));

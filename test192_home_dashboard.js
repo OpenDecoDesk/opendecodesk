@@ -24,6 +24,9 @@ const at = (day) => day + "T12:00:00.000Z";
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt) VALUES ('prime','prime','Example League','t','t'), ('rec','rec','REC','t','t');`);
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  // These figures count each order on the day it was placed (Global settings → Bookkeeping → "the order is placed";
+  // the default, shipped or delivered, is test193's).
+  d1._raw.run("INSERT INTO global_settings (key, value) VALUES ('accounting', '{\"saleDate\":\"placed\"}')");
 
   // Every order: 2 × $23 = $46 of goods, no tax, no shipping — placed today unless said otherwise.
   const add = (orderId, orgId, extra = {}, placed = today) => lib.insertOrder(d1, Object.assign({ orderId, orgId, customerName: "Cust " + orderId,

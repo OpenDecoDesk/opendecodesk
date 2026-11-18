@@ -196,7 +196,7 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   ok("…gross sales add up: every rush fee lands in exactly one bucket", (t => Math.round((t.taxableSales + t.exemptSales + t.interstateSales + t.nonTaxableSales) * 100) === Math.round(t.grossSales * 100))(ret.total));
   const rep = await lib.getSalesTaxReport(d1, from, to);
   ok("the by-state report has a Rush fees column (and its tax)", Math.round(rep.reduce((s, x) => s + x.rushFees, 0) * 100) === sumRush && rep.some(x => x.rushTax > 0) && taxedRush > 0);
-  const rev = await lib.getRevenueData(d1, from, to);
+  const rev = await lib.getRevenueData(d1, from, to, { basis: "placed" });   // by the date placed (Global settings → Bookkeeping)
   ok("the revenue report's total includes rush fees", rev.some(x => x.rushFee === 20 && x.effectiveTotal === 70));
 
   console.log("\n=== Tax added on top (taxMode exclusive) ===");

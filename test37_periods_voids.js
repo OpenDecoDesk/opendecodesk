@@ -83,7 +83,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   dup = await lib.getOrderById(d1, "DUP");
   console.log("legacy deleteOrder now voids: row kept with reason:", r.status === 200 && !!dup && !!dup.voidedAt && dup.voidReason === "Duplicate of AUG");
   console.log("audited as order.voided with a snapshot:", audits("order.voided") === 1);
-  const rev = await lib.getRevenueData(d1, "2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z");
+  const rev = await lib.getRevenueData(d1, "2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z", { basis: "placed" });   // by the date placed (Global settings → Bookkeeping)
   const tax = await lib.getSalesTaxReport(d1, "2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z");
   const taxGross = tax.reduce((a, x) => a + x.grossSales, 0);
   console.log("voided and test orders excluded from sales-tax gross (JUL $16 + AUG $32):", taxGross === 48);

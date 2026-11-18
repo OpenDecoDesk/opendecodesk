@@ -92,6 +92,37 @@ export async function setSalesTaxSettings(db, { rateBps, jurisdiction, taxMode }
   return next;
 }
 
+// ---- Bookkeeping: the date an order counts as sold (Global settings → Bookkeeping) -----------------
+// One date per order carries BOTH its revenue and its cost, so the two always land in the same month
+// (the matching principle). "shipped" (the default): when it ships, is delivered / picked up, or — with
+// nothing to ship, like downloads — is completed; until then its blanks are stock, not cost. "placed":
+// the day it was ordered (simpler; an order not made yet has no cost until it is). The sales tax report
+// stays on the order date either way: when tax is due is a state rule, not a bookkeeping choice.
+export const SALE_DATE_BASES = ["shipped", "placed"];
+const saleDateBasis_ = (b) => (b === "placed" ? "placed" : "shipped");
+export async function getAccountingSettings(db) {
+  const raw = await getSettingRaw(db, "accounting").catch(() => null);
+  const v = tryParse_(raw, {}) || {};
+  return { saleDate: saleDateBasis_(v.saleDate) };
+}
+export async function getSaleDateBasis(db) { return (await getAccountingSettings(db)).saleDate; }
+export async function setAccountingSettings(db, { saleDate }) {
+  const next = { ...(await getAccountingSettings(db)), saleDate: saleDateBasis_(saleDate) };
+  await setSettingRaw(db, "accounting", JSON.stringify(next));
+  // Home's figures depend on it: work them out again on the next visit.
+  await db.prepare("DELETE FROM global_settings WHERE key = 'dashboardCache'").run().catch(() => {});
+  return next;
+}
+// The SQL for an order's sale date. The "shipped" expression is exactly the one indexed by
+// idx_orders_sale_date (migrations/0088), so a range on it can use that index; keep them identical.
+export function saleDateSql_(basis, o = "o") {
+  return saleDateBasis_(basis) === "placed" ? `${o}.placedAt` : `COALESCE(${o}.shippedAt, ${o}.deliveredAt, ${o}.completedAt)`;
+}
+// A stock movement of one of `kinds` made for an order that exists: it counts on that order's sale date.
+function orderLinked_(m, kinds) {
+  return `(${m}.orderId IS NOT NULL AND ${m}.kind IN (${kinds.map(k => `'${k}'`).join(", ")}) AND EXISTS (SELECT 1 FROM orders ox WHERE ox.orderId = ${m}.orderId))`;
+}
+
 // ---- What the customer owes --------------------------------------------------
 // THE formula, in integer cents: active items, plus shipping while anything is still on the order,
 // minus the discount — plus the sales tax when the order's prices don't include it (taxMode
@@ -7308,41 +7339,55 @@ async function currentBlankNames_(db) {
   return new Map(results.map(b => [Number(b.id), b.name || [b.brand, b.color].filter(Boolean).join(" ")]));
 }
 
-export async function getCogsReport(db, dateFrom, dateTo) {
+export async function getCogsReport(db, dateFrom, dateTo, { basis } = {}) {
   const nb = await noBlankLine_(db);
+  const saleBasis = basis || await getSaleDateBasis(db), sale = saleDateSql_(saleBasis, "o");
   // By month, kind and reason (migrations/0060): a consume with reason 'finished' moved the blank into
   // finished stock (not COGS); a write-off's reason splits testing use from damage / loss.
+  // A blank used on an order counts in the month of the ORDER's sale date (getSaleDateBasis), so its cost
+  // lands beside its revenue; every other movement counts on the day it happened.
+  const blankMv = (reasonCol) => db.prepare(
+    `SELECT month, kind, reason, SUM(outCents) AS outCents, SUM(inCents) AS inCents, SUM(units) AS units FROM (
+       SELECT substr(m.occurredAt, 1, 7) AS month, m.kind, ${reasonCol} AS reason, -m.qtyDelta * m.unitCostCents AS outCents,
+              m.qtyDelta * m.unitCostCents AS inCents, m.qtyDelta AS units
+       FROM inventory_movements m WHERE m.occurredAt >= ? AND m.occurredAt <= ? AND m.kind IN ('consume', 'purchase', 'writeoff', 'adjust') AND m.voidedAt IS NULL
+         AND NOT ${orderLinked_("m", ["consume"])}
+       UNION ALL
+       SELECT substr(${sale}, 1, 7), m.kind, ${reasonCol}, -m.qtyDelta * m.unitCostCents, m.qtyDelta * m.unitCostCents, m.qtyDelta
+       FROM orders o JOIN inventory_movements m ON m.orderId = o.orderId
+       WHERE ${sale} >= ? AND ${sale} <= ? AND m.kind = 'consume' AND m.voidedAt IS NULL
+     ) GROUP BY month, kind, reason`
+  ).bind(dateFrom, dateTo, dateFrom, dateTo).all();
   let mv;
   try {
-    ({ results: mv } = await db.prepare(
-      `SELECT substr(occurredAt, 1, 7) AS month, kind, COALESCE(reason, '') AS reason, SUM(-qtyDelta * unitCostCents) AS outCents,
-              SUM(qtyDelta * unitCostCents) AS inCents, SUM(qtyDelta) AS units
-       FROM inventory_movements WHERE occurredAt >= ? AND occurredAt <= ? AND kind IN ('consume', 'purchase', 'writeoff', 'adjust') AND voidedAt IS NULL
-       GROUP BY month, kind, reason`
-    ).bind(dateFrom, dateTo).all());
+    ({ results: mv } = await blankMv("COALESCE(m.reason, '')"));
   } catch (e) {
     if (!/no such column/i.test(String(e && e.message))) throw e;
-    ({ results: mv } = await db.prepare(
-      `SELECT substr(occurredAt, 1, 7) AS month, kind, '' AS reason, SUM(-qtyDelta * unitCostCents) AS outCents,
-              SUM(qtyDelta * unitCostCents) AS inCents, SUM(qtyDelta) AS units
-       FROM inventory_movements WHERE occurredAt >= ? AND occurredAt <= ? AND kind IN ('consume', 'purchase', 'writeoff', 'adjust') AND voidedAt IS NULL
-       GROUP BY month, kind`
-    ).bind(dateFrom, dateTo).all());
+    ({ results: mv } = await blankMv("''"));
   }
   let fg = [];
   try {
+    // Finished stock sold on an order (sell / return) follows the order's sale date too.
     ({ results: fg } = await db.prepare(
-      `SELECT substr(occurredAt, 1, 7) AS month, kind, SUM(qtyDelta * unitCostCents) AS inCents, SUM(qtyDelta) AS units
-       FROM finished_goods_movements WHERE occurredAt >= ? AND occurredAt <= ? AND voidedAt IS NULL GROUP BY month, kind`
-    ).bind(dateFrom, dateTo).all());
+      `SELECT month, kind, SUM(inCents) AS inCents, SUM(units) AS units FROM (
+         SELECT substr(f.occurredAt, 1, 7) AS month, f.kind, f.qtyDelta * f.unitCostCents AS inCents, f.qtyDelta AS units
+         FROM finished_goods_movements f WHERE f.occurredAt >= ? AND f.occurredAt <= ? AND f.voidedAt IS NULL
+           AND NOT ${orderLinked_("f", ["sell", "return"])}
+         UNION ALL
+         SELECT substr(${sale}, 1, 7), f.kind, f.qtyDelta * f.unitCostCents, f.qtyDelta
+         FROM orders o JOIN finished_goods_movements f ON f.orderId = o.orderId
+         WHERE ${sale} >= ? AND ${sale} <= ? AND f.kind IN ('sell', 'return') AND f.voidedAt IS NULL
+       ) GROUP BY month, kind`
+    ).bind(dateFrom, dateTo, dateFrom, dateTo).all());
   } catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
-  // These two find the period's orders by manufacturedAt (idx_orders_manufactured, migrations/0087). The
-  // unary + on isTest / voidedAt keeps SQLite from choosing idx_orders_reportable for them instead,
-  // which (with no statistics) looks selective but walks every live order in the history.
+  // Estimated costs (lines made before stock was tracked) and lines with no cost, by the order's sale
+  // date. A line counts as missing its cost only once its order has been made. The unary + on isTest /
+  // voidedAt keeps SQLite from choosing idx_orders_reportable for them instead, which (with no
+  // statistics) looks selective but walks every live order in the history.
   const { results: est } = await db.prepare(
-    `SELECT substr(o.manufacturedAt, 1, 7) AS month, SUM(i.cogsCents) AS cents, SUM(i.qty) AS units
+    `SELECT substr(${sale}, 1, 7) AS month, SUM(i.cogsCents) AS cents, SUM(i.qty) AS units
      FROM order_items i JOIN orders o ON o.orderId = i.orderId
-     WHERE i.cogsSource = 'estimate' AND o.manufacturedAt >= ? AND o.manufacturedAt <= ? AND +o.isTest = 0
+     WHERE i.cogsSource = 'estimate' AND ${sale} >= ? AND ${sale} <= ? AND +o.isTest = 0
      GROUP BY month`
   ).bind(dateFrom, dateTo).all();
   const { results: missing } = await db.prepare(
@@ -7351,8 +7396,8 @@ export async function getCogsReport(db, dateFrom, dateTo) {
                       AND l.productColor = (CASE WHEN i.configJson LIKE '{%' THEN COALESCE(json_extract(i.configJson,'$.garmentColor'),'') ELSE '' END)
                       AND l.productSize = i.size) AS linkedNow
      FROM order_items i JOIN orders o ON o.orderId = i.orderId
-     WHERE o.manufacturedAt >= ? AND o.manufacturedAt <= ? AND i.cancelDate IS NULL AND i.cogsCents IS NULL
-       AND +o.isTest = 0 AND +o.voidedAt IS NULL AND NOT ${nb("i")} ORDER BY o.manufacturedAt`
+     WHERE ${sale} >= ? AND ${sale} <= ? AND o.manufacturedAt IS NOT NULL AND i.cancelDate IS NULL AND i.cogsCents IS NULL
+       AND +o.isTest = 0 AND +o.voidedAt IS NULL AND NOT ${nb("i")} ORDER BY ${sale}`
   ).bind(dateFrom, dateTo).all();
   const months = {};
   const at = (m) => (months[m] = months[m] || { month: m, cogsBlanks: 0, cogsFinished: 0, estimated: 0, unitsUsed: 0, purchases: 0,
@@ -7389,7 +7434,7 @@ export async function getCogsReport(db, dateFrom, dateTo) {
   // Why each made line has no cost: `reason` "linkedNow" (its size IS linked now — it was made before
   // the link existed; "Use blanks for past orders" fixes it), "notLinked" (link the size first) or
   // "custom" (a custom line with no product — it can't be linked to a blank).
-  return { rows, missingCost: missing.map(r => ({ orderId: r.orderId, orgId: r.orgId, name: r.name, size: r.size, qty: Number(r.qty),
+  return { basis: saleBasis, rows, missingCost: missing.map(r => ({ orderId: r.orderId, orgId: r.orgId, name: r.name, size: r.size, qty: Number(r.qty),
     reason: !r.productId || r.productId === "__custom__" ? "custom" : Number(r.linkedNow) ? "linkedNow" : "notLinked" })) };
 }
 
@@ -7732,12 +7777,43 @@ export async function getTransferValuation(db, asOf) {
   return { asOf, rows, units: rows.reduce((s, r) => s + r.qty, 0), value: fromCents(rows.reduce((s, r) => s + toCents(r.value), 0)) };
 }
 
-export async function getTransferCogs(db, dateFrom, dateTo) {
+// Cost already taken out of stock for orders that don't count as sold yet at `asOf` (end of that
+// instant): used on orders made but not shipped (basis "shipped"). Negative when orders count as sold
+// before they're made (basis "placed"). The Inventory report's roll-forward needs it: stock went down
+// when the order was made, COGS when it's sold. Cents: blanks + finished stock, and transfers apart.
+export async function getOrderCostsNotYetSold(db, asOf, { basis } = {}) {
+  const sale = saleDateSql_(basis || await getSaleDateBasis(db), "o");
+  const two = async (table, kinds) => {
+    const k = kinds.map(x => `'${x}'`).join(", ");
+    try {
+      const used = await db.prepare(`SELECT COALESCE(SUM(-m.qtyDelta * m.unitCostCents), 0) AS c FROM ${table} m
+        WHERE m.occurredAt <= ? AND m.kind IN (${k}) AND m.voidedAt IS NULL AND m.orderId IS NOT NULL
+          AND EXISTS (SELECT 1 FROM orders ox WHERE ox.orderId = m.orderId)`).bind(asOf).first();
+      const sold = await db.prepare(`SELECT COALESCE(SUM(-m.qtyDelta * m.unitCostCents), 0) AS c FROM orders o JOIN ${table} m ON m.orderId = o.orderId
+        WHERE ${sale} <= ? AND m.kind IN (${k}) AND m.voidedAt IS NULL`).bind(asOf).first();
+      return Number(used.c) - Number(sold.c);
+    } catch (e) { if (/no such table/i.test(String(e && e.message))) return 0; throw e; }
+  };
+  const [blanks, finished, transfers] = await Promise.all([
+    two("inventory_movements", ["consume"]), two("finished_goods_movements", ["sell", "return"]), two("transfer_movements", ["consume"]),
+  ]);
+  return { blanksCents: blanks, finishedCents: finished, transfersCents: transfers };
+}
+
+export async function getTransferCogs(db, dateFrom, dateTo, { basis } = {}) {
+  // Transfers used on an order count on the order's sale date (getSaleDateBasis), like its blanks.
+  const sale = saleDateSql_(basis || await getSaleDateBasis(db), "o");
   const { results: mv } = await db.prepare(
-    `SELECT substr(occurredAt, 1, 7) AS month, kind, reason, SUM(-qtyDelta * unitCostCents) AS outCents, SUM(qtyDelta * unitCostCents) AS inCents
-     FROM transfer_movements WHERE occurredAt >= ? AND occurredAt <= ? AND kind IN ('consume', 'purchase', 'writeoff') AND voidedAt IS NULL
-     GROUP BY month, kind, reason`
-  ).bind(dateFrom, dateTo).all();
+    `SELECT month, kind, reason, SUM(outCents) AS outCents, SUM(inCents) AS inCents FROM (
+       SELECT substr(t.occurredAt, 1, 7) AS month, t.kind, t.reason, -t.qtyDelta * t.unitCostCents AS outCents, t.qtyDelta * t.unitCostCents AS inCents
+       FROM transfer_movements t WHERE t.occurredAt >= ? AND t.occurredAt <= ? AND t.kind IN ('consume', 'purchase', 'writeoff') AND t.voidedAt IS NULL
+         AND NOT ${orderLinked_("t", ["consume"])}
+       UNION ALL
+       SELECT substr(${sale}, 1, 7), t.kind, t.reason, -t.qtyDelta * t.unitCostCents, t.qtyDelta * t.unitCostCents
+       FROM orders o JOIN transfer_movements t ON t.orderId = o.orderId
+       WHERE ${sale} >= ? AND ${sale} <= ? AND t.kind = 'consume' AND t.voidedAt IS NULL
+     ) GROUP BY month, kind, reason`
+  ).bind(dateFrom, dateTo, dateFrom, dateTo).all();
   const months = {};
   const at = (m) => (months[m] = months[m] || { month: m, cogs: 0, purchases: 0, writeoffs: 0, toFinished: 0 });
   for (const r of mv) {
@@ -13140,7 +13216,9 @@ export async function setOrderDueDate(db, orderId, dueDate) {
   return d;
 }
 
-export async function getRevenueData(db, dateFrom, dateTo) {
+export async function getRevenueData(db, dateFrom, dateTo, { basis } = {}) {
+  // The orders SOLD in the range: by their sale date (getSaleDateBasis), the same date their cost uses.
+  const sale = saleDateSql_(basis || await getSaleDateBasis(db), "o");
   const { results } = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
     SELECT
       o.orderId,
@@ -13154,7 +13232,7 @@ export async function getRevenueData(db, dateFrom, dateTo) {
       COALESCE((SELECT SUM(p.amountCents) FROM order_payments p WHERE p.orderId = o.orderId AND p.kind IN ('payment', 'refund', 'dispute') AND p.voidedAt IS NULL), 0) / 100.0 AS received
     FROM orders o
     LEFT JOIN order_items oi ON oi.orderId = o.orderId
-    WHERE o.placedAt >= ? AND o.placedAt <= ?
+    WHERE ${sale} >= ? AND ${sale} <= ?
       AND o.isTest = 0 AND o.voidedAt IS NULL
     GROUP BY o.orderId
   `)).bind(dateFrom, dateTo).all());
@@ -13209,12 +13287,14 @@ export async function getDashboard(db, { today, fresh = false, now = Date.now() 
 
 // ---- Admin home dashboard (2026-11): the year's and the month's money at a glance ----------------
 // From the same places as the reports, so the figures match them for the same dates:
-//   productRevenue  goods sold, less sales tax and discounts, no shipping (Revenue report, by order placed)
+//   productRevenue  goods sold, less sales tax and discounts, no shipping (Revenue report)
+//   Both revenue and cost go by each order's sale date (getSaleDateBasis: shipped by default, or placed).
 //   cogs            blanks + finished stock + estimates (Inventory & COGS) + transfer sheets used
 //   revenue         productRevenue + shipping and rush fees charged (less their tax) + other income
 //   expenses        recorded expenses + cogs + write-offs (blanks and transfers)
 // `yearFrom` / `monthFrom` / `to` are YYYY-MM-DD (the admin's own today). Dollars out.
-export async function getDashboardMoney(db, { yearFrom, monthFrom, to }) {
+export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis }) {
+  basis = basis || await getSaleDateBasis(db);
   const period = async (from) => {
     const a = from + "T00:00:00.000Z", b = to + "T23:59:59.999Z";
     const sumCents = async (sql) => {
@@ -13222,7 +13302,7 @@ export async function getDashboardMoney(db, { yearFrom, monthFrom, to }) {
       catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return 0; throw e; }
     };
     const [sales, cogs, tCogs, otherCents, expenseCents] = await Promise.all([
-      getRevenueData(db, a, b), getCogsReport(db, a, b), getTransferCogs(db, a, b),
+      getRevenueData(db, a, b, { basis }), getCogsReport(db, a, b, { basis }), getTransferCogs(db, a, b, { basis }),
       sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM other_income WHERE deletedAt IS NULL AND incomeDate >= ? AND incomeDate <= ?"),
       sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM expenses WHERE deletedAt IS NULL AND expenseDate >= ? AND expenseDate <= ?"),
     ]);
@@ -13239,7 +13319,7 @@ export async function getDashboardMoney(db, { yearFrom, monthFrom, to }) {
     };
   };
   const [year, month] = await Promise.all([period(yearFrom), period(monthFrom)]);
-  return { year, month, yearFrom, monthFrom, to };
+  return { year, month, yearFrom, monthFrom, to, saleDate: basis };
 }
 
 // Sales-tax report (accrual, by the month the order was placed). One row per

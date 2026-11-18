@@ -219,7 +219,7 @@ async function seededPre0006(){
   const blank = (await lib.getAllBlanks(d1)).find(b => b.name === "Port Authority");
   console.log("blank purchase price round-trips in dollars:", blank.sizes[0].purchasePrice === 12.34);
 
-  const rev = await lib.getRevenueData(d1, "2026-09-01T00:00:00Z", "2026-09-30T23:59:59Z");
+  const rev = await lib.getRevenueData(d1, "2026-09-01T00:00:00Z", "2026-09-30T23:59:59Z", { basis: "placed" });   // by the date placed (Global settings → Bookkeeping)
   const r1 = rev.find(r => r.orderId === "N1"), rOpen = rev.find(r => r.orderId === "O-OPEN");
   console.log("revenue report in dollars, cancelled items excluded:", r1.itemSubtotal === 60.27 && rOpen.itemSubtotal === 44.9 && rOpen.discountAmount === 4.9);
 

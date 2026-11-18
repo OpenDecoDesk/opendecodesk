@@ -91,7 +91,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
     const rr = await lib.addOrderPayment(d1, "REV", -2, "Stripe refund", "re_REV", { method: "card", kind: "refund" });
     await call({ action: "setRefundShipping", orderId: "REV", paymentId: rr, shippingAmount: 2 });
     // Expected for REV: total $44 + $6.25 = $50.25; received $44 + $8.25 − $2 = $50.25 — no gap.
-    const revRows = await (new Function(dbSrc + "\nreturn getRevenueData;")())(d1, now.slice(0, 10) + "T00:00:00.000Z", now.slice(0, 10) + "T23:59:59.999Z");
+    const revRows = await (new Function(dbSrc + "\nreturn getRevenueData;")())(d1, now.slice(0, 10) + "T00:00:00.000Z", now.slice(0, 10) + "T23:59:59.999Z", { basis: "placed" });   // by the date placed (Global settings → Bookkeeping)
     const revRow = revRows.find(x => x.orderId === "REV");
     console.log("received is net of the refund: $50.25 against a $50.25 total (no $2 gap):",
       Math.abs(revRow.received - 50.25) < 0.005 && Math.abs(revRow.itemSubtotal + revRow.shippingCost - 50.25) < 0.005);

@@ -1244,6 +1244,7 @@ const HOME_PIE_COLORS_ = ["#2a78d6", "#6250d6", "#eb6834", "#e87ba4", "#e34948",
 function homePieColor_(s){
   if (s.key === "cogs") return "#008300";
   if (s.key === "writeoffs") return "#eda100";
+  if (s.key === "recorded") return "#2a78d6";
   const id = Number(s.id);
   return s.id == null || !isFinite(id) ? "#898781" : HOME_PIE_COLORS_[Math.abs(id) % HOME_PIE_COLORS_.length];
 }

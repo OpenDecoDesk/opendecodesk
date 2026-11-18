@@ -97,6 +97,7 @@ const at = (day) => day + "T12:00:00.000Z";
     strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
     "const requireAdmin = async (env, host) => host.kind === 'admin' ? null : jsonResponse({ status: 'error', message: 'Admin only' }, 403); const adminActor = () => 'test';\n" +
     "const adminUser = () => globalThis.__homeUser || null;\n" +
+    "const adminCan = (request, fn, level) => globalThis.__homeCan ? globalThis.__homeCan(fn, level) : true;\n" +
     "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
     "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
     "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +
@@ -123,6 +124,17 @@ const at = (day) => day + "T12:00:00.000Z";
   globalThis.__homeUser = { role: "manager" };
   r = await call({ action: "getDashboard", today });
   console.log("a manager gets the money, from the same kept answer:", r.status === 200 && r.body.cached === true && r.body.year.productRevenue === 9 * 46);
+  console.log("…and the pies by expense category:", r.body.year.byType.map(t => t.key).join(",") === `c${cat},cogs`);
+  // A custom role with the money (costs.view) but not Expenses (finance.expenses): the categories come as one slice.
+  globalThis.__homeUser = { role: "custom", roleInfo: {} }; globalThis.__homeCan = (fn) => fn !== "finance.expenses";
+  r = await call({ action: "getDashboard", today });
+  console.log("a role with the money but not Expenses gets recorded expenses as one slice, still adding up:", r.status === 200
+    && r.body.year.byType.map(t => t.name + " " + t.amount).join(", ") === "Recorded expenses 120, Cost of goods 18" && r.body.year.refundedTypes.length === 0
+    && r.body.year.byType.reduce((t, x) => t + x.amount, 0) === r.body.year.expenses && !r.body.year.byType.some(t => t.id != null));
+  globalThis.__homeCan = (fn) => fn !== "costs.view";
+  r = await call({ action: "getDashboard", today });
+  console.log("…and a role without the money gets no pies at all:", r.status === 200 && !("year" in r.body) && !/byType|Recorded expenses/.test(JSON.stringify(r.body)));
+  globalThis.__homeCan = null;
   globalThis.__homeUser = null;
 
   console.log("\n=== Bookkeeping off (getDashboardMoney) ===");

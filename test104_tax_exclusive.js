@@ -295,9 +295,10 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const ret = (await lib.getSalesTaxReturn(rdb, "2026-09-01T00:00:00Z", "2026-09-30T23:59:59Z")).total;
   ok("return: taxable sales excl. tax $245 (100 + 100 + 45), non-taxable $18, out of state $30, exempt $80 → gross $373", ret.taxableSales === 245 && ret.nonTaxableSales === 18 && ret.interstateSales === 30 && ret.exemptSales === 80 && ret.grossSales === 373);
   ok("return: tax collected $14.70 = 6% of the taxable sales, and the same figure as the report", ret.taxCollected === 14.7 && Math.round(ret.taxableSales * 6) / 100 === 14.7 && ret.totalDue === 14.7);
-  const rev = await lib.getRevenueData(rdb, "2026-09-01T00:00:00Z", "2026-09-30T23:59:59Z");
+  const rev = await lib.getRevenueData(rdb, "2026-09-01T00:00:00Z", "2026-09-30T23:59:59Z", { basis: "placed" });   // by the date placed (Global settings → Bookkeeping)
   const revOf = (id) => rev.find(x => x.orderId === id) || {};
   ok("revenue report: each order comes to what its customer owes (I1 $110, X1 $110, X2 $65.70, X3 $30, X4 $80)", revOf("I1").effectiveTotal === 110 && revOf("X1").effectiveTotal === 110 && revOf("X2").effectiveTotal === 65.7 && revOf("X3").effectiveTotal === 30 && revOf("X4").effectiveTotal === 80);
+  rdb._raw.run("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('accounting', '{\"saleDate\":\"placed\"}')");   // the report by the date placed, too
   const revApi = await (async () => { const res = await api({ env: { DB: rdb }, waitUntil: () => {}, request: { url: "https://admin.example.com/api/orders", json: async () => ({ key: "x", action: "getRevenueReport", dateFrom: "2026-09-01", dateTo: "2026-09-30" }), headers: { get: () => null } } }); return JSON.parse(await res.text()); })();
   ok("…and the report's total is their sum ($395.70)", revApi.status === "ok" && Math.round(revApi.total.effectiveTotal * 100) === 39570 && Math.round(revApi.total.balance * 100) === 39570);
   const exp = await lib.getAccountantExport(rdb, "2026-09-01T00:00:00Z", "2026-09-30T23:59:59Z");

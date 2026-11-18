@@ -97,6 +97,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   console.log("only H is still waiting:", JSON.stringify(r.body.lines.map(l => l.orderId)) === '["H"]');
 
   console.log("\n=== COGS report and later orders ===");
+  d1._raw.run("UPDATE orders SET shippedAt = manufacturedAt WHERE manufacturedAt IS NOT NULL AND shippedAt IS NULL AND deliveredAt IS NULL AND completedAt IS NULL");   // sold the day made: COGS goes by the sale date (Global settings → Bookkeeping)
   r = await call({ action: "getInventoryReport", dateFrom: "2026-01-01", dateTo: "2099-12-31" });
   const aug = r.body.cogs.rows.find(x => x.month === "2026-08"), sep = r.body.cogs.rows.find(x => x.month === "2026-09");
   console.log("August COGS is $10.25 real (A + B), September $6.00 (F) with no estimate left in it:", aug.cogs === 10.25 && aug.estimatedPart === 0 && sep.cogs === 6 && sep.estimatedPart === 0);

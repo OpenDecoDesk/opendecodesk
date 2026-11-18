@@ -97,7 +97,7 @@ import {
   voidFinishedGoodsMovement, getFinishedGoodsValuation, WRITEOFF_REASONS,
   updateOrderPlacedAt, setOrderDueDate,
   insertAuditLog, getAuditLog,
-  getRevenueData, getDashboard, homeOrderStage,
+  getRevenueData, getDashboard, homeOrderStage, getAccountingSettings, setAccountingSettings, getSaleDateBasis, getOrderCostsNotYetSold,
   getSalesTaxSettings, setSalesTaxSettings, setOrgTaxExemption, getSalesTaxReport,
   getSalesTaxRefunds, PAYMENT_METHODS, methodFromPaymentMethod, getCardPaymentsMissingFees, setPaymentFee, getSalesTaxReturn, getTaxedResalePurchases, getStripeLinkedPayments, setPaymentDate,
   getDigestState, getDigestRun, getOrdersForDigest, getUnsentOwnerNotices, getFailedAdminLogins,
@@ -202,6 +202,7 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "getOrderDownloads", "resendDownloads", "resetDownloads", "revokeDownloads",
   "getEmailSettings", "updateEmailSettings", "checkMailbox", "previewCustomerEmail", "samplePdf", "sendSampleEmail",
   "getSalesTaxSettings", "updateSalesTaxSettings",
+  "getAccountingSettings", "updateAccountingSettings",
   "getBoxPresets", "setBoxPresets",
   "getInventory", "createInventoryItem", "updateInventoryItem", "deleteInventoryItem",
   "getBlanks", "createBlank", "updateBlank", "deleteBlank", "mergeBlanks", "markBlankPricesChecked", "getBlankVendorPriceHistory", "recomputeBlankAverageCosts", "confirmProductPrices",
@@ -301,6 +302,7 @@ function checkProductPrice_(body, before) {
 
 const ADMIN_ONLY_ACTIONS = [
   "updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "updateLocaleSettings", "updateSalesTaxSettings", "updateShipFromAddress",
+  "getAccountingSettings", "updateAccountingSettings",   // Global settings → Bookkeeping: when an order counts as sold
   "updateMachineSettings", "backfillStripeFees", "getAuditLog", "sendTestEmail", "updatePricingSettings", "findOrphanImages", "deleteOrphanImages", "vendorDirectorySearch", "vendorDirectoryEndpoints", "saveVendorConnection", "deleteVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks",
   // Ordering from a supplier spends the shop's money (the card / terms the supplier has on file): admin only.
   "previewSupplierOrder", "placeSupplierOrder", "listSupplierOrders", "checkSupplierOrderShipments", "cancelSupplierOrder", "listVendorApiLog", "getVendorApiLogEntry",
@@ -847,9 +849,10 @@ export async function onRequestPost(context) {
         testCardCharges: cash.testCardCharges, testCardFees: cash.testCardFees });
     }
 
+    const saleDate = await getSaleDateBasis(env.DB);   // orders sold in the range, by Global settings → Bookkeeping
     const [allOrgs, rows] = await Promise.all([
       getAllOrgs(env.DB),
-      getRevenueData(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z"),
+      getRevenueData(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z", { basis: saleDate }),
     ]);
 
     // Seed every registered org with zeroes so they always appear
@@ -894,7 +897,7 @@ export async function onRequestPost(context) {
       return acc;
     }, { orderCount: 0, subtotal: 0, discounts: 0, shipping: 0, rushFees: 0, effectiveTotal: 0, received: 0, balance: 0 });
 
-    return jsonResponse({ status: "ok", orgs, total, dateFrom, dateTo });
+    return jsonResponse({ status: "ok", orgs, total, dateFrom, dateTo, saleDate });
   }
 
   // ---- Closed periods (months already filed) --------------------------------
@@ -3863,6 +3866,21 @@ export async function onRequestPost(context) {
       return jsonResponse({ status: "ok", salesTax: { ...salesTax, ratePercent: salesTax.rateBps / 100 }, belowTarget });
     }
 
+    // ---- Bookkeeping: the date an order counts as sold, for its revenue and its cost alike ----
+    if (body.action === "getAccountingSettings") {
+      return jsonResponse({ status: "ok", accounting: await getAccountingSettings(env.DB) });
+    }
+    if (body.action === "updateAccountingSettings") {
+      const saleDate = String(body.saleDate || "");
+      if (saleDate !== "shipped" && saleDate !== "placed") {
+        return jsonResponse({ status: "error", message: "Choose when a sale counts: \"shipped\" (ships or is delivered) or \"placed\" (the order is placed)" }, 400);
+      }
+      const before = await getAccountingSettings(env.DB);
+      const accounting = await setAccountingSettings(env.DB, { saleDate });
+      audit({ orgId: null, orderId: null, action: "settings.accounting_set", detail: { from: before, to: accounting } });
+      return jsonResponse({ status: "ok", accounting });
+    }
+
     if (body.action === "getBoxPresets") {
       const presets = await getBoxPresets(env.DB);
       return jsonResponse({ status: "ok", presets });
@@ -5527,21 +5545,27 @@ export async function onRequestPost(context) {
       }
       // Beginning inventory = end of the day before dateFrom; ending = end of dateTo.
       const dayBefore = new Date(Date.parse(dateFrom + "T00:00:00.000Z") - 1).toISOString();
-      const [[beginning, ending], cogs, taxedResale, tBeginning, tEnding, tCogs, fBeginning, fEnding] = await Promise.all([
+      // COGS goes by each order's sale date (Global settings → Bookkeeping); stock goes down when the order is
+      // made. What sits between the two — used on orders not sold yet — is `notYetSold` at each end.
+      const basis = await getSaleDateBasis(env.DB);
+      const [[beginning, ending], cogs, taxedResale, tBeginning, tEnding, tCogs, fBeginning, fEnding, nysBeg, nysEnd] = await Promise.all([
         getInventoryValuations(env.DB, [dayBefore, dateTo + "T23:59:59.999Z"]),   // one read of the history for both
-        getCogsReport(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z"),
+        getCogsReport(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z", { basis }),
         getTaxedResalePurchases(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z"),
         getTransferValuation(env.DB, dayBefore),
         getTransferValuation(env.DB, dateTo + "T23:59:59.999Z"),
-        getTransferCogs(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z"),
+        getTransferCogs(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z", { basis }),
         getFinishedGoodsValuation(env.DB, dayBefore),
         getFinishedGoodsValuation(env.DB, dateTo + "T23:59:59.999Z"),
+        getOrderCostsNotYetSold(env.DB, dayBefore, { basis }),
+        getOrderCostsNotYetSold(env.DB, dateTo + "T23:59:59.999Z", { basis }),
       ]);
       const sum = (k) => Math.round(cogs.rows.reduce((a, r) => a + (r[k] || 0) * 100, 0)) / 100;
       const tsum = (k) => Math.round(tCogs.reduce((a, r) => a + r[k] * 100, 0)) / 100;
       // Transfer-sheet inventory is a parallel section (migrations/0036), same beginning/purchases −
       // COGS − write-offs = ending shape as blanks.
       const transfers = { beginning: tBeginning, ending: tEnding, cogs: tCogs,
+        notYetSold: { beginning: nysBeg.transfersCents / 100, ending: nysEnd.transfersCents / 100 },
         totals: { cogs: tsum("cogs"), purchases: tsum("purchases"), writeoffs: tsum("writeoffs"), toFinished: tsum("toFinished") } };
       // The three inventory groups (migrations/0060): blanks for sale, blanks for testing / shop use, and
       // finished stock. Their roll-forward — beginning + purchases + corrections − COGS (on blanks and
@@ -5552,7 +5576,10 @@ export async function onRequestPost(context) {
         cogsBlanks: sum("cogsBlanks"), cogsFinished: sum("cogsFinished"), writeoffsTesting: sum("writeoffsTesting"),
         writeoffsDamagedLost: sum("writeoffsDamagedLost"), writeoffsOther: sum("writeoffsOther"), toFinished: sum("toFinished"), corrections: sum("corrections") };
       const c = (x) => Math.round(Number(x || 0) * 100);
-      const begAll = c(beginning.value) + c(fBeginning.value), endAll = c(ending.value) + c(fEnding.value);
+      // Blanks and finished stock used on orders not sold yet (notYetSold) count with the stock they came
+      // from, so beginning + purchases − COGS − write-offs still equals ending.
+      const nysB = nysBeg.blanksCents + nysBeg.finishedCents, nysE = nysEnd.blanksCents + nysEnd.finishedCents;
+      const begAll = c(beginning.value) + c(fBeginning.value) + nysB, endAll = c(ending.value) + c(fEnding.value) + nysE;
       // Transfers used making finished stock (migrations/0081) come INTO this roll-forward from the transfer section.
       totals.transfersToFinished = transfers.totals.toFinished;
       const rollForward = { beginning: begAll / 100, ending: endAll / 100,
@@ -5563,7 +5590,8 @@ export async function onRequestPost(context) {
         finished: { beginning: { units: fBeginning.units, value: fBeginning.value }, ending: { units: fEnding.units, value: fEnding.value } },
       };
       return jsonResponse({ status: "ok", dateFrom, dateTo, beginning, ending, cogs, taxedResale, transfers,
-        finished: { beginning: fBeginning, ending: fEnding }, groups, rollForward, totals });
+        finished: { beginning: fBeginning, ending: fEnding }, groups, rollForward, totals, saleDate: basis,
+        notYetSold: { beginning: nysB / 100, ending: nysE / 100 } });
     }
 
     if (body.action === "getBlankLinks") {

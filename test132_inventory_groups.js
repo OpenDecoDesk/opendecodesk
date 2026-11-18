@@ -184,6 +184,7 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   ok("voiding a Made for stock entry puts its blanks back too (a worker may, as with blank movements)", r.status === 200 && blankQty(capBlank, "Royal", "OSFA") === 10 && rts("cap", "").quantity === 3);
 
   console.log("\n=== The report ===");
+  d1._raw.run("UPDATE orders SET shippedAt = manufacturedAt WHERE manufacturedAt IS NOT NULL AND shippedAt IS NULL AND deliveredAt IS NULL AND completedAt IS NULL");   // sold the day made: COGS goes by the sale date (Global settings → Bookkeeping)
   r = await call({ action: "getInventoryReport", dateFrom: "2026-01-01", dateTo: new Date().toISOString().slice(0, 10) });
   const t = r.body.totals, g = r.body.groups;
   ok("the report shows the three groups: blanks for sale, for testing, and finished stock", r.status === 200 && g.testing.ending.value === 24 && g.testing.ending.units === 8 &&
@@ -194,7 +195,9 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   ok("the roll-forward adds up: beginning + purchases + corrections − COGS − write-offs = ending", Math.abs(r.body.rollForward.check) < 0.05);
   const ex = await lib.getAccountantExport(d1, "2026-01-01T00:00:00.000Z", new Date().toISOString());
   const month = ex.summary.find(m => m.month === new Date().toISOString().slice(0, 7));
-  ok("the accountant export splits COGS and write-offs the same way", month.cogsFinished === t.cogsFinished && month.writeoffsTesting === 6 && month.toFinishedStock === t.toFinished);
+  // COGS lands in the month of each order's sale date, so add up the months (an order made in an earlier month counts there).
+  const allFinished = Math.round(ex.summary.reduce((n, m) => n + m.cogsFinished * 100, 0)) / 100;
+  ok("the accountant export splits COGS and write-offs the same way", allFinished === t.cogsFinished && month.writeoffsTesting === 6 && month.toFinishedStock === t.toFinished);
   ok("…and lists each group's beginning and ending inventory", ex.inventoryGroups.length === 3 && ex.inventoryGroups[1].group === "Blanks for testing / shop use" && ex.inventoryGroups[1].ending === 24);
 
   console.log("\n=== The admin screens ===");

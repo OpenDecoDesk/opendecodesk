@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { ADMIN_ORIGIN, shopOrigin, ROOT } = require("./testlib/hosts.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -13,7 +14,9 @@ const dbSrc = strip(read("functions/_lib/db.js"));
 const lib = new Function(dbSrc + `\nreturn { createProduct, getPublicCatalogData, getAllBlanks, priceItem, getPublishState, getPublishedOrg, publishShop, getCatalogIssues, signPreviewToken, verifyPreviewToken, planHoopings_ };`)();
 const common = strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + strip(read("functions/_lib/setupStatus.js")) + "\n";
 const api = new Function(common +
-  "const requireAdmin = async (env, host, key, request, msg, role) => { const r = (request.headers.get('x-role') || 'admin'); const rank = { staff: 1, manager: 2, admin: 3 }; return rank[r] >= rank[role === 'staff' || role === 'manager' ? role : 'admin'] ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
+  require("fs").readFileSync(__dirname + "/functions/_lib/permissions.js", "utf8").replace(/export (async function|function|const)/g, "$1") + "\n" +
+  // The real roles (functions/_lib/permissions.js) for the role the request names; "staff" (any signed-in user) as adminAuth.js reads it.
+  "const requireAdmin = async (env, host, key, request, msg, need) => { const r = (request.headers.get('x-role') || 'admin'); return roleAllows(DEFAULT_ROLES[r] || null, need === 'staff' ? '*' : need) ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
   "const adminActor = () => 'owner@test'; const adminUser = () => null; const copyVendorImage = async () => ({ ok: false });\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
@@ -73,7 +76,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const w = dom.window, d = w.document;
   await wait(150);
   await w.loadAdminScript();
-  w.eval('adminKey = "cookie"; adminMe = { role: "admin", name: "A", email: "a@x" };');
+  w.eval(("adminKey = \"cookie\"; " + asRole("admin", { name: "A", email: "a@x" })));
   w.eval(`window._adminOrgRegistry = ${JSON.stringify((await call({ action: "listOrgsAdmin" })).body.orgs)}; adminOrgs = window._adminOrgRegistry.map(o => ({ orgId: o.orgId, name: o.name }));`);
   ok("the browser says the same before sending (reserved, taken, malformed)", /reserved/.test(w.webAddressProblem_("www")) && /already uses/.test(w.webAddressProblem_("northside", "acme")) &&
     /2–40/.test(w.webAddressProblem_("my-shop")) && w.webAddressProblem_("acmeclub", "acme") === "" && w.webAddressProblem_("freshname") === "");
@@ -213,9 +216,9 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("…yes opens the shop for orders, and the switch reads Live", d1.q("SELECT ready FROM orgs WHERE orgId='acme'")[0].ready === 1 && /aria-checked="true"[^>]*>[^]*Live/.test(w.shopBarHtml_({ shop: "acme", page: "products" })));
   await w.shopBarLive_("acme", false);
   ok("…and back to Coming soon", d1.q("SELECT ready FROM orgs WHERE orgId='acme'")[0].ready === 0);
-  w.eval(`adminMe = { role: "staff" };`);
+  w.eval((asRole("staff")));
   ok("a worker doesn't get the switch", !/shop-bar-live/.test(w.shopBarHtml_({ shop: "acme", page: "designs" })));
-  w.eval(`adminMe = { role: "admin", name: "A", email: "a@x" };`);
+  w.eval((asRole("admin", { name: "A", email: "a@x" })));
 
   console.log(`\n${fail ? "FAIL" : "PASS"} — ${pass} passed, ${fail} failed`);
   if (fail) process.exit(1);

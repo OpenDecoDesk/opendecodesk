@@ -21,14 +21,14 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
 
 // ---- functions/api/design.js, built the same eval way test25 builds upload.js ----
 const rateLimitSrc = strip(read("functions/_lib/rateLimit.js"));
-const adminAuthSrc = (read("functions/_lib/access.js") + "\n" + read("functions/_lib/adminAuth.js"))
+const adminAuthSrc = (read("functions/_lib/access.js") + "\n" + read("functions/_lib/permissions.js") + "\n" + read("functions/_lib/adminAuth.js"))
   .replace(/import \{[\s\S]*?\} from ["'][^"']+["'];\n?/g, "")
   .replace(/export const/g, "const").replace(/export async function/g, "async function").replace(/export function/g, "function");
 const httpSrc = strip(read("functions/_lib/http.js"));
 const fileUploadSrc = strip(read("functions/_lib/fileUpload.js"));
 const designSrc = read("functions/api/design.js")
   .replace(/import \{ classifyHost \} from ["'].*["'];\n?/, "")
-  .replace(/import \{ requireAdmin, timingSafeEqual \} from ["'].*["'];\n?/, "")
+  .replace(/import \{ requireAdmin, timingSafeEqual[^}]*\} from ["'].*["'];\n?/, "")
   .replace(/import \{ jsonResponse[^}]*\} from ["'].*["'];\n?/, "")
   .replace(/import \{ readBodyWithLimit, hasValidMagicBytes \} from ["'].*["'];\n?/, "")
   .replace(/import \{ addProductFile, listProductFiles \} from ["'].*["'];\n?/, "")

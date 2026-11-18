@@ -27,7 +27,7 @@
 //     cached).
 
 import { classifyHost } from "../_lib/hostConfig.js";
-import { requireAdmin, timingSafeEqual } from "../_lib/adminAuth.js";
+import { requireAdmin, timingSafeEqual, adminUser, adminCan } from "../_lib/adminAuth.js";
 import { jsonResponse, featureOffResponse, featureIsOff } from "../_lib/http.js";
 import { readBodyWithLimit, hasValidMagicBytes } from "../_lib/fileUpload.js";
 import { addProductFile, listProductFiles } from "../_lib/db.js";
@@ -64,8 +64,10 @@ export async function onRequestPost({ request, env }) {
   const url = new URL(request.url);
   const contentType = (request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
 
-  // Back office work: any signed-in user (functions/_lib/adminAuth.js).
-  const denied = await requireAdmin(env, classifyHost(url.hostname, null, env), request.headers.get("X-Admin-Key"), request, "Not available here.", "staff");
+  // Design files and an order's own files (functions/_lib/permissions.js). Looking at one is for anyone who sees
+  // designs, orders or the production queues (Run Order shows them); uploading needs Edit, checked below.
+  const denied = await requireAdmin(env, classifyHost(url.hostname, null, env), request.headers.get("X-Admin-Key"), request, "Not available here.",
+    [["catalog.designs", "read"], ["orders.details", "read"], ["run.queue", "read"], ["transfer.queue", "read"], ["production.machinefiles", "read"]]);
   if (denied) return denied;
   if (!env.DESIGNS) return jsonResponse({ status: "error", message: "Design storage isn't set up (DESIGNS bucket binding)." }, 500);
   // Global settings → Features → Production switched off: embroidery design files (a design
@@ -86,6 +88,11 @@ export async function onRequestPost({ request, env }) {
     const sig = await hmacHex(secret, key + "|" + exp);
     return jsonResponse({ status: "ok", url: `/api/design?key=${encodeURIComponent(key)}&exp=${exp}&sig=${sig}` });
   }
+
+  // Every upload below changes a design or an order (a digital product's file has its own, stricter gate).
+  const mayUpload = !(typeof adminUser === "function" && (adminUser(request) || {}).roleInfo) ||
+    (url.searchParams.get("designId") ? adminCan(request, "catalog.designs", "edit") : (adminCan(request, "orders.details", "edit") || adminCan(request, "catalog.designs", "edit")));
+  if (!url.searchParams.get("productId") && !mayUpload) return jsonResponse({ status: "error", message: "Your role can't do this. Ask an admin." }, 403);
 
   // ---- Upload: a digital product's file (?org&productId&ext&name) → stored and added to the product ----
   if (url.searchParams.get("productId")) return uploadProductFile_(request, env, url);
@@ -147,8 +154,8 @@ export async function onRequestPost({ request, env }) {
 }
 
 async function uploadProductFile_(request, env, url) {
-  // Products are a manager's to change (orders.js ACTION_ROLE).
-  const denied = await requireAdmin(env, classifyHost(url.hostname, null, env), request.headers.get("X-Admin-Key"), request, "Not available here.", "manager");
+  // A digital product's files (functions/_lib/permissions.js catalog.productFiles).
+  const denied = await requireAdmin(env, classifyHost(url.hostname, null, env), request.headers.get("X-Admin-Key"), request, "Not available here.", [["catalog.productFiles", "edit"]]);
   if (denied) return denied;
   if (await featureIsOff(env, "digital")) return featureOffResponse("digital", "Digital products");
   const org = String(url.searchParams.get("org") || ""), productId = String(url.searchParams.get("productId") || "");

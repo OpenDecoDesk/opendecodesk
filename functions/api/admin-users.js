@@ -3,18 +3,26 @@
  * ========================================================================
  * POST /api/admin-users
  *   { action: "me" }                       any signed-in user, even one with a step to finish:
- *                                          → { user: { id, name, email, role }, pending, require2fa }
- *   Everything else is for an ADMIN:
+ *                                          → { user: { id, name, email, role, roleName }, pending, require2fa,
+ *                                              permissions: {fn: level}, areas }   (functions/_lib/permissions.js)
+ *   Everything else needs Users and roles (settings.users) on the caller's role — read to look, edit to change:
  *   { action: "list" }                     → { users: [...], require2fa }
+ *   { action: "listRoles" }                → { roles: [...], areas, myRank, myLevels }
+ *   { action: "saveRole", key?, name, rank, permissions }   a new role (no key) or a change to one
+ *   { action: "deleteRole", key }          a custom role nobody holds (full)
  *   { action: "create", name, email, role }→ { user, temporaryPassword }   (shown once)
  *   { action: "update", id, name, email }
- *   { action: "setRole", id, role }        role: "staff" | "manager" | "admin"
+ *   { action: "setRole", id, role }        role: a roles.key
  *   { action: "setStatus", id, status }    status: "active" | "disabled"
  *   { action: "resetPassword", id }        → { temporaryPassword }          (shown once)
  *   { action: "reset2fa", id }             a lost phone: they enrol again
- *   { action: "setRequire2fa", on }        the install-wide "Require two-step sign-in" switch
+ *   { action: "setRequire2fa", on }        the install-wide "Require two-step sign-in" switch (admins only)
  *
  * Rules kept here:
+ *   - Rank (roles.rank): you only act on a user whose role ranks BELOW yours, and only give a role that
+ *     ranks below yours (an admin may also make someone an admin, and change another admin: nobody
+ *     ranks above an admin, and a departed admin must still be removable). You only add, change or delete a
+ *     role ranked below yours, and never give it more than you have yourself. Admin is locked.
  *   - A user is disabled, never deleted, so the audit log and old orders keep their attribution.
  *   - There is always at least one active admin: the statement that changes a role or a status
  *     refuses to remove the last one (functions/_lib/db.js setUserRoleAndStatus).
@@ -31,10 +39,15 @@ import { classifyHost }   from "../_lib/hostConfig.js";
 import { getCatalogData } from "../_lib/catalogCache.js";
 import { jsonResponse }   from "../_lib/http.js";
 import {
-  requireAdmin, adminActor, adminUser, isRole, userHasUsablePassword, setUserPassword, generateTempPassword,
+  requireAdmin, adminActor, adminUser, userHasUsablePassword, setUserPassword, generateTempPassword,
   require2fa, setRequire2fa, recoveryCodesLeft,
 } from "../_lib/adminAuth.js";
-import { insertAuditLog, listUsers, getUserById, getUserByEmail, insertUser, updateUser, setUserRoleAndStatus, deleteUserSessions } from "../_lib/db.js";
+import { insertAuditLog, listUsers, getUserById, getUserByEmail, insertUser, updateUser, setUserRoleAndStatus, deleteUserSessions,
+  listRoles, getRoleRow, insertRole, updateRole, deleteRole, roleInUse } from "../_lib/db.js";
+import { resolveRole } from "../_lib/adminAuth.js";
+import { PERMISSION_AREAS, PERM_FUNCTIONS, DEFAULT_ROLES, normalizePermissions, effectivePermissions, effectiveLevel, permRank } from "../_lib/permissions.js";
+
+const ROLE_NAME_MAX = 40;
 
 const EMAIL_RE = /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/;
 const bad = (message, status = 400) => jsonResponse({status:"error", message}, status);
@@ -53,18 +66,40 @@ export async function onRequestPost(context){
   const action = String((body && body.action) || "");
   const self = action === "me";
 
-  // "me" is everyone's; the rest is user management, which is an admin's alone.
+  // "me" is everyone's; the rest is user management: Users and roles (settings.users) on the caller's
+  // role — read to look, edit to change, full to delete a role. The install-wide 2FA switch is an admin's.
+  const need = self ? "staff" : action === "setRequire2fa" ? "admin"
+    : action === "list" || action === "listRoles" ? [["settings.users", "read"]]
+    : action === "deleteRole" ? [["settings.users", "full"]] : [["settings.users", "edit"]];
   const authErr = await requireAdmin(env, host, String((body && body.key) || ""), request, "Not available here.",
-    self ? "staff" : "admin", self ? { pending: ["account", "password", "2fa"] } : undefined);
+    need, self ? { pending: ["account", "password", "2fa"] } : undefined);
   if(authErr) return authErr;
   const me = adminUser(request);
 
   try{
     if(self){
-      return jsonResponse({status:"ok", user: me && me.id != null ? { id: me.id, name: me.name, email: me.email, role: me.role } : null,
-        pending: (me && me.pending) || null, require2fa: await require2fa(env)});
+      const ri = me && me.roleInfo;
+      return jsonResponse({status:"ok", user: me && me.id != null ? { id: me.id, name: me.name, email: me.email, role: me.role, roleName: ri ? ri.name : "" } : null,
+        pending: (me && me.pending) || null, require2fa: await require2fa(env),
+        permissions: ri ? effectivePermissions(ri) : {}, areas: PERMISSION_AREAS});
     }
     if(!me || me.id == null || me.bootstrap) return bad("Sign in through the admin page first.", 403);
+
+    // ---- Rank: who may change whom ----
+    const myRole = me.roleInfo, myRank = myRole ? myRole.rank : 0, iAmAdmin = !!(myRole && myRole.key === "admin");
+    const roleOf = async (key) => {
+      if(typeof key !== "string" || !key || key.length > 40) return null;
+      let row = null;
+      try{ row = await getRoleRow(env.DB, key); }catch(e){ if(!/no such table: roles/i.test(String(e && e.message))) throw e; }
+      return resolveRole(key, row);
+    };
+    const rankOf = async (key) => { const r = await roleOf(key); return r ? r.rank : 0; };
+    // A role you may give: one ranked below yours; an admin may also give admin.
+    const mayGive = (r) => !!r && (r.rank < myRank || (iAmAdmin && r.key === "admin"));
+    // A user you may change: their role ranks below yours. Admins are the top, with nobody above them, so an
+    // admin may also change another admin — otherwise an admin who left could never be disabled.
+    const mayTouch = async (u) => (await rankOf(u.role)) < myRank || (iAmAdmin && u.role === "admin");
+    const RANK_MSG = "Only someone whose role ranks above theirs can change this user.";
 
     const view = async (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, status: u.status, has2fa: !!u.totpSecret,
       recoveryCodesLeft: recoveryCodesLeft(u), mustChangePassword: !!u.mustChangePassword, passwordUsable: await userHasUsablePassword(env, u),
@@ -100,7 +135,9 @@ export async function onRequestPost(context){
       const role = String(body.role || "");
       if(!name || name.length > 80) return bad("Give the person's name (up to 80 characters).");
       if(email.length > 200 || !EMAIL_RE.test(email)) return bad("Give the email address they will sign in with.");
-      if(!isRole(role)) return bad("Choose a role.");
+      const newRole = await roleOf(role);
+      if(!newRole) return bad("Choose a role.");
+      if(!mayGive(newRole)) return bad("You can only give a role that ranks below your own.", 403);
       if(await getUserByEmail(env.DB, email)) return bad("A user with that email already exists. A disabled user can be enabled again.", 409);
       const auditErr = await audit("security.user_created", null, { name, email, role });
       if(auditErr) return auditErr;
@@ -114,10 +151,69 @@ export async function onRequestPost(context){
       return res;
     }
 
+    // ---- Roles ----
+    const myLevels = effectivePermissions(myRole);
+    const roleView = (r) => {
+      const ri = resolveRole(r.key, r);
+      return { key: r.key, name: r.name, rank: r.rank, builtIn: !!r.builtIn, locked: !!r.locked, userCount: r.userCount || 0,
+        permissions: ri ? ri.permissions : normalizePermissions(null), canEdit: !r.locked && r.rank < myRank };
+    };
+    if(action === "listRoles"){
+      let rows;
+      try{ rows = await listRoles(env.DB); }
+      catch(e){ if(!/no such table: roles/i.test(String(e && e.message))) throw e; rows = Object.values(DEFAULT_ROLES).map(r => ({ ...r, userCount: 0 })); }
+      return jsonResponse({status:"ok", roles: rows.map(r => roleView(r)), areas: PERMISSION_AREAS, myRank, myLevels, myRole: myRole ? myRole.key : ""});
+    }
+    if(action === "saveRole"){
+      const name = typeof body.name === "string" ? body.name.trim().replace(/\s+/g, " ") : "";
+      const rank = Number(body.rank);
+      if(!name || name.length > ROLE_NAME_MAX) return bad("Give the role a name (up to " + ROLE_NAME_MAX + " characters).");
+      if(!Number.isInteger(rank) || rank < 1 || rank > 99) return bad("Rank is a whole number from 1 to 99.");
+      if(rank >= myRank) return bad("A role you set up must rank below your own (" + myRank + ").", 403);
+      const permissions = normalizePermissions(body.permissions);
+      // Never more than you have yourself.
+      const over = PERM_FUNCTIONS.filter(k => permRank(effectiveLevel({ key: "x", permissions }, k)) > permRank(myLevels[k]));
+      if(over.length) return bad("You can't give a role more than your own role has (" + over.slice(0, 3).join(", ") + (over.length > 3 ? ", …" : "") + ").", 403);
+      let before = null;
+      if(body.key != null){
+        if(typeof body.key !== "string" || !body.key) return bad("No such role.", 404);
+        try{ before = await getRoleRow(env.DB, body.key); }catch(e){ return bad("Roles need the database update (migrations/0089) first.", 409); }
+        if(!before) return bad("No such role.", 404);
+        if(before.locked) return bad("The Admin role can't be changed.", 403);
+        if(before.rank >= myRank) return bad("You can only change a role that ranks below your own.", 403);
+        if(myRole && myRole.key === before.key) return bad("You can't change your own role.", 403);
+      }
+      const key = before ? before.key : "r_" + Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, "0")).join("");
+      const auditErr = await audit(before ? "security.role_changed" : "security.role_created", null,
+        { key, name, rank, before: before ? { name: before.name, rank: before.rank, permissions: before.permissions } : null, permissions });
+      if(auditErr) return auditErr;
+      try{
+        if(before){ if(!(await updateRole(env.DB, key, { name, rank, permissions }))) return bad("The Admin role can't be changed.", 403); }
+        else await insertRole(env.DB, { key, name, rank, permissions });
+      }catch(e){ if(/UNIQUE/i.test(String(e && e.message))) return bad("Another role already has that name.", 409); throw e; }
+      const row = await getRoleRow(env.DB, key);
+      return jsonResponse({status:"ok", role: roleView({ ...row, userCount: 0 })});
+    }
+    if(action === "deleteRole"){
+      let row = null;
+      try{ row = typeof body.key === "string" ? await getRoleRow(env.DB, body.key) : null; }catch(e){ row = null; }
+      if(!row) return bad("No such role.", 404);
+      if(row.builtIn || row.locked) return bad("A built-in role can't be deleted.", 409);
+      if(row.rank >= myRank) return bad("You can only delete a role that ranks below your own.", 403);
+      const inUse = "Someone still has this role. Give them another role first (disabled users count).";
+      if(await roleInUse(env.DB, row.key)) return bad(inUse, 409);
+      const auditErr = await audit("security.role_deleted", null, { key: row.key, name: row.name });
+      if(auditErr) return auditErr;
+      if(!(await deleteRole(env.DB, row.key))) return bad(inUse, 409);   // given to someone in the meantime
+      return jsonResponse({status:"ok"});
+    }
+
     // Everything below acts on one existing user.
     const target = Number.isInteger(body.id) ? await getUserById(env.DB, body.id) : null;
     if(!target) return bad("No such user.", 404);
     const isMe = target.id === me.id;
+    // Your own account is changed under Security; anyone else only when your role ranks above theirs.
+    if(!isMe && !(await mayTouch(target))) return bad(RANK_MSG, 403);
 
     if(action === "update"){
       const name = typeof body.name === "string" ? body.name.trim() : "", email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
@@ -134,9 +230,11 @@ export async function onRequestPost(context){
 
     if(action === "setRole" || action === "setStatus"){
       const role = action === "setRole" ? String(body.role || "") : null, status = action === "setStatus" ? String(body.status || "") : null;
-      if(role !== null && !isRole(role)) return bad("Choose a role.");
+      const newRole = role !== null ? await roleOf(role) : null;
+      if(role !== null && !newRole) return bad("Choose a role.");
       if(status !== null && status !== "active" && status !== "disabled") return bad("Choose active or disabled.");
-      if(isMe) return bad("You can't change your own role or disable yourself. Another admin has to.", 409);
+      if(isMe) return bad("You can't change your own role or disable yourself. Someone ranked above you has to.", 409);
+      if(newRole && !mayGive(newRole)) return bad("You can only give a role that ranks below your own.", 403);
       if((role !== null && role === target.role) || (status !== null && status === target.status)) return jsonResponse({status:"ok", user: await view(target)});
       const auditAction = role !== null ? "security.user_role_changed" : status === "disabled" ? "security.user_disabled" : "security.user_enabled";
       const auditErr = await audit(auditAction, target, role !== null ? { ...who(target), from: target.role, to: role } : who(target));

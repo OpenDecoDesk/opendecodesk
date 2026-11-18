@@ -1,13 +1,15 @@
 /**
  * The gate every back-office endpoint goes through, and who is behind a request.
  * ========================================================================
- * PEOPLE. There are users (the `users` table), each with a role:
- *     staff   ("Back office")  day-to-day work
- *     manager                  staff + shops, publishing, the books
- *     admin                    everything, incl. users, the audit log and Global settings
- * requireAdmin(env, host, key, request, message, role) is the ONE place a role is enforced.
- * `role` is the LOWEST role allowed: "staff" or "manager". Anything else — including leaving it
- * out — means admin only, so a call nobody thought about is closed to everyone but admins.
+ * PEOPLE. There are users (the `users` table), each with a role (the `roles` table, migrations/0089):
+ *     admin (locked, always everything), manager, staff ("Back office"), production, and any role
+ *     added on Users → Roles and permissions. A role says, per function of the back office, none /
+ *     read / edit / full (functions/_lib/permissions.js).
+ * requireAdmin(env, host, key, request, message, need) is the ONE place a role is enforced.
+ * `need` is what the call needs: [[fn, level], ...] (any one is enough — permissions.js ACTION_PERM),
+ * "*" (anyone signed in), or the older words "staff" (= anyone signed in) and "manager". Anything
+ * else — including leaving it out — means admin only, so a call nobody thought about is closed to
+ * everyone but admins.
  *
  * CREDENTIALS, in order:
  *   1. Cloudflare Access (optional — see access.js). When ACCESS_TEAM_DOMAIN + ACCESS_AUD are
@@ -37,6 +39,7 @@
 import { rateLimitCheck, rateLimitHit, rateLimitResponse, rateLimitCheckGlobal, rateLimitHitGlobal } from "./rateLimit.js";
 import { jsonResponse } from "./http.js";
 import { accessEnabled, verifyAccess } from "./access.js";
+import { DEFAULT_ROLES, normalizePermissions, roleAllows, effectiveLevel, permRank } from "./permissions.js";
 import {
   insertAdminSession, deleteAdminSession, getSettingRaw, setSettingRaw, getAdminSession, setAdminSessionPending,
   deleteAllAdminSessions, getBootstrapState, insertFirstAdmin, updateUser, replaceRecoveryCodes, deleteUserSessions,
@@ -71,11 +74,33 @@ const _actors = new WeakMap();
 // …and the user behind it: { id, email, name, role, pending, tokenHash, bootstrap }.
 const _users = new WeakMap();
 
-// Roles, lowest to highest. Written out rather than looked up in an object, so no odd string
-// ("constructor") can pass for a role.
-const roleRank_ = (role) => role === "admin" ? 3 : role === "manager" ? 2 : role === "staff" ? 1 : 0;
-export const isRole = (role) => roleRank_(role) > 0;
-export const ROLE_LABELS = { staff: "Back office", manager: "Manager", admin: "Admin" };
+// The built-in roles' keys. Any other role is a row of `roles`; checked against the table, never an object
+// lookup on a typed string ("constructor" is not a role).
+const BUILT_IN_ROLE_KEYS = ["admin", "manager", "staff", "production"];
+export const isRole = (role) => BUILT_IN_ROLE_KEYS.includes(role);
+export const ROLE_LABELS = { staff: "Back office", manager: "Manager", admin: "Admin", production: "Production" };
+
+// A user's role as the gate uses it: { key, name, rank, locked, builtIn, permissions }. `row` is their
+// roles row (getAdminSession), or null on a database from before roles were rows — then the built-in
+// defaults. A built-in row with no permissions stored follows its defaults. Unknown: null (no access).
+export function resolveRole(key, row){
+  const def = BUILT_IN_ROLE_KEYS.includes(key) ? DEFAULT_ROLES[key] : null;
+  if(key === "admin") return { ...DEFAULT_ROLES.admin };                       // locked: always everything
+  if(row){
+    const permissions = row.permissions ? normalizePermissions(row.permissions) : def ? def.permissions : normalizePermissions(null);
+    return { key: row.key, name: row.name, rank: row.rank, locked: !!row.locked, builtIn: !!row.builtIn, permissions };
+  }
+  return def ? { ...def } : null;
+}
+
+// Whether a role clears what a call needs (see the header).
+function allows_(role, need){
+  if(!role) return false;
+  if(need === "*" || need === "staff") return true;
+  if(need === "manager") return role.rank >= DEFAULT_ROLES.manager.rank;
+  if(Array.isArray(need)) return roleAllows(role, need);
+  return role.key === "admin";
+}
 
 function errorResponse(message, status){
   return jsonResponse({status:"error", message}, status);
@@ -431,6 +456,16 @@ export function adminUser(request){
   return _users.get(request) || null;
 }
 
+// The level the user behind a request that passed requireAdmin() has for one function
+// (permissions.js): "none" | "read" | "edit" | "full". adminCan(request, fn, level) is the test.
+export function adminLevel(request, fn){
+  const u = _users.get(request);
+  return u && u.roleInfo ? effectiveLevel(u.roleInfo, fn) : "none";
+}
+export function adminCan(request, fn, level){
+  return permRank(adminLevel(request, fn)) >= permRank(level || "read");
+}
+
 const SETUP_MESSAGES = {
   account:  "Finish setting up your account first.",
   password: "Choose a new password first.",
@@ -447,7 +482,7 @@ export async function requireAdmin(env, host, providedKey, request, notAdminMess
     return errorResponse(notAdminMessage || "Not available here.", 403);
   }
 
-  const need = role === "staff" || role === "manager" ? role : "admin";
+  const need = role === "staff" || role === "manager" || role === "*" || Array.isArray(role) ? role : "admin";
   // Someone already signed in is let through BEFORE any failure budget is looked at: junk requests
   // from the same address (another device on the network, a tab firing requests) mustn't lock a
   // signed-in user out. A session token is 192 random bits, so checking one is no guessing aid.
@@ -499,17 +534,18 @@ async function checkCredential(env, providedKey, request, need, options){
     const sess = await readSession_(env, cookieToken);
     if(sess === "unavailable") return unavailable();
     // A disabled user's sessions are deleted when they are disabled; this covers the instant between.
-    if(!sess || sess.user.status !== "active" || !isRole(sess.user.role)) return wrong("Session expired — please log in again.", 401);
+    const roleInfo = sess && sess.user ? resolveRole(sess.user.role, sess.user.roleRow) : null;
+    if(!sess || sess.user.status !== "active" || !roleInfo) return wrong("Session expired — please log in again.", 401);
     const u = sess.user;
     if(sess.pending && !(Array.isArray(options.pending) && options.pending.includes(sess.pending))){
       return { denied: jsonResponse({ status: "error", code: "setup_required", pending: sess.pending, message: SETUP_MESSAGES[sess.pending] || "Finish signing in first." }, 403), wrongCredential: false };
     }
-    if(roleRank_(u.role) < roleRank_(need)){
-      return { denied: jsonResponse({ status: "error", code: "forbidden", message: need === "admin" ? "Only an admin can do this." : "Your account can't do this. Ask an admin." }, 403), wrongCredential: false };
+    if(!allows_(roleInfo, need)){
+      return { denied: jsonResponse({ status: "error", code: "forbidden", message: need === "admin" ? "Only an admin can do this." : "Your role can't do this. Ask an admin." }, 403), wrongCredential: false };
     }
     const who = u.email || u.name || ("user:" + u.id);
     _actors.set(request, accessEmail && accessEmail.toLowerCase() !== who ? who + " (Access: " + accessEmail + ")" : who);
-    _users.set(request, { id: u.id, email: u.email, name: u.name, role: u.role, pending: sess.pending, tokenHash: sess.tokenHash, bootstrap: false });
+    _users.set(request, { id: u.id, email: u.email, name: u.name, role: u.role, roleInfo, pending: sess.pending, tokenHash: sess.tokenHash, bootstrap: false });
     return { denied: null, wrongCredential: false };
   }
 
@@ -534,6 +570,6 @@ async function checkCredential(env, providedKey, request, need, options){
     return wrong("Unauthorized", 401);
   }
   _actors.set(request, accessEmail || "passphrase");
-  _users.set(request, { id: boot.admin ? boot.admin.id : null, email: "", name: "", role: "admin", pending: null, tokenHash: "", bootstrap: true });
+  _users.set(request, { id: boot.admin ? boot.admin.id : null, email: "", name: "", role: "admin", roleInfo: resolveRole("admin", null), pending: null, tokenHash: "", bootstrap: true });
   return { denied: null, wrongCredential: false };
 }

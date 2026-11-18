@@ -10,7 +10,7 @@ let rateLimitSrc = fs.readFileSync(__dirname + "/functions/_lib/rateLimit.js", "
   .replace(/export function/g, "function");
 // adminAuth.js imports access.js (optional Cloudflare Access check) — load both.
 let adminAuthSrc = (fs.readFileSync(__dirname + "/functions/_lib/access.js", "utf8") + "\n" +
-    fs.readFileSync(__dirname + "/functions/_lib/adminAuth.js", "utf8"))
+    fs.readFileSync(__dirname + "/functions/_lib/permissions.js", "utf8") + "\n" + fs.readFileSync(__dirname + "/functions/_lib/adminAuth.js", "utf8"))
   .replace(/import \{[\s\S]*?\} from ["'][^"']+["'];\n?/g, "")
   .replace(/export const/g, "const")
   .replace(/import \{ rateLimited, rateLimitResponse \} from ["'].*["'];\n?/, "")

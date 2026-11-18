@@ -26,7 +26,7 @@ const prelude = (realLimits, realDomains) => strip(read("functions/_lib/http.js"
   "const rateLimitCheck = async () => ({ blocked: false }), rateLimited = async () => ({ blocked: false }), rateLimitResponse = () => null, rateLimitHit = async (env, bucket) => { __hits.push(bucket); };\n" +
   "const rateLimitCheckGlobal = async () => ({ blocked: false }), rateLimitHitGlobal = async () => {};\n") +
   "const accessEnabled = () => false, verifyAccess = async () => ({ ok: true }); const getCatalogData = async () => ({ subdomainMap: {}, business: {} });\n" +
-  strip(read("functions/_lib/adminAuth.js")) + "\n" + strip(read("functions/_lib/cloudflareSetup.js")) + "\n" +
+  strip(read("functions/_lib/permissions.js")) + "\n" + strip(read("functions/_lib/adminAuth.js")) + "\n" + strip(read("functions/_lib/cloudflareSetup.js")) + "\n" +
   (realDomains ? strip(read("functions/_lib/customDomain.js")) + "\n" : "const ensureWorkerHostname = async () => ({ steps: [] }), ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({});\n");
 
 function request(path, body, { cookie = "", origin = ORIGIN, headers = {} } = {}) {

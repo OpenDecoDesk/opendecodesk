@@ -78,8 +78,8 @@ export async function onRequestPost(context){
 
   const host = classifyHost(new URL(request.url).hostname, catalogData.subdomainMap, env);
 
-  // Back office work: any signed-in user (functions/_lib/adminAuth.js).
-  const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", "staff");
+  // Shipping labels (functions/_lib/permissions.js orders.shipping).
+  const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", [["orders.shipping", "edit"]]);
   if(denied) return denied;
   // Global settings → Features → Shipping switched off: no labels (buying or reprinting).
   if((catalogData.features || {}).shipping === false) return featureOffResponse("shipping", "Shipping");

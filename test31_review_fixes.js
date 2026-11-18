@@ -34,7 +34,7 @@ global.rateLimitCheckGlobal = async () => ({ blocked: false, retryAfter: 0 }); g
     global.rateLimitResponse = () => new Response("", { status: 429 });
     const ns = {};
     new Function("ns", strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/access.js")) + "\n" +
-      strip(read("functions/_lib/adminAuth.js")) +
+      strip(read("functions/_lib/permissions.js") + "\n" + read("functions/_lib/adminAuth.js")) +
       "\nns.requireAdmin = requireAdmin; ns.getActiveSecret = getActiveSecret;")(ns);
     const ADMIN = { kind: "admin" };
     const validToken = "sess_" + "a".repeat(48);

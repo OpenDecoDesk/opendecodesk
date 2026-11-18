@@ -100,7 +100,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
     const sent = await L.sendDailyDigestEmail(env, { issues, orgNames: { prime: "PRIME" } });
     console.log("problems alone are a reason to send the roll-up, flagged in the subject and listed first:",
       sent === true && /⚠️ 3 problems/.test(mail[0].subject) && /Problems since the last roll-up/.test(mail[0].htmlBody) && /Stripe webhook updates that failed[^<]*: 1/.test(mail[0].htmlBody));
-    const dd = new Function(strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/adminAuth.js")) + "\n" +
+    const dd = new Function(strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/permissions.js") + "\n" + read("functions/_lib/adminAuth.js")) + "\n" +
       "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
       "const checkShippedDeliveries = async () => ({ delivered: [], inTransit: [], pickedUp: [], awaitingPickup: [] });\n" +
       dbSrc + "\n" + emailSrc + "\n" + strip(read("functions/api/daily-digest.js")) + "\nreturn onRequestPost;")();

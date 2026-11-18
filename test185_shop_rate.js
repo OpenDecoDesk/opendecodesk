@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 
@@ -92,10 +93,9 @@ const TODAY = new Date("2026-11-15T12:00:00Z");
   a = await call({ action: "getShopRate" });
   ok("…and comes back with the choices as saved", a.body.input.ownerPayCents === 3000000 && a.body.input.categories[cat("Insurance")].cents === 60000 && a.body.shopRate.rate === 40.77);
   ok("the save is in the audit log", d1.q("SELECT * FROM audit_log WHERE action='settings.shop_rate_set'").length === 1);
-  // The sign-in is stubbed here; the role each action needs is what requireAdmin is given (ACTION_ROLE).
+  // The sign-in is stubbed here; what each action needs is what requireAdmin is given (permissions.js ACTION_PERM).
   const ordersSrc = read("functions/api/orders.js");
-  const adminOnly = ordersSrc.slice(ordersSrc.indexOf("const ADMIN_ONLY_ACTIONS = ["), ordersSrc.indexOf("];", ordersSrc.indexOf("const ADMIN_ONLY_ACTIONS = [")));
-  ok("only an admin can see or change it (both actions are admin-only)", /"getShopRate", "saveShopRate"/.test(adminOnly));
+  ok("only an admin can see or change it (both actions are admin-only)", lowest("getShopRate") === "admin" && lowest("saveShopRate") === "admin");
 
   await lib.createProduct(d1, "acme", { productId: "cap", type: "hat", name: "Cap", pricingMode: "flat", flatPrice: 25, visible: true, noBlankNeeded: true, taxable: false, runMinutes: 10 });
   await lib.createProduct(d1, "acme", { productId: "pin", type: "other", name: "Pin", pricingMode: "flat", flatPrice: 5, visible: true, noBlankNeeded: true, taxable: false });
@@ -124,7 +124,7 @@ const TODAY = new Date("2026-11-15T12:00:00Z");
   const w = dom.window, doc = w.document, tick = (ms) => new Promise(res => setTimeout(res, ms || 50));
   await tick(200); await w.loadAdminScript(); await tick(100);
   w.eval('adminKey = "x"; adminCan_ = () => true;');
-  ok("Finance has a Shop rate item, for admins", w.eval("JSON.stringify(ADMIN_NAV_GROUPS)").includes('["shoprate","Shop rate"]') && w.adminPageRole_("#shoprate") === "admin");
+  ok("Finance has a Shop rate item, for admins", w.eval("JSON.stringify(ADMIN_NAV_GROUPS)").includes('["shoprate","Shop rate"]') && pageLowest("#shoprate") === "admin");
   const app = doc.createElement("div"); doc.body.appendChild(app);
   await w.renderShopRate(app); await tick(100);
   const $ = (id) => doc.getElementById(id);

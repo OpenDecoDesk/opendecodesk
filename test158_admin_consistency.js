@@ -1,4 +1,5 @@
 // Admin consistency (2026-10 usability round): the menus (Catalog / Production / Inventory / Finance / Reports /
+const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 // Settings, with Designs and Graphics reachable from the menu), one page heading (adminPageHead_) and one tab-title
 // format (adminTitle_), "shop" not "org" in what the admin reads, one danger-button style, the shared confirm window
 // (confirmModal_) for Void / Cancel / Revoke / Ignore, one stacking order for windows with toasts above them, and
@@ -30,7 +31,7 @@ const ok = (m, c) => console.log(m + ":", !!c);
   ok("menu entries are in sentence case", ["Audit log", "Revenue report", "Sales tax report", "Blanks to order", "Machine files", "Run times", "Periods & export"].every(l => labels.includes(l)) &&
     !labels.some(l => /\b(Report|Log|Order|Files|Times|Export)\b/.test(l.replace(/^Run Order$/, ""))));
   // OpenDecoDesk: a worker manages catalog content, graphics included (saveGraphic is a staff action there).
-  ok("a worker can open Designs and Graphics from the menu", w.adminPageRole_("designs") === "staff" && w.adminPageRole_("graphics") === "staff");
+  ok("a worker can open Designs and Graphics from the menu", pageLowest("designs") === "staff" && pageLowest("graphics") === "staff");
   w.eval(`adminOrgs = [{orgId: "acme", name: "Acme"}, {orgId: "northside", name: "Northside"}]; window._adminLastShop = "northside";`);
   ok("Designs / Graphics from the menu open the shop last worked on", w.adminLastShop_() === "northside");
   w.eval(`window._adminLastShop = "gone";`);
@@ -54,7 +55,7 @@ const ok = (m, c) => console.log(m + ":", !!c);
   ok("…an unfinished setup reads Resume shop setup; a finished or unstarted one Shop setup", /Resume shop setup/.test(bar) && /Shop setup</.test(w.shopBarHtml_({ shop: "acme", page: "products" })));
   ok("…a shop shoppers already see as it is shows ✓ Published, not a button to press", /disabled[^>]*>✓ Published</.test(w.shopBarHtml_({ shop: "acme", page: "products" })));
   ok("…on Manage catalog itself it's titled, with the picker asking for a shop", /shop-bar-title">Manage catalog</.test(w.shopBarHtml_({ shop: null, page: "catalog" })) && /Choose a shop/.test(w.shopBarHtml_({ shop: null, page: "catalog" })));
-  w.eval(`adminMe = { role: "staff" };`);
+  w.eval((asRole("staff")));
   const staffBar = w.shopBarHtml_({ shop: "northside", page: "designs" });
   // OpenDecoDesk: a worker manages products, designs and graphics; Shop setup and Publish stay a manager's.
   ok("a worker's bar has Manage catalog, Products, Designs and Graphics — no Shop setup, Shop settings or Publish", /Manage catalog/.test(staffBar) && /Products/.test(staffBar) && /Designs/.test(staffBar) &&
@@ -62,7 +63,7 @@ const ok = (m, c) => console.log(m + ":", !!c);
   w.eval(`siteFeatures = Object.assign({}, siteFeatures || {}, { production: false });`);
   ok("…and Designs leaves the bar while the Production feature is off", !/>Designs</.test(w.shopBarHtml_({ shop: "northside", page: "products" })));
   w.eval(`siteFeatures = Object.assign({}, siteFeatures, { production: true });`);
-  w.eval(`adminMe = null;`);
+  w.eval(asRole(null));
   w.location.hash = "#designs/northside"; w.eval(`window._shopBarCtx = { shop: "northside", page: "designs" };`); w.shopBarPick_("acme");
   ok("picking another shop opens the same page for it", w.location.hash === "#designs/acme");
   w.eval(`window._shopBarCtx = { shop: null, page: "categories" };`); w.shopBarPick_("acme");

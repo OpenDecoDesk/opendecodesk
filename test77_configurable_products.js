@@ -172,7 +172,7 @@ const near = (a, b) => Math.abs(a - b) < 0.005;
   console.log("\n=== admin.js + storefront wiring ===");
   const a = read("public/admin.js");
   ok("admin nav + routes: Transfers, Run Transfer Sheets, Graphics",
-    /\["transfers", "Transfers"\]/.test(a) && /navGo\('runtransfer'\)/.test(a) && /raw === "transfers"/.test(a) &&
+    /\["transfers", "Transfers"\]/.test(a) && /\["runtransfer", "Run Transfer Sheets"\]/.test(a) && /raw === "transfers"/.test(a) &&
     /raw === "runtransfer"/.test(a) && /graphicsMatch/.test(a) && /location\.hash='#graphics\/'/.test(a));
   ok("admin screens exist", /async function renderTransfers/.test(a) && /async function renderGraphics/.test(a) &&
     /async function renderRunTransfer/.test(a) && /function showReceiveTransferModal_/.test(a) && /function loadProductConfigSection/.test(a) && /function loadOrgTierBox_/.test(a));

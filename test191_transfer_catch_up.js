@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Use transfers for past orders (Inventory & COGS). A made line whose transfers never left stock — its saved
@@ -118,8 +119,8 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   r = await call({ action: "applyTransferCatchUp", itemIds: [item("O1", 1)] });
   ok("and can't be applied", r.status === 409 && /closed/.test(r.body.message) && t().quantity === 18);
   const src = read("functions/api/orders.js");
-  const staff = src.match(/const STAFF_ACTIONS = \[[\s\S]*?\];/)[0], catalog = src.match(/const CATALOG_ADMIN_ACTIONS = new Set\(\[[\s\S]*?\]\);/)[0];
-  ok("allowed for the same roles as Use blanks for past orders", /"applyTransferCatchUp"/.test(staff) && /"applyTransferCatchUp"/.test(catalog) && /"previewTransferCatchUp"/.test(staff));
+  const catalog = src.match(/const CATALOG_ADMIN_ACTIONS = new Set\(\[[\s\S]*?\]\);/)[0];
+  ok("allowed for the same roles as Use blanks for past orders", ["production", "staff", "manager", "admin"].every(r => may(r, "applyTransferCatchUp") === may(r, "applyBlankCatchUp")) && may("staff", "applyTransferCatchUp") && /"applyTransferCatchUp"/.test(catalog) && may("staff", "previewTransferCatchUp"));
   const admin = read("public/admin.js");
   ok("the Inventory & COGS page has the button", /id="cogsTransferCatchUp"[^>]*>Use transfers for past orders…/.test(admin) && /action: "applyTransferCatchUp"/.test(admin));
 

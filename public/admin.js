@@ -19,13 +19,51 @@ let adminKey = null; // "cookie" when signed in via the HttpOnly session cookie,
 // two-step sign-in is required). The SERVER refuses everything else until it is done
 // (functions/_lib/adminAuth.js); this only decides which screen to draw.
 let adminPending = null;
-// Who is signed in: { name, email, role } with role "staff" | "manager" | "admin", or null.
+// Who is signed in: { name, email, role, roleName }, or null.
 let adminMe = null;
-// Roles, lowest to highest. The menu and the router hide what a role can't use; the server is
-// what actually refuses it. A role this page doesn't know (or none yet) hides nothing.
-const ADMIN_ROLE_LABELS = { staff: "Back office", manager: "Manager", admin: "Admin" };
-const adminRoleRank_ = (role) => role === "admin" ? 3 : role === "manager" ? 2 : role === "staff" ? 1 : 0;
-function adminCan_(need){ const mine = adminMe && adminRoleRank_(adminMe.role); return !mine || mine >= adminRoleRank_(need); }
+// What their role may do (Users → Roles and permissions; functions/_lib/permissions.js), from
+// /api/admin-users "me": { fn: "none" | "read" | "edit" | "full" }, and the menus → items → functions
+// it is about. The menu, the router and the buttons hide what a role can't use; the server is what
+// actually refuses it. Not known yet (or an older server): nothing is hidden.
+let adminPerms = null, adminAreas = null;
+const ADMIN_ROLE_LABELS = { staff: "Back office", manager: "Manager", admin: "Admin", production: "Production" };
+const ADMIN_LEVEL_RANK_ = { none: 0, read: 1, edit: 2, full: 3 };
+function adminLevel_(fn){ if (!adminPerms) return "full"; const l = Object.prototype.hasOwnProperty.call(adminPerms, fn) ? adminPerms[fn] : "none"; return ADMIN_LEVEL_RANK_[l] != null ? l : "none"; }
+// adminCan_(fn, level): may the signed-in user use this function at least at this level (default read)?
+function adminCan_(fn, level){ return ADMIN_LEVEL_RANK_[adminLevel_(fn)] >= (ADMIN_LEVEL_RANK_[level || "read"] || 1); }
+function adminRoleName_(){ return (adminMe && (adminMe.roleName || ADMIN_ROLE_LABELS[adminMe.role])) || "a user"; }
+// Controls tagged with what they need are hidden from a role without it. One place does it for every screen and popup:
+//   data-need="catalog.graphics:edit"            hidden unless the role has Edit on that function
+//   data-need="orders.details:full|run.runs:edit" any one is enough; a spec without ":level" means edit
+//   data-need-form="production.machines:edit"    without it, every field inside is read-only and its buttons hidden,
+//                                                except a button marked data-perm-keep (moving around, looking things up)
+// The server refuses these actions anyway; this only stops a read-only role from being offered them.
+function adminPermOk_(spec){
+  return String(spec || "").split("|").some(s => { const i = s.lastIndexOf(":"); const fn = (i > 0 ? s.slice(0, i) : s).trim(); return !!fn && adminCan_(fn, i > 0 ? s.slice(i + 1).trim() : "edit"); });
+}
+function adminLockForm_(form){
+  if (adminPermOk_(form.getAttribute("data-need-form"))) return;
+  if (form.matches("input, select, textarea")) form.disabled = true;   // a single field can carry it too
+  form.querySelectorAll("input, select, textarea").forEach(f => { f.disabled = true; });
+  form.querySelectorAll('button:not([data-perm-keep]), input[type="submit"]').forEach(b => b.setAttribute("data-perm-off", ""));
+}
+function adminApplyPerms_(root){
+  if (!root || root.nodeType !== 1) return;
+  const tagged = Array.from(root.querySelectorAll("[data-need]"));
+  if (root.hasAttribute("data-need")) tagged.push(root);
+  for (const el of tagged) { if (adminPermOk_(el.getAttribute("data-need"))) el.removeAttribute("data-perm-off"); else el.setAttribute("data-perm-off", ""); }
+  const forms = Array.from(root.querySelectorAll("[data-need-form]"));
+  const outer = root.closest("[data-need-form]");
+  if (outer) forms.push(outer);
+  forms.forEach(adminLockForm_);
+}
+// Every screen and popup is built by setting innerHTML or appending, so watching the page catches them all, before
+// they are painted (the observer runs before the browser draws).
+if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" && document.documentElement) {
+  new MutationObserver(list => { if (!adminPerms) return; for (const m of list) for (const n of m.addedNodes) adminApplyPerms_(n.nodeType === 1 ? n : n.parentElement); })
+    .observe(document.documentElement, { childList: true, subtree: true });
+}
+// Where tagged controls end
 let _adminJustSignedIn = false; // set by a fresh sign-in (not a remembered session); read once by loadAdminOrgList
 let _boxPresetsCache = null; // cached from DB; null = not yet loaded
 
@@ -94,6 +132,7 @@ function clearAdminAuth(){
   adminKey = null;
   adminPending = null;
   adminMe = null;
+  adminPerms = null;
   try{ localStorage.removeItem(ADMIN_SESSION_STORAGE_KEY); }catch(e){}
 }
 
@@ -201,7 +240,7 @@ async function adminRoute() {
   if (adminDesktopHides_(raw)) { renderDesktopOff_(app, raw); return; }
   { const off = adminPageFeature_(raw); if (off && !featureOn_(off)) { renderFeatureOff_(app, off, raw); return; } }
   // A page this user's role can't use: say so (the server would refuse every request it makes).
-  if (!adminCan_(adminPageRole_(raw))) { renderRoleOff_(app, raw); return; }
+  if (!adminCanOpenPage_(raw)) { renderRoleOff_(app, raw); return; }
 
   // The Orders page opens on the first shop (the top of the Shop dropdown); "All shops" is #orders/all
   // ("all" is reserved, never a shop's id). #picker and an empty hash land on the first shop too.
@@ -952,7 +991,12 @@ async function refreshAdminMe_(){
   try{
     const res = await fetch("/api/admin-users", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ action: "me", key: adminKey }) });
     const data = await res.json().catch(() => null);
-    if(res.ok && data && data.status === "ok" && data.user){ adminMe = data.user; updateStoredSession_(); }
+    if(res.ok && data && data.status === "ok" && data.user){
+      adminMe = data.user;
+      if(data.permissions && typeof data.permissions === "object"){ adminPerms = data.permissions; adminApplyPerms_(document.body); }
+      if(Array.isArray(data.areas)) adminAreas = data.areas;
+      updateStoredSession_();
+    }
   }catch(e){ /* keep what we had */ }
 }
 async function loadAdminOrgList(){
@@ -997,8 +1041,8 @@ async function loadAdminOrgList(){
     if (_adminJustSignedIn) {
       _adminJustSignedIn = false;
       // The address may still point at a page the last person had open; if this user's role can't use it, start at Orders.
-      if (!adminCan_(adminPageRole_(location.hash))) adminSetHash("orders");
-      if (adminMe && adminMe.role === "admin") await openSettingsIfSetupIncomplete_();
+      if (!adminCanOpen_(location.hash)) adminSetHash(adminFirstPage_());
+      if (adminCan_("settings.global", "edit")) await openSettingsIfSetupIncomplete_();
     }
     // Now authed — route to wherever the hash points (empty/picker/orders all land on the unified
     // Orders page; a deep link like #machines goes there).
@@ -1587,7 +1631,7 @@ function globalSettingsProblem_(){
   }
   if (c.desktop && ticked("designVerification") && !ticked("email")) problems.push("Design approval needs Email");
   // A cloud install sending through its own mailbox: the same fields, and a way to keep the password.
-  if (!c.desktop && c.emailSending && adminCan_("admin") && ((document.querySelector('input[name="gEmailVia"]:checked') || {}).value === "mailbox")) {
+  if (!c.desktop && c.emailSending && adminCan_("settings.global", "edit") && ((document.querySelector('input[name="gEmailVia"]:checked') || {}).value === "mailbox")) {
     const missing = [["gEmailFrom", "the email address"], ["gEmailHost", "the outgoing (SMTP) server"], ["gEmailPort", "the port"]].filter(([id]) => !val(id));
     if (!val("gEmailPass") && !(c.emailSending.mailbox && c.emailSending.mailbox.passwordSaved)) missing.push(["gEmailPass", "the password"]);
     const bad = val("gEmailFrom") && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(val("gEmailFrom")) ? [["gEmailFrom", "an email address that looks like one"]] : [];
@@ -1668,31 +1712,47 @@ function renderDesktopOff_(app, hash){
       <div class="admin-actions" style="margin-top:14px;"><button class="admin-btn" onclick="location.hash='#orders'">Back to Orders</button></div>
     </div>`;
 }
-// The lowest role a page is for (see ACTION_ROLE in functions/api/orders.js — the server is the
-// authority; this keeps people from landing on screens that could only show refusals).
-// Global settings is an admin's page: every change on it is (updateGlobalSettings, updateFeatures, the
-// business profile, region, sales tax, ship-from), so nobody else is shown it at all.
-const ADMIN_ONLY_PAGES = ["users", "audit", "settings", "catalog/settings", "vendors", "orphans", "shoprate"];
-// The business's money (revenue, sales tax, inventory and COGS, expenses) is a manager's, like costs and margins.
-const ADMIN_MANAGER_PAGES = ["packages", "brandrules", "money", "reconcile", "accountviewer", "books", "catalog/new-org", "revenue", "salestax", "cogs", "expenses"];
-function adminPageRole_(hash){
+// Which menu item (permissions.js) a page belongs to: the first part of its hash, but a shop's settings,
+// a new shop and the setup wizard are Shop setup's, and the old #catalog/settings is Global settings.
+// "" — a page every signed-in user has (their own password and two-step; anything not in the list).
+function adminPageItem_(hash){
   const raw = String(hash || "").replace(/^#\/?/, "");
-  if (ADMIN_ONLY_PAGES.includes(raw)) return "admin";
-  // Shop setup (and the wizard) make and open shops: a manager's, like creating one.
-  if (ADMIN_MANAGER_PAGES.includes(raw) || /^catalog\/orgs\/[^/]+\/edit$/.test(raw) || /^(setup|wizard)(\/|$)/.test(raw)) return "manager";
-  return "staff";
+  if (raw === "catalog/settings") return "settings";
+  if (raw === "catalog/new-org" || /^catalog\/orgs\/[^/]+\/edit$/.test(raw) || /^(setup|wizard)(\/|$)/.test(raw)) return "setup";
+  const first = raw.split("/")[0];
+  if (!first || first === "picker") return "home";
+  if (first === "catalog") return "catalog";
+  return adminItemFns_(first) ? first : "";
 }
-// The menu without the pages of switched-off features or of a higher role (a group left empty disappears).
+// The functions of one menu item, or null when it isn't one (adminAreas from the server).
+function adminItemFns_(item){
+  for (const m of adminAreas || []) for (const it of m.items || []) if (it.hash === item) return (it.fns || []).map(f => f[0]);
+  return null;
+}
+// An item is there when any of its functions is (a switched-off menu or item has them all at none).
+function adminItemOn_(item){
+  if (!item || !adminPerms) return true;
+  const fns = adminItemFns_(item);
+  return !fns || fns.some(f => adminCan_(f, "read"));
+}
+function adminCanOpenPage_(hash){ return adminItemOn_(adminPageItem_(hash)); }
+// The menu without the pages of switched-off features or the role's hidden items (a group left empty disappears).
 function adminNavGroups_(){
-  return ADMIN_NAV_GROUPS.map(g => ({ label: g.label, items: g.items.filter(it => !Array.isArray(it) || (adminPageOn_(it[0]) && adminCan_(adminPageRole_(it[0])))) }))
+  return ADMIN_NAV_GROUPS.map(g => ({ label: g.label, items: g.items.filter(it => !Array.isArray(it) || (adminPageOn_(it[0]) && adminCanOpenPage_(it[0]))) }))
     .filter(g => g.items.length);
 }
 // Can the signed-in user open that page (their role, and the page's feature switched on)? Links and
 // buttons to a page they can't use aren't drawn at all.
-function adminCanOpen_(hash){ return adminPageOn_(hash) && adminCan_(adminPageRole_(hash)); }
+function adminCanOpen_(hash){ return adminPageOn_(hash) && adminCanOpenPage_(hash); }
+// Where someone lands when the address points at a page they can't open: the first one they can.
+function adminFirstPage_(){
+  const first = ["home", "orders", "runorder", "runtransfer", "catalog"].find(h => adminCanOpen_(h));
+  if (first) return first;
+  const g = adminNavGroups_().map(g => g.items.find(Array.isArray)).find(Boolean);
+  return g ? g[0] : "password";
+}
 function renderRoleOff_(app, hash){
   adminSetHash(hash);
-  const need = adminPageRole_(hash);
   document.title = adminTitle_("Not available");
   app.innerHTML = `
     <div class="org-hero admin-hero" style="--org-accent:var(--accent);">
@@ -1700,8 +1760,8 @@ function renderRoleOff_(app, hash){
       <h1>Not available to you</h1>
       <div class="stitch stitch-thick"></div>
     </div>
-    <div class="admin-panel" style="--org-accent:var(--accent);" id="roleOffPanel" data-need="${escapeHtml(need)}">
-      <div class="admin-empty"><strong>Not available to you.</strong> This page is for ${need === "admin" ? "an admin" : "a manager or an admin"}. You are signed in as ${escapeHtml(ADMIN_ROLE_LABELS[adminMe && adminMe.role] || "a user")}.</div>
+    <div class="admin-panel" style="--org-accent:var(--accent);" id="roleOffPanel" data-item="${escapeHtml(adminPageItem_(hash))}">
+      <div class="admin-empty"><strong>Not available to you.</strong> Your role (${escapeHtml(adminRoleName_())}) doesn't include this page. Someone who manages users can change that under Settings → Users → Roles and permissions.</div>
     </div>`;
 }
 function renderFeatureOff_(app, feature, hash){
@@ -1860,7 +1920,7 @@ function renderAdminNav(){
   // every page, grouped, so nothing hides inside a dropdown that can run off the screen.
   const navGroups = adminNavGroups_();   // pages of switched-off features are left out, here and in the sheet
   // The same top-level pages as the desktop row (Run Transfer Sheets was missing from the phone menu).
-  const top = [["home", "Home"], ["orders", "Orders"], ["runorder", "Run Order"], ["runtransfer", "Run Transfer Sheets"], ["catalog", "Manage catalog"]].filter(it => adminPageOn_(it[0]));
+  const top = [["home", "Home"], ["orders", "Orders"], ["runorder", "Run Order"], ["runtransfer", "Run Transfer Sheets"], ["catalog", "Manage catalog"]].filter(it => adminCanOpen_(it[0]));
   const current = top.concat(...ADMIN_NAV_GROUPS.map(g => g.items.filter(Array.isArray))).find(it => it[0] === active);
   const currentLabel = current ? current[1] : "";
   const sheetItem = (it) => Array.isArray(it)
@@ -1868,11 +1928,7 @@ function renderAdminNav(){
     : `<button type="button" class="admin-nav-btn" onclick="closeNavDropdowns();${it.action}">${escapeHtml(it.label)}</button>`;
   nav.innerHTML = `
     <div class="admin-nav-row">
-      <button type="button" class="admin-nav-btn${active === "home" ? " active" : ""}" onclick="navGo('home')">Home</button>
-      <button type="button" class="admin-nav-btn${active === "orders" ? " active" : ""}" onclick="navGo('orders')">Orders</button>
-      ${adminPageOn_("runorder") ? `<button type="button" class="admin-nav-btn${active === "runorder" ? " active" : ""}" onclick="navGo('runorder')">Run Order</button>` : ""}
-      <button type="button" class="admin-nav-btn${active === "runtransfer" ? " active" : ""}" onclick="navGo('runtransfer')">Run Transfer Sheets</button>
-      <button type="button" class="admin-nav-btn${active === "catalog" ? " active" : ""}" onclick="navGo('catalog')">Manage catalog</button>
+      ${top.map(([h, label]) => `<button type="button" class="admin-nav-btn${active === h ? " active" : ""}" data-h="${h}" onclick="navGo(this.dataset.h)">${escapeHtml(label)}</button>`).join("")}
       ${navGroups.map(groupHtml).join("")}
     </div>
     <div class="admin-nav-mobile admin-nav-group">
@@ -1933,7 +1989,7 @@ async function loadShopBarData_(force){
 // Each link is drawn for whoever may open that page (its role and feature switch): in OpenDecoDesk a worker manages
 // products, designs and graphics; Shop setup and Publish are a manager's.
 function shopBarHtml_(ctx){
-  const manager = adminCan_("manager");
+  const manager = adminCan_("catalog.shops", "edit");
   const orgs = adminOrgs || [];
   const shop = ctx.shop && orgs.some(o => o.orgId === ctx.shop) ? ctx.shop : null;
   const d = window._shopBarData;
@@ -1942,9 +1998,9 @@ function shopBarHtml_(ctx){
   const pub = shop && d.publish ? d.publish[shop] : null;
   const pubBtn = !shop || !manager ? "" : pub && pub.state === "current"
     ? `<button type="button" class="shop-bar-pub done" disabled title="Shoppers see this shop as it is now">✓ Published</button>`
-    : `<button type="button" class="shop-bar-pub" data-org="${escapeHtml(shop)}" onclick="shopBarPublish_(this.dataset.org)" title="${pub && pub.state === "never" ? "Shoppers see this shop's current products and settings (until it's published once, changes show at once)" : "Shoppers see this shop's current products and settings"}">${pub && pub.state === "changed" ? "Publish changes" : "Publish"}</button>`;
+    : `<button type="button" class="shop-bar-pub" data-org="${escapeHtml(shop)}" data-need="catalog.shops:edit" onclick="shopBarPublish_(this.dataset.org)" title="${pub && pub.state === "never" ? "Shoppers see this shop's current products and settings (until it's published once, changes show at once)" : "Shoppers see this shop's current products and settings"}">${pub && pub.state === "changed" ? "Publish changes" : "Publish"}</button>`;
   // Unpublished changes can be thrown away: back to what was last published (shopBarDiscard_).
-  const discardBtn = shop && manager && pub && pub.state === "changed" ? `<button type="button" class="shop-bar-discard" data-org="${escapeHtml(shop)}" onclick="shopBarDiscard_(this.dataset.org)" title="Put this shop back the way it was last published">Discard changes&hellip;</button>` : "";
+  const discardBtn = shop && manager && pub && pub.state === "changed" ? `<button type="button" class="shop-bar-discard" data-org="${escapeHtml(shop)}" data-need="catalog.shops:full" onclick="shopBarDiscard_(this.dataset.org)" title="Put this shop back the way it was last published">Discard changes&hellip;</button>` : "";
   // Open for orders, or "Coming soon" — a switch beside Publish (setOrgReady, asked first).
   const reg = shop && (window._adminOrgRegistry || []).find(o => o.orgId === shop);
   const liveBtn = !shop || !manager || !reg ? "" : `<button type="button" class="shop-bar-live${reg.ready ? " on" : ""}" role="switch" aria-checked="${reg.ready ? "true" : "false"}"
@@ -1997,7 +2053,7 @@ function drawShopBar_(){
   if (!bar) return;
   window._shopBarCtx = ctx;
   bar.innerHTML = shopBarHtml_(ctx);
-  if (ctx.shop && adminCan_("manager")) loadShopBarData_().then(() => {
+  if (ctx.shop && adminCan_("catalog.shops", "read")) loadShopBarData_().then(() => {
     const now = document.getElementById("shopBar");
     if (now && window._shopBarCtx === ctx) now.innerHTML = shopBarHtml_(ctx);
   });
@@ -2006,7 +2062,7 @@ function drawShopBar_(){
 function shopBarPick_(orgId){
   if (!orgId) return;
   const ctx = window._shopBarCtx || { page: "products" };
-  const page = ["setup", "products", "edit", "designs", "graphics"].includes(ctx.page) ? ctx.page : (adminCan_("manager") ? "products" : "designs");
+  const page = ["setup", "products", "edit", "designs", "graphics"].includes(ctx.page) ? ctx.page : (adminCan_("catalog.products", "read") ? "products" : "designs");
   location.hash = "#" + shopBarHash_(page, orgId);
 }
 async function shopBarPublish_(orgId){
@@ -2330,7 +2386,7 @@ function showDesignVerifModal(){
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
               <input type="text" id="dvImg${i}" placeholder="https://..." style="flex:1;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;color:#1a1a1a;">
               <label style="cursor:pointer;font-size:12px;padding:5px 10px;background:#e5e7eb;border-radius:4px;white-space:nowrap;color:#1a1a1a;">
-                Upload <input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif" style="display:none;" data-target="dvImg${i}" onchange="handleDvImageUpload(this)">
+                Upload <input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif" style="display:none;" data-target="dvImg${i}" data-need="catalog.products:edit" onchange="handleDvImageUpload(this)">
               </label>
               <span id="dvImg${i}Status" style="font-size:11px;color:#555;min-width:60px;"></span>
             </div>`).join("")}
@@ -2545,7 +2601,7 @@ async function renderVendorIntegrations(app){
 async function mountVendorConnections_(root){
   root.innerHTML = `
       <div style="font-size:13px;color:#666;margin-bottom:12px;line-height:1.5;">Connect suppliers through <b>PromoStandards</b>, the industry's shared web services (S&amp;S, SanMar, OTTO Cap and ~1,900 others). A connected vendor's prices, colors, sizes, descriptions and images come in live — reviewed before anything changes — instead of from a downloaded file.</div>
-      <div style="margin-bottom:12px;"><button type="button" class="admin-btn" id="vcConnect">+ Connect a vendor</button></div>
+      <div style="margin-bottom:12px;"><button data-need="settings.vendors:edit" type="button" class="admin-btn" id="vcConnect">+ Connect a vendor</button></div>
       <div id="vcBody" style="color:#888;font-size:14px;">Loading…</div>`;
   if (!adminKey) { adminKey = (await adminLogin()) || ""; if (!adminKey) return; }
   const draw = async () => {
@@ -2563,11 +2619,11 @@ async function mountVendorConnections_(root){
         </div>
         <div style="font-size:12px;color:#555;margin-top:4px;">${c.blankCount} blank${c.blankCount === 1 ? "" : "s"} linked · last test ${escapeHtml(day(c.lastTestedAt))} · last refresh ${escapeHtml(day(c.lastRefreshAt))}${c.lastError ? ` · <span style="color:#b03a2e;">${escapeHtml(c.lastError)}</span>` : ""}</div>
         <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
-          <button type="button" class="admin-btn vcTest" data-id="${c.id}" style="padding:3px 10px;font-size:12px;">Test…</button>
-          <button type="button" class="admin-btn vcLink" data-id="${c.id}" style="padding:3px 10px;font-size:12px;">Link blanks…</button>
+          <button data-need="settings.vendors:edit" type="button" class="admin-btn vcTest" data-id="${c.id}" style="padding:3px 10px;font-size:12px;">Test…</button>
+          <button data-need="settings.vendors:edit" type="button" class="admin-btn vcLink" data-id="${c.id}" style="padding:3px 10px;font-size:12px;">Link blanks…</button>
           <button type="button" class="admin-btn vcLog" data-id="${c.id}" style="padding:3px 10px;font-size:12px;" title="Every call to ${escapeHtml(c.name)}'s web services, with the full request and response">Logs…</button>
-          <button type="button" class="admin-btn vcEdit" data-id="${c.id}" style="padding:3px 10px;font-size:12px;">Edit…</button>
-          <button type="button" class="admin-btn vcDel admin-btn-danger" data-id="${c.id}" style="padding:3px 10px;font-size:12px;">Disconnect</button>
+          <button data-need="settings.vendors:edit" type="button" class="admin-btn vcEdit" data-id="${c.id}" style="padding:3px 10px;font-size:12px;">Edit…</button>
+          <button data-need="settings.vendors:full" type="button" class="admin-btn vcDel admin-btn-danger" data-id="${c.id}" style="padding:3px 10px;font-size:12px;">Disconnect</button>
         </div></div>`).join("") : `<div style="color:#888;">No vendors connected yet.</div>`);
     const byId = (id) => (r.connections || []).find(c => c.id === Number(id));
     body.querySelectorAll(".vcTest").forEach(b => b.onclick = () => showVendorTest_(byId(b.dataset.id), draw));
@@ -2808,7 +2864,7 @@ async function renderOrphanImages(app){
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
         <label style="font-size:13px;"><input type="checkbox" id="orAll" checked> Select all</label>
         <button type="button" class="admin-btn" id="orZip">Download selected (.zip)</button>
-        <button type="button" class="admin-btn admin-btn-danger admin-btn-danger-solid" id="orDelete" >Remove selected from storage</button>
+        <button data-need="settings.orphans:full" type="button" class="admin-btn admin-btn-danger admin-btn-danger-solid" id="orDelete" >Remove selected from storage</button>
         <span id="orStatus" style="font-size:12px;color:#555;"></span></div>
       <div style="max-height:60vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead><tr style="background:#f5f5f5;text-align:left;"><th style="padding:5px 8px;"></th><th style="padding:5px 8px;"></th><th style="padding:5px 8px;">File</th><th style="padding:5px 8px;text-align:right;">Size</th><th style="padding:5px 8px;">Uploaded</th></tr></thead>
@@ -2880,7 +2936,7 @@ async function renderPackageSizes(app){
       <td style="padding:4px 6px">${inp("pkg-max-caps", p.maxCaps, 50, 'min="0" step="1" placeholder="∞" aria-label="Max caps" title="Leave blank for unlimited"')}</td>
       <td style="padding:4px 6px">${inp("pkg-max-sw", p.maxSweatshirts, 50, 'min="0" step="1" placeholder="∞" aria-label="Max sweatshirts" title="Leave blank for unlimited"')}</td>
       <td style="padding:4px 6px">${inp("pkg-max-wt", p.maxWeightOz, 56, 'min="0" step="1" placeholder="∞" aria-label="Max weight (oz)" title="Leave blank for unlimited"')}</td>
-      <td style="padding:4px 0;text-align:right;"><button type="button" class="admin-btn admin-btn-danger" onclick="this.closest('tr').remove()" style="padding:2px 8px;font-size:11px;" title="Remove this size">Remove</button></td>
+      <td style="padding:4px 0;text-align:right;"><button data-need="catalog.packages:edit" type="button" class="admin-btn admin-btn-danger" onclick="this.closest('tr').remove()" style="padding:2px 8px;font-size:11px;" title="Remove this size">Remove</button></td>
     </tr>`;
   }
   const th = (t, left) => `<th style="text-align:${left ? "left" : "center"};padding:5px 6px;">${t}</th>`;
@@ -2894,10 +2950,10 @@ async function renderPackageSizes(app){
     </div>
     <div id="pkgError" style="color:#b03a2e;font-size:13px;min-height:16px;margin-top:8px;"></div>
     <div class="admin-actions" style="display:flex;gap:8px;margin-top:10px;">
-      <button type="button" class="admin-btn" id="pkgAddRow">+ Add size</button>
+      <button data-need="catalog.packages:edit" type="button" class="admin-btn" id="pkgAddRow">+ Add size</button>
       <span style="flex:1"></span>
-      <button type="button" class="admin-btn" id="pkgDiscard" style="background:#fff;color:#232323;border:1px solid #999;">Discard changes</button>
-      <button type="button" class="admin-btn" id="pkgSave">Save</button>
+      <button data-need="catalog.packages:edit" type="button" class="admin-btn" id="pkgDiscard" style="background:#fff;color:#232323;border:1px solid #999;">Discard changes</button>
+      <button data-need="catalog.packages:edit" type="button" class="admin-btn" id="pkgSave">Save</button>
     </div>`;
 
   body.querySelector("#pkgAddRow").onclick = () => {
@@ -3675,15 +3731,19 @@ const FULFILLMENT_STAGES = [
   { stage: "shipped",            label: "Mark shipped",              prereqField: "qaPackedAt",           prereqCheck: v => !!v },
   { stage: "delivered",          label: "Mark delivered",            prereqField: "qaPackedAt",           prereqCheck: v => !!v },
 ];
+// The steps from made onward (functions/_lib/permissions.js LATE_STAGES): orders.stepsLate; the rest orders.stepsEarly.
+const FULFILLMENT_LATE_ = ["manufactured", "qaPacked", "shipped", "delivered", "completed"];
 const FULFILLMENT_FIELD = { blankOrdered:"blankOrderedAt", blankShipped:"blankShippedAt", blankReceived:"blankReceivedAt", manufactured:"manufacturedAt", digitizingComplete:"digitizingCompleteAt", designApproved:"designApprovedAt", qaPacked:"qaPackedAt", shipped:"shippedAt", delivered:"deliveredAt" };
 
 // Builds the Action-column cell for one order row — a dropdown of all
 // currently-eligible stages plus a resend-email button.
 function adminActionCell(org, o){
   const dataAttrs = `data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}"`;
-  const deleteBtn = `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" ${dataAttrs} onclick="deleteTransaction(this.dataset.org, this.dataset.order)" style="margin-top:6px;">Delete</button>`;
+  // Each button only for a role that may use it (Users → Roles and permissions); the server refuses the rest anyway.
+  const can = (fn, lvl) => adminCan_(fn, lvl);
+  const deleteBtn = !can("orders.details", "full") ? "" : `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" ${dataAttrs} data-need="orders.details:full" onclick="deleteTransaction(this.dataset.org, this.dataset.order)" style="margin-top:6px;">Delete</button>`;
 
-  const paymentsBtn = `<button class="admin-btn" ${dataAttrs} onclick="showPaymentsModal(this.dataset.org, this.dataset.order)" style="margin-top:4px;">💰 Payments</button>`;
+  const paymentsBtn = !can("orders.payments", "read") ? "" : `<button class="admin-btn" ${dataAttrs} onclick="showPaymentsModal(this.dataset.org, this.dataset.order)" style="margin-top:4px;">💰 Payments</button>`;
 
   if(o.items.every(it => it.cancelDate)){
     // Payments stays available: money recorded on a cancelled order must be voided/refunded before the order can be voided.
@@ -3696,17 +3756,17 @@ function adminActionCell(org, o){
   // it's paid, Resend downloads straight from the row (a new link, emailed with the files when they fit).
   const digitalOn = featureOn_("digital");
   const dlBtn = (o.hasDownloads || o.hasDigital) && digitalOn ? `<button class="admin-btn" ${dataAttrs} onclick="showDownloadsModal_(this.dataset.org,this.dataset.order)" title="The customer's download link and files: what's been used, Reset, Revoke" style="margin-top:4px;">Downloads…</button>` : "";
-  const resendDlBtn = o.hasDigital && digitalOn && (o.paid || o.paidForWork) && adminCan_("manager")
-    ? `<button class="admin-btn" ${dataAttrs} onclick="resendDownloadsNow_(this.dataset.org,this.dataset.order)" title="Email the customer a new download link, with the files attached when they fit (the old link stops working)" style="margin-top:4px;">Resend downloads</button>` : "";
+  const resendDlBtn = o.hasDigital && digitalOn && (o.paid || o.paidForWork) && adminCan_("orders.downloads", "edit")
+    ? `<button class="admin-btn" ${dataAttrs} data-need="orders.downloads:edit" onclick="resendDownloadsNow_(this.dataset.org,this.dataset.order)" title="Email the customer a new download link, with the files attached when they fit (the old link stops working)" style="margin-top:4px;">Resend downloads</button>` : "";
   // Downloads only: nothing to make or ship, so no rush, no shipping and no stages — paid, then completed.
-  const rushBtn = o.digitalOnly ? "" : `<button class="admin-btn" ${dataAttrs} onclick="showRushFeeModal_(this.dataset.org,this.dataset.order)" title="Rush this order, or change its rush fee" style="margin-top:4px;">${o.rushRequested ? "Rush…" : "+ Rush…"}</button>`;
+  const rushBtn = o.digitalOnly || !can("orders.payments", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:full" onclick="showRushFeeModal_(this.dataset.org,this.dataset.order)" title="Rush this order, or change its rush fee" style="margin-top:4px;">${o.rushRequested ? "Rush…" : "+ Rush…"}</button>`;
 
   // Paid for everything but a rush fee (migrations/0082) counts as paid for the work: the stages go on.
   if(!o.paid && !o.paidForWork){
-    return `<button class="admin-btn" ${dataAttrs} onclick="markOrderPaid(this.dataset.org, this.dataset.order)">Mark as paid</button>` +
-      (adminDesktopNoEmail_() ? "" : `<button class="admin-btn" ${dataAttrs} onclick="resendEmail(this.dataset.org, this.dataset.order)" style="margin-top:4px;">${resendLabel}</button>`) +
-      invoiceCell_(org, o) +
-      `<button class="admin-btn" ${dataAttrs} onclick="editOrder(this.dataset.org,this.dataset.order)" style="margin-top:4px;">Edit items</button>` +
+    return (can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" onclick="markOrderPaid(this.dataset.org, this.dataset.order)">Mark as paid</button>` : `<span class="muted-cell" style="font-size:12px;">Not paid</span>`) +
+      (adminDesktopNoEmail_() || !can("orders.invoices", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.invoices:edit" onclick="resendEmail(this.dataset.org, this.dataset.order)" style="margin-top:4px;">${resendLabel}</button>`) +
+      (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") +
+      (can("orders.details", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" onclick="editOrder(this.dataset.org,this.dataset.order)" style="margin-top:4px;">Edit items</button>` : "") +
       rushBtn + dlBtn + paymentsBtn + deleteBtn;
   }
 
@@ -3714,7 +3774,8 @@ function adminActionCell(org, o){
   // Digitizing / Design approved wait for the order designs of typed-in personalization (the server
   // refuses them too) — shown greyed out with the reason rather than silently missing.
   const waitingUpload = s => Number(o.orderDesignsMissing) > 0 && (s.stage === "digitizingComplete" || s.stage === "designApproved");
-  const eligible = eligibleAll.filter(s => !waitingUpload(s));
+  // Only the steps this role may set: Production moves made → QA packed → shipped, not the blank steps.
+  const eligible = eligibleAll.filter(s => !waitingUpload(s) && can(FULFILLMENT_LATE_.includes(s.stage) ? "orders.stepsLate" : "orders.stepsEarly", "edit"));
   const waiting = eligibleAll.filter(waitingUpload);
   const stageEl = o.digitalOnly
     ? `<span class="mono" style="font-size:11px;color:var(--ink-soft);" title="Everything on this order is a digital product: nothing to make or ship">Downloads only</span>`
@@ -3725,19 +3786,19 @@ function adminActionCell(org, o){
         ${eligible.map(s => `<option value="${escapeHtml(s.stage)}">${escapeHtml(s.stage === "manufactured" && o.allFromStock ? "Pulled from stock" : s.label.replace(/^Mark /, ""))}</option>`).join("")}
         ${waiting.map(s => `<option value="" disabled>${escapeHtml(s.label.replace(/^Mark /, ""))} — upload the order design first</option>`).join("")}
       </select>`;
-  const emailBtn = adminDesktopNoEmail_() ? "" : `<button class="admin-btn" ${dataAttrs} onclick="resendEmail(this.dataset.org, this.dataset.order)" style="margin-top:4px;">${resendLabel}</button>`;
+  const emailBtn = adminDesktopNoEmail_() || !can("orders.invoices", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.invoices:edit" onclick="resendEmail(this.dataset.org, this.dataset.order)" style="margin-top:4px;">${resendLabel}</button>`;
   const hasAddr = o.shippingAddress && o.shippingAddress.line1;
-  const shipBtn = o.digitalOnly ? "" : `<button class="admin-btn" ${dataAttrs} onclick="setShippingInfo(this.dataset.org,this.dataset.order)" style="margin-top:4px;">${hasAddr ? "Edit shipping" : "Set shipping"}</button>`;
-  const editBtn = `<button class="admin-btn" ${dataAttrs} onclick="editOrder(this.dataset.org,this.dataset.order)" style="margin-top:4px;">Edit items</button>`;
-  const datesBtn = `<button class="admin-btn" ${dataAttrs} onclick="showOrderDates_(this.dataset.org,this.dataset.order)" title="Every date on this order — change or clear any of them" style="margin-top:4px;">Dates…</button>`;
+  const shipBtn = o.digitalOnly || !can("orders.shipping", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.shipping:edit" onclick="setShippingInfo(this.dataset.org,this.dataset.order)" style="margin-top:4px;">${hasAddr ? "Edit shipping" : "Set shipping"}</button>`;
+  const editBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" onclick="editOrder(this.dataset.org,this.dataset.order)" style="margin-top:4px;">Edit items</button>`;
+  const datesBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} onclick="showOrderDates_(this.dataset.org,this.dataset.order)" title="Every date on this order — change or clear any of them" style="margin-top:4px;">Dates…</button>`;
   const completeBtn = o.completedAt
-    ? `<div class="mono" style="font-size:11px;color:var(--ink-soft);margin-top:4px;">Completed ${escapeHtml(new Date(o.completedAt).toLocaleDateString())}</div><button class="admin-btn" ${dataAttrs} onclick="completeOrders(this.dataset.org, [this.dataset.order], false)" style="margin-top:4px;">Reopen</button>`
-    : canCompleteOrder(o)
-      ? `<button class="admin-btn" ${dataAttrs} onclick="completeOrdersAsk_(this.dataset.org, [this.dataset.order])" title="${o.digitalOnly ? "Paid in full, and its downloads have gone out" : "Delivered and paid in full"} — close it out" style="margin-top:4px;background:#166534;color:#fff;border-color:#166534;">Mark completed</button>`
+    ? `<div class="mono" style="font-size:11px;color:var(--ink-soft);margin-top:4px;">Completed ${escapeHtml(new Date(o.completedAt).toLocaleDateString())}</div><button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" onclick="completeOrders(this.dataset.org, [this.dataset.order], false)" style="margin-top:4px;">Reopen</button>`
+    : canCompleteOrder(o) && can("orders.stepsLate", "edit")
+      ? `<button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" onclick="completeOrdersAsk_(this.dataset.org, [this.dataset.order])" title="${o.digitalOnly ? "Paid in full, and its downloads have gone out" : "Delivered and paid in full"} — close it out" style="margin-top:4px;background:#166534;color:#fff;border-color:#166534;">Mark completed</button>`
       : "";
   // The rush fee still owed (the rest is paid): Mark as paid settles it.
-  const payRushBtn = !o.paid && Number(o.balanceDue) > 0 ? `<button class="admin-btn" ${dataAttrs} onclick="markOrderPaid(this.dataset.org, this.dataset.order)" title="Record the rest of the balance — the rush fee — as paid" style="margin-top:4px;">Mark as paid</button>` : "";
-  return stageEl + completeBtn + payRushBtn + resendDlBtn + emailBtn + invoiceCell_(org, o) + shipBtn + editBtn + datesBtn + rushBtn + dlBtn + paymentsBtn + deleteBtn;
+  const payRushBtn = !o.paid && Number(o.balanceDue) > 0 && can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" onclick="markOrderPaid(this.dataset.org, this.dataset.order)" title="Record the rest of the balance — the rush fee — as paid" style="margin-top:4px;">Mark as paid</button>` : "";
+  return stageEl + completeBtn + payRushBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + rushBtn + dlBtn + paymentsBtn + deleteBtn;
 }
 
 // The order row's Resend downloads (digital products, migrations/0086): a new download link, emailed with the files
@@ -3787,10 +3848,10 @@ async function showDownloadsModal_(orgId, orderId){
         <td style="padding:4px 6px;border-bottom:1px solid #eee;color:${g.blocked ? "#b03a2e" : "#166534"};">${g.blocked ? why[g.blocked] : "available"}</td></tr>`).join("")}</table>`
         : `<div class="admin-note">Nothing granted yet: the files are granted once the order is paid.</div>`}
       <div class="admin-note" style="margin-top:6px;">${d.emailedAt ? "Emailed " + escapeHtml(day(d.emailedAt)) + "." : "Not emailed yet."}</div>
-      ${adminCan_("manager") ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
-        <button type="button" class="admin-btn" data-dl="resendDownloads">Resend link</button>
-        <button type="button" class="admin-btn admin-btn-secondary" data-dl="resetDownloads">Reset downloads</button>
-        <button type="button" class="admin-btn admin-btn-secondary" data-dl="revokeDownloads">Revoke</button></div>` : ""}
+      ${adminCan_("orders.downloads", "edit") ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+        <button data-need="orders.downloads:edit" type="button" class="admin-btn" data-dl="resendDownloads">Resend link</button>
+        <button data-need="orders.downloads:edit" type="button" class="admin-btn admin-btn-secondary" data-dl="resetDownloads">Reset downloads</button>
+        <button data-need="orders.downloads:full" type="button" class="admin-btn admin-btn-secondary" data-dl="revokeDownloads">Revoke</button></div>` : ""}
       <div class="admin-error" style="margin-top:6px;">${escapeHtml(msg || "")}</div>`;
     body.querySelectorAll("[data-dl]").forEach(b => b.onclick = async () => {
       const act = b.dataset.dl;
@@ -3878,7 +3939,7 @@ function invoiceCell_(org, o){
   // (The desktop program's invoice is the email itself, with no page to open: no "opened" to report.)
   const status = inv ? `<div class="mono invoice-status" style="font-size:11px;color:var(--ink-soft);margin-top:4px;line-height:1.35;">Invoice sent ${escapeHtml(day(inv.sentAt))}` +
     `${adminDesktop_() ? "" : inv.viewedAt ? " · opened" : " · not opened yet"}${inv.deliveryChosenAt ? " · delivery chosen" : ""}</div>` : "";
-  const btn = owes && !adminDesktopNoEmail_() ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="showSendInvoiceModal(this.dataset.org, this.dataset.order)" title="${adminDesktop_() ? "Email the customer the invoice (with a PDF of it) and how to pay" : "Email the customer a link to choose delivery and pay online"}" style="margin-top:4px;">${inv ? "Resend invoice…" : "Send invoice…"}</button>` : "";
+  const btn = owes && !adminDesktopNoEmail_() ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.invoices:edit" onclick="showSendInvoiceModal(this.dataset.org, this.dataset.order)" title="${adminDesktop_() ? "Email the customer the invoice (with a PDF of it) and how to pay" : "Email the customer a link to choose delivery and pay online"}" style="margin-top:4px;">${inv ? "Resend invoice…" : "Send invoice…"}</button>` : "";
   // The desktop program can save the invoice as a PDF (to print, or hand over) — email or not, and
   // for a paid order too (it then says "Paid in full").
   const pdfBtn = adminDesktop_() && !o.voidedAt && window.oddDesktop && typeof window.oddDesktop.saveInvoicePdf === "function"
@@ -4193,7 +4254,7 @@ function trackingCell(org, o){
   const tracking = o.trackingNumber || (lbl && lbl.trackingNumber) || "";
   // Buying and reprinting labels belong to the Shipping feature; a tracking number typed by hand still shows.
   const shippingOn = typeof featureOn_ !== "function" || featureOn_("shipping");
-  const labelBtn = lbl && shippingOn ? ` <button class="admin-btn admin-btn-sm" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="reprintLabel(this.dataset.org, this.dataset.order)" title="Open the label PDF (nothing is bought)">Label</button>` : "";
+  const labelBtn = lbl && shippingOn ? ` <button class="admin-btn admin-btn-sm" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.shipping:edit" onclick="reprintLabel(this.dataset.org, this.dataset.order)" title="Open the label PDF (nothing is bought)">Label</button>` : "";
   if(tracking){
     const tn = escapeHtml(tracking);
     let trackUrl = "https://tools.usps.com/go/TrackConfirmAction?tLabels=" + encodeURIComponent(tracking);
@@ -4211,7 +4272,7 @@ function trackingCell(org, o){
     if(!o.paid){
       return `<span style="color:var(--ink-soft);font-size:12px;">Awaiting payment</span>`;
     }
-    return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="shipOrder(this.dataset.org, this.dataset.order)">Ship</button>`;
+    return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.shipping:edit" onclick="shipOrder(this.dataset.org, this.dataset.order)">Ship</button>`;
   }
   return '<span style="color:var(--ink-soft)">—</span>';
 }
@@ -4580,7 +4641,7 @@ function cancelCell(it, o, orgId){
       // Blank already ordered — too late to cancel through the UI.
       return `<span class="muted-cell" title="Cannot cancel after blank is ordered">—</span>`;
     }
-    return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(orgId)}" data-row="${it.sheetRow}" data-name="${escapeHtml(it.name)}" data-total="${Number(it.lineTotal).toFixed(2)}" onclick="cancelLineItem(this.dataset.org,this.dataset.row,this.dataset.name,this.dataset.total)">Cancel</button>`;
+    return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(orgId)}" data-row="${it.sheetRow}" data-name="${escapeHtml(it.name)}" data-total="${Number(it.lineTotal).toFixed(2)}" data-need="orders.details:full" onclick="cancelLineItem(this.dataset.org,this.dataset.row,this.dataset.name,this.dataset.total)">Cancel</button>`;
   }
   const d = new Date(it.cancelDate).toLocaleDateString();
   const reason = it.cancelReason ? `<br><span class="cancel-reason">${escapeHtml(it.cancelReason)}</span>` : "";
@@ -4600,7 +4661,7 @@ function refundCell(it, o, orgId){
   if(it.refundDate){
     return `<span class="refund-badge">$${Number(it.refundAmount).toFixed(2)}<br>${new Date(it.refundDate).toLocaleDateString()}</span>`;
   }
-  return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(orgId)}" data-row="${it.sheetRow}" data-amount="${Number(it.lineTotal).toFixed(2)}" data-pay="${escapeHtml(o.paymentMethod||"")}" onclick="setLineItemRefund(this.dataset.org,this.dataset.row,this.dataset.amount,this.dataset.pay)">Record refund</button>`;
+  return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(orgId)}" data-row="${it.sheetRow}" data-amount="${Number(it.lineTotal).toFixed(2)}" data-pay="${escapeHtml(o.paymentMethod||"")}" data-need="orders.payments:full" onclick="setLineItemRefund(this.dataset.org,this.dataset.row,this.dataset.amount,this.dataset.pay)">Record refund</button>`;
 }
 
 // ---- Unified Orders page: one screen, filter by shop + date range ----------------------------
@@ -4650,9 +4711,9 @@ function ordersFilterBar_(selectedOrgId){
         <label class="checkbox-row" style="margin:0;"><input type="checkbox" id="ordIncludeCancelled" ${window._orderView.includeCancelled ? "checked" : ""} onchange="ordersSetInclude('cancelled', this.checked)"> Include cancelled</label>
       </div>
       <button class="admin-btn" onclick="rerenderOrdersView()">Refresh</button>
-      ${selectedOrgId ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" onclick="createLocalSale(this.dataset.org)">+ Local sale</button>
-        ${adminCan_("manager") ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" onclick="pickOrderImportFile_(this.dataset.org)" title="Orders from Etsy, Shopify or a sheet">Import orders…</button>` : ""}
-        ${adminCan_("manager") ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" onclick="createTestTransaction(this.dataset.org)">Create test transaction</button>` : ""}` : ""}
+      ${selectedOrgId ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" data-need="orders.details:edit" onclick="createLocalSale(this.dataset.org)">+ Local sale</button>
+        ${adminCan_("orders.import", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" data-need="orders.import:edit" onclick="pickOrderImportFile_(this.dataset.org)" title="Orders from Etsy, Shopify or a sheet">Import orders…</button>` : ""}
+        ${adminCan_("catalog.shops", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" data-need="catalog.shops:edit" onclick="createTestTransaction(this.dataset.org)">Create test transaction</button>` : ""}` : ""}
     </div>`;
 }
 function onOrdersOrgChange(v){
@@ -4713,8 +4774,8 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         ${idx === 0 ? `<td rowspan="${o.items.length}" style="text-align:center;vertical-align:middle;padding:4px;">
           ${o.items.some(it => !it.cancelDate) ? `<input type="checkbox" class="order-select" data-order="${escapeHtml(o.orderId)}" data-org="${escapeHtml(org.orgId)}" data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" onchange="updateBulkBar(this.dataset.org)" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
         </td>` : ""}
-        <td data-date-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${new Date(o.placedAt).toLocaleDateString()} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="editOrderDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Edit date">✎</button></td>
-        <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="editOrderDueDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
+        <td data-date-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${new Date(o.placedAt).toLocaleDateString()} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" onclick="editOrderDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Edit date">✎</button></td>
+        <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" onclick="editOrderDueDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
         <td>${escapeHtml(o.customerName)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</td>
         <td>${escapeHtml(o.orderId)}</td>
         <td>${escapeHtml(it.name)}</td>
@@ -4827,8 +4888,8 @@ function orderCardHtml_(o, org, verif, showShop){
       ${!showShop && active.length ? `<input type="checkbox" class="order-select" ${ids} data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" onchange="updateBulkBar(this.dataset.org)" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
       <div class="oc-who">
         <div class="oc-name">${escapeHtml(o.customerName)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</div>
-        <div class="oc-dim">${escapeHtml(o.orderId)} · ${new Date(o.placedAt).toLocaleDateString()} <button type="button" class="oc-icon-btn" ${ids} onclick="editOrderDate(this)" title="Edit date" aria-label="Edit order date">✎</button></div>
-        <div class="oc-dim">Due: ${o.dueDate ? escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : "—"} <button type="button" class="oc-icon-btn" ${ids} onclick="editOrderDueDate(this)" title="Set due date" aria-label="Set due date">✎</button></div>
+        <div class="oc-dim">${escapeHtml(o.orderId)} · ${new Date(o.placedAt).toLocaleDateString()} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" onclick="editOrderDate(this)" title="Edit date" aria-label="Edit order date">✎</button></div>
+        <div class="oc-dim">Due: ${o.dueDate ? escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : "—"} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" onclick="editOrderDueDate(this)" title="Set due date" aria-label="Set due date">✎</button></div>
         ${showShop ? `<div class="oc-dim">${escapeHtml(org.name || org.orgId)}</div>` : ""}
       </div>
       <div class="oc-amt"><div class="oc-total">${money(total)}</div>
@@ -5003,20 +5064,20 @@ function renderAdminOrders(app, org, opts){
       ${ordersMoreNote_([org.orgId])}
       <div id="bulkBar" class="bulk-bar" style="display:none;">
         <span id="bulkBarCount" class="bulk-bar-count"></span>
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankOrdered" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Blank ordered</button>
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankShipped" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Blank shipped…</button>
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankReceived" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Blank received</button>
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="manufactured" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Manufactured</button>
-        ${adminFeatureOn_("production") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="digitizingComplete" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Digitizing complete</button>` : ""}
-        ${adminFeatureOn_("designVerification") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="designApproved" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Design approved</button>` : ""}
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="qaPacked" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ QA &amp; packed</button>
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="shipped" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Shipped</button>
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="delivered" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Delivered</button>
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="bulkSetDueDate(this.dataset.org)">⏱ Set due date</button>
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="bulkAddTracking(this.dataset.org)">→ Add tracking</button>
-        ${adminFeatureOn_("designVerification") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="bulkSendDesignVerification(this.dataset.org)">✉ Send verification</button>` : ""}
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="bulkEditCustomerInfo(this.dataset.org)">✎ Edit customer info</button>
-        <button class="admin-btn admin-btn-danger admin-btn-danger-solid" style="color:#fff;" data-org="${escapeHtml(org.orgId)}" onclick="bulkCancelLineItems(this.dataset.org)">→ Cancel selected</button>
+        ${adminCan_("orders.stepsEarly", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankOrdered" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Blank ordered</button>` : ""}
+        ${adminCan_("orders.stepsEarly", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankShipped" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Blank shipped…</button>` : ""}
+        ${adminCan_("orders.stepsEarly", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankReceived" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Blank received</button>` : ""}
+        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="manufactured" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Manufactured</button>` : ""}
+        ${adminCan_("orders.stepsEarly", "edit") ? adminFeatureOn_("production") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="digitizingComplete" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Digitizing complete</button>` : "" : ""}
+        ${adminCan_("orders.stepsEarly", "edit") ? adminFeatureOn_("designVerification") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="designApproved" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Design approved</button>` : "" : ""}
+        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="qaPacked" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ QA &amp; packed</button>` : ""}
+        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="shipped" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Shipped</button>` : ""}
+        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="delivered" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Delivered</button>` : ""}
+        ${adminCan_("orders.details", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:edit" onclick="bulkSetDueDate(this.dataset.org)">⏱ Set due date</button>` : ""}
+        ${adminCan_("orders.shipping", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.shipping:edit" onclick="bulkAddTracking(this.dataset.org)">→ Add tracking</button>` : ""}
+        ${adminCan_("orders.details", "edit") ? adminFeatureOn_("designVerification") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:edit" onclick="bulkSendDesignVerification(this.dataset.org)">✉ Send verification</button>` : "" : ""}
+        ${adminCan_("orders.details", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:edit" onclick="bulkEditCustomerInfo(this.dataset.org)">✎ Edit customer info</button>` : ""}
+        ${adminCan_("orders.details", "full") ? `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" style="color:#fff;" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:full" onclick="bulkCancelLineItems(this.dataset.org)">→ Cancel selected</button>` : ""}
         <button class="admin-btn" onclick="clearBulkSelection()">Clear</button>
       </div>
       ${ordersListHtml_(shownOrders, () => org, (o) => verifMap[o.orderId], false)}
@@ -5025,7 +5086,7 @@ function renderAdminOrders(app, org, opts){
         <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="renderPackingLabels(this.dataset.org, getSelectedOrderIds())">Packing labels</button>
         <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="renderBrandedLabels(this.dataset.org, getSelectedOrderIds())">Branded labels</button>
         ${shownOrders.some(o => o.shippingAddress && o.shippingAddress.line1) ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="renderMailingLabels(this.dataset.org, getSelectedOrderIds())">Mailing labels</button>` : ""}
-        ${adminDesktop_() && adminFeatureOn_("shipping") ? `<button class="admin-btn" id="ordCheckTracking" data-org="${escapeHtml(org.orgId)}" onclick="ordersCheckTracking_(this)" title="Look up every shipped order's tracking now (it's also checked every two hours while the program is open)">Check tracking now</button>` : ""}
+        ${adminDesktop_() && adminFeatureOn_("shipping") ? `<button class="admin-btn" id="ordCheckTracking" data-org="${escapeHtml(org.orgId)}" data-need="orders.stepsLate:edit" onclick="ordersCheckTracking_(this)" title="Look up every shipped order's tracking now (it's also checked every two hours while the program is open)">Check tracking now</button>` : ""}
       </div>
       <textarea class="export-box" id="exportBox" style="display:none;"></textarea>
       <div id="ordBreakdownSection">${renderOrderBreakdown(shownOrders, blankLinks, blanks)}</div>
@@ -5346,10 +5407,10 @@ async function showPaymentsModal(orgId, orderId) {
       const paymentRows = (o.payments || []).map(p => `
         <tr style="${p.voidedAt ? "opacity:.5;text-decoration:line-through;" : ""}">
           <td style="padding:4px 8px;white-space:nowrap;">${new Date(p.receivedAt).toLocaleDateString()}${!p.voidedAt && !p.fromStripe
-            ? ` <button type="button" data-pay-id="${p.id}" data-pay-date="${escapeHtml(String(p.receivedAt).slice(0, 10))}" onclick="pmSetPaymentDate(this.dataset.payId, this.dataset.payDate)" title="Change the date this money was received" style="padding:0 4px;background:none;border:none;cursor:pointer;color:#1d4ed8;font-size:12px;">✎</button>` : ""}</td>
+            ? ` <button type="button" data-pay-id="${p.id}" data-pay-date="${escapeHtml(String(p.receivedAt).slice(0, 10))}" data-need="orders.payments:edit" onclick="pmSetPaymentDate(this.dataset.payId, this.dataset.payDate)" title="Change the date this money was received" style="padding:0 4px;background:none;border:none;cursor:pointer;color:#1d4ed8;font-size:12px;">✎</button>` : ""}</td>
           <td style="padding:4px 8px;white-space:nowrap;${p.amount < 0 ? "color:#b03a2e;" : ""}">${p.amount < 0 ? "−$" + Math.abs(Number(p.amount)).toFixed(2) : "$" + Number(p.amount).toFixed(2)}${p.kind === "refund" ? " <span style=\"font-size:11px;\">refund</span>" : p.kind === "dispute" ? " <span style=\"font-size:11px;\">lost dispute</span>" : ""}${
             (p.kind === "refund" || p.kind === "dispute") && !p.voidedAt ? `<br><span class="pm-refund-ship" style="font-size:11px;color:#666;">${Number(p.shipping) > 0 ? `$${Number(p.shipping).toFixed(2)} of it shipping (no tax)` : "all goods (tax backed out)"}</span>
-              <button type="button" data-pay-id="${p.id}" data-ship="${Number(p.shipping || 0).toFixed(2)}" data-refund="${Math.abs(Number(p.amount)).toFixed(2)}" onclick="pmSetRefundShipping(this.dataset.payId, this.dataset.ship, this.dataset.refund)"
+              <button type="button" data-pay-id="${p.id}" data-ship="${Number(p.shipping || 0).toFixed(2)}" data-refund="${Math.abs(Number(p.amount)).toFixed(2)}" data-need="orders.payments:full" onclick="pmSetRefundShipping(this.dataset.payId, this.dataset.ship, this.dataset.refund)"
                 title="How much of this refund was shipping — shipping isn't taxed, so no sales tax comes back on that part" style="padding:0 4px;background:none;border:none;cursor:pointer;color:#1d4ed8;font-size:11px;">Shipping part…</button>` : ""}</td>
           <td style="padding:4px 8px;font-size:12px;">${escapeHtml(METHOD_LABEL[p.method] || "Other")}${p.reference ? " · " + escapeHtml(p.reference) : ""}${p.fee > 0 ? ` <span style="color:#666;">(fee $${Number(p.fee).toFixed(2)})</span>` : ""}
             <br>${!p.voidedAt && !p.fromStripe && accounts.length
@@ -5359,7 +5420,7 @@ async function showPaymentsModal(orgId, orderId) {
           <td style="padding:4px 8px;">${p.voidedAt
             ? `<span title="${escapeHtml(p.voidReason || "")}" style="font-size:11px;color:#b03a2e;font-weight:600;">void</span>`
             : p.fromStripe ? `<span title="Refund it in Stripe instead" style="font-size:11px;color:#888;">Stripe</span>`
-            : `<button class="admin-btn-danger" type="button" style="padding:2px 7px;border-radius:4px;cursor:pointer;font-size:11px;" data-pay-id="${p.id}" onclick="pmDeletePayment(this.dataset.payId)" title="Void an entry made by mistake">Void</button>`}</td>
+            : `<button class="admin-btn-danger" type="button" style="padding:2px 7px;border-radius:4px;cursor:pointer;font-size:11px;" data-pay-id="${p.id}" data-need="orders.payments:full" onclick="pmDeletePayment(this.dataset.payId)" title="Void an entry made by mistake">Void</button>`}</td>
         </tr>`).join("");
 
       const content = document.createElement("div");
@@ -5392,7 +5453,7 @@ async function showPaymentsModal(orgId, orderId) {
           </table>
         </div>` : ""}
 
-        <div style="border-top:1px solid #e5e7eb;padding-top:14px;margin-bottom:14px;">
+        <div data-need="orders.payments:edit" style="border-top:1px solid #e5e7eb;padding-top:14px;margin-bottom:14px;">
           <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Record payment</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
             <div>
@@ -5426,7 +5487,7 @@ async function showPaymentsModal(orgId, orderId) {
         </div>
 
         ${amountReceived > 0 ? `
-        <div style="border-top:1px solid #e5e7eb;padding-top:14px;margin-bottom:14px;">
+        <div data-need="orders.payments:full" style="border-top:1px solid #e5e7eb;padding-top:14px;margin-bottom:14px;">
           <div style="font-size:13px;font-weight:600;margin-bottom:4px;">Record refund</div>
           <div style="font-size:12px;color:#666;margin-bottom:8px;">For money returned by Venmo, Zelle, check or cash. Card refunds are made in Stripe and appear here automatically.</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
@@ -5464,7 +5525,7 @@ async function showPaymentsModal(orgId, orderId) {
           </div>
         </div>` : ""}
 
-        <div style="border-top:1px solid #e5e7eb;padding-top:14px;">
+        <div data-need-form="orders.payments:edit" style="border-top:1px solid #e5e7eb;padding-top:14px;">
           <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Discount</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
             <div>
@@ -5475,7 +5536,7 @@ async function showPaymentsModal(orgId, orderId) {
               <label style="display:block;font-size:12px;margin-bottom:3px;">Reason (optional)</label>
               <input id="pmDiscountNote" type="text" value="${escapeHtml(o.discountNote || "")}" placeholder="e.g. Member discount" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">
             </div>
-            <button type="button" id="pmSaveDiscount" style="padding:6px 14px;background:#059669;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:13px;font-weight:600;">Apply</button>
+            <button type="button" id="pmSaveDiscount" data-need="orders.payments:edit" style="padding:6px 14px;background:#059669;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:13px;font-weight:600;">Apply</button>
           </div>
         </div>
 
@@ -5759,7 +5820,7 @@ async function showOrderDates_(orgId, orderId){
       <tr><td style="padding:5px 8px 5px 0;font-size:13px;font-weight:600;">Paid</td><td style="padding:5px 0;font-size:13px;color:#555;">${o.paidAt ? escapeHtml(new Date(o.paidAt).toLocaleString()) : "—"} <span style="font-size:12px;color:#888;">(each payment's own date — Payments…)</span></td></tr>
     </table>
     <div id="odErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
-    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;"><button type="button" class="admin-btn admin-btn-secondary" id="odCancel">Cancel</button><button type="button" class="admin-btn" id="odSave">Save</button></div>`, 520);
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;"><button type="button" class="admin-btn admin-btn-secondary" id="odCancel">Cancel</button><button data-need="orders.details:edit" type="button" class="admin-btn" id="odSave">Save</button></div>`, 520);
   ov.querySelectorAll(".od-clear").forEach(b => b.onclick = () => { ov.querySelector(`.od-input[data-col="${b.dataset.col}"]`).value = ""; });
   ov.querySelector(".od-due-clear").onclick = () => { ov.querySelector(".od-due").value = ""; };
   ov.querySelector("#odCancel").onclick = close;
@@ -7068,7 +7129,7 @@ async function makeStoredThumb_(url){
 // pattern as the rest of the admin buttons.
 function imageUploadControl(targetId, orgId){
   return `<span class="img-upload">
-      <input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif" aria-label="Upload image file" data-target="${escapeHtml(targetId)}" data-org="${escapeHtml(orgId)}" onchange="handleImageUpload(this)">
+      <input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif" aria-label="Upload image file" data-target="${escapeHtml(targetId)}" data-org="${escapeHtml(orgId)}" data-need="catalog.products:edit|catalog.graphics:edit|inventory.blanks:edit" onchange="handleImageUpload(this)">
       <span class="img-upload-status" id="${escapeHtml(targetId)}-status"></span>
     </span>`;
 }
@@ -7283,8 +7344,8 @@ function renderAdminOrgListTable(orgs){
       <td data-label="Name" class="stack-title">${escapeHtml(o.name)}</td>
       <td data-label="Status">${o.ready ? "Live" : "Coming soon"}<div data-publish-state="${escapeHtml(o.orgId)}" style="font-size:12px;margin-top:2px;"></div><div data-shop-issues="${escapeHtml(o.orgId)}" style="font-size:12px;margin-top:2px;color:#92400e;"></div></td>
       <td class="stack-actions">
-        ${adminCan_("manager") ? `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" onclick="location.hash='#wizard/'+encodeURIComponent(this.dataset.org)" title="The setup steps for this shop — picks up where it was left">Shop setup<span data-wizard-state="${escapeHtml(o.orgId)}"></span></button>
-        ${adminDesktop_() ? "" : `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" onclick="publishCatalog(this.dataset.org)" title="Shoppers see this shop's current products and settings">Publish</button>
+        ${adminCan_("catalog.shops", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" onclick="location.hash='#wizard/'+encodeURIComponent(this.dataset.org)" title="The setup steps for this shop — picks up where it was left">Shop setup<span data-wizard-state="${escapeHtml(o.orgId)}"></span></button>
+        ${adminDesktop_() ? "" : `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" data-need="catalog.shops:edit" onclick="publishCatalog(this.dataset.org)" title="Shoppers see this shop's current products and settings">Publish</button>
         <button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(o.orgId)}" onclick="previewShop_(this.dataset.org)" title="Open the shop page as it will look after Publish">Preview</button>`}` : ""}
         ${adminCanOpen_("catalog/orgs/" + o.orgId + "/edit") ? `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/edit'">Edit</button>` : ""}
         <button class="admin-btn" data-org="${escapeHtml(o.orgId)}" data-issues="products" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products'" style="margin-top:4px;">Products</button>
@@ -7295,8 +7356,8 @@ function renderAdminOrgListTable(orgs){
   `).join("");
   panel.innerHTML = `
     <div class="admin-actions" style="margin:6px 0 10px 0;">
-      ${adminCan_("manager") ? `<button class="admin-btn wiz-start-btn" onclick="location.hash='#wizard/new'">＋ New shop setup</button>
-      ${adminDesktop_() ? "" : `<button class="admin-btn" onclick="publishCatalog()" title="Publish every shop's current products and settings">Publish all shops</button>`}
+      ${adminCan_("catalog.shops", "edit") ? `<button class="admin-btn wiz-start-btn" onclick="location.hash='#wizard/new'">＋ New shop setup</button>
+      ${adminDesktop_() ? "" : `<button class="admin-btn" data-need="catalog.shops:edit" onclick="publishCatalog()" title="Publish every shop's current products and settings">Publish all shops</button>`}
       <button class="admin-btn" id="catalogPriceBtn" onclick="showPriceAnalysis_({}, { title: 'Price analysis — every shop' })" title="What each item costs and leaves in every shop, and which are below your targets">Price analysis</button>` : ""}
     </div>
     <div id="publishStatus" class="admin-note"></div>
@@ -7663,7 +7724,7 @@ async function wizSaveState_(){
   catch (e) { showToast("Couldn't save the setup: " + e.message, true); }
   // The header's shop bar follows: Resume / Shop setup, Live / Coming soon and Publish / ✓ Published can all change
   // with a step (a product built, the shop opened and published at Go live).
-  if (adminCan_("manager")) { try { await loadShopBarData_(true); } catch (e) {} drawShopBar_(); }
+  if (adminCan_("catalog.shops", "read")) { try { await loadShopBarData_(true); } catch (e) {} drawShopBar_(); }
 }
 const wizBlank_ = (id) => ((_wiz && _wiz.data.blanks) || []).find(b => b.id === Number(id)) || null;
 async function wizLoad_(...what){
@@ -8442,7 +8503,7 @@ function blankWeightText_(p) {
 // domain, the steps to connect one; after, where the admin has moved to.
 async function loadDomainSetup_(){
   const box = document.getElementById("domainSetupBox");
-  if (!box || !adminCan_("admin")) return;
+  if (!box || !adminCan_("settings.global", "edit")) return;
   let d;
   try { d = (await hoopApi_({ action: "getCloudflareSetup" })).cloudflare; } catch (e) { return; }
   if (!d || !d.onWorkersDev) { box.innerHTML = ""; return; }
@@ -8456,7 +8517,7 @@ async function loadDomainSetup_(){
         <div class="admin-note">Cloudflare opens with the permissions filled in. Scroll to the bottom, click <b>Continue to summary</b>, then <b>Create Token</b>, and copy the key it shows.</div></li>
       <li><b>Paste the key here.</b>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;"><input type="password" id="cfToken" autocomplete="off" spellcheck="false" placeholder="The key from Cloudflare" style="flex:1 1 240px;min-width:0;">
-        <button class="admin-btn" id="cfConnectBtn" onclick="connectDomain_()">Connect</button></div></li>
+        <button class="admin-btn" id="cfConnectBtn" data-need="catalog.shops:edit" onclick="connectDomain_()">Connect</button></div></li>
     </ol>
     <div id="cfDomainChoose"></div>
     <div class="admin-error" id="cfDomainError" role="alert"></div>
@@ -8476,7 +8537,7 @@ async function connectDomain_(domain){
   if (d.choose) {
     choose.innerHTML = `<div style="margin:8px 0;"><label for="cfDomainPick"><b>Which domain is this site's?</b></label>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;"><select id="cfDomainPick">${d.choose.map(z => `<option value="${escapeHtml(z.name)}">${escapeHtml(z.name)}${z.active ? "" : " (waiting for its nameservers)"}</option>`).join("")}</select>
-      <button class="admin-btn" onclick="connectDomain_(document.getElementById('cfDomainPick').value)">Use this domain</button></div></div>`;
+      <button class="admin-btn" data-need="catalog.shops:edit" onclick="connectDomain_(document.getElementById('cfDomainPick').value)">Use this domain</button></div></div>`;
     return;
   }
   const box = document.getElementById("domainSetupBox");
@@ -8497,7 +8558,7 @@ function domainMovedHtml_(adminHost, shops){
 
 async function loadSetupStatus_(){
   const box = document.getElementById("setupStatusBox");
-  if (!box || !adminCan_("admin")) return;
+  if (!box || !adminCan_("settings.global", "read")) return;
   let d;
   try { d = await hoopApi_({ action: "getSetupStatus" }); } catch (e) { box.innerHTML = ""; return; }
   const rank = { required: 0, recommended: 1, optional: 2 };
@@ -8829,7 +8890,7 @@ async function renderGlobalSettings(app){
         <div id="globalSettingsError" class="admin-error"></div>
         <div class="admin-actions" style="margin-top:16px;">
           <button class="admin-btn" onclick="submitGlobalSettings()">Save global settings</button>
-          ${adminDesktop_() ? "" : `<button class="admin-btn" type="button" onclick="backfillStripeFees(this)" title="Look up Stripe's processing fee and charge date for card payments (safe to run again)">Sync Stripe fees &amp; dates</button>`}
+          ${adminDesktop_() ? "" : `<button class="admin-btn" type="button" data-need="settings.global:edit" onclick="backfillStripeFees(this)" title="Look up Stripe's processing fee and charge date for card payments (safe to run again)">Sync Stripe fees &amp; dates</button>`}
           <button class="admin-btn" onclick="location.hash='#catalog'">Cancel</button>
         </div>
       </div>
@@ -8887,7 +8948,7 @@ async function backfillStripeFees(btn){
 // Whether order emails carry a PDF, and a preview of each email a customer gets — built by the server with the
 // same code that sends them, from a made-up order using your Business profile, sales tax and payment methods.
 function customerEmailsBoxHtml_(settings, sending){
-  const admin = adminCan_("admin");
+  const admin = adminCan_("settings.global", "edit");
   return `${sending ? emailSendingBoxHtml_(sending, admin) : ""}<h2 style="margin:22px 0 12px;">Customer emails</h2>
     <div class="admin-note" style="margin-bottom:10px;">The “Order received” email goes out when an order is placed, with how to pay; the “Payment received” email when you record the payment. Both list the items priced before tax, the sales tax above the total, and your business details from above.</div>
     <label class="checkbox-row"><input type="checkbox" id="gEmailAttachPdf" ${settings && settings.attachPdf === false ? "" : "checked"} ${admin ? "" : "disabled"}> Attach a PDF to order emails — an invoice while something is owed, a receipt once paid</label>
@@ -8922,7 +8983,7 @@ function emailSendingBoxHtml_(sending, admin){
 // What a cloud install's save sends for how to send: null when nothing changed.
 function emailSendingChanges_(){
   const c = window._gSettingsCtx || {}, s = c.emailSending;
-  if (!s || !adminCan_("admin")) return null;
+  if (!s || !adminCan_("settings.global", "edit")) return null;
   const $ = (id) => document.getElementById(id), val = (id) => (($(id) || {}).value || "").trim();
   const picked = (document.querySelector('input[name="gEmailVia"]:checked') || {}).value || "hosted";
   const m = s.mailbox || {};
@@ -8953,7 +9014,7 @@ function showEmailPreview_(opts = {}){
     <div id="epAttach" style="font-size:13px;color:#555;margin-top:8px;"></div>
     <div id="epErr" style="color:#b03a2e;font-size:13px;margin-top:6px;"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:12px;">
-      ${adminCan_("admin") ? `<button type="button" class="admin-btn admin-btn-secondary" id="epSend">Send me this sample</button>` : ""}
+      ${adminCan_("settings.global", "edit") ? `<button type="button" class="admin-btn admin-btn-secondary" id="epSend">Send me this sample</button>` : ""}
       <button type="button" class="admin-btn admin-btn-secondary" id="epDownload">Download PDF</button>
       <button type="button" class="admin-btn" id="epClose">Close</button>
     </div>`, 900);
@@ -9188,7 +9249,7 @@ async function submitGlobalSettings(){
       applyBusiness_(bizData.business);   // the header and page titles follow at once
     }
     const pdfBox = document.getElementById("gEmailAttachPdf");
-    if(pdfBox && adminCan_("admin")){
+    if(pdfBox && adminCan_("settings.global", "edit")){
       // On a cloud install, how to send too: a new mailbox is signed in to by the server before it's saved.
       const mailbox = emailSendingChanges_();
       try{ await hoopApi_({ action: "updateEmailSettings", emailSettings: { attachPdf: pdfBox.checked }, ...(mailbox ? { mailbox } : {}) }); }
@@ -9199,7 +9260,7 @@ async function submitGlobalSettings(){
       }
     }
     // Digital products (migrations/0086): the delivery defaults, while the feature is on.
-    if(document.getElementById("gDigDays") && stillOn("digital") && adminCan_("admin")){
+    if(document.getElementById("gDigDays") && stillOn("digital") && adminCan_("settings.global", "edit")){
       const v = (id) => document.getElementById(id).value.trim();
       try{ await hoopApi_({ action: "updateDigitalSettings", digital: { days: v("gDigDays") === "" ? null : Number(v("gDigDays")), downloads: v("gDigDownloads") === "" ? null : Number(v("gDigDownloads")),
         email: document.getElementById("gDigEmail").checked, attach: document.getElementById("gDigAttach").checked, attachMb: Number(v("gDigAttachMb")) || 10 } }); }
@@ -9748,11 +9809,12 @@ async function submit2FADisable(){
   render2FAPanel(false);
 }
 
-// ---- Users (Security → Users; admins only) -------------------------------------------------------
-// Who can sign in and as what, and the "require two-step sign-in" switch. The server refuses all
-// of this to anyone but an admin (functions/api/admin-users.js) and keeps the rules: never zero
-// active admins, nobody edits their own role, a user is disabled rather than deleted.
-let _usersList = [], _usersMe = null;
+// ---- Users (Settings → Users) ---------------------------------------------------------------------
+// Who can sign in and as what, the roles themselves (Roles and permissions), and the "require two-step
+// sign-in" switch. The server (functions/api/admin-users.js) keeps the rules: Users and roles on your
+// role to see or change any of it; never zero active admins; nobody changes their own role; you only
+// change a user, or a role, ranked below your own; Admin is locked; a user is disabled, never deleted.
+let _usersList = [], _usersMe = null, _usersTab = "users", _rolesData = null, _roleDraft = null;
 async function usersCall_(body){
   try{
     const res = await fetch("/api/admin-users", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(Object.assign({key: adminKey}, body)) });
@@ -9776,46 +9838,66 @@ async function renderUsers(app){
   if(!adminKey) return;
   await loadUsers_();
 }
+// The two tabs: Users, and Roles and permissions.
+function usersTabsHtml_(){
+  const tab = (key, label) => `<button type="button" class="admin-btn${_usersTab === key ? "" : " admin-btn-secondary"}" role="tab" aria-selected="${_usersTab === key}" data-tab="${key}" onclick="usersShowTab_(this.dataset.tab)">${label}</button>`;
+  return `<div class="users-tabs" role="tablist">${tab("users", "Users")}${tab("roles", "Roles and permissions")}</div>`;
+}
+async function usersShowTab_(tab){
+  _usersTab = tab === "roles" ? "roles" : "users";
+  if(_usersTab === "roles") await loadRoles_(); else await loadUsers_();
+}
+const roleNameOf_ = (key) => { const r = _rolesData && (_rolesData.roles || []).find(x => x.key === key); return r ? r.name : (ADMIN_ROLE_LABELS[key] || key || ""); };
 async function loadUsers_(){
   const panel = document.getElementById("adminPanel");
   if(!panel) return;
-  const data = await usersCall_({action: "list"});
+  if(_usersTab === "roles") return loadRoles_();
+  const [data, roles] = await Promise.all([usersCall_({action: "list"}), usersCall_({action: "listRoles"})]);
   if(!data){ panel.innerHTML = `<div class="admin-empty">Could not load users.</div>`; return; }
+  if(roles) _rolesData = roles;
   _usersList = data.users || []; _usersMe = data.me;
+  const myRank = (_rolesData && _rolesData.myRank) || 0, iAmAdmin = !!(_rolesData && _rolesData.myRole === "admin");
+  const rankOf = (key) => { const r = _rolesData && (_rolesData.roles || []).find(x => x.key === key); return r ? r.rank : 0; };
+  // The roles you may give: those ranked below yours (an admin may also make an admin).
+  const givable = ((_rolesData && _rolesData.roles) || []).filter(r => r.rank < myRank || (iAmAdmin && r.key === "admin"));
   const when = (iso) => { if(!iso) return "never"; const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleString(); };
-  const roleOptions = (sel) => Object.keys(ADMIN_ROLE_LABELS).map(r => `<option value="${r}" ${r === sel ? "selected" : ""}>${escapeHtml(ADMIN_ROLE_LABELS[r])}</option>`).join("");
+  const roleOptions = (sel) => givable.map(r => `<option value="${escapeHtml(r.key)}" ${r.key === sel ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("");
+  const canEdit = adminCan_("settings.users", "edit");
   const row = (u) => {
     const mine = u.id === _usersMe, off = u.status === "disabled";
+    // Someone ranked at or above you (or yourself): shown, not changed here.
+    const locked = mine || !canEdit || rankOf(u.role) >= myRank;
     const notes = [];
     if(!u.passwordUsable) notes.push("password needs a reset");
     else if(u.mustChangePassword) notes.push("has a temporary password");
     return `<tr data-user="${u.id}" style="${off ? "opacity:.55;" : ""}">
       <td style="padding:8px 10px;"><strong>${escapeHtml(u.name || "(no name yet)")}</strong>${mine ? " <span class=\"admin-note\">(you)</span>" : ""}<div class="admin-note">${escapeHtml(u.email || "(no email yet)")}</div>
         ${notes.length ? `<div class="admin-note" style="color:#b9770e;font-weight:600;">${escapeHtml(notes.join("; "))}</div>` : ""}</td>
-      <td style="padding:8px 10px;">${mine ? escapeHtml(ADMIN_ROLE_LABELS[u.role] || u.role)
-        : `<select class="user-role" onchange="usersSetRole_(${u.id}, this.value)" ${off ? "disabled" : ""}>${roleOptions(u.role)}</select>`}</td>
+      <td style="padding:8px 10px;">${locked ? escapeHtml(roleNameOf_(u.role))
+        : `<select class="user-role" aria-label="Role of ${escapeHtml(u.name || u.email || "this user")}" onchange="usersSetRole_(${u.id}, this.value)" ${off ? "disabled" : ""}>${roleOptions(u.role)}</select>`}</td>
       <td style="padding:8px 10px;">${off ? "Disabled" : "Active"}</td>
       <td style="padding:8px 10px;">${u.has2fa ? "On" : "Off"}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${escapeHtml(when(u.lastLoginAt))}</td>
       <td style="padding:8px 10px;white-space:nowrap;">
-        <button class="admin-btn admin-btn-sm" onclick="usersEdit_(${u.id})">Edit</button>
-        ${mine ? "" : `
+        ${locked && !mine ? `<span class="admin-note">Ranked at or above you</span>` : !canEdit ? "" : `<button class="admin-btn admin-btn-sm" onclick="usersEdit_(${u.id})">Edit</button>`}
+        ${locked ? "" : `
         <button class="admin-btn admin-btn-sm" onclick="usersResetPassword_(${u.id})">Reset password</button>
         ${u.has2fa ? `<button class="admin-btn admin-btn-sm" onclick="usersReset2fa_(${u.id})">Reset two-step</button>` : ""}
         <button class="admin-btn admin-btn-sm" onclick="usersSetStatus_(${u.id}, '${off ? "active" : "disabled"}')">${off ? "Enable" : "Disable"}</button>`}
       </td></tr>`;
   };
   panel.innerHTML = `
+    ${usersTabsHtml_()}
     <h2 style="margin-bottom:8px;">Users</h2>
-    <div class="admin-note" style="margin-bottom:12px;"><strong>Back office</strong> works orders, production, inventory, the catalog and expenses.
-      <strong>Manager</strong> also runs shops, publishing and the books. <strong>Admin</strong> also manages users, Global settings and the audit log.
+    <div class="admin-note" style="margin-bottom:12px;">What each role sees and may do is set under <a href="javascript:void 0" onclick="usersShowTab_('roles')">Roles and permissions</a>.
+      You can only change someone whose role ranks below yours, and only give a role ranked below yours. Nobody changes their own role.
       A user is disabled, never deleted, so the audit log keeps their name.</div>
     <div style="overflow-x:auto;"><table class="stack-mobile" id="usersTable" style="border-collapse:collapse;width:100%;font-size:14px;">
       <thead><tr style="text-align:left;border-bottom:2px solid var(--line,#ddd);">
         <th style="padding:6px 10px;">Name</th><th style="padding:6px 10px;">Role</th><th style="padding:6px 10px;">Status</th><th style="padding:6px 10px;">Two-step</th><th style="padding:6px 10px;">Last sign-in</th><th style="padding:6px 10px;"></th></tr></thead>
       <tbody>${_usersList.map(row).join("")}</tbody></table></div>
 
-    <form class="admin-form" id="userForm" onsubmit="usersSave_(event)" style="max-width:520px;margin-top:26px;">
+    ${!canEdit ? "" : `<form class="admin-form" id="userForm" onsubmit="usersSave_(event)" style="max-width:520px;margin-top:26px;">
       <h2 id="userFormTitle" style="margin-bottom:10px;">Add a user</h2>
       <input type="hidden" id="userId" value="" />
       <label for="userName">Name</label>
@@ -9823,22 +9905,149 @@ async function loadUsers_(){
       <label for="userEmail">Email (they sign in with it)</label>
       <input type="email" id="userEmail" maxlength="200" required style="width:100%;margin:4px 0 12px;" />
       <div id="userRoleWrap"><label for="userRole">Role</label>
-        <select id="userRole" style="display:block;margin:4px 0 12px;">${roleOptions("staff")}</select></div>
+        <select id="userRole" style="display:block;margin:4px 0 12px;">${roleOptions(givable.some(r => r.key === "production") ? "production" : (givable[givable.length - 1] || {}).key)}</select></div>
       <div class="admin-note" id="userFormNote">They get a temporary password, shown to you once, and must choose their own at their first sign-in.</div>
       <div class="admin-actions" style="margin-top:12px;">
         <button class="admin-btn" type="submit" id="userSubmit">Add user</button>
         <button class="admin-btn" type="button" id="userCancel" style="display:none;" onclick="usersEdit_(null)">Cancel</button>
       </div>
-    </form>
+    </form>`}
 
-    <div class="admin-form" style="max-width:520px;margin-top:26px;">
+    ${!iAmAdmin ? "" : `<div class="admin-form" style="max-width:520px;margin-top:26px;">
       <h2 style="margin-bottom:10px;">Two-step sign-in</h2>
       <label style="display:flex;gap:8px;align-items:flex-start;">
         <input type="checkbox" id="require2fa" ${data.require2fa ? "checked" : ""} onchange="usersSetRequire2fa_(this)" style="margin-top:3px;" />
         <span><strong>Require two-step sign-in for everyone</strong>
           <span class="admin-note" style="display:block;">Nobody is signed out. At their next sign-in, anyone without an authenticator app must set one up before anything else opens. Turn your own on first (Security (2FA)).</span></span>
       </label>
-    </div>`;
+    </div>`}`;
+}
+
+// ---- Roles and permissions ----
+// Each role: its menus and items switched on or off (off = hidden), and for each function None / Read /
+// Edit / Full. The lists come from the server (functions/_lib/permissions.js), so this page never
+// has its own copy to fall out of date.
+const ROLE_LEVELS_ = [["none", "None"], ["read", "Read"], ["edit", "Edit"], ["full", "Full"]];
+async function loadRoles_(){
+  const panel = document.getElementById("adminPanel");
+  if(!panel) return;
+  const data = await usersCall_({action: "listRoles"});
+  if(!data){ panel.innerHTML = usersTabsHtml_() + `<div class="admin-empty">Could not load roles.</div>`; return; }
+  _rolesData = data;
+  const keep = _roleDraft && (data.roles || []).find(r => r.key === _roleDraft.key);
+  if(keep) roleSelect_(keep.key, true);
+  else if(!_roleDraft || _roleDraft.key) roleSelect_(((data.roles || []).find(r => r.canEdit) || (data.roles || [])[0] || {}).key, true);
+  renderRolesTab_();
+}
+function roleSelect_(key, quiet){
+  const r = ((_rolesData && _rolesData.roles) || []).find(x => x.key === key);
+  if(!r) return;
+  _roleDraft = { key: r.key, name: r.name, rank: r.rank, builtIn: r.builtIn, locked: r.locked, canEdit: r.canEdit, userCount: r.userCount,
+    permissions: JSON.parse(JSON.stringify(r.permissions || { menus: {}, items: {}, fns: {} })) };
+  if(!quiet) renderRolesTab_();
+}
+// A new role starts as a copy (of Production, the least, unless another is picked to copy).
+function roleNew_(copyOf){
+  const d = _rolesData || {}, base = (d.roles || []).find(r => r.key === copyOf) || (d.roles || []).find(r => r.key === "production");
+  const myRank = d.myRank || 0;
+  const perms = JSON.parse(JSON.stringify((base && base.permissions) || { menus: {}, items: {}, fns: {} }));
+  // Never more than you have yourself (the server refuses that too).
+  for(const k of Object.keys(perms.fns || {})) if(ADMIN_LEVEL_RANK_[perms.fns[k]] > ADMIN_LEVEL_RANK_[(d.myLevels || {})[k] || "none"]) perms.fns[k] = (d.myLevels || {})[k] || "none";
+  _roleDraft = { key: null, name: base && copyOf ? base.name + " copy" : "New role", rank: Math.max(1, Math.min(myRank - 1, base ? base.rank : 20)),
+    builtIn: false, locked: false, canEdit: true, userCount: 0, permissions: perms };
+  renderRolesTab_();
+  const n = document.getElementById("roleName"); if(n){ n.focus(); n.select(); }
+}
+function roleFnOn_(p, fn){ return ADMIN_LEVEL_RANK_[(p.fns || {})[fn] || "none"] > 0; }
+function renderRolesTab_(){
+  const panel = document.getElementById("adminPanel");
+  if(!panel || !_rolesData) return;
+  const d = _rolesData, draft = _roleDraft, myRank = d.myRank || 0;
+  const editable = !!(draft && draft.canEdit && adminCan_("settings.users", "edit"));
+  const dis = editable ? "" : "disabled";
+  const p = draft ? draft.permissions : { menus: {}, items: {}, fns: {} };
+  const myLevel = (fn) => (d.myLevels || {})[fn] || "none";
+  const chips = (d.roles || []).map(r => { const on = !!(draft && draft.key === r.key);
+      return `<button type="button" class="admin-btn role-chip${on ? "" : " admin-btn-secondary"}" aria-pressed="${on}" data-key="${escapeHtml(r.key)}" onclick="roleSelect_(this.dataset.key)">${escapeHtml(r.name)} <span class="perm-count">· ${r.userCount} ${r.userCount === 1 ? "user" : "users"}</span></button>`; }).join("")
+    + (draft && !draft.key ? `<button type="button" class="admin-btn role-chip" aria-pressed="true">${escapeHtml(draft.name || "New role")}</button>` : "");
+  const menuHtml = (m) => {
+    const mOn = p.menus[m.key] !== false;
+    const items = m.items.map(it => {
+      const iOn = mOn && p.items[it.hash] !== false && it.fns.some(([fn]) => roleFnOn_(p, fn));
+      const fns = !iOn ? "" : it.fns.map(([fn, label]) => `
+        <div class="perm-fn"><span class="perm-fn-label">${escapeHtml(label)}</span>
+          <span class="perm-seg" role="radiogroup" aria-label="${escapeHtml(label)}">${ROLE_LEVELS_.map(([lvl, name]) => {
+            const over = ADMIN_LEVEL_RANK_[lvl] > ADMIN_LEVEL_RANK_[myLevel(fn)];
+            return `<label class="${lvl === "full" ? "perm-full" : ""}" title="${over ? "More than your own role has" : ""}"><input type="radio" name="perm-${escapeHtml(fn)}" value="${lvl}" ${(p.fns[fn] || "none") === lvl ? "checked" : ""} ${dis || (over ? "disabled" : "")} data-fn="${escapeHtml(fn)}" onchange="roleSetLevel_(this.dataset.fn, this.value)" /><span>${name}</span></label>`;
+          }).join("")}</span></div>`).join("");
+      return `<div class="perm-item"><div class="perm-item-head"><label class="perm-switch"><input type="checkbox" ${iOn ? "checked" : ""} ${dis} data-item="${escapeHtml(it.hash)}" onchange="roleSetItem_(this.dataset.item, this.checked)" /> ${escapeHtml(it.label)}</label>${iOn ? "" : `<span class="perm-off">hidden</span>`}</div>${fns}</div>`;
+    }).join("");
+    const anyOn = mOn && m.items.some(it => p.items[it.hash] !== false && it.fns.some(([fn]) => roleFnOn_(p, fn)));
+    return `<div class="perm-menu"><div class="perm-menu-head"><label class="perm-switch"><input type="checkbox" ${anyOn ? "checked" : ""} ${dis} data-menu="${escapeHtml(m.key)}" onchange="roleSetMenu_(this.dataset.menu, this.checked)" /> ${escapeHtml(m.label)}</label>${anyOn ? "" : `<span class="perm-off">hidden</span>`}</div>${anyOn ? items : ""}</div>`;
+  };
+  panel.innerHTML = `
+    ${usersTabsHtml_()}
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+      <h2 style="margin:0;flex:1;">Roles and permissions</h2>
+      ${adminCan_("settings.users", "edit") && myRank > 1 ? `<button type="button" class="admin-btn" onclick="roleNew_(null)">＋ Add role</button>
+      <button type="button" class="admin-btn" ${draft && draft.key && !draft.locked ? "" : "disabled"} onclick="roleNew_(_roleDraft && _roleDraft.key)">Copy role</button>` : ""}
+    </div>
+    <div class="admin-note" style="margin-bottom:12px;"><strong>Read</strong> can open and look. <strong>Edit</strong> can add and change. <strong>Full</strong> is Edit plus delete, void, refund and write off.
+      A menu or item switched off is hidden, and the server refuses everything in it. Your own password and two-step sign-in are always there.</div>
+    <div class="role-chips">${chips}</div>
+    ${!draft ? "" : `
+    <div class="role-editor">
+      <div class="role-fields">
+        <label class="role-field" for="roleName">Name<input type="text" id="roleName" maxlength="40" value="${escapeHtml(draft.name)}" ${dis} oninput="_roleDraft.name=this.value" style="width:220px;" /></label>
+        <label class="role-field" for="roleRank">Rank (1–${Math.max(1, myRank - 1)})<input type="number" id="roleRank" min="1" max="${Math.max(1, myRank - 1)}" step="1" value="${draft.rank}" ${dis} oninput="_roleDraft.rank=Number(this.value)" style="width:90px;" /></label>
+        <div class="admin-note" style="flex:1;min-width:220px;">${draft.locked ? "Admin always has everything and can't be changed." : !draft.canEdit ? "This role ranks at or above yours, so you can see it but not change it." : "Only someone whose role ranks above this one can change it, or give it to someone." + (draft.builtIn ? " A built-in role can be changed but not deleted." : "")}</div>
+      </div>
+      ${(d.areas || []).map(menuHtml).join("")}
+      ${!editable ? "" : `<div class="admin-actions" style="margin-top:12px;">
+        <button type="button" class="admin-btn" onclick="roleSave_()">${draft.key ? "Save role" : "Add role"}</button>
+        ${draft.key ? `<button type="button" class="admin-btn" onclick="roleSelect_(_roleDraft.key)">Undo changes</button>` : `<button type="button" class="admin-btn" onclick="loadRoles_()">Cancel</button>`}
+        ${draft.key && !draft.builtIn ? `<button type="button" class="admin-btn admin-btn-danger" onclick="roleDelete_()" ${draft.userCount ? `title="Give its users another role first"` : ""}>Delete role</button>` : ""}
+      </div>`}
+    </div>`}`;
+}
+// Switching an item on starts its functions at Read (as far as your own role goes); off hides them all.
+function roleSetItem_(item, on){
+  const p = _roleDraft.permissions, d = _rolesData || {};
+  const it = (d.areas || []).flatMap(m => m.items).find(x => x.hash === item);
+  if(!it) return;
+  const menu = (d.areas || []).find(m => m.items.includes(it));
+  if(on){
+    delete p.items[item]; if(menu) delete p.menus[menu.key];
+    if(!it.fns.some(([fn]) => roleFnOn_(p, fn))) for(const [fn] of it.fns) if(ADMIN_LEVEL_RANK_[(d.myLevels || {})[fn] || "none"] >= 1) p.fns[fn] = "read";
+  } else { p.items[item] = false; for(const [fn] of it.fns) p.fns[fn] = "none"; }
+  renderRolesTab_();
+}
+function roleSetMenu_(menuKey, on){
+  const m = ((_rolesData || {}).areas || []).find(x => x.key === menuKey);
+  if(!m) return;
+  if(on){ delete _roleDraft.permissions.menus[menuKey]; for(const it of m.items) roleSetItem_(it.hash, true); }
+  else { _roleDraft.permissions.menus[menuKey] = false; for(const it of m.items) for(const [fn] of it.fns) _roleDraft.permissions.fns[fn] = "none"; }
+  renderRolesTab_();
+}
+function roleSetLevel_(fn, lvl){ if(ROLE_LEVELS_.some(([l]) => l === lvl)) _roleDraft.permissions.fns[fn] = lvl; }
+async function roleSave_(){
+  const draft = _roleDraft;
+  if(!draft) return;
+  const name = String(draft.name || "").trim();
+  if(!name){ showToast("Give the role a name.", true); return; }
+  const body = { action: "saveRole", name, rank: Number(draft.rank), permissions: draft.permissions };
+  if(draft.key) body.key = draft.key;
+  const data = await usersCall_(body);
+  if(!data) return;
+  showToast(draft.key ? "Role saved. It applies at once to everyone who has it." : "Role added.");
+  _roleDraft = { key: data.role.key };
+  await loadRoles_();
+}
+async function roleDelete_(){
+  const draft = _roleDraft;
+  if(!draft || !draft.key) return;
+  if(!await askConfirm_("Delete the role " + draft.name + "? This can't be undone.", { confirmLabel: "Delete role" })) return;
+  if(await usersCall_({ action: "deleteRole", key: draft.key })){ showToast("Role deleted."); _roleDraft = null; await loadRoles_(); }
 }
 function usersEdit_(id){
   const u = id == null ? null : _usersList.find(x => x.id === id);
@@ -9867,7 +10076,7 @@ async function usersSave_(ev){
 }
 async function usersSetRole_(id, role){
   const u = _usersList.find(x => x.id === id);
-  if(!u || !await askConfirm_("Make " + (u.name || u.email) + " " + (ADMIN_ROLE_LABELS[role] || role) + "? They are signed out and sign in again with the new role.")){ await loadUsers_(); return; }
+  if(!u || !await askConfirm_("Make " + (u.name || u.email) + " " + roleNameOf_(role) + "? They are signed out and sign in again with the new role.")){ await loadUsers_(); return; }
   if(await usersCall_({action: "setRole", id, role})) showToast("Role changed.");
   await loadUsers_();
 }
@@ -10121,7 +10330,7 @@ function renderOrgForm(app, org){
       <div class="stitch stitch-thick"></div>
     </div>
     <h2 class="shop-page-h">${isEdit ? "Shop settings" : "New shop"}</h2>
-    <div class="admin-panel" style="--org-accent:var(--accent);">
+    <div class="admin-panel" data-need-form="catalog.shops:edit" style="--org-accent:var(--accent);">
       <div class="admin-form">
         ${!isEdit ? `<div style="margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border);">
           <div style="display:flex;align-items:flex-end;gap:8px;">
@@ -10131,7 +10340,7 @@ function renderOrgForm(app, org){
                 ${(window._adminOrgRegistry || []).map(o => `<option value="${escapeHtml(o.orgId)}">${escapeHtml(o.name)}</option>`).join("")}
               </select>
             </label>
-            <button class="admin-btn" type="button" onclick="applyCloneOrg()">Apply</button>
+            <button class="admin-btn" type="button" data-need="catalog.shops:edit" onclick="applyCloneOrg()">Apply</button>
           </div>
           <label class="checkbox-row" style="margin-top:6px;"><input type="checkbox" id="orgFormCopyProducts"> Also copy that shop's products (with their photos) — artwork this shop doesn't have yet is left off and listed</label>
         </div>` : ""}
@@ -10338,7 +10547,7 @@ async function loadOrgDomainBox_(orgId, action){
   box.innerHTML = `<strong>Custom domain:</strong> ${escapeHtml(orgDomainText_(d, subEl && subEl.value.trim()))}
     ${d && d.configured ? `<div style="margin-top:6px;display:flex;gap:6px;">
       ${canSetUp ? `<button type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;" data-org="${escapeHtml(orgId)}" onclick="loadOrgDomainBox_(this.dataset.org, 'setupOrgDomain')">${d.exists ? "Retry setup" : "Set up domain"}</button>` : ""}
-      <button type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;" data-org="${escapeHtml(orgId)}" onclick="loadOrgDomainBox_(this.dataset.org, 'getOrgDomainStatus')">Check again</button>
+      <button data-perm-keep type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;" data-org="${escapeHtml(orgId)}" onclick="loadOrgDomainBox_(this.dataset.org, 'getOrgDomainStatus')">Check again</button>
     </div>` : ""}`;
 }
 
@@ -10564,7 +10773,7 @@ function renderProductListTable(orgId, products){
   const panel = document.getElementById("adminPanel");
   const groups = groupProductsByCategory_(products);
   const arrow = (p, dir, off) => `<button type="button" class="admin-btn prod-move" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-dir="${dir}"
-      onclick="moveProduct_(this.dataset.org, this.dataset.product, Number(this.dataset.dir))" ${off ? "disabled" : ""}
+      data-need="catalog.products:edit" onclick="moveProduct_(this.dataset.org, this.dataset.product, Number(this.dataset.dir))" ${off ? "disabled" : ""}
       aria-label="Move ${escapeHtml(p.name)} ${dir < 0 ? "up" : "down"}" title="Move ${dir < 0 ? "up" : "down"}"
       style="padding:2px 9px;font-size:13px;line-height:1.2;${off ? "opacity:.35;cursor:default;" : ""}">${dir < 0 ? "&uarr;" : "&darr;"}</button>`;
   // A unit's first product carries the unit's ↑ ↓; its other versions are listed under it, indented.
@@ -10580,8 +10789,8 @@ function renderProductListTable(orgId, products){
       <td data-label="Visibility">${p.visible ? "Visible" : "Hidden"}</td>
       <td class="stack-actions">
         <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products/'+encodeURIComponent(this.dataset.product)+'/edit'">Edit</button>
-        <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-visible="${p.visible ? "0" : "1"}" onclick="toggleProductVisible(this.dataset.org, this.dataset.product, this.dataset.visible === '1')" style="margin-top:4px;">${p.visible ? "Hide" : "Show"}</button>
-        ${`<button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-product-name="${escapeHtml(p.name)}" data-pricing-mode="${escapeHtml(p.pricingMode || "sized")}" data-size-pricing="${escapeHtml(JSON.stringify(p.sizePricing || {}))}" onclick="showStockModal(this.dataset.org, this.dataset.product, this.dataset.productName, this.dataset.pricingMode, JSON.parse(this.dataset.sizePricing))" style="margin-top:4px;" title="Finished stock: pieces already decorated for this shop">Stock</button>`}
+        <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-visible="${p.visible ? "0" : "1"}" data-need="catalog.products:edit" onclick="toggleProductVisible(this.dataset.org, this.dataset.product, this.dataset.visible === '1')" style="margin-top:4px;">${p.visible ? "Hide" : "Show"}</button>
+        ${`<button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-product-name="${escapeHtml(p.name)}" data-pricing-mode="${escapeHtml(p.pricingMode || "sized")}" data-size-pricing="${escapeHtml(JSON.stringify(p.sizePricing || {}))}" data-need="inventory.blanks:read" onclick="showStockModal(this.dataset.org, this.dataset.product, this.dataset.productName, this.dataset.pricingMode, JSON.parse(this.dataset.sizePricing))" style="margin-top:4px;" title="Finished stock: pieces already decorated for this shop">Stock</button>`}
       </td>
     </tr>`;
   // One table per category, with the same column widths so the sections line up.
@@ -10596,13 +10805,13 @@ function renderProductListTable(orgId, products){
       </div>`).join("");
   panel.innerHTML = `
     <div class="admin-actions" style="margin:6px 0 10px 0;">
-      <button class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="location.hash='#wizard/'+encodeURIComponent(this.dataset.org)+'/products'" title="Pick blanks and turn them into products, one question at a time">＋ Add products from blanks</button>
-      <button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(orgId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products/new'">+ New Product (full form)</button>
-      <button class="admin-btn" id="prodImportCsvBtn" title="Add or update many products at once from a spreadsheet saved as CSV">Import CSV&hellip;</button>
+      <button data-need="catalog.products:edit" class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="location.hash='#wizard/'+encodeURIComponent(this.dataset.org)+'/products'" title="Pick blanks and turn them into products, one question at a time">＋ Add products from blanks</button>
+      <button data-need="catalog.products:edit" class="admin-btn admin-btn-secondary" data-org="${escapeHtml(orgId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products/new'">+ New Product (full form)</button>
+      <button data-need="catalog.products:edit" class="admin-btn" id="prodImportCsvBtn" title="Add or update many products at once from a spreadsheet saved as CSV">Import CSV&hellip;</button>
       <button class="admin-btn" id="prodCopyBtn" title="Copy products — with their prices, sizes, colors and blank links — from another shop">Copy from another shop&hellip;</button>
-      ${adminCan_("manager") ? `<button class="admin-btn" id="prodListPriceBtn" title="What each item costs and leaves, and which are below your targets">Price analysis</button>` : ""}
+      ${adminCan_("costs.view", "read") ? `<button class="admin-btn" id="prodListPriceBtn" title="What each item costs and leaves, and which are below your targets">Price analysis</button>` : ""}
       <input type="file" id="prodImportCsvFile" accept=".csv,text/csv" style="display:none;">
-      ${adminCan_("manager") && !adminDesktop_() ? `<button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(orgId)}" onclick="previewShop_(this.dataset.org)" title="Open the shop page as it will look after Publish">Preview</button>` : ""}
+      ${adminCan_("catalog.shops", "read") && !adminDesktop_() ? `<button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(orgId)}" onclick="previewShop_(this.dataset.org)" title="Open the shop page as it will look after Publish">Preview</button>` : ""}
     </div>
     <div data-publish-state="${escapeHtml(orgId)}" class="admin-note"></div>
     <div id="publishStatus" class="admin-note"></div>
@@ -10621,7 +10830,7 @@ function renderProductListTable(orgId, products){
       if (file) await showProductCsvImportModal_(orgId, file, () => refreshProductList_(orgId));
     }; }
   // Pricing awareness: each product's income per item and $/hr under its name, ⚠ when below a target.
-  if (adminCan_("manager")) {
+  if (adminCan_("costs.view", "read")) {
     const pb = document.getElementById("prodListPriceBtn");
     const orgName = ((window._adminOrgRegistry || []).find(o => o.orgId === orgId) || {}).name || orgId;
     if (pb) pb.onclick = () => showPriceAnalysis_({ org: orgId }, { title: "Price analysis — " + orgName });
@@ -10794,7 +11003,7 @@ async function moveProduct_(orgId, productId, dir){
     window._adminProductRegistry[orgId] = data.products;
     renderProductListTable(orgId, data.products);
     const note = document.getElementById("publishStatus");
-    if (note) note.textContent = adminCan_("manager") ? "Order saved. Click Publish to update the shop's page." : "Order saved. It reaches the shop's page when a manager publishes the catalog.";
+    if (note) note.textContent = adminCan_("catalog.shops", "edit") ? "Order saved. Click Publish to update the shop's page." : "Order saved. It reaches the shop's page when a manager publishes the catalog.";
     const again = [...document.querySelectorAll(".prod-move")].find(b => b.dataset.product === productId && Number(b.dataset.dir) === dir && !b.disabled)
       || [...document.querySelectorAll(".prod-move")].find(b => b.dataset.product === productId && !b.disabled);
     if (again) again.focus();
@@ -10976,9 +11185,9 @@ async function showStockModal(orgId, productId, productName, pricingMode, sizePr
         <td style="${td}">${made}</td>
         <td style="${td}white-space:nowrap;">
           <div style="margin-bottom:4px;"><input type="number" min="1" step="1" class="fsMakeQty" placeholder="Qty" style="${inp}" ${r.blank ? "" : "disabled"} aria-label="How many made, ${escapeHtml(aria)}">
-            <button type="button" class="admin-btn fsMake" style="padding:3px 8px;font-size:12px;" ${r.blank ? "" : "disabled title=\"Link this size to a blank on the product first\""}>Make for stock</button></div>
+            <button type="button" class="admin-btn fsMake" data-need="inventory.blanks:edit" style="padding:3px 8px;font-size:12px;" ${r.blank ? "" : "disabled title=\"Link this size to a blank on the product first\""}>Make for stock</button></div>
           <div><input type="number" min="0" step="1" class="fsCount" value="${r.onHand}" style="${inp}" aria-label="Counted on hand, ${escapeHtml(aria)}">
-            <button type="button" class="admin-btn fsCorrect" style="padding:3px 8px;font-size:12px;background:#fff;color:#333;border:1px solid #ccc;">Correct count</button></div>
+            <button type="button" class="admin-btn fsCorrect" data-need="inventory.blanks:edit" style="padding:3px 8px;font-size:12px;background:#fff;color:#333;border:1px solid #ccc;">Correct count</button></div>
         </td></tr>`;
     };
     const head = `<thead><tr style="text-align:left;background:#f3f4f6;font-size:12px;">${f.configurable ? `<th style="padding:6px 8px;">Combination</th>` : ""}<th style="padding:6px 8px;">Size</th><th style="padding:6px 8px;${num}">On hand</th><th style="padding:6px 8px;${num}">Set aside</th>
@@ -11009,7 +11218,7 @@ async function showStockModal(orgId, productId, productName, pricingMode, sizePr
       catch (e) { err.textContent = e.message; btn.disabled = false; }
     });
     if (f.configurable) wireStockNewCombo_(ov, f, { orgId, productId, err, money, reload: load });
-    const list = mv.movements || [], canVoid = adminCan_("manager");
+    const list = mv.movements || [], canVoid = adminCan_("inventory.blanks", "full");
     ov.querySelector("#fsHistory").innerHTML = list.length ? `<table style="width:100%;border-collapse:collapse;color:#1a1a1a;">${list.map(m => `
       <tr style="${m.voidedAt ? "text-decoration:line-through;color:#999;" : ""}">
         <td style="padding:3px 6px;white-space:nowrap;">${escapeHtml(String(m.occurredAt).slice(0, 10))}</td>
@@ -11085,10 +11294,10 @@ function renderProductForm(app, orgId, product){
       <div class="stitch stitch-thick"></div>
     </div>
     <div class="admin-actions" style="margin:6px 0 10px 0;align-items:center;">
-      <button class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products'">&larr; Products</button>
+      <button data-perm-keep class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products'">&larr; Products</button>
       <span style="font-size:13px;color:var(--ink-soft);">${isEdit ? "Edit product" : "New product"} — ${escapeHtml(orgName)}</span>
     </div>
-    <div class="admin-panel" style="--org-accent:var(--accent);">
+    <div class="admin-panel" data-need-form="catalog.products:edit" style="--org-accent:var(--accent);">
       <div class="admin-form">
         ${isEdit ? `<div id="prodFormIssues"></div><div id="prodFormBrandApprovals"></div>` : ""}
         ${isEdit ? versionsBoxHtml_(orgId, product) : ""}
@@ -11236,9 +11445,9 @@ function renderProductForm(app, orgId, product){
           <label>Shop supplies per item ($, optional — blank uses the Global settings default)
             <input type="number" min="0" max="1000" step="0.01" id="prodFormSuppliesCost" style="max-width:220px;" value="${product && product.suppliesCost != null ? product.suppliesCost : ""}" placeholder="default">
           </label>
-          ${isEdit && adminCan_("manager") ? `<div id="pricingTable" style="margin-top:6px;font-size:13px;color:#888;">Working out costs&hellip;</div>
+          ${isEdit && adminCan_("costs.view", "read") ? `<div id="pricingTable" style="margin-top:6px;font-size:13px;color:#888;">Working out costs&hellip;</div>
           <div class="admin-note" style="margin-top:4px;">Follows the prices as you type; blank links count as saved.</div>
-          ${adminCan_("manager") ? `<button type="button" class="admin-btn" id="prodPriceAnalysisBtn" style="margin-top:6px;">Price analysis</button>` : ""}`
+          ${adminCan_("costs.view", "read") ? `<button data-perm-keep type="button" class="admin-btn" id="prodPriceAnalysisBtn" style="margin-top:6px;">Price analysis</button>` : ""}`
             : isEdit ? `<div class="admin-note">A manager sees what each item costs and leaves here.</div>`
             : `<div class="admin-note">Costs and income show here once the product is saved and linked to its blank.</div>`}
         </div>
@@ -11689,10 +11898,10 @@ function versionsBoxHtml_(orgId, product){
       <div style="font-weight:600;font-size:13px;margin-bottom:4px;">Versions</div>${inner}</div>`;
   if (!others.length) return box(`
       <div class="admin-note" style="margin:0 0 6px;">Sell this in two versions on one card — e.g. short and long sleeve. Each version is its own product with its own sizes and prices, blanks, colors, photos and overlays; the shop page shows a toggle between them.</div>
-      <button type="button" class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" onclick="showAddVersionModal_(this.dataset.org, this.dataset.product)">+ Add a version (e.g. long sleeve)…</button>`);
+      <button type="button" class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" data-need="catalog.products:edit" onclick="showAddVersionModal_(this.dataset.org, this.dataset.product)">+ Add a version (e.g. long sleeve)…</button>`);
   const tab = (p) => p.productId === product.productId
     ? `<span class="admin-btn" aria-current="true" style="padding:4px 12px;font-size:13px;">${escapeHtml(p.versionLabel || p.productId)}</span>`
-    : `<button type="button" class="admin-btn version-tab" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" onclick="versionGoTo_(this.dataset.org, this.dataset.product)" style="padding:4px 12px;font-size:13px;background:#fff;color:var(--ink,#111);border:1px solid var(--card-line,#ccc);">${escapeHtml(p.versionLabel || p.productId)}${p.visible ? "" : " (hidden)"}</button>`;
+    : `<button data-perm-keep type="button" class="admin-btn version-tab" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" onclick="versionGoTo_(this.dataset.org, this.dataset.product)" style="padding:4px 12px;font-size:13px;background:#fff;color:var(--ink,#111);border:1px solid var(--card-line,#ccc);">${escapeHtml(p.versionLabel || p.productId)}${p.visible ? "" : " (hidden)"}</button>`;
   const other = others[0];
   return box(`
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;" role="tablist" aria-label="Versions">${all.map(tab).join("")}</div>
@@ -11701,8 +11910,8 @@ function versionsBoxHtml_(orgId, product){
       </label>
       <div class="admin-note" style="margin:4px 0 8px;">Saved with Save changes. Orders show it after the product name — "${escapeHtml(product.name || "")} (${escapeHtml(product.versionLabel || "…")})".</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
-        <button type="button" class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" data-from="${escapeHtml(other.productId)}" onclick="copyVersionSettings_(this.dataset.org, this.dataset.product, this.dataset.from)" title="Name, subtitle, features, personalization, the customer's-design setting, graphics at each location and designs — not prices, sizes, blanks, colors, photos or overlays">Copy settings from ${escapeHtml(other.versionLabel || other.productId)}</button>
-        <button type="button" class="admin-btn admin-btn-danger" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" onclick="separateVersion_(this.dataset.org, this.dataset.product)" >Separate from ${escapeHtml(other.versionLabel || other.productId)}</button>
+        <button type="button" class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" data-from="${escapeHtml(other.productId)}" data-need="catalog.products:edit" onclick="copyVersionSettings_(this.dataset.org, this.dataset.product, this.dataset.from)" title="Name, subtitle, features, personalization, the customer's-design setting, graphics at each location and designs — not prices, sizes, blanks, colors, photos or overlays">Copy settings from ${escapeHtml(other.versionLabel || other.productId)}</button>
+        <button type="button" class="admin-btn admin-btn-danger" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" data-need="catalog.products:edit" onclick="separateVersion_(this.dataset.org, this.dataset.product)" >Separate from ${escapeHtml(other.versionLabel || other.productId)}</button>
       </div>`);
 }
 // Reload the shop's products, then open one of them (the list is what the edit page reads).
@@ -12767,10 +12976,10 @@ async function loadDigitalFiles_(orgId, product){
   const draw = (files, msg) => {
     section.innerHTML = `${files.length ? `<table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:8px;">${files.map(f => `<tr>
         <td style="padding:4px 6px;border-bottom:1px solid #eee;">${escapeHtml(f.fileName)}</td><td style="padding:4px 6px;border-bottom:1px solid #eee;color:#666;">${escapeHtml(digitalFileSize_(f.bytes))}</td>
-        <td style="padding:4px 6px;border-bottom:1px solid #eee;text-align:right;"><button type="button" class="admin-btn admin-btn-secondary dig-del" data-id="${f.id}" style="padding:2px 8px;font-size:12px;">Remove</button></td></tr>`).join("")}</table>`
+        <td style="padding:4px 6px;border-bottom:1px solid #eee;text-align:right;"><button type="button" class="admin-btn admin-btn-secondary dig-del" data-need="catalog.productFiles:full" data-id="${f.id}" style="padding:2px 8px;font-size:12px;">Remove</button></td></tr>`).join("")}</table>`
         : `<div class="admin-note" style="color:#b03a2e;">No files yet: it isn't shown in the shop until it has at least one.</div>`}
       ${product.digital ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <input type="file" id="digFileInput" style="font-size:12px;"><button type="button" class="admin-btn admin-btn-secondary" id="digUpload" style="padding:3px 10px;font-size:12px;">Upload</button>
+        <input type="file" id="digFileInput" style="font-size:12px;"><button type="button" class="admin-btn admin-btn-secondary" id="digUpload" data-need="catalog.productFiles:edit" style="padding:3px 10px;font-size:12px;">Upload</button>
         ${featureOn_("production") ? `<select id="digDesign" style="font-size:12px;max-width:220px;"><option value="">Add from the Designs library…</option></select>` : ""}
       </div><div class="admin-note">Embroidery files in any format, PDFs and zip files, up to 20 MB each.</div>` : `<div class="admin-note">Tick “Digital product” and save, then add the files.</div>`}
       <div id="digErr" class="admin-error">${escapeHtml(msg || "")}</div>`;
@@ -13712,7 +13921,7 @@ function missingCostHtml_(items){
   const linked = items.filter(m => m.reason === "linkedNow"), notLinked = items.filter(m => m.reason === "notLinked" || !m.reason), custom = items.filter(m => m.reason === "custom");
   return (linked.length ? box(`${n(linked.length)} ${linked.length === 1 ? "has" : "have"} no blank cost yet`,
       `${linked.length === 1 ? "its size is" : "their sizes are"} linked to a blank now, but the order was marked manufactured before the link existed, so no blank was taken out of stock. Use <b>Use blanks for past orders…</b> to take them out, dated when each order was made:`,
-      linked, `<button type="button" class="admin-btn cogs-catchup-inline" style="margin-top:8px;">Use blanks for past orders…</button>`) : "") +
+      linked, `<button data-need="inventory.blanks:edit" type="button" class="admin-btn cogs-catchup-inline" style="margin-top:8px;">Use blanks for past orders…</button>`) : "") +
     (notLinked.length ? box(`${n(notLinked.length)} ${notLinked.length === 1 ? "isn't" : "aren't"} linked to a blank`,
       `link the product's sizes (Manage catalog → product → Blank links), then use <b>Use blanks for past orders…</b> to take their blanks out. COGS is understated until then:`, notLinked) : "") +
     (custom.length ? box(`${n(custom.length)} ${custom.length === 1 ? "is a custom item" : "are custom items"} with no product`,
@@ -14427,7 +14636,7 @@ async function showBlankHistoryModal(blank, onDone){
           <td style="${dim}padding:4px 6px;">${escapeHtml([m.orderId && "Order " + m.orderId, m.vendor, m.vendorRef && "#" + m.vendorRef, m.note].filter(Boolean).join(" · "))}
             ${m.receiptKey && adminFeatureOn_("bookkeeping") ? ` <button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;" title="${escapeHtml(m.receiptName || "Receipt")}" data-key="${escapeHtml(m.receiptKey)}" onclick="expViewReceipt_(this.dataset.key)">📎 Receipt</button>` : ""}
             ${m.voidedAt ? `<div style="color:#b03a2e;">Voided${m.voidReason ? ": " + escapeHtml(m.voidReason) : ""}</div>` : ""}</td>
-          <td style="padding:4px 6px;text-align:right;white-space:nowrap;">${!m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn admin-btn-danger" style="padding:2px 6px;font-size:11px;" data-mid="${m.id}" onclick="voidBlankMovement_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;text-decoration:none;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" title="Make this entry count toward stock and cost again" onclick="restoreBlankMovement_(this.dataset.mid)">Undo void</button>` : ""}</td>
+          <td style="padding:4px 6px;text-align:right;white-space:nowrap;">${!m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn admin-btn-danger" style="padding:2px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.blanks:full" onclick="voidBlankMovement_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;text-decoration:none;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" data-need="inventory.blanks:edit" title="Make this entry count toward stock and cost again" onclick="restoreBlankMovement_(this.dataset.mid)">Undo void</button>` : ""}</td>
         </tr>`; }).join("")}</tbody></table>` : "No movements yet.";
     } catch (e) { ov.querySelector("#histBody").textContent = "Could not reach the server."; }
   }
@@ -14539,7 +14748,7 @@ async function renderBlanksToOrder(app){
         <label title="Sizes below their reorder point (Keep on the blank form) are topped back up"><input type="checkbox" id="btoRestock" ${view.includeRestock ? "checked" : ""}> Include restock (reorder points)</label>
         <button type="button" class="admin-btn" id="btoRefresh" style="padding:5px 12px;">Refresh</button>
         <span style="display:inline-flex;gap:6px;align-items:center;margin-left:auto;"><select id="btoStartVendor" aria-label="Vendor to start an order for" style="font-size:13px;padding:5px 6px;"><option value="">Start an order for…</option></select>
-          <button type="button" class="admin-btn" id="btoStartBtn" style="padding:5px 12px;" title="Build an order for a vendor from scratch — restock and best sellers, up to its free shipping">Get me to free shipping</button></span>
+          <button type="button" class="admin-btn" id="btoStartBtn" data-need="inventory.blankorder:edit" style="padding:5px 12px;" title="Build an order for a vendor from scratch — restock and best sellers, up to its free shipping">Get me to free shipping</button></span>
       </div>
       <div id="btoBody"><div class="admin-summary">Loading&hellip;</div></div>
     </div>`;
@@ -14567,7 +14776,7 @@ async function renderBlanksToOrder(app){
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px;">
           <h2 style="margin:0;font-size:17px;">${escapeHtml(s.vendor || "No supplier set")}</h2>
           ${s.vendor ? freeShipHeaderHtml_(s, si) : ""}
-          <span style="display:flex;gap:6px;flex-wrap:wrap;margin-left:auto;">${orderableRows_(s).length ? `<button type="button" class="admin-btn bto-order" data-si="${si}" style="padding:3px 10px;font-size:12px;" title="Check the supplier's stock and place the order through its web service">Order from ${escapeHtml(s.vendor || "supplier")}…</button>` : ""}
+          <span style="display:flex;gap:6px;flex-wrap:wrap;margin-left:auto;">${orderableRows_(s).length ? `<button type="button" class="admin-btn bto-order" data-need="inventory.supplierOrders:edit" data-si="${si}" style="padding:3px 10px;font-size:12px;" title="Check the supplier's stock and place the order through its web service">Order from ${escapeHtml(s.vendor || "supplier")}…</button>` : ""}
           <button type="button" class="admin-btn bto-copy" data-si="${si}" style="padding:3px 10px;font-size:12px;" title="Copy this supplier's list to paste into a spreadsheet or their order form">Copy list</button></span>
         </div>
         ${s.vendor ? "" : `<div style="font-size:12px;color:#92400e;margin-bottom:4px;">These blanks have no vendor — set it on the blank (Inventory → Blanks → Edit) to group them with a supplier.</div>`}
@@ -14651,7 +14860,7 @@ async function renderBlanksToOrder(app){
     try {
       const [r, sup] = await Promise.all([
         hoopApi_({ action: "getBlanksToOrder", includeUnpaid: view.includeUnpaid }),
-        adminCan_("admin") ? hoopApi_({ action: "listSupplierOrders" }).catch(() => null) : Promise.resolve(null),
+        adminCan_("inventory.supplierOrders", "read") ? hoopApi_({ action: "listSupplierOrders" }).catch(() => null) : Promise.resolve(null),
       ]);
       report = r; supplier = sup && Array.isArray(sup.orders) ? sup : null;
       const pick = document.getElementById("btoStartVendor");
@@ -14696,12 +14905,12 @@ function freeShipProgress_(fs, cents, pieces){
 // A Blanks to Order supplier block's header: its free shipping (✎ to change it) and, when short, the button.
 function freeShipHeaderHtml_(s, si){
   const fs = s.freeShipping;
-  if (!fs) return `<button type="button" class="bto-fs-edit" data-si="${si}" style="background:none;border:none;color:#2563eb;cursor:pointer;font-size:12px;padding:0;">Set free shipping…</button>`;
+  if (!fs) return `<button type="button" class="bto-fs-edit" data-need="inventory.blankorder:full" data-si="${si}" style="background:none;border:none;color:#2563eb;cursor:pointer;font-size:12px;padding:0;">Set free shipping…</button>`;
   const pr = freeShipProgress_(fs, s.orderCents, s.qty);
   return `<span class="bto-fs" style="font-size:12px;color:${pr.met ? "#166534" : "#92400e"};display:inline-flex;gap:6px;align-items:baseline;flex-wrap:wrap;">
     ${pr.met ? "✓ Free shipping" : `Free shipping ${escapeHtml(freeShipText_(fs))} — ${escapeHtml(pr.label)}`}
-    <button type="button" class="bto-fs-edit" data-si="${si}" title="Change ${escapeHtml(s.vendor)}'s free shipping" style="background:none;border:none;color:#2563eb;cursor:pointer;font-size:12px;padding:0;">✎</button>
-    ${pr.met ? "" : `<button type="button" class="admin-btn bto-free" data-si="${si}" style="padding:3px 10px;font-size:12px;" title="Add restock and best sellers until this order ships free">Get me to free shipping</button>`}</span>`;
+    <button type="button" class="bto-fs-edit" data-need="inventory.blankorder:full" data-si="${si}" title="Change ${escapeHtml(s.vendor)}'s free shipping" style="background:none;border:none;color:#2563eb;cursor:pointer;font-size:12px;padding:0;">✎</button>
+    ${pr.met ? "" : `<button type="button" class="admin-btn bto-free" data-need="inventory.blankorder:edit" data-si="${si}" style="padding:3px 10px;font-size:12px;" title="Add restock and best sellers until this order ships free">Get me to free shipping</button>`}</span>`;
 }
 // Restock orders placed by hand and recorded here (migrations/0074), with Cancel for one that never got ordered.
 function restockOrdersHtml_(list){
@@ -14712,7 +14921,7 @@ function restockOrdersHtml_(list){
     <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;"><tbody>
     ${list.map(o => `<tr><td style="${td}white-space:nowrap;">${escapeHtml(String(o.createdAt || "").slice(0, 10))}</td><td style="${td}">${escapeHtml(o.vendor)}${o.reference ? ` · <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;">${escapeHtml(o.reference)}</span>` : ""}</td>
       <td style="${td}">${o.lines.length} line${o.lines.length === 1 ? "" : "s"}, ${o.pieces} piece${o.pieces === 1 ? "" : "s"}${o.waiting ? "" : ` <span style="color:#166534;">· received</span>`}</td>
-      <td style="${td}text-align:right;"><button type="button" class="admin-btn bto-rso-cancel admin-btn-danger" data-id="${o.id}" style="padding:2px 8px;font-size:12px;">Cancel</button></td></tr>`).join("")}
+      <td style="${td}text-align:right;"><button type="button" class="admin-btn bto-rso-cancel admin-btn-danger" data-need="inventory.blankorder:full" data-id="${o.id}" style="padding:2px 8px;font-size:12px;">Cancel</button></td></tr>`).join("")}
     </tbody></table></div></div>`;
 }
 
@@ -14794,7 +15003,7 @@ async function showFreeShipping_(vendor, baseRows, ctx = {}){
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:13px;">
         <strong style="font-size:13px;">+ Add item</strong>
         <input type="text" id="fsQ" placeholder="SKU / style #, name or color" style="flex:1;min-width:200px;">
-        ${connIds.length && adminCan_("manager") ? `<button type="button" class="admin-btn" id="fsLookup" style="padding:4px 10px;font-size:12px;" title="Look the style # up live at ${escapeHtml(vendor)} — for a style that isn't a blank yet">Look up on ${escapeHtml(vendor)}</button>` : ""}
+        ${connIds.length && adminCan_("inventory.blanks", "edit") ? `<button type="button" class="admin-btn" id="fsLookup" style="padding:4px 10px;font-size:12px;" title="Look the style # up live at ${escapeHtml(vendor)} — for a style that isn't a blank yet">Look up on ${escapeHtml(vendor)}</button>` : ""}
       </div>
       <div id="fsFound" style="margin-top:6px;"></div>
     </div>
@@ -15023,13 +15232,13 @@ async function loadBrandApprovalBox_(orgId, product, brands){
   if (!box) return;
   const load = async () => { try { return (await hoopApi_({ action: "listBrandApprovals", org: orgId, productId: product.productId })).approvals || []; } catch (e) { return []; } };
   let approvals = await load();
-  const canEdit = adminCan_("manager");
+  const canEdit = adminCan_("catalog.brandApprovals", "edit");
   const draw = () => {
     box.innerHTML = `<div style="border:1px solid #e5e7eb;border-radius:6px;padding:8px 12px;margin-top:8px;background:#fff;color:#111;font-size:13px;">
       <b>Supplier logo approval</b> <span style="color:#666;">(${brands.map(escapeHtml).join(", ")})</span>
       ${approvals.length ? `<ul style="margin:6px 0 0 18px;">${approvals.map(a => `<li class="ba-item"><span style="${a.revokedAt ? "color:#888;text-decoration:line-through;" : ""}">${escapeHtml(a.brand)} — approved ${escapeHtml(a.approvedOn)}${a.maxQty != null ? `, up to ${a.maxQty}` : ", any quantity"}${a.note ? ` · ${escapeHtml(a.note)}` : ""}</span>
         <button type="button" class="admin-btn ba-view" data-key="${escapeHtml(a.fileKey)}" style="padding:1px 7px;font-size:11px;">📎 View</button>
-        ${a.revokedAt ? `<span style="color:#888;"> revoked ${escapeHtml(String(a.revokedAt).slice(0, 10))}${a.revokeNote ? ": " + escapeHtml(a.revokeNote) : ""}</span>` : canEdit ? `<button type="button" class="admin-btn ba-revoke admin-btn-danger" data-id="${a.id}" style="padding:1px 7px;font-size:11px;">Revoke…</button>` : ""}</li>`).join("")}</ul>`
+        ${a.revokedAt ? `<span style="color:#888;"> revoked ${escapeHtml(String(a.revokedAt).slice(0, 10))}${a.revokeNote ? ": " + escapeHtml(a.revokeNote) : ""}</span>` : canEdit ? `<button type="button" class="admin-btn ba-revoke admin-btn-danger" data-need="catalog.brandApprovals:full" data-id="${a.id}" style="padding:1px 7px;font-size:11px;">Revoke…</button>` : ""}</li>`).join("")}</ul>`
         : `<div style="color:#b03a2e;margin-top:4px;">None on file — a large order of this product can't be ordered from the supplier here until it's added (verify the logo with the supplier).</div>`}
       ${canEdit ? `<button type="button" class="admin-btn" id="baAdd" style="margin-top:6px;padding:3px 10px;font-size:12px;">+ Add approval…</button>` : ""}</div>`;
     box.querySelectorAll(".ba-view").forEach(b => b.onclick = () => expViewReceipt_(b.dataset.key));
@@ -15099,7 +15308,7 @@ async function showPriceImpact_(rules, opts){
     rows.sort((a, b) => a.blank.localeCompare(b.blank) || a.shop.localeCompare(b.shop) || a.product.localeCompare(b.product));
   };
   try { await load(); } catch (e) { body.textContent = e.message; return; }
-  const canApply = adminCan_("manager");
+  const canApply = adminCan_("catalog.brandApprovals", "edit");
   let rounding = "none";
   const brands = [...new Set([...rows.map(r => r.brand).filter(Boolean), ...edit.brandPrices.map(b => b.brand)])].sort((a, b) => a.localeCompare(b));
   const money = (v) => v == null ? "—" : "$" + Number(v).toFixed(2);
@@ -15219,7 +15428,7 @@ async function renderBrandRules(app){
   let rules, cats = [];
   try { rules = (await hoopApi_({ action: "getBrandRules" })).rules; } catch (e) { body.textContent = e.message; return; }
   try { cats = (await hoopApi_({ action: "listProductCategories" })).categories || []; } catch (e) {}
-  const canEdit = adminCan_("admin");
+  const canEdit = adminCan_("catalog.brandrules", "edit");
   const dis = canEdit ? "" : "disabled";
   const draw = () => {
     body.innerHTML = `
@@ -15315,16 +15524,16 @@ function supplierOrdersHtml_(orders){
       <td style="${td}color:${color};">${escapeHtml(statusText)}${o.cancelledAt && o.cancelNote ? `<div style="font-size:11px;color:#555;">${escapeHtml(o.cancelNote)}</div>` : ""}${o.error && !o.cancelledAt ? `<div style="font-size:11px;color:#7f1d1d;">${escapeHtml(o.error)}</div>` : ""}</td>
       <td style="${td}font-size:12px;">${ships || (o.status === "placed" && !o.cancelledAt ? `<span style="color:#888;">none yet</span>` : "")}</td>
       <td style="${td}white-space:nowrap;">
-        ${o.status === "placed" && !o.cancelledAt ? `<button type="button" class="admin-btn so-check" data-id="${o.id}" style="padding:2px 8px;font-size:12px;">Check shipments</button>
-          <button type="button" class="admin-btn so-receive" data-id="${o.id}" style="padding:2px 8px;font-size:12px;">Receive…</button>` : ""}
-        ${(o.status === "failed" || o.status === "unknown") && !o.cancelledAt ? `<button type="button" class="admin-btn so-retry" data-id="${o.id}" style="padding:2px 8px;font-size:12px;">Send again</button>` : ""}
-        ${(o.status === "placed" || o.status === "unknown") && !o.cancelledAt ? `<button type="button" class="admin-btn so-cancel admin-btn-danger" data-id="${o.id}" style="padding:2px 8px;font-size:12px;" title="You cancelled this order with the supplier: take its PO number off the order lines">Mark cancelled…</button>` : ""}
+        ${o.status === "placed" && !o.cancelledAt ? `<button data-need="inventory.supplierOrders:edit" type="button" class="admin-btn so-check" data-id="${o.id}" style="padding:2px 8px;font-size:12px;">Check shipments</button>
+          <button data-need="inventory.blanks:edit" type="button" class="admin-btn so-receive" data-id="${o.id}" style="padding:2px 8px;font-size:12px;">Receive…</button>` : ""}
+        ${(o.status === "failed" || o.status === "unknown") && !o.cancelledAt ? `<button type="button" class="admin-btn so-retry" data-need="inventory.supplierOrders:edit" data-id="${o.id}" style="padding:2px 8px;font-size:12px;">Send again</button>` : ""}
+        ${(o.status === "placed" || o.status === "unknown") && !o.cancelledAt ? `<button type="button" class="admin-btn so-cancel admin-btn-danger" data-need="inventory.supplierOrders:full" data-id="${o.id}" style="padding:2px 8px;font-size:12px;" title="You cancelled this order with the supplier: take its PO number off the order lines">Mark cancelled…</button>` : ""}
       </td></tr>`;
   }).join("");
   return `<div id="btoSupplierOrders" style="margin-top:26px;">
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px;">
       <h2 style="margin:0;font-size:17px;">Orders placed with suppliers</h2>
-      ${(orders || []).some(o => o.status === "placed") ? `<button type="button" class="admin-btn so-check-all" style="padding:3px 10px;font-size:12px;">Check all for shipments</button>` : ""}
+      ${(orders || []).some(o => o.status === "placed") ? `<button data-need="inventory.supplierOrders:edit" type="button" class="admin-btn so-check-all" style="padding:3px 10px;font-size:12px;">Check all for shipments</button>` : ""}
     </div>
     <div style="font-size:12px;color:#666;margin-bottom:6px;">Placed from this screen. Tracking numbers the supplier reports are added to the blank shipments each morning (or with Check shipments), and followed to delivery.</div>
     ${rows ? `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;">
@@ -15608,8 +15817,8 @@ async function renderInventoryReport(app){
           ${[y, y-1].map(yy => `<button type="button" class="cogsQuick" data-from="${yy}-01-01" data-to="${yy}-12-31" style="padding:6px 10px;font-size:12px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:var(--surface,#fff);">${yy}</button>`).join("")}</div>
       </form>
       <div style="margin:-6px 0 18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-        <button type="button" class="admin-btn" id="cogsCatchUp" style="font-size:13px;padding:6px 14px;">Use blanks for past orders…</button>
-        <button type="button" class="admin-btn" id="cogsTransferCatchUp" style="font-size:13px;padding:6px 14px;">Use transfers for past orders…</button>
+        <button data-need="inventory.blanks:edit" type="button" class="admin-btn" id="cogsCatchUp" style="font-size:13px;padding:6px 14px;">Use blanks for past orders…</button>
+        <button data-need="inventory.transfers:edit" type="button" class="admin-btn" id="cogsTransferCatchUp" style="font-size:13px;padding:6px 14px;">Use transfers for past orders…</button>
         <span style="font-size:12px;color:#666;">Orders made before stock was tracked (or before you entered their receipts or turned on a transfer) get their blanks or transfers taken out of stock, priced as of the day they were made.</span>
       </div>
       <div id="cogsResults"></div>
@@ -15792,7 +16001,7 @@ async function mnLoad_(){
   const td = "padding:7px 10px;border-bottom:1px solid #e5e7eb;vertical-align:middle;color:#111;background:#fff;";
   const today = new Date().toLocaleDateString("en-CA");
   const s = d.summary;
-  const del = (kind, id) => `<button type="button" data-kind="${kind}" data-id="${id}" class="mn-del admin-btn-danger" style="padding:2px 8px;font-size:12px;border-radius:4px;cursor:pointer;">Delete</button>`;
+  const del = (kind, id) => `<button type="button" data-need="finance.money:full" data-kind="${kind}" data-id="${id}" class="mn-del admin-btn-danger" style="padding:2px 8px;font-size:12px;border-radius:4px;cursor:pointer;">Delete</button>`;
   const table = (heads, rows, empty) => `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
       <thead><tr>${heads.map(h => `<th style="${th}${/Amount|Balance/.test(h) ? "text-align:right;" : ""}">${h}</th>`).join("")}</tr></thead>
       <tbody>${rows.length ? rows.join("") : `<tr><td colspan="${heads.length}" style="${td}color:#888;">${empty}</td></tr>`}</tbody></table></div>`;
@@ -15816,8 +16025,8 @@ async function mnLoad_(){
         <td style="${td}">${x.paidPersonally ? "Personal funds" : x.accountId ? escapeHtml(x.accountName || name(x.accountId)) : `<span style="color:#b45309;">not set</span>`}</td>
         <td style="${td}text-align:right;white-space:nowrap;">${fmt(x.total)}</td>
         <td style="${td}">${x.receiptKey ? `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" title="${escapeHtml(x.receiptName || "Receipt")}" data-key="${escapeHtml(x.receiptKey)}" onclick="expViewReceipt_(this.dataset.key)">📎 Receipt</button>` : `<span style="font-size:12px;color:#999;">no receipt</span>`}
-          <div style="margin-top:4px;"><button type="button" class="admin-btn mn-stock-acct" style="padding:3px 8px;font-size:12px;" data-kind="${escapeHtml(x.kind)}" data-id="${Number(x.ids[0])}">Change account…</button></div>
-          ${x.kind === "transfers" ? `<div style="margin-top:4px;"><button type="button" class="admin-btn mn-stock-sheet" style="padding:3px 8px;font-size:12px;" data-id="${Number(x.ids[0])}">Edit sheet…</button></div>` : ""}</td></tr>`),
+          <div style="margin-top:4px;"><button type="button" class="admin-btn mn-stock-acct" data-need="finance.money:edit" style="padding:3px 8px;font-size:12px;" data-kind="${escapeHtml(x.kind)}" data-id="${Number(x.ids[0])}">Change account…</button></div>
+          ${x.kind === "transfers" ? `<div style="margin-top:4px;"><button type="button" class="admin-btn mn-stock-sheet" data-need="inventory.transfers:full" style="padding:3px 8px;font-size:12px;" data-id="${Number(x.ids[0])}">Edit sheet…</button></div>` : ""}</td></tr>`),
       "No blanks or transfers bought in " + escapeHtml(yr) + ".")}</div>`;
 
   el.style.color = "var(--ink,#111)";
@@ -15832,17 +16041,17 @@ async function mnLoad_(){
         <td style="${td}"><input data-f="openingBalance" type="number" step="0.01" value="${Number(a.openingBalance).toFixed(2)}" style="${inp}width:110px;"></td>
         <td style="${td}text-align:right;font-weight:600;">${fmt(a.balance)}</td>
         <td style="${td}text-align:center;"><input data-f="active" type="checkbox" ${a.active ? "checked" : ""}></td>
-        <td style="${td}"><button type="button" class="admin-btn mn-acc-save" style="padding:3px 10px;font-size:12px;">Save</button></td></tr>`).concat([`<tr data-acc="new">
+        <td style="${td}"><button type="button" class="admin-btn mn-acc-save" data-need="finance.money:edit" style="padding:3px 10px;font-size:12px;">Save</button></td></tr>`).concat([`<tr data-acc="new">
         <td style="${td}"><input data-f="name" placeholder="New account" maxlength="60" style="${inp}width:170px;"></td>
         <td style="${td}"><select data-f="type" style="${inp}">${Object.entries(types).map(([k, v]) => `<option value="${k}">${escapeHtml(v)}</option>`).join("")}</select></td>
         <td style="${td}"><input data-f="openingDate" type="date" value="${yearStartOrToday_()}" style="${inp}"></td>
         <td style="${td}"><input data-f="openingBalance" type="number" step="0.01" value="0.00" style="${inp}width:110px;"></td>
         <td style="${td}"></td><td style="${td}text-align:center;"><input data-f="active" type="checkbox" checked></td>
-        <td style="${td}"><button type="button" class="admin-btn mn-acc-save" style="padding:3px 10px;font-size:12px;">Add</button></td></tr>`]), "")}
+        <td style="${td}"><button type="button" class="admin-btn mn-acc-save" data-need="finance.money:edit" style="padding:3px 10px;font-size:12px;">Add</button></td></tr>`]), "")}
     <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:10px 0 24px;font-size:13px;">
       <label>Shippo postage is charged to<br><select id="mnPostage" style="${inp}">${accountOptions_(accounts, acc.defaults.postageAccountId)}</select></label>
       <label>Stripe pays out to<br><select id="mnPayout" style="${inp}">${accountOptions_(accounts, acc.defaults.payoutAccountId)}</select></label>
-      <button type="button" class="admin-btn" id="mnDefaultsSave" style="padding:5px 12px;font-size:12px;">Save defaults</button>
+      <button type="button" class="admin-btn" id="mnDefaultsSave" data-need="finance.money:edit" style="padding:5px 12px;font-size:12px;">Save defaults</button>
       <span style="font-size:12px;color:#666;">Payouts are recorded automatically once <code>payout.paid</code> is ticked on your Stripe webhook.</span>
     </div>
 
@@ -15857,7 +16066,7 @@ async function mnLoad_(){
 
     <h2 style="font-size:17px;margin:0 0 6px;">Other income</h2>
     <p style="font-size:13px;color:#555;margin:0 0 8px;">Money earned outside storefront orders. Goods you sell in person belong in <strong>Local sale</strong> (so sales tax applies); use this for services (e.g. digitizing for others), other business income, and bank interest.</p>
-    <div class="mn-form" data-kind="income" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
+    <div class="mn-form" data-need="finance.money:edit" data-kind="income" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
       <div><label style="${lbl}">Date</label><input data-f="date" type="date" max="${today}" value="${today}" style="${inp}"></div>
       <div style="flex:1;min-width:180px;"><label style="${lbl}">Description</label><input data-f="description" maxlength="300" style="${inp}width:100%;"></div>
       <div><label style="${lbl}">Type</label><select data-f="type" style="${inp}">${Object.entries(incomeTypes).map(([k, v]) => `<option value="${k}">${escapeHtml(v)}</option>`).join("")}</select></div>
@@ -15871,7 +16080,7 @@ async function mnLoad_(){
 
     <h2 style="font-size:17px;margin:24px 0 6px;">Owner contributions &amp; draws</h2>
     <p style="font-size:13px;color:#555;margin:0 0 8px;">Money you put into the business or take out for yourself — not income or expenses, but your CPA needs them. Expenses marked “Personal funds” count as money put in automatically.</p>
-    <div class="mn-form" data-kind="owner" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
+    <div class="mn-form" data-need="finance.money:edit" data-kind="owner" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
       <div><label style="${lbl}">Date</label><input data-f="date" type="date" max="${today}" value="${today}" style="${inp}"></div>
       <div><label style="${lbl}">Type</label><select data-f="kind" style="${inp}"><option value="contribution">Put money in</option><option value="draw">Took money out</option></select></div>
       <div><label style="${lbl}">Amount ($)</label><input data-f="amount" type="number" min="0.01" step="0.01" style="${inp}width:100px;"></div>
@@ -15884,7 +16093,7 @@ async function mnLoad_(){
 
     <h2 style="font-size:17px;margin:24px 0 6px;">Transfers between accounts</h2>
     <p style="font-size:13px;color:#555;margin:0 0 8px;">Venmo to the bank, depositing cash, paying the credit card. Stripe payouts appear here automatically.</p>
-    <div class="mn-form" data-kind="transfer" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
+    <div class="mn-form" data-need="finance.money:edit" data-kind="transfer" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
       <div><label style="${lbl}">Date</label><input data-f="date" type="date" max="${today}" value="${today}" style="${inp}"></div>
       <div><label style="${lbl}">From</label><select data-f="fromAccountId" style="${inp}">${accountOptions_(accounts, (accounts.find(a => a.type === "venmo") || accounts[0] || {}).id)}</select></div>
       <div><label style="${lbl}">To</label><select data-f="toAccountId" style="${inp}">${accountOptions_(accounts, (accounts.find(a => a.type === "checking") || accounts[0] || {}).id)}</select></div>
@@ -16099,7 +16308,7 @@ function shopRateDraw_(){
         <td style="${td}"><input type="number" class="sr-amt" min="0" step="0.01" value="${c.overridden ? c.amount : c.fromExpenses}" style="${inp}width:110px;"${c.excluded ? " disabled" : ""}>${c.overridden ? ` <span title="Your figure — the expenses say ${srMoney_(c.fromExpenses)}">✎</span>` : ""}</td>
         <td style="${td}text-align:right;" class="sr-counted">${c.excluded ? "—" : srMoney_(c.amount)}</td></tr>`).join("") || `<tr><td colspan="5" style="${td}color:#666;">No expenses in this period.</td></tr>`}</tbody></table>
     <div id="srExtras" style="margin-top:6px;">${(v.extras.length ? v.extras : []).map(x => shopRateExtraHtml_(x, inp)).join("")}</div>
-    <button type="button" class="admin-btn admin-btn-secondary" id="srAddExtra" style="padding:3px 10px;font-size:12px;margin-top:4px;">+ Add a cost not in expenses</button>
+    <button type="button" class="admin-btn admin-btn-secondary" id="srAddExtra" data-need="finance.shoprate:edit" style="padding:3px 10px;font-size:12px;margin-top:4px;">+ Add a cost not in expenses</button>
     <div style="text-align:right;font-size:13px;margin-top:6px;">Running costs <b id="srRunningTotal">${srMoney_(v.running_total)}</b></div>
     ${sec("Equipment, spread over its life")}
     <table style="border-collapse:collapse;width:100%;"><thead><tr><th style="${th}">Item</th><th style="${th}">Bought</th><th style="${th}text-align:right;">Cost</th><th style="${th}">Life (years)</th><th style="${th}text-align:right;">A year</th></tr></thead>
@@ -16124,7 +16333,7 @@ function shopRateDraw_(){
     <div id="srResult">${shopRateResultHtml_(v)}</div>
     <div id="srError" class="admin-error"></div>
     <div class="admin-actions" style="margin-top:14px;align-items:center;">
-      <button type="button" class="admin-btn" id="srSave">Save shop rate</button>
+      <button type="button" class="admin-btn" id="srSave" data-need="finance.shoprate:edit">Save shop rate</button>
       <span id="srSaved" style="font-size:12px;color:#666;">${v.saved ? `Saved ${escapeHtml(new Date(v.saved.savedAt).toLocaleDateString())}: ${srMoney_(v.saved.rate)}/hour` : "Not saved yet: price analysis doesn't use it."}</span>
     </div>`;
   shopRateWire_();
@@ -16252,8 +16461,8 @@ async function avSearch_(again){
         <td style="${td}text-align:right;white-space:nowrap;color:${r.amount < 0 ? "#b03a2e" : "#166534"};">${r.amount < 0 ? "−" : "+"}${fmt(Math.abs(r.amount))}</td>
         <td style="${td}text-align:right;white-space:nowrap;font-weight:600;">${fmt(r.balance)}</td>
         <td style="${td}white-space:nowrap;">${r.receiptKey
-          ? `<button type="button" class="av-view" style="${btn}" title="${escapeHtml(r.receiptName || "Receipt")}" data-key="${escapeHtml(r.receiptKey)}">📎 View</button> <button type="button" class="av-add" style="${btn}color:#555;" data-src="${escapeHtml(r.src)}" data-id="${r.srcId}" title="Replace this receipt">Replace</button>`
-          : `<button type="button" class="av-add" style="${btn}" data-src="${escapeHtml(r.src)}" data-id="${r.srcId}">＋ Receipt</button>`}</td>
+          ? `<button type="button" class="av-view" style="${btn}" title="${escapeHtml(r.receiptName || "Receipt")}" data-key="${escapeHtml(r.receiptKey)}">📎 View</button> <button type="button" class="av-add" data-need="finance.money:edit|finance.expenses:edit|orders.payments:edit" style="${btn}color:#555;" data-src="${escapeHtml(r.src)}" data-id="${r.srcId}" title="Replace this receipt">Replace</button>`
+          : `<button type="button" class="av-add" data-need="finance.money:edit|finance.expenses:edit|orders.payments:edit" style="${btn}" data-src="${escapeHtml(r.src)}" data-id="${r.srcId}">＋ Receipt</button>`}</td>
       </tr>`).join("")}</tbody></table>` : `<div style="padding:14px;color:#888;">No transactions in this range.</div>`;
   list.scrollTop = keepScroll;
   list.querySelectorAll(".av-view").forEach(b => b.onclick = () => expViewReceipt_(b.dataset.key));
@@ -16323,7 +16532,7 @@ async function rcLoad_(data){
   const inp = "font-size:13px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
   const th = "padding:6px 9px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
   const td = "padding:6px 9px;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#111;background:#fff;";
-  const btn = (cls, id, label, extra = "") => `<button type="button" class="${cls}" data-id="${id}" style="padding:2px 8px;font-size:12px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer;${extra}">${label}</button>`;
+  const btn = (cls, id, label, extra = "") => `<button type="button" data-need="finance.reconcile:edit" class="${cls}" data-id="${id}" style="padding:2px 8px;font-size:12px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer;${extra}">${label}</button>`;
   const unmatched = d.lines.filter(l => l.status === "unmatched" || l.status === "broken");
   const matched = d.lines.filter(l => l.status === "matched"), ignored = d.lines.filter(l => l.status === "ignored");
   const locked = !!d.reconciled;
@@ -16331,7 +16540,7 @@ async function rcLoad_(data){
   el.innerHTML = `
     <div style="border:1px solid #ddd;border-radius:8px;padding:12px 14px;margin-bottom:18px;background:var(--surface,#fff);">
       <div style="font-weight:700;margin-bottom:6px;">Import statement CSV — ${escapeHtml(d.account.name)}</div>
-      <input type="file" id="rcFile" accept=".csv,text/csv" style="font-size:13px;" ${locked ? "disabled" : ""}>
+      <input type="file" id="rcFile" data-need-form="finance.reconcile:edit" accept=".csv,text/csv" style="font-size:13px;" ${locked ? "disabled" : ""}>
       <div id="rcMap" style="margin-top:10px;"></div>
     </div>
 
@@ -16343,8 +16552,8 @@ async function rcLoad_(data){
           <span style="color:#555;">− not yet on a statement ${fmt(d.uncleared)} + ignored lines ${fmt(d.ignored)} = expected <strong>${fmt(isCard ? -d.expectedStatementBalance : d.expectedStatementBalance)}</strong>${isCard ? " owed" : ""}</span></div>
         <div id="rcDiff" style="font-size:14px;font-weight:700;"></div>
         ${locked ? `<div style="font-size:13px;color:#15803d;font-weight:600;">✓ Reconciled ${escapeHtml(new Date(d.reconciled.at).toLocaleDateString())}</div>
-            <button type="button" id="rcReopen" class="admin-btn" style="padding:4px 10px;font-size:12px;">Reopen month</button>`
-          : `<button type="button" id="rcReconcile" class="admin-pass-submit" style="padding:6px 14px;font-size:13px;">Mark reconciled</button>`}
+            <button type="button" id="rcReopen" data-need="finance.reconcile:full" class="admin-btn" style="padding:4px 10px;font-size:12px;">Reopen month</button>`
+          : `<button type="button" id="rcReconcile" data-need="finance.reconcile:full" class="admin-pass-submit" style="padding:6px 14px;font-size:13px;">Mark reconciled</button>`}
       </div>
       <div id="rcErr" style="color:#b03a2e;font-size:13px;min-height:16px;margin-top:6px;"></div>
     </div>
@@ -16891,17 +17100,17 @@ async function renderExpenses(app){
   app.innerHTML = `
     ${adminPageHead_("Expenses")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:1040px;margin:8px auto 60px;">
-      <div id="expForm" style="border:1px solid #ddd;border-radius:8px;padding:14px 16px;margin-bottom:22px;background:var(--surface,#fff);">
+      <div id="expForm" data-need="finance.expenses:edit" style="border:1px solid #ddd;border-radius:8px;padding:14px 16px;margin-bottom:22px;background:var(--surface,#fff);">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
           <div id="expFormTitle" style="font-size:15px;font-weight:700;">Add expense</div>
-          <button type="button" class="admin-btn" id="expImportBtn" style="padding:4px 12px;font-size:12px;" title="Import expenses from a card/bank statement or spreadsheet CSV">Import CSV</button>
+          <button type="button" class="admin-btn" id="expImportBtn" data-need="finance.expenses:edit" style="padding:4px 12px;font-size:12px;" title="Import expenses from a card/bank statement or spreadsheet CSV">Import CSV</button>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
           <div><label style="${lbl}" for="expDate" id="expDateLbl">Date</label><input id="expDate" type="date" max="${expToday_()}" value="${expToday_()}" style="${inp}"></div>
           <div style="flex:2;min-width:200px;"><label style="${lbl}" for="expDesc">Description</label><input id="expDesc" type="text" maxlength="300" placeholder="e.g. Embroidery machine" style="${inp}width:100%;"></div>
           <div><label style="${lbl}" for="expCat">Category</label>
             <div style="display:flex;gap:4px;"><select id="expCat" style="${inp}max-width:260px;"></select>
-              ${adminCan_("manager") ? `<button type="button" class="admin-btn" id="expCatManage" title="Manage categories" aria-label="Manage categories" style="padding:4px 9px;font-size:14px;">⚙</button>` : ""}</div></div>
+              ${adminCan_("finance.expenses", "edit") ? `<button type="button" class="admin-btn" id="expCatManage" title="Manage categories" aria-label="Manage categories" style="padding:4px 9px;font-size:14px;">⚙</button>` : ""}</div></div>
           <div><label style="${lbl}" for="expAmount">Amount ($)</label><input id="expAmount" type="number" min="0.01" step="0.01" placeholder="0.00" style="${inp}width:110px;">
             <label id="expRefundWrap" style="display:flex;gap:4px;align-items:center;font-size:11px;color:#555;margin-top:3px;" title="Money back for an earlier purchase (a returned item, a reversed fee). It reduces this category instead of counting as income."><input type="checkbox" id="expRefund"> This is a refund</label></div>
         </div>
@@ -17161,9 +17370,9 @@ function expDrawRecurring_(){
         <td style="${td}white-space:nowrap;">${r.endDate ? escapeHtml(expShortDate_(r.endDate)) : "—"}</td>
         <td style="${td}white-space:nowrap;">${r.recordedCount ? `${r.recordedCount} · ${expMoney_(r.recordedTotal)}` : "None yet"}</td>
         <td style="${td}white-space:nowrap;text-align:right;">
-          <button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${r.id}" onclick="expEditRecurring_(this.dataset.id)">Edit…</button>
-          ${r.ended ? "" : `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${r.id}" onclick="expStopRecurring_(this.dataset.id)">Stop</button>`}
-          <button class="admin-btn-danger" type="button" style="padding:3px 8px;font-size:12px;border-radius:4px;cursor:pointer;" data-id="${r.id}" onclick="expDeleteRecurring_(this.dataset.id)">Delete</button>
+          <button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${r.id}" data-need="finance.expenses:edit" onclick="expEditRecurring_(this.dataset.id)">Edit…</button>
+          ${r.ended ? "" : `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${r.id}" data-need="finance.expenses:edit" onclick="expStopRecurring_(this.dataset.id)">Stop</button>`}
+          <button class="admin-btn-danger" type="button" style="padding:3px 8px;font-size:12px;border-radius:4px;cursor:pointer;" data-id="${r.id}" data-need="finance.expenses:full" onclick="expDeleteRecurring_(this.dataset.id)">Delete</button>
         </td></tr>`).join("")}</tbody></table></div></details>`;
 }
 // Edit a recurring expense in a window: the same fields as the form. The first date is fixed once one is recorded.
@@ -17293,8 +17502,8 @@ async function expLoad_(){
         <td style="${td}text-align:right;white-space:nowrap;">${x.deductionType === "deductible" ? expMoney_(x.deductible) : x.deductionType === "depreciation" ? `<span style="font-size:12px;color:#666;">capital</span>` : "—"}</td>
         <td style="${td}white-space:nowrap;text-align:right;">
           ${x.receiptKey ? `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" title="${escapeHtml(x.receiptName || "Receipt")}" data-key="${escapeHtml(x.receiptKey)}" onclick="expViewReceipt_(this.dataset.key)">📎 Receipt</button>` : ""}
-          <button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${x.id}" onclick="expEdit_(this.dataset.id)">Edit</button>
-          <button class="admin-btn-danger" type="button" style="padding:3px 8px;font-size:12px;border-radius:4px;cursor:pointer;" data-id="${x.id}" onclick="expDelete_(this.dataset.id)">Delete</button>
+          <button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${x.id}" data-need="finance.expenses:edit" onclick="expEdit_(this.dataset.id)">Edit</button>
+          <button class="admin-btn-danger" type="button" style="padding:3px 8px;font-size:12px;border-radius:4px;cursor:pointer;" data-id="${x.id}" data-need="finance.expenses:full" onclick="expDelete_(this.dataset.id)">Delete</button>
         </td></tr>`).join("")}</tbody></table></div>`
     : `<div style="color:#888;">No expenses recorded for this period.</div>`;
 }
@@ -17541,7 +17750,7 @@ async function renderCommunications(app, opts){
       <div style="display:flex;gap:8px;margin-bottom:16px;">
         <button class="admin-btn" style="font-size:13px;padding:6px 14px;" onclick="refreshComms_()">Refresh</button>
       </div>
-      ${adminCan_("admin") ? `<details id="commsTest" style="margin:0 0 18px;border:1px solid #ddd;border-radius:6px;padding:10px 14px;background:#fafafa;">
+      ${adminCan_("settings.global", "edit") ? `<details id="commsTest" style="margin:0 0 18px;border:1px solid #ddd;border-radius:6px;padding:10px 14px;background:#fafafa;">
         <summary style="cursor:pointer;font-weight:700;font-size:14px;">✉️ Send a test email</summary>
         <div style="font-size:13px;color:#555;margin:8px 0;">Sends one short message the same way order emails go, and shows what the email service answered — for finding out why emails aren't arriving.</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
@@ -17689,7 +17898,7 @@ async function renderCommunications(app, opts){
       <ul style="margin:0;padding-left:18px;font-size:14px;">${d.recurringRecorded.map(x => `<li>${escapeHtml(x.date)} — <b>${escapeHtml(x.description)}</b> ${escapeHtml(expMoney_(x.amount))} <span style="color:#666;">· ${escapeHtml([x.frequency, x.paidFrom].filter(Boolean).join(" · "))}</span></li>`).join("")}</ul>` : ""}
     <div style="display:flex;align-items:center;gap:8px;margin:22px 0 8px;flex-wrap:wrap;">
       <h2 style="font-size:17px;margin:0;">👕 Blanks in transit from the vendor${awaitingBlanks.length ? ` — ${awaitingBlanks.length}` : ""}</h2>
-      ${adminFeatureOn_("shipping") ? `<button class="admin-btn" style="font-size:12px;padding:4px 10px;" onclick="checkBlankShipmentsNow(this)">Check now</button>` : ""}</div>
+      ${adminFeatureOn_("shipping") ? `<button class="admin-btn" style="font-size:12px;padding:4px 10px;" data-need="orders.stepsEarly:edit" onclick="checkBlankShipmentsNow(this)">Check now</button>` : ""}</div>
     <div style="font-size:13px;color:#555;margin:0 0 8px;">Each shipment's carrier status is polled in the daily roll-up; Check now refreshes it on demand. Delivered shipments queue a reminder — mark the blanks received on the orders screen once you've counted them.</div>
     ${blanksHtml}
     <h2 style="font-size:17px;margin:22px 0 8px;">🚚 Shipped — waiting on delivery${inTransit.length ? ` — ${inTransit.length}` : ""}</h2>
@@ -17715,7 +17924,7 @@ function priceReminderHtml_(pr) {
   const money = (v) => v == null ? "not entered" : "$" + Number(v).toFixed(2);
   return `<h2 style="font-size:17px;margin:22px 0 8px;">💲 Blank prices to check${blanks.length + products.length ? ` — ${blanks.length} blank${blanks.length === 1 ? "" : "s"}, ${products.length} product${products.length === 1 ? "" : "s"} to re-price` : ""}</h2>
     <div style="font-size:13px;color:#555;margin:0 0 8px;">Every 30 days the roll-up lists blanks used by products on sale whose vendor prices haven't been checked in 30 days, and products priced on blank prices that have since changed. ${when}${pr.lastSentAt ? ` Last sent ${escapeHtml(day(pr.lastSentAt))}.` : ""}
-      ${blanks.length ? `<button type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;margin-left:6px;" onclick="refreshPriceReminderFromVendors_()">Refresh all from connected vendors</button>` : ""}</div>
+      ${blanks.length ? `<button type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;margin-left:6px;" data-need="inventory.blanks:edit" onclick="refreshPriceReminderFromVendors_()">Refresh all from connected vendors</button>` : ""}</div>
     ${blanks.length ? `<div style="font-size:13px;margin-bottom:8px;">${blanks.map(b => `<div class="price-check-blank" data-id="${b.id}" style="padding:3px 0;"><b>${escapeHtml(b.name)}</b> <span style="color:#666;">${escapeHtml(b.vendor || "")} · ${escapeHtml(b.checkedAt ? "checked " + day(b.checkedAt) : "never checked")} · ${Number(b.sizesWithPrice) || 0}/${Number(b.sizes) || 0} sizes priced · used by ${escapeHtml((b.products || []).map(p => p.name + " (" + (p.orgName || p.orgId) + ")").join(", "))}</span></div>`).join("")}
       <a href="#inventory" style="font-size:12px;">Open Blanks →</a></div>` : ""}
     ${products.length ? `<div style="font-size:13px;">${products.map(p => `<div class="price-check-product" style="padding:3px 0;"><a href="#catalog/orgs/${encodeURIComponent(p.orgId)}/products/${encodeURIComponent(p.productId)}/edit"><b>${escapeHtml(p.name)}</b></a> <span style="color:#666;">(${escapeHtml(p.orgName || p.orgId)}) — ${escapeHtml(p.changes.map(c => `${c.blankName}${c.color ? " " + c.color : ""}${c.size ? " " + c.size : ""} ${money(c.from)} → ${money(c.to)}`).join("; "))}</span></div>`).join("")}</div>` : ""}`;
@@ -17811,7 +18020,7 @@ async function renderBooks(app){
       <p style="font-size:13px;color:#555;margin:0 0 10px;">Close a month once its sales tax return is filed (or the books for it are done). Changes that would alter a closed month's numbers — payments, refunds, discounts, item edits, voids, date changes — are refused until it's reopened. Stripe events still record (dated in the current month).</p>
       <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px;">
         <label style="font-size:12px;font-weight:600;">Month<br><input type="month" id="closeMonth" value="${lastMonth}" style="${inp}"></label>
-        <button type="button" class="admin-pass-submit" id="closeMonthBtn" style="padding:6px 16px;font-size:13px;">Close month</button>
+        <button type="button" class="admin-pass-submit" id="closeMonthBtn" data-need="reports.books:edit" style="padding:6px 16px;font-size:13px;">Close month</button>
       </div>
       <div id="periodsList" style="margin-bottom:28px;font-size:14px;color:#888;">Loading…</div>
 
@@ -17851,7 +18060,7 @@ async function renderBooks(app){
     el.innerHTML = periods.length ? `<table style="border-collapse:collapse;font-size:14px;color:var(--ink,#111);">${periods.map(p => `<tr>
       <td style="padding:5px 12px 5px 0;font-weight:600;">${escapeHtml(monthName(p.month))}</td>
       <td style="padding:5px 12px;color:#777;font-size:12px;">closed ${escapeHtml(new Date(p.closedAt).toLocaleDateString())}${p.closedBy ? " by " + escapeHtml(p.closedBy) : ""}</td>
-      <td style="padding:5px 0;"><button type="button" class="admin-btn" style="padding:3px 10px;font-size:12px;" data-reopen="${escapeHtml(p.month)}">Reopen</button></td></tr>`).join("")}</table>`
+      <td style="padding:5px 0;"><button type="button" class="admin-btn" style="padding:3px 10px;font-size:12px;" data-reopen="${escapeHtml(p.month)}" data-need="reports.books:full">Reopen</button></td></tr>`).join("")}</table>`
       : `<span style="color:#888;">No months closed yet.</span>`;
     el.querySelectorAll("[data-reopen]").forEach(b => b.onclick = async () => {
       if (!await askConfirm_("Reopen " + monthName(b.dataset.reopen) + "? Its numbers can change again until it's closed.")) return;
@@ -18124,8 +18333,8 @@ async function renderAdminBlanks(app) {
         <select id="blankGroup" aria-label="Which blanks" style="font-size:13px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;">
           <option value="">All blanks</option><option value="sale">For sale</option><option value="testing">For testing / shop use</option>
           <option value="onsale">On a product for sale</option><option value="unlinked">Not linked to any product</option><option value="low">Below reorder point</option></select>
-        <button type="button" class="admin-btn" id="blankAddBtn">+ New blank</button>
-        <button type="button" class="admin-btn" id="blankOrderBtn" title="Record a whole vendor order: several blanks, shipping, R&amp;D and personal items">Receive order</button>
+        <button type="button" class="admin-btn" id="blankAddBtn" data-need="inventory.blanks:edit">+ New blank</button>
+        <button type="button" class="admin-btn" id="blankOrderBtn" data-need="inventory.blanks:edit" title="Record a whole vendor order: several blanks, shipping, R&amp;D and personal items">Receive order</button>
         ${adminMenuHtml_("Import", [
           adminMenuItem_('id="blankImportPdfBtn" title="Read a vendor invoice or order confirmation PDF and pre-fill Receive order from it — Import from PDF"', "Vendor invoice (PDF)&hellip;"),
           adminMenuItem_('id="blankVendorNewBtn" title="Bring in complete blanks from a vendor\'s product file — colors, sizes, prices per color, description, and images from the vendor\'s image download"', "Vendor product file — new blanks&hellip;"),
@@ -18339,7 +18548,7 @@ async function findDuplicateBlankPhotos_(onDone){
     <div id="dpErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:6px;"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
       <button type="button" id="dpCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button>
-      <button type="button" id="dpRemove" class="admin-btn">Remove duplicates (${dupCount})</button></div>`;
+      <button type="button" id="dpRemove" class="admin-btn" data-need="inventory.blanks:edit">Remove duplicates (${dupCount})</button></div>`;
   const removeBtn = ov.querySelector("#dpRemove");
   const count = () => { const n = ov.querySelectorAll(".dpPick:checked").length; removeBtn.textContent = `Remove duplicates (${n})`; removeBtn.disabled = !n; };
   ov.querySelector("#dpList").addEventListener("change", count);
@@ -18506,15 +18715,15 @@ function renderBlanksTable(panel, app, blanks, query) {
           <td style="padding:8px 10px;font-family:monospace;font-size:12px;vertical-align:top;">${escapeHtml(b.brand)}${b.sku ? " / " + escapeHtml(b.sku) : ""}</td>
           <td style="padding:8px 10px;vertical-align:top;">${colorBlocks}<div style="font-size:11px;color:var(--ink-soft);margin-top:3px;">${totalStock} units${totalHeld ? ` · ${totalHeld} set aside` : ""} · $${totalValue.toFixed(2)} value</div></td>
           <td style="padding:8px 10px;white-space:nowrap;vertical-align:top;">
-            <button class="admin-btn" style="padding:3px 10px;font-size:12px;" data-blank-id="${b.id}" onclick="blankEdit(this.dataset.blankId)">Edit</button>
+            <button class="admin-btn" style="padding:3px 10px;font-size:12px;" data-blank-id="${b.id}" data-need="inventory.blanks:edit" onclick="blankEdit(this.dataset.blankId)">Edit</button>
             <button class="admin-btn" style="padding:3px 10px;font-size:12px;margin-left:4px;" data-blank-id="${b.id}" onclick="blankHistory(this.dataset.blankId)" title="Every stock movement for this blank">History</button>
-            ${adminMenuHtml_("⋯", [
-              adminMenuItem_(`data-blank-id="${b.id}" onclick="blankWriteOff(this.dataset.blankId)" title="Damaged, lost, or used for testing/samples/shop scrap"`, "Write off&hellip;"),
+            <span data-need="inventory.blanks:edit">${adminMenuHtml_("⋯", [
+              adminMenuItem_(`data-blank-id="${b.id}" data-need="inventory.blanks:full" onclick="blankWriteOff(this.dataset.blankId)" title="Damaged, lost, or used for testing/samples/shop scrap"`, "Write off&hellip;"),
               adminMenuItem_(`data-blank-id="${b.id}" onclick="blankMerge(this.dataset.blankId)" title="Fold other blanks (old per-color rows) into this one"`, "Merge&hellip;"),
               adminMenuItem_(`data-blank-id="${b.id}" onclick="blankClone(this.dataset.blankId)" title="Start a new blank from this one: its colors, sizes, prices and photos, with no stock"`, "Clone"),
               '<div class="admin-menu-sep" role="separator"></div>',
-              adminMenuItem_(`data-blank-id="${b.id}" data-blank-name="${escapeHtml(b.name || [b.brand, b.color].filter(Boolean).join(" "))}" onclick="blankDelete(this.dataset.blankId, this.dataset.blankName)"`, "Delete&hellip;", true),
-            ].join(""), { dots: true, ariaLabel: "More for " + (b.name || "this blank"), btnStyle: "padding:3px 10px;font-size:12px;margin-left:4px;" })}
+              adminMenuItem_(`data-blank-id="${b.id}" data-blank-name="${escapeHtml(b.name || [b.brand, b.color].filter(Boolean).join(" "))}" data-need="inventory.blanks:full" onclick="blankDelete(this.dataset.blankId, this.dataset.blankName)"`, "Delete&hellip;", true),
+            ].join(""), { dots: true, ariaLabel: "More for " + (b.name || "this blank"), btnStyle: "padding:3px 10px;font-size:12px;margin-left:4px;" })}</span>
           </td>
         </tr>`;
     });
@@ -19000,10 +19209,10 @@ async function renderThreadCatalog(app){
       <div style="font-size:13px;color:#666;margin-bottom:14px;">A shared thread-color catalog, used across every shop — one place designs (and, soon, machines) point at for what a color actually is.</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
         <input type="search" id="thrSearch" placeholder="Search brand, code, name…" style="font-size:13px;padding:6px 10px;border:1px solid #ccc;border-radius:4px;min-width:220px;">
-        <button type="button" class="admin-btn" id="thrNewBtn">+ New thread</button>
-        <button type="button" class="admin-btn" id="thrImportBtn">Import chart file…</button>
-        <button type="button" class="admin-btn" id="thrSpoolBtn" title="Manage the shared list of spool sizes (description + length in metres)">Manage spool sizes…</button>
-        <button type="button" class="admin-btn" id="thrNeedleBtn" title="The needle Run Order recommends: needle size by thread weight, and the needle types a blank can pick">Needle settings…</button>
+        <button type="button" class="admin-btn" id="thrNewBtn" data-need="production.threads:edit">+ New thread</button>
+        <button type="button" class="admin-btn" id="thrImportBtn" data-need="production.threads:edit">Import chart file…</button>
+        <button type="button" class="admin-btn" id="thrSpoolBtn" data-need="production.threads:edit" title="Manage the shared list of spool sizes (description + length in metres)">Manage spool sizes…</button>
+        <button type="button" class="admin-btn" id="thrNeedleBtn" data-need="production.threads:edit" title="The needle Run Order recommends: needle size by thread weight, and the needle types a blank can pick">Needle settings…</button>
         <input type="file" id="thrImportFile" style="display:none;">
       </div>
       <div id="thrBody" style="color:#888;font-size:14px;max-height:65vh;overflow-y:auto;">Loading…</div>
@@ -19036,9 +19245,9 @@ async function renderThreadCatalog(app){
           <td style="padding:4px 6px;">${escapeHtml(t.name)}</td>
           <td style="padding:4px 6px;font-size:12px;">${invSummary(t)}</td>
           <td style="padding:4px 6px;text-align:right;white-space:nowrap;">
-            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" onclick="threadInventory_(this.dataset.tid)">Inventory</button>
-            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-tid="${t.id}" onclick="threadEdit_(this.dataset.tid)">Edit</button>
-            <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-tid="${t.id}" onclick="threadDelete_(this.dataset.tid)">Delete</button>
+            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="production.threads:edit" onclick="threadInventory_(this.dataset.tid)">Inventory</button>
+            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-tid="${t.id}" data-need="production.threads:edit" onclick="threadEdit_(this.dataset.tid)">Edit</button>
+            <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-tid="${t.id}" data-need="production.threads:full" onclick="threadDelete_(this.dataset.tid)">Delete</button>
           </td>
         </tr>`).join("")}</tbody>
       </table>`).join("");
@@ -19122,7 +19331,7 @@ async function showSpoolSizesModal_(onDone){
         <tbody>${sizes.map(s => `<tr style="border-bottom:1px solid #eee;">
           <td style="padding:4px 6px;">${escapeHtml(s.description)}</td>
           <td style="padding:4px 6px;">${s.meters} M</td>
-          <td style="padding:4px 6px;text-align:right;"><button type="button" class="admin-btn ssDel admin-btn-danger" data-id="${s.id}" style="padding:2px 8px;font-size:11px;">Delete</button></td>
+          <td style="padding:4px 6px;text-align:right;"><button type="button" class="admin-btn ssDel admin-btn-danger" data-need="production.threads:full" data-id="${s.id}" style="padding:2px 8px;font-size:11px;">Delete</button></td>
         </tr>`).join("")}</tbody></table>` : `<div style="color:#888;padding:8px 0;">No spool sizes yet.</div>`}
       <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;border-top:1px solid #eee;padding-top:10px;">
         <label style="font-size:12px;font-weight:600;flex:1;min-width:160px;">Description<br><input id="ssDesc" placeholder="e.g. King spool" style="${inp}width:100%;"></label>
@@ -19235,7 +19444,7 @@ async function showNeedleSettingsModal_(threads){
         <tbody>${sizes.map(z => `<tr style="border-bottom:1px solid #eee;">
           <td style="${th}">${escapeHtml(z.weight)} wt</td>
           <td style="${th}"><input class="ndSizeEdit" data-weight="${escapeHtml(z.weight)}" data-was="${escapeHtml(z.needleSize)}" value="${escapeHtml(z.needleSize)}" aria-label="Needle size for ${escapeHtml(z.weight)} wt" style="${inp}width:110px;"></td>
-          <td style="${th}text-align:right;"><button type="button" class="admin-btn ndSizeDel admin-btn-danger" data-weight="${escapeHtml(z.weight)}" style="padding:2px 8px;font-size:11px;">Delete</button></td>
+          <td style="${th}text-align:right;"><button type="button" class="admin-btn ndSizeDel admin-btn-danger" data-need="production.threads:full" data-weight="${escapeHtml(z.weight)}" style="padding:2px 8px;font-size:11px;">Delete</button></td>
         </tr>`).join("")}</tbody></table>` : `<div style="color:#888;padding:4px 0 10px;">No needle sizes yet.</div>`}
       ${unset.length ? `<div style="font-size:12px;color:#b45309;margin-bottom:8px;">Threads in your catalog with no needle size yet: ${unset.map(w => `<button type="button" class="ndUnset" data-weight="${escapeHtml(w)}" title="Fill this weight in below" style="border:1px solid #f59e0b;background:#fffbeb;color:#92400e;border-radius:999px;padding:1px 9px;font-size:12px;cursor:pointer;margin-left:4px;">${escapeHtml(w)} wt</button>`).join("")}</div>` : ""}
       <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
@@ -19250,7 +19459,7 @@ async function showNeedleSettingsModal_(threads){
         <tbody>${types.map(t => `<tr style="border-bottom:1px solid #eee;">
           <td style="${th}"><input class="ndTypeEdit" data-id="${t.id}" data-was="${escapeHtml(t.name)}" value="${escapeHtml(t.name)}" aria-label="Needle type name" style="${inp}width:180px;"></td>
           <td style="${th}color:#666;">${t.blankCount ? `${t.blankCount} blank${t.blankCount === 1 ? "" : "s"}` : `<span style="color:#bbb;">—</span>`}</td>
-          <td style="${th}text-align:right;"><button type="button" class="admin-btn ndTypeDel admin-btn-danger" data-id="${t.id}" style="padding:2px 8px;font-size:11px;">Delete</button></td>
+          <td style="${th}text-align:right;"><button type="button" class="admin-btn ndTypeDel admin-btn-danger" data-need="production.threads:full" data-id="${t.id}" style="padding:2px 8px;font-size:11px;">Delete</button></td>
         </tr>`).join("")}</tbody></table>` : `<div style="color:#888;padding:4px 0 10px;">No needle types yet.</div>`}
       <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
         <label style="font-size:12px;font-weight:600;width:266px;">New type<br><input id="ndTypeName" placeholder="e.g. Ballpoint" style="${inp}width:100%;"></label>
@@ -19321,7 +19530,7 @@ function showThreadInventoryModal_(thread, spoolSizes, onDone){
         <tbody>${items.map(it => `<tr style="border-bottom:1px solid #eee;">
           <td style="padding:4px 6px;"><select class="tiSize" data-id="${it.id}" style="${inp}min-width:180px;">${sizeOptions(it.spoolSizeId)}</select></td>
           <td style="padding:4px 6px;"><input class="tiQty" data-id="${it.id}" type="number" min="0" step="1" value="${Number(it.quantity) || 0}" style="${inp}width:90px;"></td>
-          <td style="padding:4px 6px;text-align:right;"><button type="button" class="admin-btn tiDel admin-btn-danger" data-id="${it.id}" style="padding:2px 8px;font-size:11px;">Remove</button></td>
+          <td style="padding:4px 6px;text-align:right;"><button type="button" class="admin-btn tiDel admin-btn-danger" data-need="production.threads:full" data-id="${it.id}" style="padding:2px 8px;font-size:11px;">Remove</button></td>
         </tr>`).join("")}</tbody></table>` : `<div style="color:#888;padding:8px 0;">No inventory items yet.</div>`}
       <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;border-top:1px solid #eee;padding-top:10px;">
         <label style="font-size:12px;font-weight:600;flex:1;min-width:180px;">Add spool size<br><select id="tiNewSize" style="${inp}width:100%;">${sizeOptions(null)}</select></label>
@@ -20481,7 +20690,7 @@ async function showProductCsvImportModal_(orgId, file, onDone){
     detail: (r) => [r.price ? escapeHtml(r.price) : "", r.sizes && r.sizes.length ? `Sizes ${escapeHtml(csvSizeSummary_(r.sizes))}` : "",
       r.colors && r.colors.length ? `${r.colors.length} color${r.colors.length === 1 ? "" : "s"}` : "", r.locations && r.locations.length ? `At: ${escapeHtml(r.locations.join(", "))}` : "",
       r.blank && r.blank.found ? `Linked to blank ${escapeHtml(r.blank.style)} (${r.blank.links} color/size row${r.blank.links === 1 ? "" : "s"})` : ""].filter(Boolean).join(" · "),
-    done: (r) => `Products imported: ${r.created} new, ${r.updated} updated${r.skipped ? `, ${r.skipped} skipped` : ""}. ${adminCan_("manager") ? "Press Publish to put them on the storefront." : "They reach the storefront when a manager publishes the catalog."}` +
+    done: (r) => `Products imported: ${r.created} new, ${r.updated} updated${r.skipped ? `, ${r.skipped} skipped` : ""}. ${adminCan_("catalog.shops", "edit") ? "Press Publish to put them on the storefront." : "They reach the storefront when a manager publishes the catalog."}` +
       ((r.belowMap || []).length ? ` ⚠ ${r.belowMap.length} priced below a blank's MAP — raise ${r.belowMap.length === 1 ? "it" : "them"} before publishing: ${r.belowMap.map(p => p.name).join(", ")}.` : ""),
   });
 }
@@ -20569,7 +20778,7 @@ async function renderHoopCatalog(app){
     ${adminPageHead_("Hoops")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:820px;margin:8px auto 60px;">
       <div style="font-size:13px;color:#666;margin-bottom:14px;">A shared hoop list — designs (and, soon, machines) reference these instead of each typing a hoop name/size by hand. Tick "Cap frame" for cap hoops specifically — that's the one hoop change the Run screen will treat as categorically the most disruptive, not just "a different size."</div>
-      <div style="margin-bottom:14px;"><button type="button" class="admin-btn" id="hpNewBtn">+ New hoop</button></div>
+      <div style="margin-bottom:14px;"><button type="button" class="admin-btn" id="hpNewBtn" data-need="production.hoops:edit">+ New hoop</button></div>
       <div id="hpBody" style="color:#888;font-size:14px;max-height:65vh;overflow-y:auto;">Loading…</div>
     </div>`;
   let hoops = [];
@@ -20584,8 +20793,8 @@ async function renderHoopCatalog(app){
         <td style="padding:5px 6px;">${h.isCapFrame ? "✓ Cap frame" : "—"}</td>
         <td style="padding:5px 6px;color:#666;">${escapeHtml(h.notes)}</td>
         <td style="padding:5px 6px;text-align:right;white-space:nowrap;">
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-hid="${h.id}" onclick="hoopEdit_(this.dataset.hid)">Edit</button>
-          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-hid="${h.id}" onclick="hoopDelete_(this.dataset.hid)">Delete</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-hid="${h.id}" data-need="production.hoops:edit" onclick="hoopEdit_(this.dataset.hid)">Edit</button>
+          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-hid="${h.id}" data-need="production.hoops:full" onclick="hoopDelete_(this.dataset.hid)">Delete</button>
         </td>
       </tr>`).join("")}</tbody></table>`;
   }
@@ -20643,7 +20852,7 @@ async function renderAbortReasons(app){
     ${adminPageHead_("Abort reasons")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:640px;margin:8px auto 60px;">
       <div style="font-size:13px;color:#666;margin-bottom:14px;">The reasons offered when a run is aborted on the Run Order screen. "Machine problem" is the default selection. Sort order sets the dropdown order.</div>
-      <div style="margin-bottom:14px;"><button type="button" class="admin-btn" id="arNewBtn">+ New reason</button></div>
+      <div style="margin-bottom:14px;"><button type="button" class="admin-btn" id="arNewBtn" data-need="production.abortreasons:edit">+ New reason</button></div>
       <div id="arBody" style="color:#888;font-size:14px;max-height:65vh;overflow-y:auto;">Loading…</div>
     </div>`;
   let reasons = [];
@@ -20656,8 +20865,8 @@ async function renderAbortReasons(app){
         <td style="padding:5px 6px;font-weight:600;">${escapeHtml(r.label)}</td>
         <td style="padding:5px 6px;color:#666;">${r.sortOrder}</td>
         <td style="padding:5px 6px;text-align:right;white-space:nowrap;">
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-rid="${r.id}" onclick="abortReasonEdit_(this.dataset.rid)">Edit</button>
-          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-rid="${r.id}" onclick="abortReasonDelete_(this.dataset.rid)">Delete</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-rid="${r.id}" data-need="production.abortreasons:edit" onclick="abortReasonEdit_(this.dataset.rid)">Edit</button>
+          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-rid="${r.id}" data-need="production.abortreasons:full" onclick="abortReasonDelete_(this.dataset.rid)">Delete</button>
         </td>
       </tr>`).join("")}</tbody></table>`;
   }
@@ -20720,7 +20929,7 @@ async function renderLocationsCatalog(app){
 async function mountLocationManager_(box, onChange){
   box.innerHTML = `
     <div style="font-size:13px;color:#666;margin-bottom:14px;">Where a design goes on a garment (Left chest, Back, Right sleeve…), shared by every shop — used by a product's printed or embroidered designs, its design options, and to tag a blank's color photos. Sort order sets how they appear in pickers.</div>
-    <div style="margin-bottom:14px;"><button type="button" class="admin-btn" data-loc-new>+ New decoration location</button></div>
+    <div style="margin-bottom:14px;"><button type="button" class="admin-btn" data-loc-new data-need="catalog.locations:edit">+ New decoration location</button></div>
     <div data-loc-body style="color:#888;font-size:14px;max-height:65vh;overflow-y:auto;">Loading…</div>`;
   const body = box.querySelector("[data-loc-body]");
   function draw(){
@@ -20731,8 +20940,8 @@ async function mountLocationManager_(box, onChange){
         <td style="padding:5px 6px;font-weight:600;">${escapeHtml(l.name)}${l.notes ? `<div style="font-weight:400;color:#777;font-size:12px;">${escapeHtml(l.notes)}</div>` : ""}</td>
         <td style="padding:5px 6px;color:#666;">${l.sortOrder}</td>
         <td style="padding:5px 6px;text-align:right;white-space:nowrap;">
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-loc-edit="${l.id}">Edit</button>
-          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-loc-del="${l.id}">Delete</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-loc-edit="${l.id}" data-need="catalog.locations:edit">Edit</button>
+          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-loc-del="${l.id}" data-need="catalog.locations:full">Delete</button>
         </td>
       </tr>`).join("")}</tbody></table>`;
   }
@@ -20759,7 +20968,7 @@ function showLocationsModal_(onChange){
 }
 // A small "Manage…" button to put next to a location picker; it opens the list in a popup.
 function manageLocationsBtn_(extraAttrs){
-  return `<button type="button" class="admin-btn admin-btn-secondary manage-list-btn" data-manage-locations ${extraAttrs || ""} title="Add, rename or remove decoration locations">Manage&hellip;</button>`;
+  return `<button type="button" class="admin-btn admin-btn-secondary manage-list-btn" data-manage-locations data-need="catalog.locations:edit" ${extraAttrs || ""} title="Add, rename or remove decoration locations">Manage&hellip;</button>`;
 }
 
 function showLocationFormModal_(location, onDone){
@@ -20805,7 +21014,7 @@ async function renderProductCategories(app){
 async function mountCategoryManager_(box, onChange){
   box.innerHTML = `
     <div style="font-size:13px;color:#666;margin-bottom:14px;">What a product or a blank can be filed under, shared by every shop. Each shop's page lists its products in sections, one per category it uses, in this order. Whether a product has sizes is set on the product itself (priced by size, or one flat price) — not by its category.</div>
-    <div style="margin-bottom:14px;"><button type="button" class="admin-btn" data-pc-new>+ New category</button></div>
+    <div style="margin-bottom:14px;"><button type="button" class="admin-btn" data-pc-new data-need="catalog.categories:edit">+ New category</button></div>
     <div data-pc-body style="color:#888;font-size:14px;max-height:65vh;overflow-y:auto;">Loading…</div>`;
   const body = box.querySelector("[data-pc-body]");
   let cats = [];
@@ -20822,8 +21031,8 @@ async function mountCategoryManager_(box, onChange){
         <td data-label="Used by" style="${td}color:#666;">${usedBy(c) || `<span style="color:#bbb;">—</span>`}</td>
         <td data-label="Order" style="${td}color:#666;">${c.sortOrder}</td>
         <td class="stack-actions" style="${td}text-align:right;white-space:nowrap;">
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-pc-edit="${escapeHtml(c.key)}">Edit</button>
-          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-pc-del="${escapeHtml(c.key)}">Delete</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-pc-edit="${escapeHtml(c.key)}" data-need="catalog.categories:edit">Edit</button>
+          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-pc-del="${escapeHtml(c.key)}" data-need="catalog.categories:full">Delete</button>
         </td>
       </tr>`).join("")}</tbody></table>`;
   }
@@ -20848,7 +21057,7 @@ function showCategoriesModal_(onChange){
 }
 // A small "Manage…" button to put next to a category picker or list; it opens the list in a popup.
 function manageCategoriesBtn_(extraAttrs){
-  return `<button type="button" class="admin-btn admin-btn-secondary manage-list-btn" data-manage-categories ${extraAttrs || ""} title="Add, rename or re-order product categories">Manage&hellip;</button>`;
+  return `<button type="button" class="admin-btn admin-btn-secondary manage-list-btn" data-manage-categories data-need="catalog.categories:edit" ${extraAttrs || ""} title="Add, rename or re-order product categories">Manage&hellip;</button>`;
 }
 // One page-wide handler for every Manage… button: open the popup, then put the fresh list into the select(s) beside
 // it (a select keeps its value; one named by data-select is refreshed) and tell the page (data-after → a function
@@ -20904,7 +21113,7 @@ function vendorOptionsHtml_(selected, opts = {}){
 // manager, Manage…. opts: {blanks, placeholder, style}. It fills itself in once the list is loaded.
 function vendorPickerHtml_(id, value, opts = {}){
   setTimeout(() => fillVendorPickers_(), 0);
-  return `<span class="pick-with-manage vendor-pick"><select id="${escapeHtml(id)}" data-vendor-pick${opts.blanks ? " data-blanks" : ""} data-placeholder="${escapeHtml(opts.placeholder || "")}" data-value="${escapeHtml(value || "")}" aria-label="Vendor" style="${opts.style || ""}">${vendorOptionsHtml_(value, opts)}</select>${adminCan_("manager") ? `<button type="button" class="admin-btn admin-btn-secondary manage-list-btn" data-manage-vendors title="Add, rename or hide vendors, and set their free shipping">Manage&hellip;</button>` : ""}</span>`;
+  return `<span class="pick-with-manage vendor-pick"><select id="${escapeHtml(id)}" data-vendor-pick${opts.blanks ? " data-blanks" : ""} data-placeholder="${escapeHtml(opts.placeholder || "")}" data-value="${escapeHtml(value || "")}" aria-label="Vendor" style="${opts.style || ""}">${vendorOptionsHtml_(value, opts)}</select>${adminCan_("inventory.blankorder", "full") ? `<button type="button" class="admin-btn admin-btn-secondary manage-list-btn" data-manage-vendors title="Add, rename or hide vendors, and set their free shipping">Manage&hellip;</button>` : ""}</span>`;
 }
 // Puts a name into a picker — the list's spelling of it ("S&S Activewear" picks S&S) — even before the list has loaded.
 function setVendorPick_(sel, name){
@@ -20929,7 +21138,7 @@ function vendorFreeShipLabel_(v){
 // Manage vendors: the list, with + New vendor, Edit, Hide / Show, and Delete for one nothing names. onChange(list,
 // saved) runs after every change (saved = the vendor just added or changed).
 async function mountVendorManager_(box, onChange){
-  const canEdit = adminCan_("manager");
+  const canEdit = adminCan_("inventory.blankorder", "full");
   box.innerHTML = `
     <div style="font-size:13px;color:#555;margin-bottom:12px;line-height:1.45;">Every vendor box picks from this list — blanks, receipts, transfer sheets, expenses, blank orders. <b>For blanks</b> puts a vendor in the blank pickers and Blanks to Order, with its <b>free shipping</b>. Renaming a vendor renames it on every record. A vendor that's on records can't be deleted — hide it instead, so it's no longer offered.</div>
     ${canEdit ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;"><button type="button" class="admin-btn" data-vd-new>+ New vendor</button>
@@ -21175,7 +21384,7 @@ async function renderGraphics(app, orgId){
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:900px;margin:8px auto 60px;">
       <h2 class="shop-page-h">Graphics — ${escapeHtml(((adminOrgs || []).find(o => o.orgId === orgId) || {}).name || orgId)}</h2>
       <div style="font-size:13px;color:#666;margin-bottom:12px;">Selectable options for configurable products — an embroidery design or a transfer sheet (DTF / sublimation). The tier sets the add-on price (set on the shop: Manage catalog → the shop → Edit → Reorder QR code &amp; option prices); no tier = included.</div>
-      <div style="margin-bottom:14px;"><button type="button" class="admin-btn" id="grNewBtn">+ New graphic</button></div>
+      <div style="margin-bottom:14px;"><button type="button" class="admin-btn" id="grNewBtn" data-need="catalog.graphics:edit">+ New graphic</button></div>
       <div id="grBody" style="color:#888;font-size:14px;max-height:65vh;overflow-y:auto;">Loading…</div>
     </div>`;
   let graphics = [], designs = [], transfers = [], tiers = {}, allLocations = [], allColors = [];
@@ -21196,8 +21405,8 @@ async function renderGraphics(app, orgId){
         <td style="padding:5px 6px;">${g.tier ? TIER_LABEL_[g.tier] : "—"}</td>
         <td style="padding:5px 6px;color:#666;">${escapeHtml((g.inkColors || []).join(", "))}</td>
         <td style="padding:5px 6px;text-align:right;white-space:nowrap;">
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-gid="${g.id}" onclick="graphicEdit_(this.dataset.gid)">Edit</button>
-          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-gid="${g.id}" onclick="graphicDelete_(this.dataset.gid)">Delete</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-gid="${g.id}" data-need="catalog.graphics:edit" onclick="graphicEdit_(this.dataset.gid)">Edit</button>
+          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-gid="${g.id}" data-need="catalog.graphics:full" onclick="graphicDelete_(this.dataset.gid)">Delete</button>
         </td></tr>`).join("")}</tbody></table>`;
   }
   async function load(){
@@ -21355,8 +21564,8 @@ async function renderTransfers(app){
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:900px;margin:8px auto 60px;">
       <div style="font-size:13px;color:#666;margin-bottom:12px;">Transfer-sheet inventory (DTF / sublimation). The portion of a sheet a job uses is consumed like a blank and flows into COGS.</div>
       <div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;">
-        <button type="button" class="admin-btn" id="trNewBtn">+ New transfer</button>
-        <button type="button" class="admin-btn" id="trReceiveBtn">Receive sheet</button>
+        <button type="button" class="admin-btn" id="trNewBtn" data-need="inventory.transfers:edit">+ New transfer</button>
+        <button type="button" class="admin-btn" id="trReceiveBtn" data-need="inventory.transfers:edit">Receive sheet</button>
       </div>
       <div id="trBody" style="color:#888;font-size:14px;max-height:65vh;overflow-y:auto;">Loading…</div>
     </div>`;
@@ -21371,10 +21580,10 @@ async function renderTransfers(app){
         <td style="padding:5px 6px;">${t.quantity}</td>
         <td style="padding:5px 6px;">$${Number(t.purchasePrice).toFixed(2)}</td>
         <td style="padding:5px 6px;text-align:right;white-space:nowrap;">
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" onclick="transferEdit_(this.dataset.tid)">Edit</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="inventory.transfers:edit" onclick="transferEdit_(this.dataset.tid)">Edit</button>
           <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" onclick="transferHistory_(this.dataset.tid)">History</button>
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" onclick="transferWriteOff_(this.dataset.tid)">Write off</button>
-          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" onclick="transferDelete_(this.dataset.tid)">Delete</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="inventory.transfers:full" onclick="transferWriteOff_(this.dataset.tid)">Write off</button>
+          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="inventory.transfers:full" onclick="transferDelete_(this.dataset.tid)">Delete</button>
         </td></tr>`).join("")}</tbody></table>`;
   }
   async function load(){ try { transfers = (await hoopApi_({ action: "listTransfers" })).transfers || []; draw(); }
@@ -21422,7 +21631,7 @@ async function renderTransfers(app){
       if (m.kind === "purchase") {
         const sheet = [m.vendor, m.vendorRef ? "#" + m.vendorRef : ""].filter(Boolean).join(" ") || "Sheet";
         return `${escapeHtml(sheet)}${m.pctOfSheet != null ? `<span style="color:#666;"> · ${Number(m.pctOfSheet)}% of sheet</span>` : ""}` +
-          (!m.voidedAt ? ` <button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" onclick="transferOpenSheet_(this.dataset.mid)">Open sheet</button>` : "");
+          (!m.voidedAt ? ` <button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.transfers:full" onclick="transferOpenSheet_(this.dataset.mid)">Open sheet</button>` : "");
       }
       if (m.kind === "consume" && m.orderId) return m.orderOrgId
         ? `<button type="button" class="admin-btn" style="padding:1px 6px;font-size:11px;" data-org="${escapeHtml(m.orderOrgId)}" data-order="${escapeHtml(m.orderId)}" onclick="transferOpenOrder_(this.dataset.org, this.dataset.order)">Order ${escapeHtml(m.orderId)}</button>`
@@ -21436,7 +21645,7 @@ async function renderTransfers(app){
         <td style="padding:4px 6px;">${escapeHtml((m.occurredAt || "").slice(0, 10))}</td><td style="padding:4px 6px;">${escapeHtml(m.kind)}</td>
         <td style="padding:4px 6px;">${m.qtyDelta}</td><td style="padding:4px 6px;">$${Number(m.unitCost).toFixed(2)}</td>
         <td style="padding:4px 6px;">${where(m)}</td>
-        <td style="padding:4px 6px;white-space:nowrap;">${!m.voidedAt && (["purchase", "adjust", "writeoff"].includes(m.kind) || (m.kind === "consume" && m.itemId && m.reason !== "finished")) ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" onclick="transferVoid_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && m.kind === "consume" ? `<span style="font-size:11px;color:#999;" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : ""))}">voided</span>` : ""}${m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) && m.voidReason !== "Sheet edited" ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : "") + " — click to make this entry count again")}" onclick="transferRestore_(this.dataset.mid)">Undo void</button>` : ""}${m.voidedAt && m.voidReason === "Sheet edited" ? `<span style="font-size:11px;color:#999;">replaced by an edit</span>` : ""}</td>
+        <td style="padding:4px 6px;white-space:nowrap;">${!m.voidedAt && (["purchase", "adjust", "writeoff"].includes(m.kind) || (m.kind === "consume" && m.itemId && m.reason !== "finished")) ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.transfers:full" onclick="transferVoid_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && m.kind === "consume" ? `<span style="font-size:11px;color:#999;" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : ""))}">voided</span>` : ""}${m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) && m.voidReason !== "Sheet edited" ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : "") + " — click to make this entry count again")}" data-need="inventory.transfers:edit" onclick="transferRestore_(this.dataset.mid)">Undo void</button>` : ""}${m.voidedAt && m.voidReason === "Sheet edited" ? `<span style="font-size:11px;color:#999;">replaced by an edit</span>` : ""}</td>
       </tr>`).join("")}</tbody></table></div>`, 820);
     window.transferOpenSheet_ = (mid) => { close(); openTransferSheet_(Number(mid), load); };
     window.transferOpenOrder_ = (org, order) => { close(); openOrderFromDashboard_(org, order); };
@@ -21771,9 +21980,9 @@ async function renderRunTransfer(app){
       ${rtTransferNote_(c)}
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         ${!c.blankReceived ? `<span style="font-size:12px;color:#b26a00;align-self:center;">Waiting on blank</span>` : ""}
-        ${!c.transferReceived ? `<button type="button" class="admin-btn rtRecv" data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}" style="padding:4px 12px;">Mark transfer received</button>` : ""}
-        ${ready && c.hasEmbroidery ? `<button type="button" class="admin-btn rtApply" data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}" style="padding:6px 16px;font-weight:700;background:var(--org-accent,#2c6b2f);color:#fff;">Mark transfers applied</button>` : ""}
-        ${ready && !c.hasEmbroidery ? `<button type="button" class="admin-btn rtMake" data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}" style="padding:6px 16px;font-weight:700;background:var(--org-accent,#2c6b2f);color:#fff;">Mark made</button>` : ""}
+        ${!c.transferReceived ? `<button type="button" class="admin-btn rtRecv" data-need="transfer.mark:edit" data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}" style="padding:4px 12px;">Mark transfer received</button>` : ""}
+        ${ready && c.hasEmbroidery ? `<button type="button" class="admin-btn rtApply" data-need="transfer.mark:edit" data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}" style="padding:6px 16px;font-weight:700;background:var(--org-accent,#2c6b2f);color:#fff;">Mark transfers applied</button>` : ""}
+        ${ready && !c.hasEmbroidery ? `<button type="button" class="admin-btn rtMake" data-need="transfer.mark:edit" data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}" style="padding:6px 16px;font-weight:700;background:var(--org-accent,#2c6b2f);color:#fff;">Mark made</button>` : ""}
       </div></div>`;
     body.innerHTML = paidUnrunHtml_(data.paidUnrun || []) + `
       <h2 style="font-size:17px;margin:4px 0 8px;">Ready to press (${data.ready.length})</h2>
@@ -22009,11 +22218,11 @@ async function renderDesigns(app, orgId, openDesignId){
   document.title = adminTitle_("Designs — " + orgName);
   adminNoteShop_(orgId);
   app.innerHTML = `
-    ${adminPageHead_("Designs", { crumbs: adminCan_("manager") ? [{label:"Manage catalog", hash:"catalog"}, {label: orgName}, {label:"Designs"}] : [{label:"Catalog"}, {label: orgName}, {label:"Designs"}] })}
+    ${adminPageHead_("Designs", { crumbs: adminCan_("catalog.products", "read") ? [{label:"Manage catalog", hash:"catalog"}, {label: orgName}, {label:"Designs"}] : [{label:"Catalog"}, {label: orgName}, {label:"Designs"}] })}
     <h2 class="shop-page-h">Designs — ${escapeHtml(orgName)}</h2>
     <div class="admin-panel dsg-layout${openDesignId ? " dsg-has-open" : ""}" style="--org-accent:var(--accent);max-width:1000px;margin:8px auto 60px;">
       <div class="dsg-list-col">
-        <button type="button" class="admin-btn" id="dsgNewBtn" style="width:100%;margin-bottom:10px;">+ New design</button>
+        <button type="button" class="admin-btn" id="dsgNewBtn" data-need="catalog.designs:edit" style="width:100%;margin-bottom:10px;">+ New design</button>
         <div id="dsgList" style="color:#888;font-size:13px;">Loading&hellip;</div>
       </div>
       <div class="dsg-detail-col">
@@ -22106,8 +22315,8 @@ async function loadDesignDetail_(designId){
         ${design.notes ? `<div style="font-size:13px;color:#666;margin-top:4px;">${escapeHtml(design.notes)}</div>` : ""}
       </div>
       <div style="display:flex;gap:6px;">
-        <button type="button" class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="showDesignFormModal_(this.dataset.org, window._dsgCtx.designs.find(d=>d.id===${Number(design.id)}), window._dsgCtx.hoops, () => loadDesignDetail_(${Number(design.id)}))">Edit</button>
-        <button type="button" class="admin-btn admin-btn-danger" data-org="${escapeHtml(orgId)}" onclick="deleteDesign_(${Number(design.id)}, this.dataset.org)">Delete</button>
+        <button type="button" class="admin-btn" data-need="catalog.designs:edit" data-org="${escapeHtml(orgId)}" onclick="showDesignFormModal_(this.dataset.org, window._dsgCtx.designs.find(d=>d.id===${Number(design.id)}), window._dsgCtx.hoops, () => loadDesignDetail_(${Number(design.id)}))">Edit</button>
+        <button type="button" class="admin-btn admin-btn-danger" data-need="catalog.designs:full" data-org="${escapeHtml(orgId)}" onclick="deleteDesign_(${Number(design.id)}, this.dataset.org)">Delete</button>
       </div>
     </div>
     ${versions.length && canPreviewStitch_(versions[0].machineFileExt) ? `
@@ -22118,7 +22327,7 @@ async function loadDesignDetail_(designId){
     <div style="margin-top:18px;">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
         <h3 style="margin:0;">Versions</h3>
-        <button type="button" class="admin-btn" onclick="showDesignVersionUploadModal_(${design.id}, () => loadDesignDetail_(${design.id}))">+ Upload version</button>
+        <button type="button" class="admin-btn" data-need="catalog.designs:edit" onclick="showDesignVersionUploadModal_(${design.id}, () => loadDesignDetail_(${design.id}))">+ Upload version</button>
       </div>
       ${versions.length ? `<table class="stack-mobile dsg-versions" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;">
         <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:5px 6px;">Uploaded</th><th style="padding:5px 6px;">Design file</th><th style="padding:5px 6px;">Machine file</th><th style="padding:5px 6px;">Threads</th><th style="padding:5px 6px;">Stitches</th><th style="padding:5px 6px;">Notes</th></tr></thead>
@@ -22126,8 +22335,8 @@ async function loadDesignDetail_(designId){
           <td data-label="Uploaded" style="padding:5px 6px;">${escapeHtml((v.uploadedAt || "").slice(0, 10))}${i === 0 ? ' <span style="font-weight:400;color:#2c6b2f;">(current)</span>' : ""}</td>
           <td data-label="Design file" style="padding:5px 6px;">${escapeHtml(v.designFileName)} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" onclick="downloadDesignFile_('${v.designFileKey.replace(/'/g, "\\'")}')">Download</button></td>
           <td data-label="Machine file" style="padding:5px 6px;">${escapeHtml(v.machineFileName)} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" onclick="downloadDesignFile_('${v.machineFileKey.replace(/'/g, "\\'")}')">Download</button></td>
-          <td data-label="Threads" style="padding:5px 6px;">${v.threadColors.length ? v.threadColors.map(tc => threadSwatch_(tc.threadId)).join("") + v.threadColors.length + " needle" + (v.threadColors.length === 1 ? "" : "s") : "—"} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" onclick="editVersionColors_(${v.id})">Edit colors</button></td>
-          <td data-label="Stitches" style="padding:5px 6px;">${v.stitchCount != null ? Number(v.stitchCount).toLocaleString() : '<span style="color:#888;font-weight:400;">not known</span>'} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-vid="${v.id}" data-did="${design.id}" data-cur="${v.stitchCount == null ? "" : v.stitchCount}" onclick="setVersionStitches_(this)">Set</button></td>
+          <td data-label="Threads" style="padding:5px 6px;">${v.threadColors.length ? v.threadColors.map(tc => threadSwatch_(tc.threadId)).join("") + v.threadColors.length + " needle" + (v.threadColors.length === 1 ? "" : "s") : "—"} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-need="catalog.designs:edit" onclick="editVersionColors_(${v.id})">Edit colors</button></td>
+          <td data-label="Stitches" style="padding:5px 6px;">${v.stitchCount != null ? Number(v.stitchCount).toLocaleString() : '<span style="color:#888;font-weight:400;">not known</span>'} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-vid="${v.id}" data-did="${design.id}" data-cur="${v.stitchCount == null ? "" : v.stitchCount}" data-need="catalog.designs:edit" onclick="setVersionStitches_(this)">Set</button></td>
           <td data-label="Notes" style="padding:5px 6px;color:#666;">${escapeHtml(v.notes)}</td>
         </tr>`).join("")}</tbody></table>
       ${versions[0].threadColors.length ? `<div style="margin-top:10px;font-size:13px;"><b>Current thread map</b> (needle order):<br>
@@ -22469,7 +22678,7 @@ async function showOrderItemFilesModal_(itemId, itemLabel, onCountChange, slots)
     <div id="oifErr" style="color:#b03a2e;font-size:13px;min-height:18px;"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;">
       <button type="button" id="oifClose" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Close</button>
-      <button type="button" id="oifUpload" class="admin-btn">Upload</button>
+      <button type="button" id="oifUpload" class="admin-btn" data-need="orders.details:edit|catalog.designs:edit">Upload</button>
     </div>`, 440);
   let files = [];
   const draw = () => {
@@ -22483,7 +22692,7 @@ async function showOrderItemFilesModal_(itemId, itemLabel, onCountChange, slots)
         </span>
         <span style="flex:none;">
           <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-key="${escapeHtml(f.fileKey)}">Download</button>
-          ${f.uploadedBy === "customer" ? "" : `<button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;" data-fid="${f.id}">Delete</button>`}
+          ${f.uploadedBy === "customer" ? "" : `<button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;" data-need="orders.details:full" data-fid="${f.id}">Delete</button>`}
         </span>
       </div>`).join("") : `<div style="color:#888;">No files uploaded yet.</div>`;
     fillDesignThumbs_(body);
@@ -22510,7 +22719,7 @@ async function showOrderItemFilesModal_(itemId, itemLabel, onCountChange, slots)
           ${cur ? `<div style="color:#111;">${escapeHtml(cur.machineFileName)} · ${cur.threadColors.length} thread${cur.threadColors.length === 1 ? "" : "s"} · uploaded ${escapeHtml(String(cur.uploadedAt || "").slice(0, 10))}
             <button type="button" class="admin-btn oifDesignDl" data-key="${escapeHtml(cur.machineFileKey)}" style="padding:2px 8px;font-size:11px;margin-left:6px;">Download</button></div>`
           : `<div style="color:#b45309;">None yet — upload it before the design is sent for approval.</div>`}
-          <button type="button" class="admin-btn oifDesignUp" data-i="${i}" style="margin-top:6px;">${cur ? "Upload a new version…" : "Upload order design…"}</button></div>`; }).join("");
+          <button type="button" class="admin-btn oifDesignUp" data-need="orders.details:edit|catalog.designs:edit" data-i="${i}" style="margin-top:6px;">${cur ? "Upload a new version…" : "Upload order design…"}</button></div>`; }).join("");
       el.querySelectorAll(".oifDesignDl").forEach(b => b.onclick = () => downloadDesignFile_(b.dataset.key));
       el.querySelectorAll(".oifDesignUp").forEach(b => b.onclick = async () => {
         const slot = slots[Number(b.dataset.i)];
@@ -22565,9 +22774,9 @@ async function renderMachines(app){
     ${adminPageHead_("Machines")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:900px;margin:8px auto 60px;">
       <div style="font-size:13px;color:#666;margin-bottom:14px;">Each machine's current hoop and per-needle thread reflect what's physically loaded on it right now. Run Order updates the hoop when a run uses another one; correct either here by hand after a manual change. <b>The hoop and needle boxes save as soon as you change them.</b></div>
-      <div style="margin-bottom:14px;"><button type="button" class="admin-btn" id="mchNewBtn">+ New machine</button>
-        <button type="button" class="admin-btn" id="mchScanBtn" style="margin-left:8px;">Scan for machines&hellip;</button>
-        <button type="button" class="admin-btn" id="mchStitchesBtn" style="margin-left:8px;" title="Reads the stitch count of every design file (DST / DSB) that doesn't have one yet">Read design stitch counts</button>
+      <div style="margin-bottom:14px;"><button type="button" class="admin-btn" id="mchNewBtn" data-need="production.machines:edit">+ New machine</button>
+        <button type="button" class="admin-btn" id="mchScanBtn" data-need="production.machines:edit" style="margin-left:8px;">Scan for machines&hellip;</button>
+        <button type="button" class="admin-btn" id="mchStitchesBtn" data-need="catalog.designs:edit" style="margin-left:8px;" title="Reads the stitch count of every design file (DST / DSB) that doesn't have one yet">Read design stitch counts</button>
         <a href="#maintenance" style="margin-left:10px;font-size:13px;">Maintenance log &rarr;</a>
       </div>
       <div id="mchBody" style="color:#888;font-size:14px;max-height:65vh;overflow-y:auto;">Loading&hellip;</div>
@@ -22596,8 +22805,8 @@ async function renderMachines(app){
             ${m.notes ? `<div style="font-size:12px;color:#666;margin-top:2px;">${escapeHtml(m.notes)}</div>` : ""}
           </div>
           <div style="white-space:nowrap;">
-            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" onclick="machineEdit_(this.dataset.mid)">Edit</button>
-            <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-mid="${m.id}" onclick="machineDelete_(this.dataset.mid)">Delete</button>
+            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-need="production.machines:edit" onclick="machineEdit_(this.dataset.mid)">Edit</button>
+            <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-mid="${m.id}" data-need="production.machines:full" onclick="machineDelete_(this.dataset.mid)">Delete</button>
           </div>
         </div>
         <div style="margin-top:10px;font-size:13px;">
@@ -22605,7 +22814,7 @@ async function renderMachines(app){
         </div>
         <div style="margin-top:6px;font-size:13px;display:flex;align-items:center;gap:6px;">
           <b>Current hoop:</b> <span style="font-size:12px;color:#888;">(saves as you change it)</span>
-          <select data-mid="${m.id}" class="mchHoopSelect" style="font-size:13px;padding:3px 6px;">
+          <select data-mid="${m.id}" class="mchHoopSelect" data-need-form="production.machines:edit" style="font-size:13px;padding:3px 6px;">
             <option value="">— None —</option>
             ${hoops.map(h => `<option value="${h.id}" ${h.id === m.currentHoopId ? "selected" : ""}>${escapeHtml(h.name)}${h.isCapFrame ? " (cap frame)" : ""}</option>`).join("")}
           </select>
@@ -22617,7 +22826,7 @@ async function renderMachines(app){
             ${Array.from({ length: m.needleCount }, (_, i) => i + 1).map(n => `
               <div style="display:flex;align-items:center;gap:4px;font-size:12px;">
                 <span style="color:#888;width:20px;">${n}.</span>
-                <select data-mid="${m.id}" data-needle="${n}" class="mchNeedleSelect" style="flex:1;font-size:12px;padding:2px 4px;">${threadOptions_(m.needles[n])}</select>
+                <select data-mid="${m.id}" data-needle="${n}" class="mchNeedleSelect" data-need-form="production.machines:edit" style="flex:1;font-size:12px;padding:2px 4px;">${threadOptions_(m.needles[n])}</select>
               </div>`).join("")}
           </div>
         </div>
@@ -22682,15 +22891,15 @@ function machineCounterHtml_(m){
       <span><b>Stitch counter:</b> <span class="mch-stitches">${(Number(m.stitchCount) || 0).toLocaleString()}</span></span>
       <span><b>Run time:</b> ${fmtHours_(m.runSeconds)}</span>
       <span style="color:#888;font-size:12px;">${m.counterUpdatedAt ? "updated " + escapeHtml(new Date(m.counterUpdatedAt).toLocaleDateString()) : "no reading entered yet"}</span>
-      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" onclick="machineReading_(this.dataset.mid)">Enter machine reading&hellip;</button>
+      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-need="production.machines:edit" onclick="machineReading_(this.dataset.mid)">Enter machine reading&hellip;</button>
     </div>
     <div style="margin-top:8px;"><b>Maintenance</b>
-      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:6px;" data-mid="${m.id}" onclick="machineTasks_(this.dataset.mid)">Tasks&hellip;</button>
-      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-mid="${m.id}" onclick="machineMaintDone_(this.dataset.mid, '')">Log other work&hellip;</button>
+      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:6px;" data-mid="${m.id}" data-need="production.maintenance:edit" onclick="machineTasks_(this.dataset.mid)">Tasks&hellip;</button>
+      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-mid="${m.id}" data-need="production.maintenanceLog:edit" onclick="machineMaintDone_(this.dataset.mid, '')">Log other work&hellip;</button>
       <a href="#maintenance/${m.id}" style="font-size:12px;margin-left:6px;">Log</a></div>
     ${tasks.length ? `<div style="margin-top:4px;">${tasks.map(t => `<div class="mch-task" style="display:flex;align-items:center;gap:8px;padding:3px 0;${t.active ? "" : "opacity:.6;"}">
         ${maintChipHtml_(t)} <span style="flex:1;">${escapeHtml(t.name)} <span style="color:#666;font-size:12px;">· ${escapeHtml(maintProgressText_(t))}</span></span>
-        <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-tid="${t.id}" onclick="machineMaintDone_(this.dataset.mid, this.dataset.tid)">Done</button></div>`).join("")}</div>`
+        <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-tid="${t.id}" data-need="production.maintenanceLog:edit" onclick="machineMaintDone_(this.dataset.mid, this.dataset.tid)">Done</button></div>`).join("")}</div>`
       : `<div style="color:#888;font-size:12px;margin-top:4px;">No maintenance tasks yet — Tasks&hellip; adds them (e.g. oil the rotary hook every 4 run hours).</div>`}
   </div>`;
 }
@@ -22761,7 +22970,7 @@ function showMaintenanceTasksModal_(m, machines, onDone){
         <td data-label="Every stitches" style="padding:4px;"><input type="text" inputmode="numeric" class="mtE" data-f="everyStitches" value="${t.everyStitches || ""}" style="width:110px;padding:4px;"></td>
         <td data-label="On" style="padding:4px;"><input type="checkbox" class="mtE" data-f="active" ${t.active ? "checked" : ""}></td>
         <td style="padding:4px;white-space:nowrap;"><button type="button" class="admin-btn mtSave" style="padding:2px 8px;font-size:11px;">Save</button>
-          <button type="button" class="admin-btn mtDel admin-btn-danger" style="padding:2px 8px;font-size:11px;">Delete</button></td></tr>`).join("")}</tbody></table>`
+          <button type="button" class="admin-btn mtDel admin-btn-danger" data-need="production.maintenance:full" style="padding:2px 8px;font-size:11px;">Delete</button></td></tr>`).join("")}</tbody></table>`
       : `<div style="color:#888;font-size:13px;">No tasks yet.</div>`;
     ov.querySelectorAll("#mtList tr[data-tid]").forEach(tr => {
       const t = tasks.find(x => x.id === Number(tr.dataset.tid));
@@ -22851,7 +23060,7 @@ async function renderMaintenance(app, machineIdStr){
   document.getElementById("mntDue").innerHTML = `<h3 style="margin:0 0 6px;font-size:15px;">Due now</h3>` + (due.length
     ? due.sort((a, b) => b.t.pct - a.t.pct).map(({ m, t }) => `<div class="mnt-due" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;">${maintChipHtml_(t)}
         <span style="flex:1;"><b>${escapeHtml(m.name)}</b> — ${escapeHtml(t.name)} <span style="color:#666;">· ${escapeHtml(maintProgressText_(t))}</span></span>
-        <button type="button" class="admin-btn mntDone" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-tid="${t.id}">Done</button></div>`).join("")
+        <button type="button" class="admin-btn mntDone" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-tid="${t.id}" data-need="production.maintenanceLog:edit">Done</button></div>`).join("")
     : `<div style="color:#2c6b2f;font-size:13px;">Nothing due.</div>`);
   document.querySelectorAll(".mntDone").forEach(b => b.onclick = () => {
     const m = machines.find(x => x.id === Number(b.dataset.mid));
@@ -23499,7 +23708,7 @@ function paidUnrunHtml_(orders){
       <td style="padding:5px 8px;"><b>${escapeHtml(o.customerName)}</b> <a href="#orders/${encodeURIComponent(o.orgId)}" style="color:inherit;font-size:12px;">${escapeHtml(o.orderId)}</a><div style="font-size:12px;color:#777;">${escapeHtml(o.orgName)}</div></td>
       <td style="padding:5px 8px;font-size:13px;">${items}</td>
       <td style="padding:5px 8px;white-space:nowrap;font-size:12px;">${o.needsBlanks === false ? (o.allFromStock ? `<span style="color:#166534;">From stock</span>` : `<span style="color:#666;">No blank needed</span>`) : o.blankReceived ? `<span style="color:#166534;">Blanks in</span>` : o.blankOrdered ? `<span style="color:#b45309;">Blanks ordered</span>`
-        : o.blanksInStock ? `<span style="color:#166534;">In stock</span> <button type="button" class="admin-btn ro-use-stock" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="paidUnrunUseStock_(this)" title="Take this order's blanks from stock on hand" style="padding:2px 8px;font-size:11px;margin-left:4px;">Use from stock</button>`
+        : o.blanksInStock ? `<span style="color:#166534;">In stock</span> <button type="button" class="admin-btn ro-use-stock" data-need="orders.stepsEarly:edit" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="paidUnrunUseStock_(this)" title="Take this order's blanks from stock on hand" style="padding:2px 8px;font-size:11px;margin-left:4px;">Use from stock</button>`
         : `<span style="color:#b03a2e;">Blanks not ordered yet</span>`}</td>
     </tr>`;
   }).join("");
@@ -23617,11 +23826,11 @@ async function renderRunOrder(app, opts){
           <div style="font-size:11px;color:#888;">since ${escapeHtml(since)}</div>
         </div>`;
       actions = `
-          <button type="button" class="run-complete-btn" data-runid="${run.runId}" ${ids}
+          <button type="button" class="run-complete-btn" data-need="run.runs:edit" data-runid="${run.runId}" ${ids}
             style="min-height:56px;padding:14px 28px;font-size:16px;font-weight:700;border-radius:10px;border:none;background:var(--org-accent,#2c6b2f);color:#fff;cursor:pointer;flex:2;">
             ${stepNo < stepCount ? `Mark hooping ${stepNo} done` : "Mark piece done"}
           </button>
-          <button type="button" class="run-abort-btn admin-btn-danger" data-runid="${run.runId}" ${ids}
+          <button type="button" class="run-abort-btn admin-btn-danger" data-need="run.runs:edit" data-runid="${run.runId}" ${ids}
       style="min-height:56px;padding:14px 20px;font-size:14px;font-weight:700;border-radius:10px;border:1px solid #b03a2e;cursor:pointer;flex:1;">
             Abort job
           </button>`;
@@ -23643,19 +23852,19 @@ async function renderRunOrder(app, opts){
       const off = blocked || !eligible.length;
       actions = blocked ? `
           <div style="flex:1 1 100%;color:#b03a2e;font-size:14px;font-weight:600;">⚠ ${escapeHtml(blocked)}</div>
-          ${step.kind === "itemDesign" ? `<button type="button" class="run-upload-item-design-btn" ${ids} data-design-loc="${escapeHtml(step.itemDesignLocation || "")}" data-design-label="${escapeHtml(step.label || "")}"
+          ${step.kind === "itemDesign" ? `<button type="button" class="run-upload-item-design-btn" data-need="orders.details:edit|catalog.designs:edit" ${ids} data-design-loc="${escapeHtml(step.itemDesignLocation || "")}" data-design-label="${escapeHtml(step.label || "")}"
             style="min-height:48px;padding:10px 18px;font-size:14px;font-weight:700;border-radius:10px;border:1px solid var(--org-accent,#2c6b2f);background:#fff;color:var(--org-accent,#2c6b2f);cursor:pointer;">
             Upload order design…</button>` : ""}` : `
           ${step.machineFileKey ? `
-          <button type="button" class="run-send-btn" ${ids}
+          <button type="button" class="run-send-btn" data-need="run.runs:edit" ${ids}
             style="min-height:56px;padding:14px 18px;font-size:14px;font-weight:700;border-radius:10px;border:1px solid var(--org-accent,#2c6b2f);background:#fff;color:var(--org-accent,#2c6b2f);cursor:pointer;flex:1;">
             Send design to machine
           </button>` : ""}
-          <button type="button" class="run-start-btn" ${ids} ${off ? "disabled" : ""}
+          <button type="button" class="run-start-btn" data-need="run.runs:edit" ${ids} ${off ? "disabled" : ""}
             style="min-height:56px;padding:14px 22px;font-size:15px;font-weight:700;border-radius:10px;border:none;background:var(--org-accent,#2c6b2f);color:#fff;cursor:pointer;flex:2;${off ? "opacity:.5;cursor:not-allowed;" : ""}">
             ${stepCount > 1 ? `Start hooping ${stepNo}` : "Start job"}
           </button>
-          <button type="button" class="run-btn" ${ids}
+          <button type="button" class="run-btn" data-need="run.markMade:edit" ${ids}
             style="min-height:56px;padding:14px 16px;font-size:13px;font-weight:600;border-radius:10px;border:1px solid #ccc;background:#fff;color:#555;cursor:pointer;flex:1;" title="Record this hooping as done without timing it">
             Mark done (no timing)
           </button>`;
@@ -24066,7 +24275,7 @@ async function renderMachineFiles(app){
   if (!adminKey) adminKey = (await adminLogin()) || ""; // resolve once before the parallel calls
   let machines = [], orgs = [], showDelete = false;
   try {
-    const [m, o, s] = await Promise.all([machineApi_({ action: "listMachines" }), designApi_({ action: "listOrgsAdmin" }), machineApi_({ action: "getMachineSettings" })]);
+    const [m, o, s] = await Promise.all([machineApi_({ action: "listMachines" }), designApi_({ action: "listOrgs" }), machineApi_({ action: "getMachineSettings" })]);
     machines = m.machines || []; orgs = o.orgs || [];
     showDelete = !!(s.machineSettings && s.machineSettings.showDeleteButton);
   } catch (e) { document.getElementById("mfBody").innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
@@ -24194,7 +24403,7 @@ async function loadMachineFileList_(machine, opts){
       <td style="padding:5px 6px;">${f.size != null ? (f.size / 1024).toFixed(1) + " KB" : "—"}</td>
       <td style="padding:5px 6px;">${escapeHtml(f.modified || "—")}</td>
       <td style="padding:5px 6px;text-align:right;"><button type="button" class="admin-btn mfDownloadBtn" data-name="${escapeHtml(f.name)}" style="padding:2px 8px;font-size:11px;">Download</button></td>
-      ${showDelete ? `<td style="padding:5px 6px;text-align:right;"><button type="button" class="admin-btn mfDeleteBtn admin-btn-danger" data-name="${escapeHtml(f.name)}" style="padding:2px 8px;font-size:11px;">Delete</button></td>` : ""}
+      ${showDelete ? `<td style="padding:5px 6px;text-align:right;"><button type="button" class="admin-btn mfDeleteBtn admin-btn-danger" data-need="production.machinefiles:full" data-name="${escapeHtml(f.name)}" style="padding:2px 8px;font-size:11px;">Delete</button></td>` : ""}
     </tr>`).join("")}</tbody></table></div>`;
   const picks = () => [...el.querySelectorAll(".mfPick")];
   const selBtn = document.getElementById("mfDownloadSel"), allBtn = document.getElementById("mfDownloadAll");

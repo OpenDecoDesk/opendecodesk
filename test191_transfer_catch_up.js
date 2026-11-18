@@ -11,7 +11,7 @@ const strip = (src) => src
   .replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "")
   .replace(/export (async function|function|const)/g, "$1");
 const dbSrc = strip(read("functions/_lib/db.js"));
-const lib = new Function(dbSrc + `\nreturn { createTransfer };`)();
+const lib = new Function(dbSrc + `\nreturn { createTransfer, transfersInHand_, consumeLineTransfersOnce_ };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
   "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
@@ -122,6 +122,15 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   ok("allowed for the same roles as Use blanks for past orders", /"applyTransferCatchUp"/.test(staff) && /"applyTransferCatchUp"/.test(catalog) && /"previewTransferCatchUp"/.test(staff));
   const admin = read("public/admin.js");
   ok("the Inventory & COGS page has the button", /id="cogsTransferCatchUp"[^>]*>Use transfers for past orders…/.test(admin) && /action: "applyTransferCatchUp"/.test(admin));
+
+  console.log("\n=== A voided use no longer counts as used ===");
+  const inHand = await lib.transfersInHand_(d1, [{ r: { itemId: item("O5"), qty: 1 }, transfers: [{ transferId: QR }] }]);
+  ok("Run Transfer Sheets doesn't call O5's transfers used — they come from stock again", inHand.get(item("O5")).source === "stock");
+  await lib.consumeLineTransfersOnce_(d1, "O5", item("O5"));
+  ok("making the line again takes its transfer (the voided use doesn't block it)",
+    d1.q("SELECT count(*) n FROM transfer_movements WHERE itemId = ? AND kind = 'consume' AND voidedAt IS NULL", item("O5"))[0].n === 1 && t().quantity === 17);
+  await lib.consumeLineTransfersOnce_(d1, "O5", item("O5"));
+  ok("and only once", t().quantity === 17);
 
   console.log(failed ? `\n${failed} FAILED` : "\nAll passed");
   process.exit(failed ? 1 : 0);

@@ -13361,17 +13361,36 @@ export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis }) 
       catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return 0; throw e; }
     };
     const none = async () => 0;
-    const [sales, cogs, tCogs, otherCents, expenseCents] = await Promise.all([
+    // Recorded expenses by category, for Home's "Where the money went" pies.
+    const byCategory = async () => {
+      try {
+        const { results } = await db.prepare(`SELECT e.categoryId id, COALESCE(c.name, 'Uncategorized') name, SUM(e.amountCents) c
+          FROM expenses e LEFT JOIN expense_categories c ON c.id = e.categoryId
+          WHERE e.deletedAt IS NULL AND e.expenseDate >= ? AND e.expenseDate <= ? GROUP BY e.categoryId`).bind(from, to).all();
+        return results || [];
+      } catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return []; throw e; }
+    };
+    const [sales, cogs, tCogs, otherCents, expenseCents, cats] = await Promise.all([
       getRevenueData(db, a, b, { basis }), getCogsReport(db, a, b, { basis }), getTransferCogs(db, a, b, { basis }),
       books ? sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM other_income WHERE deletedAt IS NULL AND incomeDate >= ? AND incomeDate <= ?") : none(),
       books ? sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM expenses WHERE deletedAt IS NULL AND expenseDate >= ? AND expenseDate <= ?") : none(),
+      books ? byCategory() : [],
     ]);
     const add = (rows, k) => rows.reduce((t, r) => t + Math.round((Number(r[k]) || 0) * 100), 0);
     const goods = sales.reduce((t, r) => t + r.netSalesCents, 0);
     const extras = sales.reduce((t, r) => t + r.shippingCents + r.rushNetCents, 0);
     const cogsCents = add(cogs.rows, "cogs") + add(tCogs, "cogs");
     const writeoffCents = add(cogs.rows, "writeoffs") + add(tCogs, "writeoffs");
+    // The pie's slices: each category with more spent than refunded (largest first), then cost of goods and
+    // write-offs, so they add up to `expenses`. A category whose refunds outweigh it can't be a slice: it's named
+    // in `refundedTypes` instead.
+    const rows = cats.map(r => ({ key: "c" + (r.id == null ? "" : r.id), id: r.id, name: String(r.name), cents: Number(r.c) || 0 }));
+    const byType = rows.filter(r => r.cents > 0).sort((x, y) => y.cents - x.cents || x.name.localeCompare(y.name))
+      .map(r => ({ key: r.key, id: r.id, name: r.name, amount: fromCents(r.cents) }));
+    if (cogsCents > 0) byType.push({ key: "cogs", name: "Cost of goods", amount: fromCents(cogsCents) });
+    if (writeoffCents > 0) byType.push({ key: "writeoffs", name: "Write-offs", amount: fromCents(writeoffCents) });
     return {
+      byType, refundedTypes: rows.filter(r => r.cents < 0).map(r => r.name),
       revenue: fromCents(goods + extras + otherCents), expenses: fromCents(expenseCents + cogsCents + writeoffCents),
       recordedExpenses: fromCents(expenseCents), writeoffs: fromCents(writeoffCents), otherIncome: fromCents(otherCents),
       productRevenue: fromCents(goods), cogs: fromCents(cogsCents), productNet: fromCents(goods - cogsCents),

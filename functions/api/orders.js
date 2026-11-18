@@ -435,6 +435,13 @@ export async function onRequestPost(context) {
     if (u.roleInfo && typeof adminCan === "function") return adminCan(request, "costs.view", "read");
     return u.role === "manager" || u.role === "admin";   // a user without the role's details (tests' stand-ins): the built-in rule
   };
+  // Recorded expenses item by item or by category (permissions.js finance.expenses): Home's pies, getDashboard.
+  const seesExpenses_ = () => {
+    const u = typeof adminUser === "function" ? adminUser(request) : null;
+    if (!u || !u.role) return true;
+    if (u.roleInfo && typeof adminCan === "function") return adminCan(request, "finance.expenses", "read");
+    return u.role === "manager" || u.role === "admin";
+  };
   // A step change needs the half of the steps it is in (permissions.js stageFn): Production can move an
   // order made → shipped but not order or receive its blanks.
   const stageDenied_ = (stage) => typeof adminCan !== "function" || adminCan(request, stageFn(stage), "edit") ? null
@@ -760,6 +767,17 @@ export async function onRequestPost(context) {
     // The business's money is a manager's (seesPricing_'s rule): staff get the order counts only. The kept
     // answer stays whole, so one cache serves every role.
     if (!seesPricing_()) return jsonResponse({ status: "ok", stages: d.stages, open: d.open, onTheWay: d.onTheWay, cachedAt: d.cachedAt, cached: d.cached });
+    // Home's pies split recorded expenses by category, which is the Expenses page's (finance.expenses). A role that
+    // sees the money but not Expenses gets them as one "Recorded expenses" slice, so the pie still adds up.
+    if (!seesExpenses_()) {
+      const fold = (p) => {
+        if (!p || !Array.isArray(p.byType)) return p;
+        const stock = p.byType.filter(t => t.key === "cogs" || t.key === "writeoffs");
+        const recorded = Number(p.recordedExpenses) > 0 ? [{ key: "recorded", name: "Recorded expenses", amount: p.recordedExpenses }] : [];
+        return { ...p, byType: [...recorded, ...stock], refundedTypes: [] };
+      };
+      return jsonResponse({ status: "ok", ...d, year: fold(d.year), month: fold(d.month) });
+    }
     return jsonResponse({ status: "ok", ...d });
   }
 

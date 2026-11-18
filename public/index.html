@@ -357,6 +357,17 @@
   .home-table tr:last-child td{border-bottom:0;}
   .home-row-lbl{color:var(--ink-soft);}
   .home-num-cell{text-align:right; white-space:nowrap;}
+  .home-pies{display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr)); gap:10px;}
+  .home-pie{display:flex; flex-wrap:wrap; align-items:center; gap:16px; background:#fff; border:1px solid var(--card-line); border-radius:8px; padding:12px 14px; color:var(--ink);}
+  .home-pie-chart{display:flex; flex-direction:column; align-items:center; gap:4px;}
+  .home-pie-total{font-size:16px; font-weight:600; fill:var(--ink);}
+  .home-pie-sub{font-size:11px; fill:var(--ink-soft);}
+  .home-pie-legend{flex:1; min-width:180px;}
+  .home-legend{width:100%; border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums;}
+  .home-legend td{padding:3px 0;}
+  .home-legend td.home-num-cell{padding-left:10px;}
+  .home-legend-pct{text-align:right; width:42px; color:var(--ink-soft);}
+  .home-swatch{display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:7px; vertical-align:-1px;}
   .admin-nav-out{margin-left:auto; color:#666;}
   /* Grouped dropdowns so the whole admin menu fits on one line. */
   .admin-nav-group{position:relative; display:inline-block;}

@@ -120,7 +120,7 @@ const at = (day) => day + "T12:00:00.000Z";
   globalThis.__homeUser = { role: "staff" };
   r = await call({ action: "getDashboard", today });
   console.log("staff get the step counts and when they were worked out, and no money at all:", r.status === 200 && r.body.stages.new === 3 && r.body.open === 9 && r.body.onTheWay === 1 && !!r.body.cachedAt
-    && ["year", "month", "saleDate", "yearFrom", "monthFrom", "bookkeeping"].every(k => !(k in r.body)) && !/productRevenue|expenses|cogs/.test(JSON.stringify(r.body)));
+    && ["year", "month", "saleDate", "yearFrom", "monthFrom", "bookkeeping", "inOut"].every(k => !(k in r.body)) && !/productRevenue|expenses|cogs/.test(JSON.stringify(r.body)));
   globalThis.__homeUser = { role: "manager" };
   r = await call({ action: "getDashboard", today });
   console.log("a manager gets the money, from the same kept answer:", r.status === 200 && r.body.cached === true && r.body.year.productRevenue === 9 * 46);
@@ -195,6 +195,15 @@ const at = (day) => day + "T12:00:00.000Z";
   console.log("…each with a legend by type: amount and share:", legend(pies[0]).join(",") === `${cat1}|$120|87%,Cost of goods|$18|13%`);
   console.log("…a slice per type with its amount on hover, and the total in the middle:", pies[0].querySelectorAll("svg circle").length === 2
     && pies[0].querySelector("svg circle title").textContent === `${cat1} $120 (87%)` && pies[0].querySelector(".home-pie-total").textContent === "$138");
+  const inout = w.document.querySelector(".home-inout");
+  const months = Number(today.slice(5, 7));
+  console.log("Money in and out: a pair of bars per month so far, above the pies:", !!inout && inout.querySelectorAll("svg > g").length === 2 * months
+    && inout.compareDocumentPosition(pies[0]) & 4 && /Money in and out/.test(inout.previousElementSibling.textContent));
+  const tot = [...inout.querySelectorAll(".home-inout-total .home-val")].map(e => e.textContent);
+  // In: this year's payments ($46 × 7 paid orders) + $30 other income; out: the $120 expense.
+  console.log("…with the year's in, out and what's left:", tot.join(",") === "$352,$120,$232");
+  const thisMonth = [...inout.querySelectorAll("svg > g")].slice(-2).map(g => g.querySelector("title").textContent);
+  console.log("…hovering this month's bars gives their parts:", /in \$352/.test(thisMonth[0]) && /Customer payments \(less tax\) \$322/.test(thisMonth[0]) && /Other income \$30/.test(thisMonth[0]) && /Expenses \$120/.test(thisMonth[1]));
   console.log("…cost of goods is always green:", [...pies[0].querySelectorAll(".home-swatch")][1].getAttribute("style").includes("#008300"));
   const tRows = [...w.document.querySelectorAll(".home-table tbody tr")].map(tr => [...tr.cells].map(c => c.textContent));
   console.log("product sales: revenue, COGS, net income and margin for the year and the month:",

@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -232,9 +233,9 @@ function dsb(records) {
 
   console.log("\n=== Roles ===");
   const ordersSrc = read("functions/api/orders.js");
-  const staffList = ordersSrc.slice(ordersSrc.indexOf("const STAFF_ACTIONS"), ordersSrc.indexOf("];", ordersSrc.indexOf("const STAFF_ACTIONS")));
-  ok("every new action is a worker's (production staff)", ["setMachineStitchCount", "listMaintenanceTasks", "saveMaintenanceTask", "deleteMaintenanceTask", "recordMaintenance",
-    "getMaintenanceLog", "setDesignVersionStitches", "fillDesignStitchCounts"].every(a => staffList.includes(`"${a}"`)));
+  ok("every new action is a worker's (Back office; deleting a task needs Full); Production reads them and logs maintenance done", ["setMachineStitchCount", "listMaintenanceTasks", "saveMaintenanceTask", "recordMaintenance",
+    "getMaintenanceLog", "setDesignVersionStitches", "fillDesignStitchCounts"].every(a => may("staff", a)) && lowest("deleteMaintenanceTask") === "manager" &&
+    may("production", "recordMaintenance") && may("production", "listMaintenanceTasks") && !may("production", "saveMaintenanceTask"));
   // OpenDecoDesk: machine maintenance belongs to the production feature (Global settings → Features).
   await lib.setFeatures(d1, { production: false });
   const prodList = ordersSrc.slice(ordersSrc.indexOf("const FEATURE_ACTIONS"), ordersSrc.indexOf("bookkeeping: [", ordersSrc.indexOf("const FEATURE_ACTIONS")));
@@ -329,7 +330,7 @@ function dsb(records) {
   ok("Machine maintenance shows the log, the readings and the runs per day", /Grease/.test(app.textContent) && app.querySelector(".mnt-reading") && app.querySelector(".mnt-usage")
     && /7,654,321/.test(app.textContent));
   ok("...for the machine in the address", doc.getElementById("mntMachine").value === String(m2) && ![...app.querySelectorAll(".mnt-log")].some(r => /Replaced the hook/.test(r.textContent)));
-  ok("the page is in the Production menu and open to workers", w.eval("ADMIN_NAV_GROUPS").find(g => g.label === "Production").items.some(i => i[0] === "maintenance") && w.adminPageRole_("#maintenance/3") === "staff");
+  ok("the page is in the Production menu and open to workers", w.eval("ADMIN_NAV_GROUPS").find(g => g.label === "Production").items.some(i => i[0] === "maintenance") && pageLowest("#maintenance/3") === "production");
 
   // Run Order's warning and the abort box.
   const warn = w.runMaintWarnHtml_({ id: 4, maintenanceDue: [{ name: "Oil the rotary hook", status: "due" }, { name: "Clean <lint>", status: "soon" }] });

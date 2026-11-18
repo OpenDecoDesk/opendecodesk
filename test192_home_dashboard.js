@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
@@ -213,15 +214,15 @@ const at = (day) => day + "T12:00:00.000Z";
     && hints[1] === "Cost of goods — bookkeeping is off" && hints[3] === "Cost of goods — bookkeeping is off" && !w.document.querySelector('#homeMoney a[href="#expenses"]'));
   await lib.setFeatures(d1, { bookkeeping: true }); w.eval("delete siteFeatures.bookkeeping;");
   // Staff: the order tiles, and no money anywhere on the page or in its menus.
-  globalThis.__homeUser = { role: "staff" }; w.eval('adminMe = { role: "staff", name: "Sam" };');
+  globalThis.__homeUser = { role: "staff" }; w.eval((asRole("staff", { name: "Sam" })));
   await route("#home");
   await wait(() => tile("new") && tile("new").querySelector(".home-num").textContent !== "…");
   const navText = (w.document.querySelector(".admin-nav-row") || {}).textContent || "";
   console.log("staff see the step tiles but no business totals or product sales:", tile("new").querySelector(".home-num").textContent === "3" && !w.document.getElementById("homeMoney") && !w.document.querySelector(".home-card"));
   console.log("…and no Revenue, Sales tax, Inventory & COGS or Expenses in the menus:", !/Revenue report|Sales tax report|Inventory & COGS|Expenses/.test(w.document.body.innerHTML.match(/admin-nav[\s\S]*?<\/nav>|$/)[0] + navText));
   await route("#revenue");
-  console.log("…and opening the Revenue report says it's a manager's page instead of loading it:", !w.document.getElementById("revFrom") && /manager/i.test(w.document.getElementById("app").textContent));
-  globalThis.__homeUser = null; w.eval("adminMe = null;");
+  console.log("…and opening the Revenue report says it isn't in their role instead of loading it:", !w.document.getElementById("revFrom") && /Not available to you/.test(w.document.getElementById("app").textContent) && /Back office/.test(w.document.getElementById("app").textContent));
+  globalThis.__homeUser = null; w.eval(asRole(null));
 
   await route("#home/new");
   await wait(() => w.document.querySelector("#homeStageBody tr[data-order]"));

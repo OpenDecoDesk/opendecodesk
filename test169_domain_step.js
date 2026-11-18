@@ -145,7 +145,7 @@ function cloudflare() {
 
   console.log("\n=== The page ===");
   const adminJs = read("public/admin.js");
-  ok("Global settings has the Your domain box, loaded for an admin only", /<div id="domainSetupBox"><\/div>\n    <div id="setupStatusBox"><\/div>/.test(adminJs) && /async function loadDomainSetup_\(\)\{\n  const box = document\.getElementById\("domainSetupBox"\);\n  if \(!box \|\| !adminCan_\("admin"\)\) return;/.test(adminJs));
+  ok("Global settings has the Your domain box, loaded for an admin only", /<div id="domainSetupBox"><\/div>\n    <div id="setupStatusBox"><\/div>/.test(adminJs) && /async function loadDomainSetup_\(\)\{\n  const box = document\.getElementById\("domainSetupBox"\);\n  if \(!box \|\| !adminCan_\("settings\.global", "edit"\)\) return;/.test(adminJs));
   ok("…the key is typed into a password box and sent only to this site", /<input type="password" id="cfToken" autocomplete="off"/.test(adminJs) && /action: "connectCloudflare", token: token\.trim\(\)/.test(adminJs));
   ok("…and it says what the key can do", /What the key can do: change this Cloudflare account's Workers/.test(adminJs));
   ok("the Setup status line for the domain points there", /connect your domain under Your domain/.test(read("functions/_lib/setupStatus.js")));

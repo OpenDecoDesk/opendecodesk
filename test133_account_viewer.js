@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
@@ -143,8 +144,7 @@ const KEY = (c) => "receipts/2026/" + c.repeat(32) + ".pdf";
   ok("a receipt can still be attached to a record in a closed month (it changes no amounts)", closed && inClosed.status === 200 && dbRow("other_income", oldRow.srcId).receiptKey === KEY("b"));
 
   console.log("\n=== The role gate ===");
-  ok("both actions need the manager role, not staff", /"getAccountRegister"/.test(read("functions/api/orders.js").match(/const MANAGER_ACTIONS = \[[\s\S]*?\];/)[0]) && /"setRecordReceipt"/.test(read("functions/api/orders.js").match(/const MANAGER_ACTIONS = \[[\s\S]*?\];/)[0]) &&
-    !/"getAccountRegister"/.test(read("functions/api/orders.js").match(/const STAFF_ACTIONS = \[[\s\S]*?\];/)[0]));
+  ok("both actions need the manager role, not staff", lowest("getAccountRegister") === "manager" && lowest("setRecordReceipt") === "manager");
   ok("the migration and schema.sql add receiptKey/receiptName to every other source", ["order_payments", "other_income", "owner_transactions", "account_transfers", "shipping_labels"].every(t => new RegExp("ALTER TABLE " + t + "\\s+ADD COLUMN receiptKey").test(read("migrations/0061_receipts_and_groups.sql"))));
 
   console.log("\n=== The screen ===");

@@ -20,7 +20,9 @@ globalThis.__invoiceAi = ai;
 const dbSrc = strip(read("functions/_lib/db.js"));
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" +
   "const readInvoiceWithAi = (...a) => globalThis.__invoiceAi.readInvoiceWithAi(...a);\n" +
-  "const requireAdmin = async (env, host, key, request, msg, role) => { const r = (request.headers.get('x-role') || 'admin'); const rank = { staff: 1, manager: 2, admin: 3 }; return rank[r] >= rank[role === 'staff' || role === 'manager' ? role : 'admin'] ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
+  require("fs").readFileSync(__dirname + "/functions/_lib/permissions.js", "utf8").replace(/export (async function|function|const)/g, "$1") + "\n" +
+  // The real roles (functions/_lib/permissions.js) for the role the request names; "staff" (any signed-in user) as adminAuth.js reads it.
+  "const requireAdmin = async (env, host, key, request, msg, need) => { const r = (request.headers.get('x-role') || 'admin'); return roleAllows(DEFAULT_ROLES[r] || null, need === 'staff' ? '*' : need) ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
   "const adminActor = () => 'test'; const adminUser = () => null;\n" +
   "const rateLimited = async (env, bucket) => { (globalThis.__rl = globalThis.__rl || []).push(bucket); return { blocked: false }; }; const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +

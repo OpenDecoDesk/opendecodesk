@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { ADMIN_ORIGIN } = require("./testlib/hosts.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -14,7 +15,9 @@ const dbSrc = strip(read("functions/_lib/db.js"));
 const psSrc = strip(read("functions/_lib/promostandards.js")), credSrc = strip(read("functions/_lib/vendorCredentials.js")) + "\n" + strip(read("functions/_lib/vendorLog.js")), soSrc = strip(read("functions/_lib/supplierOrders.js"));
 const lib = new Function(dbSrc + `\nreturn { createBlank, createProduct, setBlankLink, insertOrder, getBlanksToOrder, getCatalogIssues, getOrdersByOrg, getOrderById, brandKey_, brandRuleFor_, getBrandRules, DEFAULT_BRAND_RULES };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + psSrc + "\n" + credSrc + "\n" + soSrc + "\n" +
-  "const requireAdmin = async (env, host, key, request, msg, role) => { const r = (request.headers.get('x-role') || 'admin'); const rank = { staff: 1, manager: 2, admin: 3 }; return rank[r] >= rank[role === 'staff' || role === 'manager' ? role : 'admin'] ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
+  require("fs").readFileSync(__dirname + "/functions/_lib/permissions.js", "utf8").replace(/export (async function|function|const)/g, "$1") + "\n" +
+  // The real roles (functions/_lib/permissions.js) for the role the request names; "staff" (any signed-in user) as adminAuth.js reads it.
+  "const requireAdmin = async (env, host, key, request, msg, need) => { const r = (request.headers.get('x-role') || 'admin'); return roleAllows(DEFAULT_ROLES[r] || null, need === 'staff' ? '*' : need) ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
   "const adminActor = () => 'owner@test'; const adminUser = () => null; const copyVendorImage = async () => ({ ok: false });\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
@@ -211,7 +214,7 @@ const URLS = { product: "https://ws.sanmar.com:8080/promostandards/ProductDataSe
   const w = dom.window, d = w.document;
   await new Promise(res => setTimeout(res, 150));
   await w.loadAdminScript();
-  w.eval('adminKey = "cookie"; adminMe = { role: "admin", name: "A", email: "a@x" };');
+  w.eval(("adminKey = \"cookie\"; " + asRole("admin", { name: "A", email: "a@x" })));
   const wait = async (fn) => { for (let i = 0; i < 300 && !fn(); i++) await new Promise(res => setTimeout(res, 10)); return fn(); };
   await w.renderBrandRules(d.getElementById("app"));
   await wait(() => d.querySelector(".br-row"));
@@ -221,11 +224,11 @@ const URLS = { product: "https://ws.sanmar.com:8080/promostandards/ProductDataSe
   d.getElementById("brSave").click();
   await wait(() => (JSON.parse((d1.q("SELECT value FROM global_settings WHERE key='brandRules'")[0] || { value: "{}" }).value).largeQty === 120));
   ok("…Save writes the change", JSON.parse(d1.q("SELECT value FROM global_settings WHERE key='brandRules'")[0].value).largeQty === 120);
-  w.eval('adminMe = { role: "manager", name: "M", email: "m@x" };');
+  w.eval((asRole("manager", { name: "M", email: "m@x" })));
   await w.renderBrandRules(d.getElementById("app"));
   await wait(() => d.querySelector(".br-row"));
   ok("…a manager sees them read-only", d.getElementById("brQty").disabled && !d.getElementById("brSave"));
-  w.eval('adminMe = { role: "admin", name: "A", email: "a@x" };');
+  w.eval((asRole("admin", { name: "A", email: "a@x" })));
   const pills = w.brandReviewPills_({ brandReview: [{ brand: "Carhartt", style: "CT104", blank: "Hoodie", pieces: 120, threshold: 100, approved: false }, { brand: "Nike", style: "NKX", blank: "Polo", pieces: 200, threshold: 100, approved: true }] });
   ok("the Orders pill: ⚠ Supplier review for an unapproved style, ✓ approved for an approved one", /⚠ Supplier review: Carhartt CT104 ×120/.test(pills) && /✓ Nike approved/.test(pills) && !/SanMar/.test(pills));
   const note = w.brandApprovalNeededHtml_([{ blankId: 1, blank: "Hoodie", sku: "CT104", toOrder: 120, brandRule: { brand: "Carhartt", threshold: 100 }, approvals: { "acme|hood": false } }]);

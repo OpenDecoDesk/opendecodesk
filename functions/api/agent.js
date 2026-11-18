@@ -21,7 +21,7 @@
 // healthy agent's polls cost no D1 reads or writes at all.
 
 import { classifyHost } from "../_lib/hostConfig.js";
-import { requireAdmin, timingSafeEqual } from "../_lib/adminAuth.js";
+import { requireAdmin, timingSafeEqual, adminUser, adminCan } from "../_lib/adminAuth.js";
 import { jsonResponse, featureOffResponse, featureIsOff } from "../_lib/http.js";
 import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { openRelay, IDLE_POLL_SEC, HOT_POLL_SEC } from "../_lib/agentRelay.js";
@@ -123,8 +123,8 @@ export async function onRequestPost({ request, env }){
   }
 
   // ---- Browser → site ----
-  // Back office work: any signed-in user (functions/_lib/adminAuth.js).
-  const denied = await requireAdmin(env, host, request.headers.get("X-Admin-Key"), request, "Not available here.", "staff");
+  // The machines: their files, or sending a design for a run (functions/_lib/permissions.js).
+  const denied = await requireAdmin(env, host, request.headers.get("X-Admin-Key"), request, "Not available here.", [["production.machinefiles", "read"], ["production.machines", "read"], ["run.runs", "edit"]]);
   if(denied) return denied;
   // Global settings → Features → Production switched off: the admin can't queue machine jobs or ask
   // about the agent. (The agent's own polls above are left alone — they read no database, and with
@@ -136,6 +136,10 @@ export async function onRequestPost({ request, env }){
     return jsonResponse({ status: "ok", online: !!p, lastSeenSec: p ? p.lastSeenSec : null, agentIp: p ? p.agentIp || "" : "" });
   }
   if(op === "submit"){
+    // Sending a design is part of a run; deleting a machine's file or scanning for machines needs more.
+    const roleNeed = { delete: ["production.machinefiles", "full"], discover: ["production.machines", "edit"] }[String(body.type || "")];
+    if(roleNeed && typeof adminUser === "function" && (adminUser(request) || {}).roleInfo && !adminCan(request, roleNeed[0], roleNeed[1]))
+      return err("Your role can't do this. Ask an admin.", 403);
     const { job, error } = cleanJob(body);
     if(error) return err(error, 400);
     const bytes = crypto.getRandomValues(new Uint8Array(12));

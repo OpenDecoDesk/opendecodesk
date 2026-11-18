@@ -17,7 +17,9 @@ const lib = new Function(dbSrc + `\nreturn { createBlank, receiveBlanks, createP
   getBlankReservations, getReadyToShipByOrg, getFinishedStock, setFulfillmentStage, markItemPieceManufactured, cancelLineItem, voidOrder, stagePrereqError,
   getInventoryValuation, getFinishedGoodsValuation, getCogsReport, getAccountantExport, getPaidUnrunOrders, makeForStock, getBlankStockCoverage };`)();
 const api = new Function(hostSrc + "\n" + httpSrc + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" +
-  "const requireAdmin = async (env, host, key, request, msg, role) => { const r = (request.headers.get('x-role') || 'admin'); const rank = { staff: 1, manager: 2, admin: 3 }; return rank[r] >= rank[role === 'staff' || role === 'manager' ? role : 'admin'] ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
+  require("fs").readFileSync(__dirname + "/functions/_lib/permissions.js", "utf8").replace(/export (async function|function|const)/g, "$1") + "\n" +
+  // The real roles (functions/_lib/permissions.js) for the role the request names; "staff" (any signed-in user) as adminAuth.js reads it.
+  "const requireAdmin = async (env, host, key, request, msg, need) => { const r = (request.headers.get('x-role') || 'admin'); return roleAllows(DEFAULT_ROLES[r] || null, need === 'staff' ? '*' : need) ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
   "const adminActor = () => 'test'; const adminUser = () => null;\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
@@ -179,9 +181,10 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   await call({ action: "makeForStock", productId: "cap", size: "", qty: 2 });
   const makeId = Number(d1.q("SELECT max(id) AS id FROM finished_goods_movements WHERE kind='make' AND productId='cap'")[0].id);
   ok("(two more caps made: 3 → 5 on hand, blanks 10 → 8)", rts("cap", "").quantity === 5 && blankQty(capBlank, "Royal", "OSFA") === 8);
-  // A worker may void a stock entry, as they may a blank or transfer movement.
-  r = await call({ action: "voidFinishedGoodsMovement", movementId: makeId, reason: "entered twice" }, { role: "staff" });
-  ok("voiding a Made for stock entry puts its blanks back too (a worker may, as with blank movements)", r.status === 200 && blankQty(capBlank, "Royal", "OSFA") === 10 && rts("cap", "").quantity === 3);
+  // Voiding a stock entry is Full on Blank stock, as voiding a blank or transfer movement is: a manager's by default, not Back office's.
+  const staffTry = await call({ action: "voidFinishedGoodsMovement", movementId: makeId, reason: "entered twice" }, { role: "staff" });
+  r = await call({ action: "voidFinishedGoodsMovement", movementId: makeId, reason: "entered twice" }, { role: "manager" });
+  ok("voiding a Made for stock entry puts its blanks back too (a manager may, as with blank movements; Back office may not)", staffTry.status === 403 && r.status === 200 && blankQty(capBlank, "Royal", "OSFA") === 10 && rts("cap", "").quantity === 3);
 
   console.log("\n=== The report ===");
   d1._raw.run("UPDATE orders SET shippedAt = manufacturedAt WHERE manufacturedAt IS NOT NULL AND shippedAt IS NULL AND deliveredAt IS NULL AND completedAt IS NULL");   // sold the day made: COGS goes by the sale date (Global settings → Bookkeeping)

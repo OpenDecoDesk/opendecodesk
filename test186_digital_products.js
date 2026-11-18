@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 const { ADMIN_ORIGIN, shopOrigin } = require("./testlib/hosts.js");
 
@@ -76,7 +77,7 @@ function fakeR2() {
   ok("the product lists its files in order", r.status === 200 && r.body.files.map(f => f.fileName).join() === "rose.dst,rose.pes");
   const ds = read("functions/api/design.js");
   ok("uploads go to the private bucket under digital/<org>/<product>/, embroidery files, PDFs and zips, manager or above", /digital\/\$\{keyPart_\(org\)\}\/\$\{keyPart_\(productId\)\}/.test(ds) &&
-    /DIGITAL_EXTRA_EXTS = new Set\(\["pdf", "zip"\]\)/.test(ds) && /"manager"\);/.test(ds));
+    /DIGITAL_EXTRA_EXTS = new Set\(\["pdf", "zip"\]\)/.test(ds) && /\[\["catalog\.productFiles", "edit"\]\]\);/.test(ds) && lowest("addProductFileFromDesign") === "manager");
 
   console.log("\n=== Ordering ===");
   r = await shop({ orderId: "D-1", items: [{ productId: "rose", qty: 1 }] });

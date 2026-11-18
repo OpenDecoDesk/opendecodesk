@@ -165,7 +165,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
 
   console.log("\n=== Screen wiring ===");
   console.log("Run Order is a top-level header button (right of Orders) and routed:",
-    /navGo\('runorder'\)">Run Order</.test(adminJs) && /renderRunOrder\(app\)/.test(adminJs));
+    /const top = \[\["home", "Home"\], \["orders", "Orders"\], \["runorder", "Run Order"\]/.test(adminJs) && /\$\{top\.map\(\(\[h, label\]\) => `<button type="button" class="admin-nav-btn[^`]*onclick="navGo\(this\.dataset\.h\)"/.test(adminJs) && /renderRunOrder\(app\)/.test(adminJs));
   console.log("Mark done (no timing) button + its per-hooping action exist:", /class="run-btn"/.test(adminJs) && /action: "markHoopingDone"/.test(adminJs));
   console.log("qty>1 lines split into per-piece cards (pkey, piece label, per-piece itemId sent):",
     /data-pkey=/.test(adminJs) && /Piece \$\{pieceNoShown\} of \$\{job\.qty\}/.test(adminJs) && /itemId: card\.job\.itemId/.test(adminJs));

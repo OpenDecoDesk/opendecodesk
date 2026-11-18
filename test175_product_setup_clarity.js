@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 const { ADMIN_ORIGIN } = require("./testlib/hosts.js");
 
@@ -149,7 +150,7 @@ const ok = (label, v) => console.log(label + ":", !!v);
     const ordersJs = read("functions/api/orders.js");
     const listOf = (name) => (ordersJs.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`)) || [])[1] || "";
     ok("OpenDecoDesk: the box is a staff action (staff edit products there), under the Production feature",
-      /"previewProductHoopings"/.test(listOf("STAFF_ACTIONS")) && !/"previewProductHoopings"/.test(listOf("MANAGER_ACTIONS")) &&
+      may("staff", "previewProductHoopings") && listOf("STAFF_ACTIONS") === "" &&
       /production: \[[\s\S]*?"previewProductHoopings"[\s\S]*?\],/.test(ordersJs));
     ok("…and with Production off the form shows no Run Order box, designs or “No embroidery design needed”",
       /if \(!adminFeatureOn_\("production"\)\) \{ box\.remove\(\); return; \}/.test(adm) &&

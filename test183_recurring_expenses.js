@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
@@ -164,9 +165,8 @@ const addMonths = (ymd, n) => { const [y, m] = ymd.split("-").map(Number); const
 
   console.log("\n=== Roles ===");
   const ordersSrc = read("functions/api/orders.js");
-  const mgr = ordersSrc.slice(ordersSrc.indexOf("const MANAGER_ACTIONS"), ordersSrc.indexOf("const STAFF_ACTIONS"));
   console.log("the four actions are a manager's (like the rest of the books):",
-    ["listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense"].every(a => mgr.includes(`"${a}"`)));
+    ["listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense"].every(a => lowest(a) === "manager") && /"listRecurringExpenses"/.test(ordersSrc));
 
   console.log("\n=== The roll-up and Communications ===");
   const d2 = await createD1();

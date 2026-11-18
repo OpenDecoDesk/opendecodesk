@@ -34,8 +34,8 @@ export async function onRequestPost({ request, env }) {
   const url = new URL(request.url);
   const contentType = (request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
 
-  // Back office work: any signed-in user (functions/_lib/adminAuth.js).
-  const denied = await requireAdmin(env, classifyHost(url.hostname, null, env), request.headers.get("X-Admin-Key"), request, "Not available here.", "staff");
+  // Receipts belong to expenses, money entries and payments (functions/_lib/permissions.js).
+  const denied = await requireAdmin(env, classifyHost(url.hostname, null, env), request.headers.get("X-Admin-Key"), request, "Not available here.", [["finance.expenses", "edit"], ["finance.money", "edit"], ["orders.payments", "edit"]]);
   if (denied) return denied;
   // Global settings → Features → Bookkeeping switched off: no receipt uploads or links.
   if (await featureIsOff(env, "bookkeeping")) return featureOffResponse("bookkeeping", "Bookkeeping");

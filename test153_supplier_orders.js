@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { ADMIN_ORIGIN } = require("./testlib/hosts.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -17,7 +18,9 @@ const lib = new Function(dbSrc + `\nreturn { createBlank, createProduct, setBlan
 const ps = new Function(psSrc + `\nreturn { psBuildPO_, psSendPO, psGetInventory, psGetParts, psPartFor_, psGetShipments, psEl_, PS_OVERRIDES };`)();
 const so = new Function(psSrc + "\n" + soSrc + `\nreturn { supplierShipMethods };`)();
 const built = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + psSrc + "\n" + credSrc + "\n" + soSrc + "\n" +
-  "const requireAdmin = async (env, host, key, request, msg, role) => { const r = (request.headers.get('x-role') || 'admin'); const rank = { staff: 1, manager: 2, admin: 3 }; return rank[r] >= rank[role === 'staff' || role === 'manager' ? role : 'admin'] ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
+  require("fs").readFileSync(__dirname + "/functions/_lib/permissions.js", "utf8").replace(/export (async function|function|const)/g, "$1") + "\n" +
+  // The real roles (functions/_lib/permissions.js) for the role the request names; "staff" (any signed-in user) as adminAuth.js reads it.
+  "const requireAdmin = async (env, host, key, request, msg, need) => { const r = (request.headers.get('x-role') || 'admin'); return roleAllows(DEFAULT_ROLES[r] || null, need === 'staff' ? '*' : need) ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
   "const adminActor = () => 'owner@test'; const adminUser = () => null; const copyVendorImage = async () => ({ ok: false });\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
@@ -257,7 +260,7 @@ const URLS = { product: "https://ws.sanmar.com:8080/promostandards/ProductDataSe
   const w = dom.window, d = w.document;
   await new Promise(res => setTimeout(res, 150));
   await w.loadAdminScript();
-  w.eval('adminKey = "cookie"; adminMe = { role: "manager", name: "M", email: "m@x" };');
+  w.eval(("adminKey = \"cookie\"; " + asRole("manager", { name: "M", email: "m@x" })));
   const wait = async (fn) => { for (let i = 0; i < 300 && !fn(); i++) await new Promise(res => setTimeout(res, 10)); return fn(); };
   // A new paid order so there's something to buy again.
   const o4 = await placeOrder([["S", 4, "Black"], ["S", 1, "Navy"]]);
@@ -271,7 +274,7 @@ const URLS = { product: "https://ws.sanmar.com:8080/promostandards/ProductDataSe
   await lib.setBlankLink(d1, "acme", "tee", "", "M", tee, "Navy", "M");
   await lib.insertOrder(d1, { orderId: "OT1", orgId: "acme", customerName: "T", contact: "t@x.com", paymentMethod: "Venmo", placedAt: new Date().toISOString() }, [{ productId: "tee", name: "Acme Tee", type: "shirt", size: "M", qty: 2, unitPrice: 20 }]);
   await d1.prepare("UPDATE orders SET paid=1 WHERE orderId='OT1'").run();
-  w.eval('adminMe = { role: "admin", name: "A", email: "a@x" };');
+  w.eval((asRole("admin", { name: "A", email: "a@x" })));
   await w.renderBlanksToOrder(d.getElementById("app"));
   await wait(() => d.querySelector(".bto-order"));
   ok("a line whose blank isn't linked to a connection is named under the table, with how to fix it", /Core Tee \(PC54\)/.test((d.querySelector(".bto-not-orderable") || {}).textContent || "") &&

@@ -1,4 +1,5 @@
 // Tools → Communications → Send a test email: one message through the same path as every other email,
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 // and a report of what happened — the provider, the From address, the provider's own status and
 // message, and what to do about the usual Resend mistakes (an unverified domain, a bad key, a key
 // saved with a line break, a From address still on example.com). The key itself never comes back.
@@ -84,9 +85,9 @@ global.fetch = async (url, init) => {
 
   console.log("\n=== Who can use it ===");
   const ordersJs = read("functions/api/orders.js"), adminJs = read("public/admin.js");
-  ok("the action is admin-only, checks that, and is rate-limited", /const ADMIN_ONLY_ACTIONS = \[[^\]]*"sendTestEmail"/.test(ordersJs) &&
-    /body\.action === "sendTestEmail"\) \{\s*const denied = await requireAdmin\([^)]*ACTION_ROLE\[body\.action\]\);\s*if \(denied\) return denied;\s*const rl = await rateLimited\(env, "email_test"/.test(ordersJs));
-  ok("the Communications page shows the button only to an admin", /\$\{adminCan_\("admin"\) \? `<details id="commsTest"/.test(adminJs) && /action: "sendTestEmail", key: adminKey, to/.test(adminJs));
+  ok("the action is admin-only, checks that, and is rate-limited", lowest("sendTestEmail") === "admin" &&
+    /body\.action === "sendTestEmail"\) \{\s*const denied = await requireAdmin\([^)]*ACTION_PERM_\[body\.action\]\);\s*if \(denied\) return denied;\s*const rl = await rateLimited\(env, "email_test"/.test(ordersJs));
+  ok("the Communications page shows the button only to an admin", /\$\{adminCan_\("settings\.global", "edit"\) \? `<details id="commsTest"/.test(adminJs) && /action: "sendTestEmail", key: adminKey, to/.test(adminJs));
 
   console.log(`\n${pass} passed, ${fail} failed`);
 })().catch(e => { console.error(e); console.log("test125 ran to the end without crashing: false"); process.exitCode = 1; });

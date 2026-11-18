@@ -14,7 +14,7 @@
   const stock = src.slice(src.indexOf("async function showStockModal("), src.indexOf("function renderCreateProductForm("));
   const shared = src.match(/function inventoryModal_\(title, bodyHtml, width, opts\)\{[\s\S]*?ov\.innerHTML = `<div style="background:#fff;color:#1a1a1a;/);
   console.log("the stock window sets dark text on its white background:", /inventoryModal_\("Finished stock/.test(stock) && !!shared);
-  console.log("the stock window's button has its own visible colours:", /id="fsClose"/.test(stock) && /class="admin-btn fsCorrect" style="[^"]*background:#fff;color:#333/.test(stock));
+  console.log("the stock window's button has its own visible colours:", /id="fsClose"/.test(stock) && /class="admin-btn fsCorrect"(?: data-need="[^"]*")? style="[^"]*background:#fff;color:#333/.test(stock));
 }
 
 // Persistent admin header: every tool page appears in one of the ADMIN_NAV_GROUPS dropdowns.
@@ -27,9 +27,9 @@
     /label: "Settings", items: \[\s*\["settings", "Global settings"\]/.test(groups) && !/location\.hash='#catalog\/settings'/.test(src)
     && /raw === "settings" \|\| raw === "catalog\/settings"/.test(src));
   console.log("Manage catalog is a top-level button (after Run Transfer Sheets), not in Tools:",
-    /navGo\('runtransfer'\)">Run Transfer Sheets<\/button>\s*<button[^>]*navGo\('catalog'\)">Manage catalog</.test(src) && !groups.includes('["catalog"'));
+    /const top = \[\["home", "Home"\], \["orders", "Orders"\], \["runorder", "Run Order"\], \["runtransfer", "Run Transfer Sheets"\], \["catalog", "Manage catalog"\]\]/.test(src) && !groups.includes('["catalog"'));
   console.log("Run Order is a standalone top-level button, not in a dropdown:",
-    /navGo\('runorder'\)">Run Order</.test(src) && !groups.includes('["runorder"'));
+    /const top = \[\["home", "Home"\], \["orders", "Orders"\], \["runorder", "Run Order"\], \["runtransfer", "Run Transfer Sheets"\], \["catalog", "Manage catalog"\]\]/.test(src) && !groups.includes('["runorder"'));
   console.log("the menu groups are Catalog / Production / Inventory / Finance / Reports / Settings, in that order:",
     groups.indexOf('label: "Catalog"') >= 0 && ["Catalog", "Production", "Inventory", "Finance", "Reports", "Settings"].every((l, i, a) => groups.includes('label: "' + l + '"') && (i === 0 || groups.indexOf('label: "' + a[i - 1] + '"') < groups.indexOf('label: "' + l + '"'))));
   console.log("Sign out lives in the Settings dropdown, not a top-level shops row:", /label: "Settings"[\s\S]*adminSignOut\(\)/.test(groups));

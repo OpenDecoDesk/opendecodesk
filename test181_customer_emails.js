@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 
@@ -30,7 +31,7 @@ const M = new Function(hostSrc + "\n" + httpSrc + "\n" + strip(read("functions/_
   "const checkShippedDeliveries = async () => ({}), checkBlankShipments = async () => ({});\n" +
   dbSrc + "\n" + pdfSrc + "\n" + emailSrc + "\n" + strip(read("functions/api/orders.js")) + "\n" +
   "return { post: onRequestPost, receiptLines_, howToPay_, businessBlock_, buildOrderReceivedEmail, buildPaymentReceivedEmail, buildInvoiceEmail, orderPdf, previewMessage, send_, " +
-  "  pdfDocument, pdfWrap, pdfTextWidth, setBusinessProfile, getBusinessProfile, setSalesTaxSettings, setGlobalSettings, getEmailSettings, setEmailSettings, setupStatus, ACTION_ROLE, sampleOrder_ };")();
+  "  pdfDocument, pdfWrap, pdfTextWidth, setBusinessProfile, getBusinessProfile, setSalesTaxSettings, setGlobalSettings, getEmailSettings, setEmailSettings, setupStatus, sampleOrder_ };")();
 
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
@@ -200,8 +201,8 @@ const order = (o = {}) => Object.assign({
   r = await post({ action: "previewCustomerEmail" }, "acme");
   ok("only from the admin address", r.status === 401);
   ok("roles: preview and the sample PDF are a manager's, saving and sending a sample an admin's, the order PDF staff's",
-    M.ACTION_ROLE.previewCustomerEmail === "manager" && M.ACTION_ROLE.samplePdf === "manager" && M.ACTION_ROLE.getEmailSettings === "manager" &&
-    M.ACTION_ROLE.updateEmailSettings === "admin" && M.ACTION_ROLE.sendSampleEmail === "admin" && M.ACTION_ROLE.getOrderPdf === "staff");
+    lowest("previewCustomerEmail") === "manager" && lowest("samplePdf") === "manager" && lowest("getEmailSettings") === "manager" &&
+    lowest("updateEmailSettings") === "admin" && lowest("sendSampleEmail") === "admin" && may("staff", "getOrderPdf"));
 
   console.log("\n=== An order's own PDF (Orders → Invoice PDF) ===");
   r = await post({ action: "createLocalSale", org: "acme", paymentMethod: "Check", customerName: "Alex Sample", contact: "alex@example.net",

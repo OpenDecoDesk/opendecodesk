@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expiresAt);
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(userId);
 
--- Users and roles (migrations/0053). role: 'admin' | 'manager' | 'staff'. status: 'active' |
+-- Users and roles (migrations/0053). role: a roles.key (migrations/0089). status: 'active' |
 -- 'disabled' (never deleted, so history keeps its attribution). password: the salted, keyed hash
 -- record (functions/_lib/adminAuth.js). recoveryCodes: JSON array of hashes. A new install has no
 -- rows: the first sign-in with the installer's passphrase creates the first admin.
@@ -144,6 +144,24 @@ CREATE TABLE IF NOT EXISTS users (
   lastLoginAt        TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email <> '';
+
+-- Roles (migrations/0089): what each role sees and may do (functions/_lib/permissions.js). Seeds included.
+CREATE TABLE IF NOT EXISTS roles (
+  key         TEXT    PRIMARY KEY CHECK (length(key) BETWEEN 1 AND 40),
+  name        TEXT    NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 40),
+  rank        INTEGER NOT NULL CHECK (rank BETWEEN 1 AND 100),
+  builtIn     INTEGER NOT NULL DEFAULT 0 CHECK (builtIn IN (0, 1)),
+  locked      INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
+  permissions TEXT,
+  createdAt   TEXT    NOT NULL,
+  updatedAt   TEXT    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_name ON roles(name COLLATE NOCASE);
+INSERT OR IGNORE INTO roles (key, name, rank, builtIn, locked, permissions, createdAt, updatedAt) VALUES
+  ('admin',      'Admin',       100, 1, 1, NULL, '2026-11-18T00:00:00.000Z', '2026-11-18T00:00:00.000Z'),
+  ('manager',    'Manager',      75, 1, 0, NULL, '2026-11-18T00:00:00.000Z', '2026-11-18T00:00:00.000Z'),
+  ('staff',      'Back office',  50, 1, 0, NULL, '2026-11-18T00:00:00.000Z', '2026-11-18T00:00:00.000Z'),
+  ('production', 'Production',   25, 1, 0, NULL, '2026-11-18T00:00:00.000Z', '2026-11-18T00:00:00.000Z');
 
 -- Accounts money moves through (migrations/0014). Seeds included.
 CREATE TABLE IF NOT EXISTS accounts (

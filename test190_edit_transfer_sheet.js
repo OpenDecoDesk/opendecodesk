@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Editing a received transfer sheet (Accounts & money → Edit sheet…, Transfers → History → Open sheet). A sheet's
@@ -161,8 +162,7 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   r = await call({ action: "editTransferSheet", movementId: lg, receivedAt: "2026-08-01", vendor: "Old", vendorRef: "L1", total: 20, accountId: acct, rows: [{ transferId: A, count: 6, pctOfSheet: 100 }] });
   ok("a sheet in a closed month can't be edited", r.status === 409 && /closed/.test(r.body.message));
   const src = read("functions/api/orders.js");
-  const mgr = src.match(/const MANAGER_ACTIONS = \[[\s\S]*?\];/)[0], staff = src.match(/const STAFF_ACTIONS = \[[\s\S]*?\];/)[0];
-  ok("editing needs the manager role; reading a sheet is staff", /"editTransferSheet"/.test(mgr) && !/"editTransferSheet"/.test(staff) && /"getTransferSheet"/.test(staff));
+  ok("editing needs the manager role; reading a sheet is staff", lowest("editTransferSheet") === "manager" && may("staff", "getTransferSheet") && /editTransferSheet/.test(src));
 
   // A double click on Receive / Save changes must not send the sheet twice: the second click is ignored until the first finishes.
   const modalSrc = read("public/admin.js").match(/function showTransferSheetModal_[\s\S]*?\n}\n/)[0];

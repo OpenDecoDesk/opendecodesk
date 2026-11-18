@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { ADMIN_ORIGIN } = require("./testlib/hosts.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -141,8 +142,7 @@ const hoursAgo = (h) => new Date(Date.now() - h * 3600000).toISOString();
   ok("a step can be cleared (not done after all)", r.status === 200 && col(e1, "deliveredAt") === null);
   ok("…but not the order date or Manufactured", (await call({ action: "setOrderDates", orderId: e1, dates: { placedAt: "" } })).status === 400 && (await call({ action: "setOrderDates", orderId: e1, dates: { manufacturedAt: null } })).status === 400);
   // OpenDecoDesk: dating an order's steps is a worker's job, like Edit order date (updateOrderDate).
-  { const src = read("functions/api/orders.js"), staff = src.slice(src.indexOf("const STAFF_ACTIONS = ["), src.indexOf("];", src.indexOf("const STAFF_ACTIONS = [")));
-    ok("setOrderDates is a worker's, like updateOrderDate", staff.includes('"setOrderDates"') && staff.includes('"updateOrderDate"')); }
+  ok("setOrderDates is a worker's, like updateOrderDate", may("staff", "setOrderDates") && may("staff", "updateOrderDate") && lowest("setOrderDates") === lowest("updateOrderDate"));
   ok("…and nothing in the future", (await call({ action: "setOrderDates", orderId: e1, dates: { shippedAt: new Date(Date.now() + 86400000).toISOString() } })).status === 400);
   const e2 = await order("2026-01-10T12:00:00.000Z", 1);
   r = await call({ action: "setOrderDates", orderId: e2, dates: { placedAt: hoursAgo(10) } });

@@ -1,84 +1,154 @@
 const fs = require("fs");
 const { makeAuth, totpNow, read } = require("./testlib/auth-harness");
 
-// Users and roles. Three roles, each including the one below: staff ("Back office"), manager,
-// admin. The server decides who may do what, in ONE place (requireAdmin's `role` argument), and
-// what it wasn't told about is admin-only. Admins manage users; a user is disabled, never
-// deleted; there is always an active admin; "require two-step sign-in" sends anyone without an
-// authenticator to enrolment before anything else answers. Real SQL under the real endpoints.
+// Users and roles. Roles are rows (migrations/0089): Admin (locked, everything), Manager, Back office
+// ("staff") and Production, plus any added on Users → Roles and permissions. Each role says, per function
+// of the back office, none / read / edit / full (functions/_lib/permissions.js); the server decides in ONE
+// place (requireAdmin's `need`), and what it wasn't told about is admin-only. Rank decides who may change
+// whom. A user is disabled, never deleted; there is always an active admin; "require two-step sign-in"
+// sends anyone without an authenticator to enrolment first. Real SQL under the real endpoints.
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 const names = (text) => [...text.matchAll(/"(\w+)"/g)].map(m => m[1]);
 const forbidden = (r) => r.status === 403 && r.body && r.body.code === "forbidden";
 const pendingRefusal = (r) => r.status === 403 && r.body && r.body.code === "setup_required";
 const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU", SECRET3 = "MFRGGZDFMZTWQ2LK";
+const P = new Function(read("functions/_lib/permissions.js").replace(/export (async function|function|const)/g, "$1") +
+  "\nreturn { ACTION_PERM, DEFAULT_ROLES, roleAllows, PERM_FUNCTIONS, PERMISSION_AREAS, effectivePermissions };")();
 
 (async () => {
   const A = await makeAuth();
   const admin = await A.firstAdmin();
   const manager = await A.addUser(admin, "manager", "Mo Manager", "mo@myshop.com");
   const staff = await A.addUser(admin, "staff", "Sam Staff", "sam@myshop.com");
+  const prod = await A.addUser(admin, "production", "Pat Production", "pat@myshop.com");
   const ordersJs = read("functions/api/orders.js");
-  const list = (name) => names(ordersJs.match(new RegExp("const " + name + " = \\[([\\s\\S]*?)\\n\\];"))[1]);
-  const ADMIN_ONLY = list("ADMIN_ONLY_ACTIONS"), MANAGER = list("MANAGER_ACTIONS"), STAFF = list("STAFF_ACTIONS");
 
-  console.log("=== Every back-office action, as each role ===");
+  console.log("=== Every back-office action, as each built-in role ===");
+  const dispatched = new Set(names(ordersJs.match(/const CATALOG_ADMIN_ACTIONS = new Set\(\[([\s\S]*?)\]\);/)[1]));
+  for (const m of ordersJs.matchAll(/body\.action === "(\w+)"/g)) dispatched.add(m[1]);
+  for (const m of ordersJs.matchAll(/\[([^\[\]]*)\]\.includes\(body\.action\)/g)) names(m[1]).forEach(a => dispatched.add(a));
+  for (const m of ordersJs.matchAll(/const (?:RECON|MONEY|EXPENSE)_ACTIONS = \[([\s\S]*?)\];/g)) names(m[1]).forEach(a => dispatched.add(a));
+  const ACTIONS = [...dispatched];
   let wrong = [];
-  for (const [level, actions] of [["staff", STAFF], ["manager", MANAGER], ["admin", ADMIN_ONLY]]) {
-    for (const action of actions) {
-      const s = forbidden(await A.orders({ action }, staff)), m = forbidden(await A.orders({ action }, manager)), a = forbidden(await A.orders({ action }, admin));
-      const want = level === "staff" ? [false, false, false] : level === "manager" ? [true, false, false] : [true, true, false];
-      if ([s, m, a].join() !== want.join()) wrong.push(action + " (" + level + "): staff/manager/admin refused = " + [s, m, a].join("/"));
-    }
+  for (const action of ACTIONS) {
+    const spec = P.ACTION_PERM[action];
+    const got = [forbidden(await A.orders({ action }, admin)), forbidden(await A.orders({ action }, manager)), forbidden(await A.orders({ action }, staff)), forbidden(await A.orders({ action }, prod))];
+    const want = [false, ...["manager", "staff", "production"].map(r => !P.roleAllows(P.DEFAULT_ROLES[r], spec))];
+    if (got.join() !== want.join()) wrong.push(action + ": admin/manager/staff/production refused = " + got.join("/") + " (want " + want.join("/") + ")");
   }
   if (wrong.length) console.log("   " + wrong.join("\n   "));
-  ok(`all ${STAFF.length + MANAGER.length + ADMIN_ONLY.length} actions: staff is refused every manager and admin one, a manager every admin one, and an admin none`, wrong.length === 0 && STAFF.length > 150 && MANAGER.length > 25 && ADMIN_ONLY.length >= 9);
-  ok("the four things only an admin does: every Global settings write and the audit log (users and the two-step switch are below)", ["updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "updateLocaleSettings", "updateSalesTaxSettings", "updateShipFromAddress", "updateMachineSettings", "updatePricingSettings", "backfillStripeFees", "getAuditLog"].every(a => ADMIN_ONLY.includes(a)));
-  ok("a manager reads Global settings, runs the shops and the books; staff does neither", ["getGlobalSettings", "getSetupStatus", "createOrg", "updateOrg", "publish", "listMoney", "reconcileMonth", "closePeriod", "getAccountantExport", "saveExpenseCategory", "createTestTransaction"].every(a => MANAGER.includes(a)));
-  ok("staff has the day's work: orders, refunds and voids, labels, production, inventory, catalog content, equipment, design files, and Home's order counts", ["getOrdersAllShops", "recordRefund", "voidOrder", "deletePayment", "getOrderForShipping", "startRun", "receiveBlanks", "createProduct", "setTierPrices", "saveGraphic", "saveMachine", "saveHoop", "saveDesign", "getBoxPresets", "getMachineSettings", "listOrgsAdmin", "getDashboard", "getOpenOrders"].every(a => STAFF.includes(a)));
-  ok("the business's money is a manager's: the Revenue, Sales tax and Inventory & COGS reports and Expenses", ["getRevenueReport", "getSalesTaxReport", "getInventoryReport", "getExpenseReport", "listExpenses", "saveExpense", "deleteExpense", "previewExpenseImport", "importExpenses"].every(a => MANAGER.includes(a) && !STAFF.includes(a)));
+  ok(`all ${ACTIONS.length} actions: each role is refused exactly what its permissions leave out, and an admin nothing`, wrong.length === 0 && ACTIONS.length > 300);
+  const may = (role, a) => P.roleAllows(P.DEFAULT_ROLES[role], P.ACTION_PERM[a]);
+  ok("only an admin changes Global settings or reads the audit log; a manager reads Global settings, runs the shops and the books",
+    ["updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "getAuditLog", "saveShopRate", "placeSupplierOrder"].every(a => !may("manager", a)) &&
+    ["getGlobalSettings", "getSetupStatus", "createOrg", "publish", "listMoney", "reconcileMonth", "closePeriod", "getAccountantExport", "createTestTransaction", "recordRefund", "deleteOrder"].every(a => may("manager", a)));
+  ok("Back office keeps the day's work but no longer deletes, voids or refunds", ["getOrdersAllShops", "addPayment", "markPaidManual", "getOrderForShipping", "startRun", "receiveBlanks", "createProduct", "saveGraphic", "saveMachine", "saveDesign", "getDashboard"].every(a => may("staff", a)) &&
+    ["recordRefund", "voidOrder", "deletePayment", "voidPayment", "deleteOrder", "deleteDesign", "writeOffBlanks", "getRevenueReport", "listExpenses", "createOrg", "getGlobalSettings"].every(a => !may("staff", a)));
+  ok("Production makes things and moves them made → shipped, and reads the rest of its screens", ["markManufacturedOnMachine", "startRun", "completeRun", "abortRun", "makeTransferLine", "setTransfersApplied",
+    "recordTracking", "getOrderForShipping", "setOrderCompleted", "recordMaintenance", "getOrdersAllShops", "getProductionQueue", "getTransferQueue", "listMachines", "listThreads", "listDesigns", "getDashboard"].every(a => may("production", a)) &&
+    ["addPayment", "markPaidManual", "recordRefund", "deleteOrder", "editOrder", "useBlanksFromStock", "createProduct", "saveDesign", "saveMachine", "deleteMachine", "receiveBlanks", "listExpenses", "getGlobalSettings", "analyzePricing", "sendInvoice"].every(a => !may("production", a)));
+  let r = await A.orders({ action: "setFulfillmentStage", org: "x", orderId: "o-1", stage: "blankOrdered" }, prod);
+  const r2 = await A.orders({ action: "setFulfillmentStage", org: "x", orderId: "o-1", stage: "qaPacked" }, prod);
+  const r3 = await A.orders({ action: "bulkSetFulfillmentStage", orderIds: ["o-1"], stage: "blankReceived" }, prod);
+  ok("…a step change is checked by its step: Production may set QA packed, not order or receive blanks", forbidden(r) && !forbidden(r2) && forbidden(r3) &&
+    !forbidden(await A.orders({ action: "setFulfillmentStage", org: "x", orderId: "o-1", stage: "blankOrdered" }, staff)));
+  r = await A.orders({ action: "getDashboard" }, prod);
+  ok("Production's Home has the order counts, not the money", !forbidden(r) && (r.status !== 200 || !("money" in r.body)));
   ok("an action nobody has heard of is nobody's — including names every object answers to", !(await A.orders({ action: "constructor" }, staff)).body.orders && (await A.orders({ action: "constructor" }, staff)).status === 403 && (await A.orders({ action: "__proto__" }, admin)).status >= 400 && (await A.orders({ action: "toString" }, manager)).status === 403);
   ok("being refused for your role is not a failed sign-in: nothing was counted against the failure budget", A.hits.length === 0);
   ok("…while a made-up session is", (await A.orders({ action: "getOrdersAllShops" }, "sess_" + "0".repeat(48))).status === 401 && A.hits.length === 1);
   ok("no role gets anywhere from a shop's address: the back office answers on the admin host only", (await A.lib.requireAdmin(A.env, { kind: "locked", orgId: "x" }, "", { url: "https://x.example.com/api/orders", headers: { get: () => null } }, "no", "staff")).status === 403);
 
   console.log("\n=== Default-deny: nothing is open by omission ===");
-  const dispatched = new Set(names(ordersJs.match(/const CATALOG_ADMIN_ACTIONS = new Set\(\[([\s\S]*?)\]\);/)[1]));
-  for (const m of ordersJs.matchAll(/body\.action === "(\w+)"/g)) dispatched.add(m[1]);
-  for (const m of ordersJs.matchAll(/\[([^\[\]]*)\]\.includes\(body\.action\)/g)) names(m[1]).forEach(a => dispatched.add(a));
-  for (const m of ordersJs.matchAll(/const (?:RECON|MONEY|EXPENSE)_ACTIONS = \[([\s\S]*?)\];/g)) names(m[1]).forEach(a => dispatched.add(a));
-  const roled = [...STAFF, ...MANAGER, ...ADMIN_ONLY], undecided = [...dispatched].filter(a => !roled.includes(a)), ghosts = roled.filter(a => !dispatched.has(a));
-  if (undecided.length || ghosts.length) console.log("   no role:", undecided.join(", "), " not real:", ghosts.join(", "));
-  ok("every action the orders endpoint answers has a role, each exactly once, and every name with a role is a real action", undecided.length === 0 && ghosts.length === 0 && new Set(roled).size === roled.length && dispatched.size === roled.length);
+  const undecided = ACTIONS.filter(a => !P.ACTION_PERM[a]), ghosts = Object.keys(P.ACTION_PERM).filter(a => !dispatched.has(a));
+  if (undecided.length || ghosts.length) console.log("   no permission:", undecided.join(", "), " not real:", ghosts.join(", "));
+  ok("every action the orders endpoint answers needs a function at a level, and every action in the map is a real one", undecided.length === 0 && ghosts.length === 0);
+  ok("every function the map names is on the Roles screen's list", Object.values(P.ACTION_PERM).filter(Array.isArray).flat().every(([fn]) => P.PERM_FUNCTIONS.includes(fn)));
   const gateCalls = [...ordersJs.matchAll(/requireAdmin\(([^\n]*)\)/g)].map(m => m[1]).filter(a => a.trim());
-  ok("every gate call in the orders endpoint passes that action's role", gateCalls.length > 50 && gateCalls.every(a => /, ACTION_ROLE\[body\.action\]$/.test(a)));
-  // Every API file is either open to the public on purpose, or names the role it needs.
+  ok("every gate call in the orders endpoint passes that action's permission", /const ACTION_PERM_ = typeof ACTION_PERM !== "undefined" \? ACTION_PERM : Object\.create\(null\);/.test(ordersJs) && gateCalls.length > 50 && gateCalls.every(a => /, ACTION_PERM_\[body\.action\]$/.test(a)));
+  // Every API file is either open to the public on purpose, or names what it needs.
   const PUBLIC = ["admin-session", "catalog", "checkout", "customer-design", "daily-digest", "download", "image-proxy", "invoice", "shipping", "stripe-webhook", "upload-verify", "verify"];
-  const NEEDS = { "orders": /ACTION_ROLE\[body\.action\]/, "admin-users": /self \? "staff" : "admin"/, "admin-2fa": /"staff", \{ pending: \["2fa"\] \}/, "admin-password": /"staff", \{ pending: \["account", "password"\] \}/,
-    "agent": /, "staff"$/, "design": /, "(staff|manager)"$/, "receipt": /, "staff"$/, "shippo-label": /, "staff"$/, "upload": /, "staff"$/ };
+  const NEEDS = { "orders": /ACTION_PERM_\[body\.action\]/, "admin-users": /\n\s*need, self \? \{ pending/, "admin-2fa": /"staff", \{ pending: \["2fa"\] \}/, "admin-password": /"staff", \{ pending: \["account", "password"\] \}/,
+    "agent": /\[\["production\./, "design": /\[\["catalog\./, "receipt": /\[\["finance\.expenses", "edit"\]/, "shippo-label": /\[\["orders\.shipping", "edit"\]\]$/, "upload": /\[\["catalog\.products", "edit"\]/ };
   const files = fs.readdirSync(__dirname + "/functions/api").filter(f => f.endsWith(".js")).map(f => f.replace(/\.js$/, ""));
   const loose = files.filter(f => { const src = read("functions/api/" + f + ".js"), calls = [...src.matchAll(/await requireAdmin\(([\s\S]*?)\);/g)].map(m => m[1]);
     return PUBLIC.includes(f) ? calls.length > 0 : !(NEEDS[f] && calls.length > 0 && calls.every(a => NEEDS[f].test(a))); });
   if (loose.length) console.log("   not accounted for:", loose.join(", "));
-  ok("every API file is on the public list or names a role at each gate call — a new file is neither until someone decides", loose.length === 0 && files.length === PUBLIC.length + Object.keys(NEEDS).length);
-  const gate = async (role) => A.lib.requireAdmin(A.env, { kind: "admin" }, "", { url: "https://admin.example.com/api/x", headers: { get: (h) => ({ origin: "https://admin.example.com", cookie: "__Host-odd_admin=" + staff })[h.toLowerCase()] || null } }, "no", role);
-  ok("the gate itself: a role it doesn't know — none, a typo, another case, something every object has — means admin only", (await gate("staff")) === null && [undefined, null, "", "STAFF", "staf", "constructor", "toString", 1, {}, ["staff"]].every(() => true) &&
-    (await Promise.all([undefined, null, "", "STAFF", "staf", "constructor", "toString", 1, {}, ["staff"], "manager", "admin"].map(gate))).every(r => r !== null && r.status === 403));
+  ok("every API file is on the public list or names what it needs at each gate call — a new file is neither until someone decides", loose.length === 0 && files.length === PUBLIC.length + Object.keys(NEEDS).length);
+  const gate = async (need) => A.lib.requireAdmin(A.env, { kind: "admin" }, "", { url: "https://admin.example.com/api/x", headers: { get: (h) => ({ origin: "https://admin.example.com", cookie: "__Host-odd_admin=" + staff })[h.toLowerCase()] || null } }, "no", need);
+  ok("the gate itself: something it doesn't understand — none, a typo, another case, something every object has, a function name alone — means admin only", (await gate("staff")) === null && (await gate("*")) === null && (await gate([["orders.details", "read"]])) === null &&
+    (await Promise.all([undefined, null, "", "STAFF", "staf", "constructor", "toString", 1, {}, ["staff"], "orders.details", [["orders.details", "full"]], [["constructor", "read"]], [], "manager", "admin"].map(gate))).every(r => r !== null && r.status === 403));
 
-  console.log("\n=== Managing users is an admin's job ===");
-  const USER_ACTIONS = [{ action: "list" }, { action: "create", name: "X", email: "x@myshop.com", role: "admin" }, { action: "update", id: 3, name: "Sam", email: "sam@myshop.com" }, { action: "setRole", id: 3, role: "admin" },
+  console.log("\n=== Managing users needs Users and roles on your role (only Admin has it at first) ===");
+  const USER_ACTIONS = [{ action: "list" }, { action: "listRoles" }, { action: "saveRole", name: "X", rank: 10, permissions: {} }, { action: "deleteRole", key: "production" },
+    { action: "create", name: "X", email: "x@myshop.com", role: "admin" }, { action: "update", id: 3, name: "Sam", email: "sam@myshop.com" }, { action: "setRole", id: 3, role: "admin" },
     { action: "setStatus", id: 1, status: "disabled" }, { action: "resetPassword", id: 1 }, { action: "reset2fa", id: 1 }, { action: "setRequire2fa", on: false }];
   let leaks = [];
-  for (const body of USER_ACTIONS) for (const [who, c] of [["staff", staff], ["manager", manager]]) if (!forbidden(await A.users(body, c))) leaks.push(who + ":" + body.action);
-  ok("staff and managers are refused every user-management action, and nothing changed", leaks.length === 0 && A.d1.q("SELECT count(*) n FROM users")[0].n === 3 && A.user("sam@myshop.com").role === "staff" && A.user("olive@myshop.com").status === "active");
+  for (const body of USER_ACTIONS) for (const [who, c] of [["staff", staff], ["manager", manager], ["production", prod]]) if (!forbidden(await A.users(body, c))) leaks.push(who + ":" + body.action);
+  if (leaks.length) console.log("   " + leaks.join(", "));
+  ok("manager, back office and production are refused every user and role action, and nothing changed", leaks.length === 0 && A.d1.q("SELECT count(*) n FROM users")[0].n === 4 && A.user("sam@myshop.com").role === "staff" && A.user("olive@myshop.com").status === "active");
   ok("…so a manager cannot make themselves, or anyone, an admin", forbidden(await A.users({ action: "setRole", id: A.user("mo@myshop.com").id, role: "admin" }, manager)) && A.user("mo@myshop.com").role === "manager");
-  ok("everyone can ask who they are", (await A.users({ action: "me" }, staff)).body.user.role === "staff" && (await A.users({ action: "me" }, manager)).body.user.role === "manager");
-  let r = await A.users({ action: "list" }, admin);
-  ok("an admin sees everyone: name, email, role, status, two-step, last sign-in", r.status === 200 && r.body.users.length === 3 && r.body.users.every(u => u.name && u.email && u.role && u.status === "active" && u.has2fa === false && !!u.lastLoginAt && u.passwordUsable === true) &&
-    !JSON.stringify(r.body).includes("hash") && !JSON.stringify(r.body).includes("salt"));
+  r = await A.users({ action: "me" }, prod);
+  ok("everyone can ask who they are, and gets what their role may do and the list it's about", (await A.users({ action: "me" }, staff)).body.user.role === "staff" && (await A.users({ action: "me" }, manager)).body.user.role === "manager" &&
+    r.body.user.role === "production" && r.body.user.roleName === "Production" && r.body.permissions["run.markMade"] === "edit" && r.body.permissions["orders.payments"] === "none" && r.body.permissions["orders.details"] === "read" && Array.isArray(r.body.areas) && r.body.areas.length === P.PERMISSION_AREAS.length);
+  r = await A.users({ action: "me" }, admin);
+  ok("…an admin has everything at full", P.PERM_FUNCTIONS.every(k => r.body.permissions[k] === "full"));
+
+  console.log("\n=== Roles: rank decides who changes whom ===");
+  r = await A.users({ action: "listRoles" }, admin);
+  ok("the four built-in roles, highest first, with how many people have each", r.status === 200 && r.body.roles.map(x => x.key).join() === "admin,manager,staff,production" && r.body.roles.map(x => x.userCount).join() === "1,1,1,1" &&
+    r.body.roles[0].locked && !r.body.roles[0].canEdit && r.body.roles.slice(1).every(x => x.canEdit) && r.body.myRank === 100);
+  ok("Admin can't be changed by anyone — not even an admin", (r = await A.users({ action: "saveRole", key: "admin", name: "Admin", rank: 99, permissions: {} }, admin)).status === 403 && /can't be changed/.test(r.body.message) &&
+    A.d1.q("SELECT permissions FROM roles WHERE key = 'admin'")[0].permissions === null);
+  const mgrRole = (await A.users({ action: "listRoles" }, admin)).body.roles.find(x => x.key === "manager");
+  mgrRole.permissions.fns["settings.users"] = "edit";
+  r = await A.users({ action: "saveRole", key: "manager", name: "Manager", rank: 75, permissions: mgrRole.permissions }, admin);
+  ok("an admin gives Manager the Users page: it takes effect at once, without signing anyone out", r.status === 200 && (await A.users({ action: "list" }, manager)).status === 200 && A.audit("security.role_changed").length === 1);
+  const sam = A.user("sam@myshop.com").id, mo = A.user("mo@myshop.com").id, olive = A.user("olive@myshop.com").id, pat = A.user("pat@myshop.com").id;
+  ok("a manager can move Back office and Production people between those roles", (await A.users({ action: "setRole", id: pat, role: "staff" }, manager)).status === 200 && A.user("pat@myshop.com").role === "staff" &&
+    (await A.users({ action: "setRole", id: pat, role: "production" }, manager)).status === 200);
+  ok("…but can't make anyone a manager or an admin", (await A.users({ action: "setRole", id: pat, role: "manager" }, manager)).status === 403 && (await A.users({ action: "setRole", id: pat, role: "admin" }, manager)).status === 403 &&
+    (await A.users({ action: "create", name: "Max", email: "max@myshop.com", role: "manager" }, manager)).status === 403 && A.user("pat@myshop.com").role === "production" && !A.user("max@myshop.com"));
+  await A.users({ action: "create", name: "Meg Manager", email: "meg@myshop.com", role: "manager" }, admin);
+  const meg = A.user("meg@myshop.com").id;
+  ok("…and can't demote, disable or reset another manager or an admin — only someone ranked above them can", ["setRole", "setStatus", "resetPassword", "reset2fa", "update"].every(() => true) &&
+    (await A.users({ action: "setRole", id: meg, role: "staff" }, manager)).status === 403 && (await A.users({ action: "setStatus", id: meg, status: "disabled" }, manager)).status === 403 &&
+    (await A.users({ action: "resetPassword", id: olive }, manager)).status === 403 && (await A.users({ action: "setRole", id: olive, role: "staff" }, manager)).status === 403 &&
+    (await A.users({ action: "update", id: olive, name: "Olive", email: "olive@myshop.com" }, manager)).status === 403 && A.user("meg@myshop.com").role === "manager" && A.user("olive@myshop.com").role === "admin");
+  ok("nobody changes their own role, not even to lower it", (r = await A.users({ action: "setRole", id: mo, role: "staff" }, manager)).status === 409 && /your own/.test(r.body.message) && A.user("mo@myshop.com").role === "manager");
+  ok("a manager can't change the Manager role itself, nor Admin", (await A.users({ action: "saveRole", key: "manager", name: "Manager", rank: 74, permissions: mgrRole.permissions }, manager)).status === 403 &&
+    (await A.users({ action: "saveRole", key: "admin", name: "Admin", rank: 1, permissions: {} }, manager)).status === 403);
+  const prodRole = (await A.users({ action: "listRoles" }, manager)).body.roles.find(x => x.key === "production");
+  ok("…the roles list says which a manager may change", (await A.users({ action: "listRoles" }, manager)).body.roles.map(x => x.key + ":" + x.canEdit).join() === "admin:false,manager:false,staff:true,production:true");
+  const tooMuch = JSON.parse(JSON.stringify(prodRole.permissions)); tooMuch.fns["settings.global"] = "edit";
+  ok("…and can't give a role more than their own role has", (r = await A.users({ action: "saveRole", key: "production", name: "Production", rank: 25, permissions: tooMuch }, manager)).status === 403 && /more than your own/.test(r.body.message));
+  ok("…nor rank a role at or above their own", (await A.users({ action: "saveRole", name: "Lead", rank: 75, permissions: prodRole.permissions }, manager)).status === 403);
+
+  console.log("\n=== Adding a role ===");
+  const lead = JSON.parse(JSON.stringify(prodRole.permissions));
+  lead.fns["orders.payments"] = "read"; lead.items.runtransfer = false; lead.menus.production = false;
+  r = await A.users({ action: "saveRole", name: "Shift lead", rank: 40, permissions: lead }, manager);
+  const leadKey = r.body.role && r.body.role.key;
+  ok("a manager adds a role below their own; it is stored clean and audited", r.status === 200 && /^r_[0-9a-f]{12}$/.test(leadKey) && r.body.role.permissions.fns["orders.payments"] === "read" && r.body.role.permissions.items.runtransfer === false &&
+    A.audit("security.role_created").length === 1 && (await A.users({ action: "saveRole", name: "shift LEAD", rank: 30, permissions: lead }, manager)).status === 409);
+  ok("…and can give it to someone", (await A.users({ action: "setRole", id: pat, role: leadKey }, manager)).status === 200 && A.user("pat@myshop.com").role === leadKey);
+  const lc = (await A.signIn("pat@myshop.com", "a password of their own")).cookie;
+  r = await A.users({ action: "me" }, lc);
+  ok("its users get exactly that: what's switched off is none, whatever its levels said", r.body.user.roleName === "Shift lead" && r.body.permissions["orders.payments"] === "read" && r.body.permissions["transfer.mark"] === "none" && r.body.permissions["production.maintenanceLog"] === "none" && r.body.permissions["run.markMade"] === "edit");
+  ok("…and the server holds them to it", !forbidden(await A.orders({ action: "listAccounts" }, lc)) && forbidden(await A.orders({ action: "addPayment" }, lc)) && forbidden(await A.orders({ action: "makeTransferLine" }, lc)) &&
+    forbidden(await A.orders({ action: "recordMaintenance" }, lc)) && !forbidden(await A.orders({ action: "startRun" }, lc)));
+  ok("a role someone has can't be deleted, nor a built-in one", (await A.users({ action: "deleteRole", key: leadKey }, admin)).status === 409 && (await A.users({ action: "deleteRole", key: "production" }, admin)).status === 409 && A.d1.q("SELECT count(*) n FROM roles")[0].n === 5);
+  ok("a role is deleted only with full Users and roles (a manager has edit)", forbidden(await A.users({ action: "deleteRole", key: leadKey }, manager)));
+  await A.users({ action: "setRole", id: pat, role: "production" }, manager);
+  ok("once nobody has it, an admin can delete it", (await A.users({ action: "deleteRole", key: leadKey }, admin)).status === 200 && A.d1.q("SELECT count(*) n FROM roles")[0].n === 4 && A.audit("security.role_deleted").length === 1);
+  ok("a role that no longer exists (or never did) can't be given", (await A.users({ action: "setRole", id: pat, role: leadKey }, admin)).status === 400 && (await A.users({ action: "setRole", id: pat, role: "constructor" }, admin)).status === 400);
+  await A.users({ action: "setStatus", id: meg, status: "disabled" }, admin);
+  r = await A.users({ action: "list" }, admin);
+  ok("an admin sees everyone: name, email, role, status, two-step, last sign-in", r.status === 200 && r.body.users.length === 5 && r.body.users.filter(u => u.id !== meg).every(u => u.name && u.email && u.role && u.status === "active" && u.has2fa === false && !!u.lastLoginAt && u.passwordUsable === true) &&
+    !JSON.stringify(r.body).includes("hash") && !JSON.stringify(r.body).includes("salt") && true);
   ok("a new user needs a name, a real email and a role that exists", (await A.users({ action: "create", name: "", email: "a@b.co", role: "staff" }, admin)).status === 400 && (await A.users({ action: "create", name: "A", email: "nope", role: "staff" }, admin)).status === 400 &&
     (await A.users({ action: "create", name: "A", email: "a@b.co", role: "owner" }, admin)).status === 400 && (await A.users({ action: "create", name: "A", email: "a@b.co", role: "constructor" }, admin)).status === 400);
-  const sam = A.user("sam@myshop.com").id, mo = A.user("mo@myshop.com").id, olive = A.user("olive@myshop.com").id;
   r = await A.users({ action: "update", id: sam, name: "Samantha Staff", email: "samantha@myshop.com" }, admin);
   ok("a name or an email can be corrected, and a taken email can't be given to someone else", r.status === 200 && A.user("samantha@myshop.com").name === "Samantha Staff" && (await A.users({ action: "update", id: sam, name: "S", email: "mo@myshop.com" }, admin)).status === 409 &&
     (await A.orders({ action: "getOrdersAllShops" }, staff)).status === 200);
@@ -92,7 +162,7 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU", SECRET3 = "MFRG
   r = await A.users({ action: "setStatus", id: sam, status: "disabled" }, admin);
   ok("their session stops working that instant", r.status === 200 && r.body.user.status === "disabled" && (await A.orders({ action: "getOrdersAllShops" }, samCookie)).status === 401 && (await A.users({ action: "me" }, samCookie)).status === 401);
   ok("they can't sign in, and are told nothing a stranger wouldn't be", (r = await A.signIn("samantha@myshop.com", "a password of their own")).status === 401 && r.body.message === (await A.signIn("nobody@myshop.com", "x")).body.message);
-  ok("the row is kept, so history keeps its name", A.d1.q("SELECT count(*) n FROM users")[0].n === 3 && A.user("samantha@myshop.com").status === "disabled" && !fs.readFileSync(__dirname + "/functions/api/admin-users.js", "utf8").includes("DELETE FROM users"));
+  ok("the row is kept, so history keeps its name", A.d1.q("SELECT count(*) n FROM users")[0].n === 5 && A.user("samantha@myshop.com").status === "disabled" && !fs.readFileSync(__dirname + "/functions/api/admin-users.js", "utf8").includes("DELETE FROM users"));
   // Even a session row that somehow survived is refused: the gate checks the user, not just the session.
   A.d1._raw.exec(`UPDATE users SET status = 'active' WHERE id = ${sam}`); samCookie = (await A.signIn("samantha@myshop.com", "a password of their own")).cookie; A.d1._raw.exec(`UPDATE users SET status = 'disabled' WHERE id = ${sam}`);
   ok("…and a session that outlived the disabling is refused anyway", A.sessions() >= 1 && (await A.orders({ action: "getOrdersAllShops" }, samCookie)).status === 401);
@@ -184,25 +254,36 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU", SECRET3 = "MFRG
   // page's own functions, cut out of public/admin.js, against stand-ins.
   const adminJs = read("public/admin.js");
   const cut = (start, end) => { const i = adminJs.indexOf(start); const j = adminJs.indexOf(end, i); if (i < 0 || j < 0) throw new Error("admin.js no longer has: " + start); return adminJs.slice(i, j); };
-  const roles = (me) => new Function("adminMe", "ADMIN_NAV_GROUPS", "adminPageOn_",
-    cut("const adminRoleRank_", "// The email typed") .replace("// After a step is finished", "") .split("// The marker also remembers")[0] + cut("const ADMIN_ONLY_PAGES", "function renderRoleOff_") +
-    "\nreturn { adminCan_, adminPageRole_, adminNavGroups_, adminCanOpen_ };")(me, new Function(cut("const ADMIN_NAV_GROUPS = [", "// Flat list of every page hash") + "\nreturn ADMIN_NAV_GROUPS;")(), () => true);
-  const pagesFor = (role) => roles(role ? { role } : null).adminNavGroups_().flatMap(g => g.items.filter(Array.isArray).map(i => i[0]));
-  const R = roles({ role: "staff" });
-  ok("each page has a lowest role: Users, the audit log and Global settings are an admin's; package sizes, shops and the books a manager's", ["users", "audit", "settings", "catalog/settings"].every(p => R.adminPageRole_(p) === "admin") &&
-    ["packages", "money", "reconcile", "books", "catalog/new-org", "catalog/orgs/league-101/edit", "revenue", "salestax", "cogs", "expenses"].every(p => R.adminPageRole_("#" + p) === "manager") &&
-    ["orders", "", "home", "catalog", "catalog/orgs/league-101/products", "inventory", "designs/league-101", "security", "password", "machines"].every(p => R.adminPageRole_(p) === "staff"));
+  const NAV = new Function(cut("const ADMIN_NAV_GROUPS = [", "// Flat list of every page hash") + "\nreturn ADMIN_NAV_GROUPS;")();
+  const roles = (perms) => new Function("adminPerms", "adminAreas", "ADMIN_NAV_GROUPS", "adminPageOn_",
+    cut("const ADMIN_LEVEL_RANK_", "function adminRoleName_") + cut("function adminPageItem_(hash){", "// Where someone lands") +
+    "\nreturn { adminCan_, adminPageItem_, adminNavGroups_, adminCanOpen_, adminCanOpenPage_ };")(perms, P.PERMISSION_AREAS, NAV, () => true);
+  const of = (role) => roles(role ? P.effectivePermissions(P.DEFAULT_ROLES[role]) : null);
+  const pagesFor = (role) => of(role).adminNavGroups_().flatMap(g => g.items.filter(Array.isArray).map(i => i[0]));
+  const R = of("staff");
+  ok("each page belongs to a menu item: a shop's settings, a new shop and the wizard are Shop setup's; the old #catalog/settings is Global settings'",
+    ["setup/x", "wizard/new", "catalog/new-org", "catalog/orgs/league-101/edit"].every(h => R.adminPageItem_("#" + h) === "setup") && R.adminPageItem_("catalog/settings") === "settings" &&
+    R.adminPageItem_("catalog/orgs/league-101/products") === "catalog" && R.adminPageItem_("") === "home" && R.adminPageItem_("designs/league-101") === "designs" && R.adminPageItem_("security") === "" && R.adminPageItem_("password") === "");
+  ok("Production's menu is Home, Orders, Run Order, Run Transfer Sheets, the Production menu and its own account — nothing else", (() => {
+    const P_ = of("production"), top = ["home", "orders", "runorder", "runtransfer", "catalog"].filter(h => P_.adminCanOpen_(h)), menus = P_.adminNavGroups_().map(g => g.label);
+    return top.join() === "home,orders,runorder,runtransfer" && menus.join() === "Production,Settings" &&
+      pagesFor("production").filter(h => !["security", "password"].includes(h)).every(h => NAV.find(g => g.label === "Production").items.some(i => i[0] === h)) && !P_.adminCanOpen_("users") && !P_.adminCanOpen_("inventory"); })());
+  ok("…and in it only making things and moving them on is more than Read", (() => { const P_ = of("production");
+    return P_.adminCan_("run.markMade", "edit") && P_.adminCan_("orders.stepsLate", "edit") && P_.adminCan_("orders.shipping", "edit") && P_.adminCan_("transfer.mark", "edit") &&
+      !P_.adminCan_("orders.details", "edit") && !P_.adminCan_("orders.stepsEarly", "edit") && !P_.adminCan_("production.machines", "edit") && !P_.adminCan_("orders.payments", "read") && !P_.adminCan_("costs.view"); })());
   ok("the menu a Back office user sees has none of the manager's or admin's pages; a manager's has no Users or Audit Log; an admin's has everything", !pagesFor("staff").some(p => ["users", "audit", "settings", "packages", "money", "reconcile", "books"].includes(p)) && !pagesFor("staff").some(p => ["revenue", "salestax", "cogs", "expenses"].includes(p)) && pagesFor("staff").includes("inventory") && pagesFor("staff").includes("password") &&
-    ["packages", "money", "books", "revenue", "salestax", "cogs", "expenses"].every(p => pagesFor("manager").includes(p)) && !pagesFor("manager").includes("users") && !pagesFor("manager").includes("audit") && !pagesFor("manager").includes("settings") && ["users", "audit", "settings"].every(p => pagesFor("admin").includes(p)));
-  ok("a role the page doesn't know hides nothing (the server still refuses): nobody is locked out of the menu by a newer server", pagesFor(null).includes("users") && pagesFor("auditor").includes("users") && pagesFor("constructor").includes("settings"));
+    ["packages", "money", "books", "revenue", "salestax", "cogs", "expenses"].every(p => pagesFor("manager").includes(p)) && !pagesFor("manager").includes("users") && !pagesFor("manager").includes("audit") && pagesFor("manager").includes("settings") && ["users", "audit", "settings"].every(p => pagesFor("admin").includes(p)));
+  ok("before the server has said what a role may do, the page hides nothing (the server still refuses): nobody is locked out of the menu by an older server", pagesFor(null).includes("users") && of(null).adminCan_("settings.global", "full"));
+  ok("a menu or item switched off is gone, and so are its pages", (() => { const off = JSON.parse(JSON.stringify(P.DEFAULT_ROLES.manager)); off.permissions.menus.finance = false; off.permissions.items.revenue = false;
+    const M = roles(P.effectivePermissions(off)); return !M.adminNavGroups_().some(g => g.label === "Finance") && !M.adminCanOpen_("money") && !M.adminCanOpen_("revenue") && M.adminCanOpen_("cogs"); })());
   ok("Users is in the Settings menu, with 2FA, Change password, Sign out and Sign out everywhere", /\["users", "Users"\], \["security", "Security \(2FA\)"\], \["password", "Change password"\],\s*\{ action: "adminSignOut\(\)", label: "Sign out" \}, \{ action: "adminSignOutEverywhere\(\)", label: "Sign out everywhere" \}/.test(adminJs));
   const route = cut("async function adminRoute()", "function promptAdminPassphrase");
   ok("the router shows a step that is owed before any page, and a page above the user's role says so instead of loading", route.indexOf("if (adminPending) { renderPendingStep_(app); return; }") > 0 && route.indexOf("if (adminPending)") < route.indexOf("renderOrdersPage(app)") &&
-    route.indexOf("if (!adminCan_(adminPageRole_(raw))) { renderRoleOff_(app, raw); return; }") > 0 && route.indexOf("renderRoleOff_") < route.indexOf("renderOrdersPage(app)") && /if \(raw === "users"\) \{ renderUsers\(app\); return; \}/.test(route));
+    route.indexOf("if (!adminCanOpenPage_(raw)) { renderRoleOff_(app, raw); return; }") > 0 && route.indexOf("renderRoleOff_") < route.indexOf("renderOrdersPage(app)") && /if \(raw === "users"\) \{ renderUsers\(app\); return; \}/.test(route));
   const start = cut("async function loadAdminOrgList(){", "// Straight after signing in");
   ok("on start-up a step that is owed is drawn BEFORE any data is asked for, and the menu stays hidden", start.indexOf("if(adminPending){ renderPendingStep_(") > 0 && start.indexOf("if(adminPending)") < start.indexOf('action: "listOrgs"') && /if\(!adminOrgs \|\| !adminKey \|\| adminPending\)\{ if\(nav\) nav\.remove\(\); return; \}/.test(adminJs));
   ok("…a server that says a step is owed is believed, rather than treated as signed out", start.indexOf('data.code === "setup_required"') > 0 && start.indexOf('data.code === "setup_required"') < start.indexOf("clearAdminAuth();"));
-  ok("only an admin is sent to Global settings after signing in, and nobody is left on a page above their role", /if \(!adminCan_\(adminPageRole_\(location\.hash\)\)\) adminSetHash\("orders"\);/.test(start) && /if \(adminMe && adminMe\.role === "admin"\) await openSettingsIfSetupIncomplete_\(\);/.test(start));
+  ok("only someone who can change Global settings is sent there after signing in, and nobody is left on a page they can't open", /if \(!adminCanOpen_\(location\.hash\)\) adminSetHash\(adminFirstPage_\(\)\);/.test(start) && /if \(adminCan_\("settings\.global", "edit"\)\) await openSettingsIfSetupIncomplete_\(\);/.test(start));
   ok("being refused for your role doesn't sign you out: the page signs out on 401, not on any error", !/if\(!res\.ok \|\| data\.status === "error"\)\{\n      clearAdminAuth\(\);\n      showToast/.test(adminJs) && (adminJs.match(/if\(res\.status === 401\) clearAdminAuth\(\);/g) || []).length === 8);
   ok("sign-in sends the email with the password, remembers the email (never the password), and keeps who signed in and what they owe", /body: JSON\.stringify\(\{email, key\}\)/.test(adminJs) && /body: JSON\.stringify\(\{email, key, totpCode\}\)/.test(adminJs) &&
     /adminPending = data\.pending \|\| null;\n      adminMe = data\.user \|\| null;/.test(adminJs) && /rememberAdminEmail_\(\(data\.user && data\.user\.email\) \|\| ""\)/.test(adminJs) && !/localStorage\.setItem\([^)]*key\b[^)]*\)/.test(cut("async function adminLogin(){", "async function fetchOrders")));
@@ -236,17 +317,25 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU", SECRET3 = "MFRG
   f = await chg({}, { ok: true, json: async () => ({ status: "ok", signInAgain: true }) });
   ok("…success signs out, for a fresh sign-in with the new password", f.out.signedOut === 1 && /Sign in with the new one/.test(f.out.toast));
   // What a user can't use isn't shown at all: no menu entry, no link, no button.
-  ok("Global settings is an admin's alone: hidden from a manager's menu, and only an admin can open it", !roles({ role: "manager" }).adminCanOpen_("settings") && roles({ role: "admin" }).adminCanOpen_("settings") &&
+  ok("Global settings is hidden from Back office and Production; a manager can open it to read", !of("staff").adminCanOpen_("settings") && !of("production").adminCanOpen_("settings") && of("manager").adminCanOpen_("settings") && !of("manager").adminCan_("settings.global", "edit") &&
     !adminJs.includes("globalSettingsReadOnly_"));
-  ok("the page asks the server who is signed in before drawing the menu (a missing or stale copy can't show everything)",
-    /await refreshAdminMe_\(\);\s*renderAdminNav\(\);/.test(cut("async function loadAdminOrgList(){", "function renderPickerOrgButtons")) && /action: "me"/.test(cut("async function refreshAdminMe_(){", "async function loadAdminOrgList(){")));
-  ok("sign-in only takes an admin to Global settings to finish setup; the 'turned off' page only offers it to an admin", /if \(!adminCanOpen_\("settings"\)\) return;/.test(cut("async function openSettingsIfSetupIncomplete_", "function renderPickerOrgButtons")) &&
+  ok("the page asks the server who is signed in, and what they may do, before drawing the menu (a missing or stale copy can't show everything)",
+    /await refreshAdminMe_\(\);\s*renderAdminNav\(\);/.test(cut("async function loadAdminOrgList(){", "function renderPickerOrgButtons")) && /action: "me"/.test(cut("async function refreshAdminMe_(){", "async function loadAdminOrgList(){")) &&
+    /adminPerms = data\.permissions;/.test(cut("async function refreshAdminMe_(){", "async function loadAdminOrgList(){")) && /adminMe = null;\n  adminPerms = null;/.test(adminJs));
+  ok("sign-in only takes someone who can change Global settings there to finish setup; the 'turned off' page only offers it to whoever can open it", /if \(!adminCanOpen_\("settings"\)\) return;/.test(cut("async function openSettingsIfSetupIncomplete_", "function renderPickerOrgButtons")) &&
     /\$\{adminCanOpen_\("settings"\) \? `<button class="admin-btn" onclick="location\.hash='#settings'">Open Global settings<\/button>` : ""\}/.test(adminJs));
-  ok("buttons for what only a manager may do aren't drawn for back office: a shop's Edit, Publish in the shop bar, Create test transaction, managing expense categories",
-    /\$\{adminCanOpen_\("catalog\/orgs\/" \+ o\.orgId \+ "\/edit"\) \? `<button/.test(adminJs) && /const pubBtn = !shop \|\| !manager \? ""/.test(adminJs) &&
-    /\$\{adminCan_\("manager"\) \? `<button class="admin-btn" data-org="\$\{escapeHtml\(selectedOrgId\)\}" onclick="createTestTransaction/.test(adminJs) && /\$\{adminCan_\("manager"\) \? `<button type="button" class="admin-btn" id="expCatManage"/.test(adminJs));
-  ok("the buttons that make or publish shops are drawn only for a manager or above", /\$\{adminCan_\("manager"\) \? `<button class="admin-btn wiz-start-btn" onclick="location\.hash='#wizard\/new'">＋ New shop setup<\/button>/.test(adminJs));
-  ok("the Users page offers the three roles by their names, and the two-step switch", /const ADMIN_ROLE_LABELS = \{ staff: "Back office", manager: "Manager", admin: "Admin" \};/.test(adminJs) && /Require two-step sign-in for everyone/.test(adminJs) && /usersCall_\(\{action: "setRequire2fa", on\}\)/.test(adminJs));
+  // The markup checks below read past the permission tags (data-need=…), which test194 checks on their own.
+  const markup_ = (t) => t.replace(/ data-need(?:-form)?="[^"]*"/g, ""), markup = markup_(adminJs);
+  ok("buttons follow the role's functions: a shop's Edit, Create test transaction, Import orders, managing expense categories, New shop setup",
+    /\$\{adminCanOpen_\("catalog\/orgs\/" \+ o\.orgId \+ "\/edit"\) \? `<button/.test(markup) && /const manager = adminCan_\("catalog\.shops", "edit"\);/.test(markup) &&
+    /\$\{adminCan_\("catalog\.shops", "edit"\) \? `<button class="admin-btn" data-org="\$\{escapeHtml\(selectedOrgId\)\}" onclick="createTestTransaction/.test(markup) && /\$\{adminCan_\("orders\.import", "edit"\) \? `<button[^`]*pickOrderImportFile_/.test(markup) &&
+    /\$\{adminCan_\("finance\.expenses", "edit"\) \? `<button type="button" class="admin-btn" id="expCatManage"/.test(markup) && /\$\{adminCan_\("catalog\.shops", "edit"\) \? `<button class="admin-btn wiz-start-btn"/.test(markup));
+  const cell = cut("function adminActionCell(org, o){", "// The order row's Resend downloads");
+  ok("an order's row draws Delete, Payments, Mark as paid, Edit items and each step only for a role that may use them", /const deleteBtn = !can\("orders\.details", "full"\)/.test(markup_(cell)) && /const paymentsBtn = !can\("orders\.payments", "read"\)/.test(markup_(cell)) &&
+    /can\("orders\.payments", "edit"\) \? `<button class="admin-btn" \$\{dataAttrs\} onclick="markOrderPaid/.test(markup_(cell)) && /can\(FULFILLMENT_LATE_\.includes\(s\.stage\) \? "orders\.stepsLate" : "orders\.stepsEarly", "edit"\)/.test(markup_(cell)) &&
+    /\$\{adminCan_\("orders\.details", "full"\) \? `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" style="color:#fff;" data-org="\$\{escapeHtml\(org\.orgId\)\}" onclick="bulkCancelLineItems/.test(markup));
+  ok("the Users page has the Roles and permissions tab, offers only the roles you may give, and keeps the two-step switch for admins", /tab\("roles", "Roles and permissions"\)/.test(adminJs) && /r\.rank < myRank \|\| \(iAmAdmin && r\.key === "admin"\)/.test(adminJs) &&
+    /Require two-step sign-in for everyone/.test(adminJs) && /usersCall_\(\{action: "setRequire2fa", on\}\)/.test(adminJs) && /action: "saveRole"/.test(adminJs) && /action: "deleteRole"/.test(adminJs));
   ok("recovery codes are shown once, at enrolment, and the forced enrolment only moves on when the user says they have them", /render2FACodes_\(data\.recoveryCodes, after\)/.test(adminJs) && /if\(wasForced\)\{ _tfa\.forced = false; adminStepDone_\(data\.pending\); \}/.test(adminJs));
 
   console.log(`\n${pass} passed, ${fail} failed`);

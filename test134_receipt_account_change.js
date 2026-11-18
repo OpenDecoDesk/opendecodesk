@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
@@ -169,8 +170,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 
   console.log("\n=== Role gate, schema, voided ===");
   const src = read("functions/api/orders.js");
-  const mgr = src.match(/const MANAGER_ACTIONS = \[[\s\S]*?\];/)[0], staff = src.match(/const STAFF_ACTIONS = \[[\s\S]*?\];/)[0];
-  ok("both actions need the manager role", /"previewReceiptAccountChange"/.test(mgr) && /"setReceiptAccount"/.test(mgr) && !/ReceiptAccount/.test(staff));
+  ok("both actions need the manager role", lowest("previewReceiptAccountChange") === "manager" && lowest("setReceiptAccount") === "manager");
   await lib.voidInventoryMovement(d1, oldId, "dup");
   ok("a voided purchase can't be used to find a receipt", (await call({ action: "previewReceiptAccountChange", kind: "blanks", movementId: oldId })).status === 404);
 

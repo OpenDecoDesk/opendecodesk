@@ -199,7 +199,7 @@ const wait = async (cond, n = 300) => { for (let i = 0; i < n && !cond(); i++) a
   globalThis.__role = "manager"; r = await save(19);
   ok("…a manager's save of a changed price does", r.status === 200 && r.body.pricing && r.body.pricing.productId === "tee");
   globalThis.__role = null;
-  ok("the product form shows the panel only to a manager (a worker sees a note)", /isEdit && adminCan_\("manager"\) \? `<div id="pricingTable"/.test(read("public/admin.js")) && /A manager sees what each item costs and leaves here/.test(read("public/admin.js")));
+  ok("the product form shows the panel only to a manager (a worker sees a note)", /isEdit && adminCan_\("costs\.view", "read"\) \? `<div id="pricingTable"/.test(read("public/admin.js")) && /A manager sees what each item costs and leaves here/.test(read("public/admin.js")));
 
   console.log("\n=== Sales tax added on top of the prices ===");
   // OpenDecoDesk can add the tax on top instead (Global settings → Sales tax): the customer pays it over the

@@ -14,7 +14,8 @@
 import { classifyHost, rootDomain, adminSubdomains, isDesktopEdition, desktopLockedFeatures, desktopSuppliersOn, desktopEmailOn } from "../_lib/hostConfig.js";
 import { getCatalogData, invalidateCatalogVersionCache } from "../_lib/catalogCache.js";
 import { validateOrgFields, validateProductImages, cleanImageUrl, PRODUCT_ID_RE } from "../_lib/catalogValidation.js";
-import { requireAdmin, adminActor, adminUser } from "../_lib/adminAuth.js";
+import { requireAdmin, adminActor, adminUser, adminCan } from "../_lib/adminAuth.js";
+import { ACTION_PERM, stageFn } from "../_lib/permissions.js";
 import { copyVendorImage } from "../_lib/vendorImages.js";
 import { countStitches } from "../_lib/stitchCount.js";
 import { findOrphanImages, deleteOrphanImages } from "../_lib/orphanImages.js";
@@ -236,18 +237,7 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "getTransferQueue", "setTransferReceived", "getGangSheet", "makeTransferLine", "setTransfersApplied", "refreshOrderFromCatalog",
 ]);
 
-// ---- Roles (functions/_lib/adminAuth.js) -------------------------------------------------------
-// The LOWEST role that may use each action: staff ("Back office") < manager < admin. Every
-// requireAdmin call in this file passes ACTION_ROLE[body.action], and requireAdmin treats anything
-// that isn't exactly "staff" or "manager" as admin-only — so an action that is missing from these
-// lists is closed to everyone but admins, and the roles test fails until someone decides.
-//   admin    Global settings (every write), the audit log
-//   manager  shops, domains, publishing, package sizes, the test transaction; the books: money,
-//            reconciling, expense categories, closing periods, the accountant's export; and
-//            READING Global settings
-//   staff    everything else: orders, payments and refunds, shipping, production, inventory,
-//            catalog content, equipment lists, expenses, reports, design files — plus the few
-//            settings their screens read (package sizes, machine settings, the shop list)
+// ---- Roles: see functions/_lib/permissions.js (ACTION_PERM) and functions/_lib/adminAuth.js -----
 // The combination a Stock window action is about (migrations/0080): `color` + `picks` [{location, graphicId, ink}],
 // or `variant` (the key of one already in stock). db.js checks the picks against the product, as an order's are.
 function stockComboArgs_(b) {
@@ -300,75 +290,10 @@ function checkProductPrice_(body, before) {
   return "";
 }
 
-const ADMIN_ONLY_ACTIONS = [
-  "updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "updateLocaleSettings", "updateSalesTaxSettings", "updateShipFromAddress",
-  "getAccountingSettings", "updateAccountingSettings",   // Global settings → Bookkeeping: when an order counts as sold
-  "updateMachineSettings", "backfillStripeFees", "getAuditLog", "sendTestEmail", "updatePricingSettings", "findOrphanImages", "deleteOrphanImages", "vendorDirectorySearch", "vendorDirectoryEndpoints", "saveVendorConnection", "deleteVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks",
-  // Ordering from a supplier spends the shop's money (the card / terms the supplier has on file): admin only.
-  "previewSupplierOrder", "placeSupplierOrder", "listSupplierOrders", "checkSupplierOrderShipments", "cancelSupplierOrder", "listVendorApiLog", "getVendorApiLogEntry",
-  "updateBrandRules",
-  // The domain step (Global settings → Your domain): a Cloudflare key that can change the account's Workers and DNS.
-  "getCloudflareSetup", "connectCloudflare",
-  "updateRushSettings",   // rush fees (migrations/0082)
-  "updateEmailSettings", "sendSampleEmail",   // Global settings → Customer emails
-  "checkMailbox",                             // Global settings → Email: signs in to the owner's mailbox with a password typed there
-  "getShopRate", "saveShopRate",              // Finance → Shop rate: the business's costs, and the target every price is held to
-  "updateDigitalSettings",                    // Global settings → Digital products: the delivery defaults
-];
-const MANAGER_ACTIONS = [
-  "getRushSettings", "setRushFee",                                // rush fees (migrations/0082)
-  // The business's money (2026-11): revenue, sales tax, inventory and COGS, expenses — a manager's, like costs and margins.
-  "getRevenueReport", "getSalesTaxReport", "getInventoryReport", "getExpenseReport",
-  "listExpenses", "saveExpense", "deleteExpense", "previewExpenseImport", "importExpenses",
-  "importOrders",                                                 // Orders → Import orders (Etsy, Shopify, a sheet; migrations/0087)
-  "listProductFiles", "deleteProductFile", "addProductFileFromDesign", // a digital product's files (migrations/0086)
-  "getDigitalSettings", "getOrderDownloads", "resendDownloads", "resetDownloads", "revokeDownloads", // and its buyers' downloads
-  "getEmailSettings", "previewCustomerEmail", "samplePdf",       // Global settings → Customer emails: preview and sample PDF
-  "getPublishState", "getPreviewLink",                            // publish per shop (migrations/0076)
-  "previewDiscardShopChanges", "discardShopChanges",              // Discard changes… (back to the published shop)
-  "applyRulePrices",                                              // Brand rules → Show price impact → Apply
-  "setOrgReady",                                                  // Shop setup → Go live
-  "getShopWizard", "saveShopWizard", "listShopWizards", "deleteShopWizard", "buildProductFromBlank",   // New shop setup wizard
-  "createOrg", "updateOrg", "setupOrgDomain", "getOrgDomainStatus", "publish", "createTestTransaction", "getGlobalSettings", "getFeatures",
-  "getBusinessProfile", "getLocaleSettings", "getSalesTaxSettings", "getShipFromAddress", "getSetupStatus", "setBoxPresets", "saveAccount",
-  "saveMoneyDefaults", "listMoney", "saveMoneyEntry", "deleteMoneyEntry", "getReconciliation", "importStatement", "autoMatchStatement",
-  "matchStatementLine", "unmatchStatementLine", "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth",
-  "listCashoutPayments", "analyzePricing", "getPricingSettings", "saveVendor", "deleteVendor",
-  "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",   // recurring expenses (migrations/0085)
-  "getBrandRules", "addBrandApproval", "revokeBrandApproval",   // brand rules (migrations/0075)
-  "recomputeBlankAverageCosts", "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount", "editTransferSheet", "saveExpenseCategory", "deleteExpenseCategory", "closePeriod", "reopenPeriod", "getAccountantExport",
-];
-const STAFF_ACTIONS = [
-  "listBrandApprovals",
-  "listOrgsAdmin", "listProducts", "createProduct", "updateProduct", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "importProducts", "importBlanks", "previewVendorBlanks", "applyVendorBlanks", "copyVendorImage", "suggestColorGroups", "removeBlankImages", "listVendorConnections", "fetchVendorProducts", "getBlanksToOrder", "freeShippingSuggestions", "listVendors", "recordRestockOrder", "cancelRestockOrder",
-  "getMachineSettings", "getBoxPresets", "getInventory", "createInventoryItem", "updateInventoryItem", "deleteInventoryItem", "getBlankReadyCounts", "getBlanks",
-  "createBlank", "updateBlank", "deleteBlank", "mergeBlanks", "listThreads", "saveThread", "deleteThread", "importThreadChart", "listSpoolSizes",
-  "saveSpoolSize", "deleteSpoolSize", "saveThreadInventory", "deleteThreadInventory", "getNeedleSettings", "saveNeedleSize", "deleteNeedleSize",
-  "saveNeedleType", "deleteNeedleType", "listHoops", "saveHoop", "deleteHoop", "listLocations", "saveLocation", "deleteLocation",
-  "listProductCategories", "saveProductCategory", "deleteProductCategory",
-  "listProductGraphicImages", "setProductGraphicImage", "deleteProductGraphicImage", "listDesigns", "getDesign", "saveDesign", "deleteDesign",
-  "saveDesignVersion", "updateDesignVersionColors", "setProductDesign", "listProductDesigns", "setProductDesigns", "getOrderItemDesigns",
-  "saveOrderItemDesign", "getCatalogIssues", "getOrderItemFiles", "saveOrderItemFile", "deleteOrderItemFile", "listMachines", "getMachine",
-  "saveMachine", "deleteMachine", "setMachineHoop", "setMachineNeedle", "recordMachineDiscovery", "getProductionQueue", "markManufacturedOnMachine",
-  "listAbortReasons", "saveAbortReason", "deleteAbortReason", "listActiveRuns", "startRun", "completeRun", "getRunStats", "abortRun",
-  "setMachineStitchCount", "listMaintenanceTasks", "saveMaintenanceTask", "deleteMaintenanceTask", "recordMaintenance", "getMaintenanceLog", "setDesignVersionStitches", "fillDesignStitchCounts",
-  "markHoopingDone", "getRunReportByDesign", "receiveBlanks", "receiveBlankOrder", "addBlankSizes", "readInvoiceWithAi", "markBlankPricesChecked", "confirmProductPrices", "getBlankVendorPriceHistory", "writeOffBlanks", "getBlankMovements", "voidInventoryMovement",
-  "restoreInventoryMovement", "previewBlankCatchUp", "applyBlankCatchUp", "previewTransferCatchUp", "applyTransferCatchUp", "getBlankLinks", "setBlankLink", "saveBlankLinks", "deleteBlankLink", "previewProductHoopings",
-  "getReadyToShip", "setReadyToShipQty", "makeForStock", "getFinishedGoodsMovements", "voidFinishedGoodsMovement", "listGraphics", "saveGraphic", "deleteGraphic", "setProductGraphicColorBlocked", "getTierPrices",
-  "setTierPrices", "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "getTransferMovements", "getTransferSheet",
-  "voidTransferMovement", "restoreTransferMovement", "getTransferQueue", "setTransferReceived", "getGangSheet", "makeTransferLine",
-  "setTransfersApplied", "refreshOrderFromCatalog", "listOrgs", "getOrders", "getOrdersAllShops", "getOpenOrders", "getDashboard",
-  "listAccounts", "setPaymentAccount", "listExpenseCategories", "getPendingCommunications", "checkDeliveries", "checkBlankShipments", "setOrderCompleted", "markPaidManual", "resendEmail", "addPayment", "recordRefund", "setRefundShipping", "setPaymentDate", "deletePayment", "voidPayment",
-  "setDiscount", "deleteOrder", "voidOrder", "updateCustomerInfo", "createLocalSale", "setFulfillmentStage", "useBlanksFromStock", "addBlankShipment",
-  "updateBlankShipment", "deleteBlankShipment", "getBlankShipments", "bulkSetFulfillmentStage", "cancelLineItem", "bulkCancelLineItems",
-  "setLineItemRefund", "editOrder", "recordTracking", "bulkRecordTracking", "getOrderForShipping", "sendDesignVerification",
-  "listDesignVerifications", "setShippingInfo", "setShippingPaidAmount", "createShippingPaymentLink", "sendInvoice", "getInvoiceDocument", "getOrderPdf", "updateOrderDate", "setOrderDates", "setOrderDueDate",
-  "bulkSetDueDate", "listClosedPeriods",
-];
-const ACTION_ROLE = Object.create(null);   // no prototype: "constructor" is not an action
-for (const a of STAFF_ACTIONS) ACTION_ROLE[a] = "staff";
-for (const a of MANAGER_ACTIONS) ACTION_ROLE[a] = "manager";
-for (const a of ADMIN_ONLY_ACTIONS) ACTION_ROLE[a] = "admin";
+// Who may use each action: functions/_lib/permissions.js ACTION_PERM (function + level, per role on
+// Users → Roles and permissions). An action missing there is refused to everyone but admins — and so is
+// every action if the map itself were missing (tests that load this file as plain source stub the gate).
+const ACTION_PERM_ = typeof ACTION_PERM !== "undefined" ? ACTION_PERM : Object.create(null);
 
 // ---- Features (Global settings → Features; db.js FEATURES) ---------------------------------------
 // Which optional feature an admin action belongs to. An action listed here is refused (403) while
@@ -503,7 +428,17 @@ export async function onRequestPost(context) {
   // (Home's totals, getDashboard). Staff save products and blanks
   // too, so those replies leave the analysis / below-target list out for them. (No signed-in user — the
   // installer's passphrase — sees everything, as with every other action.)
-  const seesPricing_ = () => { const u = typeof adminUser === "function" ? adminUser(request) : null; return !u || !u.role || u.role === "manager" || u.role === "admin"; };
+  // Money, costs and margins (permissions.js costs.view): a role without it gets counts, not money.
+  const seesPricing_ = () => {
+    const u = typeof adminUser === "function" ? adminUser(request) : null;
+    if (!u || !u.role) return true;
+    if (u.roleInfo && typeof adminCan === "function") return adminCan(request, "costs.view", "read");
+    return u.role === "manager" || u.role === "admin";   // a user without the role's details (tests' stand-ins): the built-in rule
+  };
+  // A step change needs the half of the steps it is in (permissions.js stageFn): Production can move an
+  // order made → shipped but not order or receive its blanks.
+  const stageDenied_ = (stage) => typeof adminCan !== "function" || adminCan(request, stageFn(stage), "edit") ? null
+    : jsonResponse({ status: "error", code: "forbidden", message: "Your role can't set that step. Ask an admin." }, 403);
   // Products now below a target or a blank's MAP: all of it for a manager; a worker hears only of MAP (a vendor's
   // public price), never of costs or targets.
   const belowFor_ = (list) => seesPricing_() ? list : list.filter(p => p.belowMap).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.mapProblems || [], belowMap: true }));
@@ -734,13 +669,13 @@ export async function onRequestPost(context) {
   // THE gate: an action of a switched-off feature goes no further. Sign-in is checked first, so
   // someone who isn't an admin learns nothing about which features are on.
   if (ACTION_FEATURE[body.action] && !featureOn(ACTION_FEATURE[body.action])) {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     return featureOffResponse(ACTION_FEATURE[body.action], featureLabel_(ACTION_FEATURE[body.action]));
   }
   if (isDesktopEdition(env) && (DESKTOP_REFUSED_ACTIONS.has(body.action) || (DESKTOP_SUPPLIER_ACTIONS.has(body.action) && !desktopSuppliersOn(env))
     || (DESKTOP_EMAIL_ACTIONS.has(body.action) && !desktopEmailOn(env)))) {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     return jsonResponse({ status: "error", code: "desktop", message: DESKTOP_REFUSED_ACTIONS.has(body.action) ? DESKTOP_REFUSED_MSG
       : DESKTOP_EMAIL_ACTIONS.has(body.action) ? DESKTOP_EMAIL_OFF_MSG : DESKTOP_SUPPLIERS_OFF_MSG }, 403);
@@ -748,7 +683,7 @@ export async function onRequestPost(context) {
 
   // ---- listOrgs — admin org picker -------------------------------------------
   if (body.action === "listOrgs") {
-    const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const orgs = await getAllOrgs(env.DB);
     return jsonResponse({ status: "ok", orgs: orgs.map((o) => ({ orgId: o.orgId, name: o.name, subdomain: o.subdomain || "" })) });
@@ -759,7 +694,7 @@ export async function onRequestPost(context) {
   // whole history (hundreds of MB) would otherwise be read and sent. `more: true` says some were left
   // out; the page says so and asks for narrower dates.
   if (body.action === "getOrders") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const org = body.org;
     if (!org) return jsonResponse({ status: "error", message: "Unknown org" }, 404);
@@ -774,7 +709,7 @@ export async function onRequestPost(context) {
   // them merged, instead of the page firing 2×N requests. The date window + the rest of the
   // filtering stay client-side.
   if (body.action === "getOrdersAllShops") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const orgs = await getAllOrgs(env.DB);
     const range = { from: body.dateFrom, to: body.dateTo };
@@ -791,7 +726,7 @@ export async function onRequestPost(context) {
 
   // ---- getOpenOrders — admin home dashboard: every open order across all orgs ----
   if (body.action === "getOpenOrders") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const [orders, orgs] = await Promise.all([getOpenOrders(env.DB), getAllOrgs(env.DB)]);
     const names = Object.fromEntries(orgs.map(o => [o.orgId, o.name]));
@@ -801,7 +736,7 @@ export async function onRequestPost(context) {
 
   // ---- getAuditLog — admin fetches the audit log with optional filters --------
   if (body.action === "getAuditLog") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const entries = await getAuditLog(env.DB, {
       orgId:    body.orgId    ? String(body.orgId).trim()    : undefined,
@@ -816,7 +751,7 @@ export async function onRequestPost(context) {
 
   // ---- getDashboard — admin Home: orders by step and the money, kept for an hour (db.js getDashboard) ----
   if (body.action === "getDashboard") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     // The admin's own today (their time zone), so "this month" turns over at their midnight.
     const today = String(body.today || "").trim();
@@ -830,7 +765,7 @@ export async function onRequestPost(context) {
 
   // ---- getRevenueReport — admin revenue breakdown by org for a date range ----
   if (body.action === "getRevenueReport") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
 
     const dateFrom = String(body.dateFrom || "").trim();
@@ -908,7 +843,7 @@ export async function onRequestPost(context) {
 
   // ---- Closed periods (months already filed) --------------------------------
   if (["listClosedPeriods", "closePeriod", "reopenPeriod"].includes(body.action)) {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (body.action !== "listClosedPeriods") {
       const month = String(body.month || "");
@@ -928,7 +863,7 @@ export async function onRequestPost(context) {
   const RECON_ACTIONS = ["getReconciliation", "importStatement", "autoMatchStatement", "matchStatementLine", "unmatchStatementLine",
     "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth", "listCashoutPayments"];
   if (RECON_ACTIONS.includes(body.action)) {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const vbad = await checkVendors_(); if (vbad) return vbad; }
     { const locked = await periodGuard(body); if (locked) return locked; }
@@ -1220,7 +1155,7 @@ export async function onRequestPost(context) {
   const MONEY_ACTIONS = ["listAccounts", "saveAccount", "saveMoneyDefaults", "listMoney", "saveMoneyEntry", "deleteMoneyEntry", "setPaymentAccount",
     "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount"];
   if (MONEY_ACTIONS.includes(body.action)) {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     const bad = (message) => jsonResponse({ status: "error", message }, 400);
@@ -1402,7 +1337,7 @@ export async function onRequestPost(context) {
     "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",
     "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense"];
   if (EXPENSE_ACTIONS.includes(body.action)) {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const vbad = await checkVendors_(); if (vbad) return vbad; }
     { const locked = await periodGuard(body); if (locked) return locked; }
@@ -1654,7 +1589,7 @@ export async function onRequestPost(context) {
   // New orders and queued owner notices since the last roll-up email (the
   // same queries /api/daily-digest uses), for the admin Communications page.
   if (body.action === "getPendingCommunications") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const state = await getDigestState(env.DB);
     // Run delivery check first so newly-delivered notices are included below.
@@ -1692,7 +1627,7 @@ export async function onRequestPost(context) {
   // For finding out why email isn't arriving: the answer names the provider, the From address, the
   // provider's own status and message, and what to do about the usual mistakes. Never a secret.
   if (body.action === "sendTestEmail") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const rl = await rateLimited(env, "email_test", request, 10);
     if (rl.blocked) return rateLimitResponse(rl.retryAfter);
@@ -1706,7 +1641,7 @@ export async function onRequestPost(context) {
   // Same check as the 6 AM run: delivered orders are marked delivered and queued for the
   // next roll-up email (and shown on the Communications page).
   if (body.action === "checkDeliveries") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const rl = await rateLimited(env, "check_deliveries", request, 6);
     if (rl.blocked) return rateLimitResponse(rl.retryAfter);
@@ -1721,7 +1656,7 @@ export async function onRequestPost(context) {
   // Same check as the 6 AM run: stores each shipment's latest carrier status + scan history, and a
   // delivered one queues an owner notice. Never auto-marks the blanks received.
   if (body.action === "checkBlankShipments") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const rl = await rateLimited(env, "check_deliveries", request, 6);
     if (rl.blocked) return rateLimitResponse(rl.retryAfter);
@@ -1736,7 +1671,7 @@ export async function onRequestPost(context) {
   // Server re-checks every rule (delivered, paid, not voided, an active item) — the
   // browser's view of an order can be stale.
   if (body.action === "setOrderCompleted") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const ids = Array.isArray(body.orderIds) ? body.orderIds : (body.orderId ? [body.orderId] : []);
     if (!ids.length) return jsonResponse({ status: "error", message: "No orders given" }, 400);
@@ -1752,7 +1687,7 @@ export async function onRequestPost(context) {
 
   // ---- getAccountantExport — raw rows for the year-end / monthly CSVs ----------
   if (body.action === "getAccountantExport") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const dateFrom = String(body.dateFrom || "").trim(), dateTo = String(body.dateTo || "").trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
@@ -1765,7 +1700,7 @@ export async function onRequestPost(context) {
 
   // ---- getSalesTaxReport — tax collected by month / exempt / ship-to state ----
   if (body.action === "getSalesTaxReport") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const dateFrom = String(body.dateFrom || "").trim();
     const dateTo   = String(body.dateTo   || "").trim();
@@ -1796,7 +1731,7 @@ export async function onRequestPost(context) {
 
   // ---- markPaidManual — admin marks an order paid + emails customer ----------
   if (body.action === "markPaidManual") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     if (!body.org || !body.orderId) return jsonResponse({ status: "error", message: "Missing org or orderId" }, 400);
@@ -1826,7 +1761,7 @@ export async function onRequestPost(context) {
 
   // ---- resendEmail -----------------------------------------------------------
   if (body.action === "resendEmail") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!body.org || !body.orderId) return jsonResponse({ status: "error", message: "Missing org or orderId" }, 400);
 
@@ -1851,7 +1786,7 @@ export async function onRequestPost(context) {
 
   // ---- addPayment — record an actual payment received for an order -------------
   if (body.action === "addPayment") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
 
@@ -1909,7 +1844,7 @@ export async function onRequestPost(context) {
   // Card refunds are recorded automatically by the Stripe webhook; recording
   // one here too would count it twice, so card is refused.
   if (body.action === "recordRefund") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     const orderId = String(body.orderId || "").trim();
@@ -1953,7 +1888,7 @@ export async function onRequestPost(context) {
   // Sets how much of an existing refund was shipping (migrations/0035) — e.g. a card refund made in
   // Stripe, which arrives through the webhook as all goods. Audited first; closed months refuse it.
   if (body.action === "setRefundShipping") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     const paymentId = Number(body.paymentId);
@@ -1976,7 +1911,7 @@ export async function onRequestPost(context) {
   // charge's balance transaction, and stores the fee + PaymentIntent id.
   // Idempotent: only touches card payments whose fee is still 0.
   if (body.action === "backfillStripeFees") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!env.STRIPE_SECRET_KEY) return jsonResponse({ status: "error", message: "Stripe not configured" }, 500);
     const stripeGet = async (path) => {
@@ -2048,7 +1983,7 @@ export async function onRequestPost(context) {
 
   // ---- setPaymentDate — correct when a (non-Stripe) entry's money arrived ------
   if (body.action === "setPaymentDate") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     const paymentId = Number(body.paymentId);
@@ -2075,7 +2010,7 @@ export async function onRequestPost(context) {
   // Mistaken ledger entries are VOIDED (kept, excluded from totals) — never
   // deleted. "deletePayment" is kept as the action name the admin UI uses.
   if (body.action === "deletePayment" || body.action === "voidPayment") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
 
@@ -2107,7 +2042,7 @@ export async function onRequestPost(context) {
 
   // ---- setDiscount — apply or clear a discount on an order -------------------
   if (body.action === "setDiscount") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
 
@@ -2135,7 +2070,7 @@ export async function onRequestPost(context) {
   // ---- setRushFee (migrations/0082): rush on or off for one order, its fee or "to follow", and the due date ----
   // Works on any order, whether or not its shop offers rush. Audited first; a closed month refuses it (periodGuard).
   if (body.action === "setRushFee") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     const orderId = String(body.orderId || "").trim();
@@ -2183,7 +2118,7 @@ export async function onRequestPost(context) {
   // Orders are VOIDED (kept on record, excluded from every report) — never
   // deleted. "deleteOrder" is kept as the action name the admin UI uses.
   if (body.action === "deleteOrder" || body.action === "voidOrder") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
 
@@ -2216,7 +2151,7 @@ export async function onRequestPost(context) {
 
   // ---- updateCustomerInfo — admin edits name/email/phone/address on orders ---
   if (body.action === "updateCustomerInfo") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
 
     if (!body.org) return jsonResponse({ status: "error", message: "Missing org" }, 400);
@@ -2242,7 +2177,7 @@ export async function onRequestPost(context) {
 
   // ---- createLocalSale — admin records an in-person / local sale -------------
   if (body.action === "createLocalSale") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
 
@@ -2359,7 +2294,7 @@ export async function onRequestPost(context) {
   // Another store's orders from its export (db.js importOrdersCsv). `rows` are orders, each {order, row, lines}: the
   // browser groups the file's item rows by order number. `dryRun` is the preview; the real run takes the ticked ones.
   if (body.action === "importOrders") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!body.org || !(await getOrgById(env.DB, body.org))) return jsonResponse({ status: "error", message: "Unknown org" }, 404);
     const rows = Array.isArray(body.rows) ? body.rows.filter(r => r && typeof r === "object" && Array.isArray(r.lines)) : [];
@@ -2375,7 +2310,7 @@ export async function onRequestPost(context) {
 
   // ---- createTestTransaction -------------------------------------------------
   if (body.action === "createTestTransaction") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     const org = body.org;
@@ -2447,12 +2382,13 @@ export async function onRequestPost(context) {
   })().catch((e) => console.error("Shipped email failed for", orderId, e)));
 
   if (body.action === "setFulfillmentStage") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const vbad = await checkVendors_(); if (vbad) return vbad; }
     if (!body.org || !body.orderId || !body.stage) {
       return jsonResponse({ status: "error", message: "Missing org, orderId, or stage" }, 400);
     }
+    { const no = stageDenied_(String(body.stage)); if (no) return no; }
     if (body.stage === "designApproved" && !featureOn("designVerification")) return featureOffResponse("designVerification", featureLabel_("designVerification"));
     // Stage order is enforced here, not just in the browser (stagePrereqError mirrors FULFILLMENT_STAGES).
     const stageOrder = await getOrderById(env.DB, String(body.orderId));
@@ -2493,7 +2429,7 @@ export async function onRequestPost(context) {
   // their blanks from stock on hand (marked ordered + received now, "In stock") — refused, with what's
   // short, unless the stock covers all of them (useBlanksFromStock in db.js).
   if (body.action === "useBlanksFromStock") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const order = body.orderId ? await getOrderById(env.DB, String(body.orderId)) : null;
     if (!order || (body.org && order.orgId !== body.org)) return jsonResponse({ status: "error", message: "Order not found" }, 404);
@@ -2512,7 +2448,7 @@ export async function onRequestPost(context) {
 
   // ---- Blank shipments (migrations/0039): multiple tracking numbers per blank order ----------
   if (body.action === "addBlankShipment") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const vbad = await checkVendors_(); if (vbad) return vbad; }
     const itemIds = Array.isArray(body.itemIds) ? body.itemIds.map(Number).filter(Boolean) : [];
@@ -2525,7 +2461,7 @@ export async function onRequestPost(context) {
     } catch (e) { return jsonResponse({ status: "error", message: e.userFacing ? e.message : "Could not add the shipment" }, e.userFacing ? 400 : 500); }
   }
   if (body.action === "updateBlankShipment") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!body.id) return jsonResponse({ status: "error", message: "id required" }, 400);
     const itemIds = Array.isArray(body.itemIds) ? body.itemIds.map(Number).filter(Boolean) : [];
@@ -2538,7 +2474,7 @@ export async function onRequestPost(context) {
     } catch (e) { return jsonResponse({ status: "error", message: e.userFacing ? e.message : "Could not update the shipment" }, e.userFacing ? 400 : 500); }
   }
   if (body.action === "deleteBlankShipment") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!body.id) return jsonResponse({ status: "error", message: "id required" }, 400);
     await deleteBlankShipment(env.DB, Number(body.id));
@@ -2546,7 +2482,7 @@ export async function onRequestPost(context) {
     return jsonResponse({ status: "ok" });
   }
   if (body.action === "getBlankShipments") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!body.orderId) return jsonResponse({ status: "error", message: "orderId required" }, 400);
     return jsonResponse({ status: "ok", shipments: await getBlankShipmentsForOrder(env.DB, String(body.orderId)) });
@@ -2554,7 +2490,7 @@ export async function onRequestPost(context) {
 
   // ---- bulkSetFulfillmentStage -----------------------------------------------
   if (body.action === "bulkSetFulfillmentStage") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const vbad = await checkVendors_(); if (vbad) return vbad; }
     if (!Array.isArray(body.orderIds) || !body.stage) {
@@ -2570,6 +2506,7 @@ export async function onRequestPost(context) {
     if (!VALID_STAGES.has(body.stage)) {
       return jsonResponse({ status: "error", message: "Invalid stage" }, 400);
     }
+    { const no = stageDenied_(String(body.stage)); if (no) return no; }
     if (body.stage === "designApproved" && !featureOn("designVerification")) return featureOffResponse("designVerification", featureLabel_("designVerification"));
     // Optional per-order line-item selection (migrations/0039): body.items = [{orderId, itemId}].
     // Lets one bulk action span orders and pick specific lines for a blank stage.
@@ -2629,7 +2566,7 @@ export async function onRequestPost(context) {
 
   // ---- cancelLineItem --------------------------------------------------------
   if (body.action === "cancelLineItem") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     if (!body.org || !body.sheetRow) return jsonResponse({ status: "error", message: "Missing org or sheetRow" }, 400);
@@ -2657,7 +2594,7 @@ export async function onRequestPost(context) {
 
   // ---- bulkCancelLineItems ---------------------------------------------------
   if (body.action === "bulkCancelLineItems") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     if (!Array.isArray(body.sheetRows)) return jsonResponse({ status: "error", message: "Missing sheetRows" }, 400);
@@ -2695,7 +2632,7 @@ export async function onRequestPost(context) {
 
   // ---- setLineItemRefund -----------------------------------------------------
   if (body.action === "setLineItemRefund") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     if (!body.org || !body.sheetRow) return jsonResponse({ status: "error", message: "Missing org or sheetRow" }, 400);
@@ -2715,7 +2652,7 @@ export async function onRequestPost(context) {
 
   // ---- editOrder — change/add/remove items, optionally request payment --------
   if (body.action === "editOrder") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
 
@@ -2866,7 +2803,7 @@ export async function onRequestPost(context) {
 
   // ---- recordTracking --------------------------------------------------------
   if (body.action === "recordTracking") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!body.org || !body.orderId) return jsonResponse({ status: "error", message: "Missing org or orderId" }, 400);
     await setTrackingNumbers(env.DB, [body.orderId], body.trackingNumber || "");
@@ -2877,7 +2814,7 @@ export async function onRequestPost(context) {
 
   // ---- bulkRecordTracking ----------------------------------------------------
   if (body.action === "bulkRecordTracking") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!Array.isArray(body.orderIds)) return jsonResponse({ status: "error", message: "Missing orderIds" }, 400);
     if (body.orderIds.length > 500) return jsonResponse({ status: "error", message: "Too many order IDs (max 500)" }, 400);
@@ -2892,7 +2829,7 @@ export async function onRequestPost(context) {
 
   // ---- getOrderForShipping (used by shippo-label.js) -------------------------
   if (body.action === "getOrderForShipping") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!body.orderId) return jsonResponse({ status: "error", message: "Missing orderId" }, 400);
     const row = await getOrderForShipping(env.DB, body.orderId);
@@ -2906,7 +2843,7 @@ export async function onRequestPost(context) {
 
   // ---- Catalog admin actions -------------------------------------------------
   if (CATALOG_ADMIN_ACTIONS.has(body.action)) {
-    const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const vbad = await checkVendors_(); if (vbad) return vbad; }
 
@@ -5750,7 +5687,7 @@ export async function onRequestPost(context) {
   // Publish (migrations/0076): one shop ({org}) or every shop (no org). Its current rows become what shoppers see
   // and orders are priced from; the cache version is bumped so the change shows at once.
   if (body.action === "publish") {
-    const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const orgIds = body.org ? [String(body.org)] : (await getAllOrgs(env.DB)).map(o => o.orgId);
     const published = [];
@@ -5765,7 +5702,7 @@ export async function onRequestPost(context) {
   // ---- Apply these prices (Brand rules → Show price impact): changes [{org, productId, group, size, price}] ----
   // All checked first; nothing is written if any is wrong. The products are drafts until each shop is published.
   if (body.action === "applyRulePrices") {
-    const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const list = Array.isArray(body.changes) ? body.changes.slice(0, 2000) : [];
     if (!list.length) return jsonResponse({ status: "error", message: "No prices to apply." }, 400);
@@ -5795,7 +5732,7 @@ export async function onRequestPost(context) {
 
   // ---- Discard a shop's unpublished changes: back to what was last published (planDiscardShopChanges) ----
   if (body.action === "previewDiscardShopChanges" || body.action === "discardShopChanges") {
-    const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const org = String(body.org || "");
     if (body.action === "previewDiscardShopChanges") {
@@ -5813,7 +5750,7 @@ export async function onRequestPost(context) {
 
   // ---- sendDesignVerification — batch email design proofs to customers ---------
   if (body.action === "sendDesignVerification") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
 
     const orderIds = Array.isArray(body.orderIds) ? body.orderIds.filter(id => ORDER_ID_RE.test(id)) : [];
@@ -5923,7 +5860,7 @@ export async function onRequestPost(context) {
 
   // ---- listDesignVerifications — latest verification per order for an org -----
   if (body.action === "listDesignVerifications") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!env.DB) return jsonResponse({ status: "error", message: "Server misconfigured" }, 500);
     const orgId = String(body.org || "").trim();
@@ -5934,7 +5871,7 @@ export async function onRequestPost(context) {
 
   // ---- setShippingInfo — admin adds/updates address + weight on an order ------
   if (body.action === "setShippingInfo") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     if (!env.DB) return jsonResponse({ status: "error", message: "Server misconfigured" }, 500);
@@ -5973,7 +5910,7 @@ export async function onRequestPost(context) {
 
   // ---- setShippingPaidAmount — admin manually corrects paid amount on an order -
   if (body.action === "setShippingPaidAmount") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     if (!env.DB) return jsonResponse({ status: "error", message: "Server misconfigured" }, 500);
@@ -5986,7 +5923,7 @@ export async function onRequestPost(context) {
 
   // ---- createShippingPaymentLink — Stripe session + email for shipping cost ---
   if (body.action === "createShippingPaymentLink") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!env.DB) return jsonResponse({ status: "error", message: "Server misconfigured" }, 500);
     if (!env.STRIPE_SECRET_KEY) return jsonResponse({ status: "error", message: "Stripe not configured" }, 500);
@@ -6092,7 +6029,7 @@ export async function onRequestPost(context) {
   // ---- getInvoiceDocument — the desktop program's "Save invoice PDF…": the invoice as a printable
   // page (email.js invoiceDocument), which the program makes into a PDF and saves where it's asked.
   if (body.action === "getInvoiceDocument") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!isDesktopEdition(env)) return jsonResponse({ status: "error", message: "Saving an invoice as a PDF is part of the desktop program." }, 400);
     const orderId = String(body.orderId || "").trim();
@@ -6108,7 +6045,7 @@ export async function onRequestPost(context) {
   // ---- getOrderPdf — Orders → PDF: the order's invoice (something owed) or receipt (paid), drawn by
   // email.js orderPdf — the same PDF the customer's emails carry.
   if (body.action === "getOrderPdf") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const orderId = String(body.orderId || "").trim();
     if (!ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
@@ -6120,7 +6057,7 @@ export async function onRequestPost(context) {
   }
 
   if (body.action === "sendInvoice") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const orderId = String(body.orderId || "").trim();
     if (!ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
@@ -6158,7 +6095,7 @@ export async function onRequestPost(context) {
   // saying which), none in the future; the order date and Manufactured can be changed but not cleared; a date that
   // moves money or cost of goods (order date, manufactured) can't move into or out of a closed month. Audited first.
   if (body.action === "setOrderDates") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const orderId = String(body.orderId || "").trim();
     if (!ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
@@ -6216,7 +6153,7 @@ export async function onRequestPost(context) {
   }
 
   if (body.action === "updateOrderDate") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
 
@@ -6243,7 +6180,7 @@ export async function onRequestPost(context) {
 
   // ---- setOrderDueDate — admin sets/clears the optional due date ---------------
   if (body.action === "setOrderDueDate") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const orderId = String(body.orderId || "").trim();
     if (!ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
@@ -6258,7 +6195,7 @@ export async function onRequestPost(context) {
 
   // ---- bulkSetDueDate — set/clear the due date on several orders at once -------
   if (body.action === "bulkSetDueDate") {
-    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const raw = body.dueDate == null ? "" : String(body.dueDate).trim();
     if (raw && !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return jsonResponse({ status: "error", message: "Invalid date — expected YYYY-MM-DD" }, 400);

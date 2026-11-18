@@ -2860,13 +2860,23 @@ export async function insertAdminSession(db, tokenHash, expiresAt, userId = null
 
 // A session with the user it belongs to, or null. A row with no user (made before users existed)
 // comes back with user: null and is not accepted by the gate.
+// The user's role row comes along (migrations/0089) — roleRow is null when the role is unknown, or on a
+// database from before roles were rows (the caller then uses the built-in defaults).
 export async function getAdminSession(db, tokenHash) {
-  const r = await db.prepare(
-    "SELECT s.expiresAt, s.userId, s.pending, u.id AS uid, u.email, u.name, u.role, u.status, u.totpSecret " +
-    "FROM admin_sessions s LEFT JOIN users u ON u.id = s.userId WHERE s.tokenHash = ?").bind(tokenHash).first();
+  const base = "SELECT s.expiresAt, s.userId, s.pending, u.id AS uid, u.email, u.name, u.role, u.status, u.totpSecret";
+  let r, withRoles = true;
+  try {
+    r = await db.prepare(base + ", ro.key AS roKey, ro.name AS roName, ro.rank AS roRank, ro.builtIn AS roBuiltIn, ro.locked AS roLocked, ro.permissions AS roPermissions " +
+      "FROM admin_sessions s LEFT JOIN users u ON u.id = s.userId LEFT JOIN roles ro ON ro.key = u.role WHERE s.tokenHash = ?").bind(tokenHash).first();
+  } catch (e) {
+    if (!/no such table: roles/i.test(String(e && e.message))) throw e;
+    withRoles = false;
+    r = await db.prepare(base + " FROM admin_sessions s LEFT JOIN users u ON u.id = s.userId WHERE s.tokenHash = ?").bind(tokenHash).first();
+  }
   if (!r) return null;
   return { expiresAt: r.expiresAt, userId: r.userId, pending: r.pending || null,
-    user: r.uid == null ? null : { id: r.uid, email: r.email, name: r.name, role: r.role, status: r.status, has2fa: !!r.totpSecret } };
+    user: r.uid == null ? null : { id: r.uid, email: r.email, name: r.name, role: r.role, status: r.status, has2fa: !!r.totpSecret,
+      roleRow: withRoles && r.roKey != null ? roleFromRow_({ key: r.roKey, name: r.roName, rank: r.roRank, builtIn: r.roBuiltIn, locked: r.roLocked, permissions: r.roPermissions }) : null } };
 }
 
 export async function setAdminSessionPending(db, tokenHash, pending) {
@@ -2950,6 +2960,50 @@ export async function setUserRoleAndStatus(db, id, { role, status }) {
     "  OR (COALESCE(?1, role) = 'admin' AND COALESCE(?2, status) = 'active')" +          // still one afterwards
     "  OR EXISTS (SELECT 1 FROM users o WHERE o.role = 'admin' AND o.status = 'active' AND o.id <> ?4))"   // someone else is
   ).bind(role || null, status || null, new Date().toISOString(), id).run();
+  return (r.meta && r.meta.changes) > 0;
+}
+
+// ---- Roles (migrations/0089) -------------------------------------------------------------------
+// The rows only. What a role may do, and who may change it, is functions/_lib/permissions.js and
+// functions/api/admin-users.js. permissions is JSON, or null for a built-in role still on its defaults.
+const roleFromRow_ = (r) => r ? { key: r.key, name: r.name, rank: Number(r.rank) || 0, builtIn: !!r.builtIn, locked: !!r.locked,
+  permissions: r.permissions == null ? null : tryParse_(r.permissions, null), userCount: r.userCount == null ? undefined : Number(r.userCount) } : null;
+
+export async function listRoles(db) {
+  const { results } = await db.prepare(
+    "SELECT r.key, r.name, r.rank, r.builtIn, r.locked, r.permissions, " +
+    "(SELECT count(*) FROM users u WHERE u.role = r.key AND u.status = 'active') AS userCount FROM roles r ORDER BY r.rank DESC, r.name COLLATE NOCASE").all();
+  return (results || []).map(roleFromRow_);
+}
+
+export async function getRoleRow(db, key) {
+  return roleFromRow_(await db.prepare("SELECT key, name, rank, builtIn, locked, permissions FROM roles WHERE key = ?").bind(String(key || "")).first());
+}
+
+// A new (custom) role. A taken key or name throws (the primary key / unique index).
+export async function insertRole(db, { key, name, rank, permissions }) {
+  const now = new Date().toISOString();
+  await db.prepare("INSERT INTO roles (key, name, rank, builtIn, locked, permissions, createdAt, updatedAt) VALUES (?, ?, ?, 0, 0, ?, ?, ?)")
+    .bind(key, String(name).trim(), rank, JSON.stringify(permissions), now, now).run();
+  return getRoleRow(db, key);
+}
+
+// Changes a role's name, rank and permissions. A locked role (Admin) is never changed: false.
+export async function updateRole(db, key, { name, rank, permissions }) {
+  const r = await db.prepare("UPDATE roles SET name = ?, rank = ?, permissions = ?, updatedAt = ? WHERE key = ? AND locked = 0")
+    .bind(String(name).trim(), rank, JSON.stringify(permissions), new Date().toISOString(), key).run();
+  return (r.meta && r.meta.changes) > 0;
+}
+
+// Whether anyone (a disabled user too) holds a role.
+export async function roleInUse(db, key) {
+  return !!(await db.prepare("SELECT 1 AS x FROM users WHERE role = ? LIMIT 1").bind(String(key || "")).first());
+}
+
+// Deletes a custom role nobody holds (a disabled user still holds theirs). One statement, so a user
+// given the role at the same moment can't be left without one. False if it was refused.
+export async function deleteRole(db, key) {
+  const r = await db.prepare("DELETE FROM roles WHERE key = ?1 AND builtIn = 0 AND locked = 0 AND NOT EXISTS (SELECT 1 FROM users WHERE role = ?1)").bind(key).run();
   return (r.meta && r.meta.changes) > 0;
 }
 

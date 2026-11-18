@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 const { ADMIN_ORIGIN, shopOrigin } = require("./testlib/hosts.js");
 
@@ -170,7 +171,7 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   d1._raw.exec(`DELETE FROM closed_periods`);
   const ordersSrc = read("functions/api/orders.js");
   ok("roles: setRushFee / getRushSettings are a manager's, updateRushSettings an admin's",
-    /const MANAGER_ACTIONS = \[\s*"getRushSettings", "setRushFee"/.test(ordersSrc) && /"updateRushSettings",\s+\/\/ rush fees/.test(ordersSrc));
+    lowest("getRushSettings") === "manager" && lowest("setRushFee") === "manager" && lowest("updateRushSettings") === "admin" && /"setRushFee"/.test(ordersSrc));
 
   console.log("\n=== Sales tax ===");
   await admin({ action: "updateRushSettings", rush: { rule: { mode: "fixed", amount: 10.6 }, taxable: true } });

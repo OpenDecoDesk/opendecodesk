@@ -43,7 +43,7 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
     const grp = (label) => (groups.match(new RegExp('label: "' + label + '", items: \\[([\\s\\S]*?)\\]\\},')) || [])[1] || "";
     console.log("Catalog lists Package sizes and Settings lists Global settings, as pages:", /\["packages", "Package sizes"\]/.test(grp("Catalog")) && /\["settings", "Global settings"\]/.test(grp("Settings")));
     console.log("Package sizes no longer opens a pop-up from the menu:", !/showManagePackagePresets/.test(adminJs));
-    console.log("Manage catalog is a top-level button, not in Tools:", /navGo\('catalog'\)">Manage catalog</.test(adminJs) && !/\["catalog"/.test(groups));
+    console.log("Manage catalog is a top-level button, not in Tools:", /const top = \[\["home", "Home"\], \["orders", "Orders"\], \["runorder", "Run Order"\], \["runtransfer", "Run Transfer Sheets"\], \["catalog", "Manage catalog"\]\]/.test(adminJs) && !/\["catalog"/.test(groups));
     console.log("#packages and #settings are routed:", /raw === "packages"\)\s*\{ renderPackageSizes\(app\)/.test(adminJs) && /raw === "settings" \|\| raw === "catalog\/settings"/.test(adminJs));
 
     console.log("\n=== Global settings: no Back button ===");

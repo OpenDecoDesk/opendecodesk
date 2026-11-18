@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -17,7 +18,9 @@ const lib = new Function(dbSrc + `\nreturn { createBlank, getAllBlanks };`)();
 const ps = new Function(psSrc + `\nreturn { readXml_, xmlAll_, psXmlText_, soapCall_, searchPsCompanies, getPsEndpoints, fetchVendorProduct, psProductId_, psGetParts, psPartFor_, psIsImageUrl_ };`)();
 const vc = new Function(credSrc + `\nreturn { encryptVendorCredentials, decryptVendorCredentials, vendorCredentialsReady };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + psSrc + "\n" + credSrc + "\n" +
-  "const requireAdmin = async (env, host, key, request, msg, role) => { const r = (request.headers.get('x-role') || 'admin'); const rank = { staff: 1, manager: 2, admin: 3 }; return rank[r] >= rank[role === 'staff' || role === 'manager' ? role : 'admin'] ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
+  require("fs").readFileSync(__dirname + "/functions/_lib/permissions.js", "utf8").replace(/export (async function|function|const)/g, "$1") + "\n" +
+  // The real roles (functions/_lib/permissions.js) for the role the request names; "staff" (any signed-in user) as adminAuth.js reads it.
+  "const requireAdmin = async (env, host, key, request, msg, need) => { const r = (request.headers.get('x-role') || 'admin'); return roleAllows(DEFAULT_ROLES[r] || null, need === 'staff' ? '*' : need) ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
   "const adminActor = () => 'owner@test'; const adminUser = () => null; const copyVendorImage = async () => ({ ok: false });\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
@@ -253,7 +256,7 @@ const conn = { name: "SanMar", companyCode: "SanMar", endpoints: { product: "htt
   await w.renderVendorIntegrations(d.getElementById("app"));
   for (let i = 0; i < 100 && !d.querySelector(".vc-card"); i++) await new Promise(res => setTimeout(res, 10));
   ok("Vendor integrations lists the connection: its status and blanks linked", /SanMar/.test(d.querySelector(".vc-card").textContent) && /1 blank linked/.test(d.querySelector(".vc-card").textContent));
-  ok("…and Tools has the page (admin only)", w.eval("ADMIN_NAV_TOOLS").some(x => x[0] === "vendors") && w.eval("adminPageRole_('vendors')") === "admin");
+  ok("…and Tools has the page (admin only)", w.eval("ADMIN_NAV_TOOLS").some(x => x[0] === "vendors") && pageLowest("vendors") === "admin");
   d.getElementById("vcConnect").click();
   d.getElementById("vcQ").value = "sanmar"; d.getElementById("vcGo").click();
   for (let i = 0; i < 100 && !d.querySelector(".vcPick"); i++) await new Promise(res => setTimeout(res, 10));

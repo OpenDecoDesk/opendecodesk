@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { execFileSync } = require("child_process");
 const os = require("os");
@@ -145,7 +146,7 @@ function bucket(objects){
   await wait(() => refreshed);
   ok("Remove duplicates takes the ticked copy off the blank", sent.some(b => b.action === "removeBlankImages") && (await colorImgs("Black")).join() === [u("a"), u("q")].join() && refreshed);
   // Tools → Orphaned images.
-  ok("Tools has Orphaned images (admin only)", /\["orphans", "Orphaned images"\]/.test(adminJs) && w.adminPageRole_("orphans") === "admin");
+  ok("Tools has Orphaned images (admin only)", /\["orphans", "Orphaned images"\]/.test(adminJs) && pageLowest("orphans") === "admin");
   await w.renderOrphanImages(d.getElementById("app"));
   d.getElementById("orScan").click();
   await wait(() => d.querySelectorAll(".orPick").length);

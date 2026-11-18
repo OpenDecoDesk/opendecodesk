@@ -64,8 +64,8 @@ export async function onRequestPost(context){
   // IMAGES/R2_PUBLIC_BASE config check below, so an unauthenticated caller
   // never learns whether image storage is configured.
   const host = classifyHost(url.hostname, null, env);
-  // Back office work: any signed-in user (functions/_lib/adminAuth.js).
-  const denied = await requireAdmin(env, host, request.headers.get("X-Admin-Key"), request, "Not available here.", "staff");
+  // Catalog and blank pictures (functions/_lib/permissions.js).
+  const denied = await requireAdmin(env, host, request.headers.get("X-Admin-Key"), request, "Not available here.", [["catalog.products", "edit"], ["catalog.graphics", "edit"], ["catalog.designs", "edit"], ["inventory.blanks", "edit"]]);
   if(denied) return denied;
   if(!env.IMAGES || !env.R2_PUBLIC_BASE){
     return jsonResponse({status:"error", message:"Server misconfigured — image storage not set up."}, 500);

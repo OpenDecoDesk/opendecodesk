@@ -79,7 +79,7 @@ const httpSrc = strip(read("functions/_lib/http.js"));
     dbSrc + "\n" + emailSrc + "\n" + strip(read("functions/api/daily-digest.js")) + "\nreturn onRequestPost;")();
   const runDigest = async () => { const r = await digest({ env, request: { json: async () => ({ key: "cron" }), headers: { get: () => null } } }); return JSON.parse(await r.text()); };
   await runDigest(); // send what's already queued (the design response above) so this section starts clean
-  const accessSrc = strip(read("functions/_lib/access.js")), authSrc = strip(read("functions/_lib/adminAuth.js"));
+  const accessSrc = strip(read("functions/_lib/access.js")), authSrc = strip(read("functions/_lib/permissions.js") + "\n" + read("functions/_lib/adminAuth.js"));
   const session = new Function(httpSrc + "\n" + strip(read("functions/_lib/hostConfig.js")) + "\nconst getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });" +
     "\nconst rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;" +
     "\nconst rateLimitCheck = async () => ({ blocked: false }); const rateLimitHit = async () => {};\n" +

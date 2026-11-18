@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -104,8 +105,7 @@ const wait = async (cond, n = 300) => { for (let i = 0; i < n && !cond(); i++) a
   ok("linking a blank whose MAP is above the price is refused…", r.status === 409 && r.body.code === "belowMap" && /M \$9\.00 is below the MAP of \$9\.50/.test(r.body.message));
   ok("…and the link isn't left behind", !d1.q("SELECT 1 FROM product_blank_links WHERE productId='tee' AND productSize='M'").length);
   // OpenDecoDesk: a worker edits products and their blank links, so saving them in one request is a staff action too.
-  { const src = read("functions/api/orders.js"), staff = src.slice(src.indexOf("const STAFF_ACTIONS = ["), src.indexOf("];", src.indexOf("const STAFF_ACTIONS = [")));
-    ok("saveBlankLinks is a worker's, like setBlankLink", staff.includes('"saveBlankLinks"') && staff.includes('"setBlankLink"')); }
+  ok("saveBlankLinks is a worker's, like setBlankLink", may("staff", "saveBlankLinks") && may("staff", "setBlankLink"));
   // The product form's Save sends every changed link in ONE request (saveBlankLinks), with one MAP check.
   const links = () => d1.q("SELECT productSize, blankSize FROM product_blank_links WHERE productId='tee' ORDER BY productSize").map(l => l.productSize + ">" + l.blankSize).join();
   r = await call({ action: "saveBlankLinks", org: "acme", productId: "tee", set: [{ productColor: "", productSize: "M", blankId, blankColor: "White", blankSize: "M" }], remove: [] });

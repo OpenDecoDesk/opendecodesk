@@ -17,7 +17,7 @@ const strip = (src) => src
   .replace(/export (async function|function|const|let)/g, "$1");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const LIB_PATHS = ["functions/_lib/hostConfig.js", "functions/_lib/http.js", "functions/_lib/access.js",
-  "functions/_lib/adminAuth.js", "functions/_lib/quoteToken.js", "functions/_lib/turnstile.js"];
+  "functions/_lib/permissions.js", "functions/_lib/adminAuth.js", "functions/_lib/quoteToken.js", "functions/_lib/turnstile.js"];
 const LIBS = LIB_PATHS.map(p => strip(read(p))).join("\n");
 // Evaluate a module with fresh copies of the real libs in scope; returns the
 // named bindings. (A lib path is already part of LIBS, so it isn't re-added.)

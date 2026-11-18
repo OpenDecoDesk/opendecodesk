@@ -317,6 +317,9 @@ const ADMIN_ONLY_ACTIONS = [
 ];
 const MANAGER_ACTIONS = [
   "getRushSettings", "setRushFee",                                // rush fees (migrations/0082)
+  // The business's money (2026-11): revenue, sales tax, inventory and COGS, expenses — a manager's, like costs and margins.
+  "getRevenueReport", "getSalesTaxReport", "getInventoryReport", "getExpenseReport",
+  "listExpenses", "saveExpense", "deleteExpense", "previewExpenseImport", "importExpenses",
   "importOrders",                                                 // Orders → Import orders (Etsy, Shopify, a sheet; migrations/0087)
   "listProductFiles", "deleteProductFile", "addProductFileFromDesign", // a digital product's files (migrations/0086)
   "getDigitalSettings", "getOrderDownloads", "resendDownloads", "resetDownloads", "revokeDownloads", // and its buyers' downloads
@@ -350,14 +353,12 @@ const STAFF_ACTIONS = [
   "listAbortReasons", "saveAbortReason", "deleteAbortReason", "listActiveRuns", "startRun", "completeRun", "getRunStats", "abortRun",
   "setMachineStitchCount", "listMaintenanceTasks", "saveMaintenanceTask", "deleteMaintenanceTask", "recordMaintenance", "getMaintenanceLog", "setDesignVersionStitches", "fillDesignStitchCounts",
   "markHoopingDone", "getRunReportByDesign", "receiveBlanks", "receiveBlankOrder", "addBlankSizes", "readInvoiceWithAi", "markBlankPricesChecked", "confirmProductPrices", "getBlankVendorPriceHistory", "writeOffBlanks", "getBlankMovements", "voidInventoryMovement",
-  "restoreInventoryMovement", "getInventoryReport", "previewBlankCatchUp", "applyBlankCatchUp", "previewTransferCatchUp", "applyTransferCatchUp", "getBlankLinks", "setBlankLink", "saveBlankLinks", "deleteBlankLink", "previewProductHoopings",
+  "restoreInventoryMovement", "previewBlankCatchUp", "applyBlankCatchUp", "previewTransferCatchUp", "applyTransferCatchUp", "getBlankLinks", "setBlankLink", "saveBlankLinks", "deleteBlankLink", "previewProductHoopings",
   "getReadyToShip", "setReadyToShipQty", "makeForStock", "getFinishedGoodsMovements", "voidFinishedGoodsMovement", "listGraphics", "saveGraphic", "deleteGraphic", "setProductGraphicColorBlocked", "getTierPrices",
   "setTierPrices", "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "getTransferMovements", "getTransferSheet",
   "voidTransferMovement", "restoreTransferMovement", "getTransferQueue", "setTransferReceived", "getGangSheet", "makeTransferLine",
-  "setTransfersApplied", "refreshOrderFromCatalog", "listOrgs", "getOrders", "getOrdersAllShops", "getOpenOrders", "getRevenueReport", "getDashboard",
-  "listAccounts", "setPaymentAccount", "listExpenseCategories", "listExpenses", "getExpenseReport", "saveExpense", "previewExpenseImport",
-  "importExpenses", "deleteExpense", "getPendingCommunications", "checkDeliveries", "checkBlankShipments", "setOrderCompleted", "getSalesTaxReport",
-  "markPaidManual", "resendEmail", "addPayment", "recordRefund", "setRefundShipping", "setPaymentDate", "deletePayment", "voidPayment",
+  "setTransfersApplied", "refreshOrderFromCatalog", "listOrgs", "getOrders", "getOrdersAllShops", "getOpenOrders", "getDashboard",
+  "listAccounts", "setPaymentAccount", "listExpenseCategories", "getPendingCommunications", "checkDeliveries", "checkBlankShipments", "setOrderCompleted", "markPaidManual", "resendEmail", "addPayment", "recordRefund", "setRefundShipping", "setPaymentDate", "deletePayment", "voidPayment",
   "setDiscount", "deleteOrder", "voidOrder", "updateCustomerInfo", "createLocalSale", "setFulfillmentStage", "useBlanksFromStock", "addBlankShipment",
   "updateBlankShipment", "deleteBlankShipment", "getBlankShipments", "bulkSetFulfillmentStage", "cancelLineItem", "bulkCancelLineItems",
   "setLineItemRefund", "editOrder", "recordTracking", "bulkRecordTracking", "getOrderForShipping", "sendDesignVerification",
@@ -498,7 +499,8 @@ export async function onRequestPost(context) {
   // none can be opened for orders.
   const noDomainYet = () => !env.ROOT_DOMAIN && /\.workers\.dev$/i.test(new URL(request.url).hostname);
   const noDomainResponse = () => jsonResponse({ status: "error", code: "no_domain", message: NO_DOMAIN_MSG }, 409);
-  // Costs and margins (pricing awareness, migrations/0067) are a manager's. Staff save products and blanks
+  // Costs and margins (pricing awareness, migrations/0067) are a manager's, and so is the business's money
+  // (Home's totals, getDashboard). Staff save products and blanks
   // too, so those replies leave the analysis / below-target list out for them. (No signed-in user — the
   // installer's passphrase — sees everything, as with every other action.)
   const seesPricing_ = () => { const u = typeof adminUser === "function" ? adminUser(request) : null; return !u || !u.role || u.role === "manager" || u.role === "admin"; };
@@ -819,7 +821,11 @@ export async function onRequestPost(context) {
     // The admin's own today (their time zone), so "this month" turns over at their midnight.
     const today = String(body.today || "").trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(today)) return jsonResponse({ status: "error", message: "Invalid date — expected YYYY-MM-DD" }, 400);
-    return jsonResponse({ status: "ok", ...(await getDashboard(env.DB, { today, fresh: body.fresh === true })) });
+    const d = await getDashboard(env.DB, { today, fresh: body.fresh === true });
+    // The business's money is a manager's (seesPricing_'s rule): staff get the order counts only. The kept
+    // answer stays whole, so one cache serves every role.
+    if (!seesPricing_()) return jsonResponse({ status: "ok", stages: d.stages, open: d.open, onTheWay: d.onTheWay, cachedAt: d.cachedAt, cached: d.cached });
+    return jsonResponse({ status: "ok", ...d });
   }
 
   // ---- getRevenueReport — admin revenue breakdown by org for a date range ----

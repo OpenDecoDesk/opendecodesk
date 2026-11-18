@@ -1200,7 +1200,9 @@ function drawHomeMoney_(d){
   if (!y || !m) { el.innerHTML = `<div class="home-note">The money figures didn't come back — try Refresh.</div>`; return; }
   const monthName = new Date(d.monthFrom + "T12:00:00").toLocaleDateString(undefined, { month: "long" });
   const card = (label, v, sub, title) => `<div class="home-card" title="${escapeHtml(title || "")}"><span class="home-lbl">${escapeHtml(label)}</span><span class="home-val">${homeMoney_(v)}</span><span class="home-hint">${escapeHtml(sub)}</span></div>`;
-  const books = featureOn_("bookkeeping");
+  // From the same reply as the figures (getDashboardMoney), so the label always matches what was added up.
+  const books = d.bookkeeping !== false;
+  const offSub = (p) => "Cost of goods" + (p.writeoffs ? " and write-offs" : "") + " — bookkeeping is off";
   const expTitle = (p) => `Expenses ${homeMoney_(p.recordedExpenses)} + cost of goods ${homeMoney_(p.cogs)}` + (p.writeoffs ? ` + write-offs ${homeMoney_(p.writeoffs)}` : "");
   const revTitle = (p) => `Sales less tax ${homeMoney_(p.revenue - p.otherIncome)}` + (p.otherIncome ? ` + other income ${homeMoney_(p.otherIncome)}` : "") + " — shipping and rush fees included";
   const pct = (p) => p.productRevenue > 0 ? Math.round(p.productNet / p.productRevenue * 100) + "%" : "—";
@@ -1213,9 +1215,9 @@ function drawHomeMoney_(d){
     <h3 class="home-h">Business totals</h3>
     <div class="home-tiles home-tiles-4">
       ${card("Revenue · year to date", y.revenue, "Jan 1 to today", revTitle(y))}
-      ${card("Expenses · year to date", y.expenses, books ? "Jan 1 to today" : "Cost of goods only — bookkeeping is off", expTitle(y))}
+      ${card("Expenses · year to date", y.expenses, books ? "Jan 1 to today" : offSub(y), expTitle(y))}
       ${card("Revenue · month to date", m.revenue, monthName + " 1 to today", revTitle(m))}
-      ${card("Expenses · month to date", m.expenses, books ? monthName + " 1 to today" : "Cost of goods only", expTitle(m))}
+      ${card("Expenses · month to date", m.expenses, books ? monthName + " 1 to today" : offSub(m), expTitle(m))}
     </div>
     <h3 class="home-h">Product sales</h3>
     <div style="overflow-x:auto;border:1px solid var(--border,#ddd);border-radius:8px;">
@@ -1671,7 +1673,8 @@ function renderDesktopOff_(app, hash){
 // Global settings is an admin's page: every change on it is (updateGlobalSettings, updateFeatures, the
 // business profile, region, sales tax, ship-from), so nobody else is shown it at all.
 const ADMIN_ONLY_PAGES = ["users", "audit", "settings", "catalog/settings", "vendors", "orphans", "shoprate"];
-const ADMIN_MANAGER_PAGES = ["packages", "brandrules", "money", "reconcile", "accountviewer", "books", "catalog/new-org"];
+// The business's money (revenue, sales tax, inventory and COGS, expenses) is a manager's, like costs and margins.
+const ADMIN_MANAGER_PAGES = ["packages", "brandrules", "money", "reconcile", "accountviewer", "books", "catalog/new-org", "revenue", "salestax", "cogs", "expenses"];
 function adminPageRole_(hash){
   const raw = String(hash || "").replace(/^#\/?/, "");
   if (ADMIN_ONLY_PAGES.includes(raw)) return "admin";

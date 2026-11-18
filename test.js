@@ -211,7 +211,7 @@ function makeOrdersFetchMock(win, adminPassphrase, fakeSheetRows){
   window.document.querySelector(".admin-pass-submit").click();
   await new Promise(r=>setTimeout(r,150));
   const pickerHtml = window.document.body.innerHTML;
-  console.log("Org picker lists Example League:", pickerHtml.includes("Example League 101"));
+  console.log("Signing in opens Home, with Example League loaded:", pickerHtml.includes("home-tile") && window.eval("adminOrgs.map(o => o.name).join()").includes("Example League 101"));
   window.selectAdminOrg("league-101");
   await new Promise(r=>setTimeout(r,150));
   const adminHtml = window.document.getElementById("app").innerHTML;

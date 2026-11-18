@@ -206,7 +206,11 @@ async function adminRoute() {
   // The Orders page opens on the first shop (the top of the Shop dropdown); "All shops" is #orders/all
   // ("all" is reserved, never a shop's id). #picker and an empty hash land on the first shop too.
   if (raw === "orders/all") { renderOrdersPage(app); return; }
-  if (!raw || raw === "picker" || raw === "orders") {
+  // Home (2026-11) is where the admin opens: an empty address and #picker land there.
+  if (!raw || raw === "picker" || raw === "home") { renderHome(app); return; }
+  const homeStage = raw.match(/^home\/([a-z]+)$/);
+  if (homeStage) { renderHomeStage(app, homeStage[1]); return; }
+  if (raw === "orders") {
     const first = (adminOrgs || [])[0];
     if (first) renderAdminOrders(app, first); else renderOrdersPage(app);
     return;
@@ -1013,7 +1017,7 @@ async function loadAdminOrgList(){
 // failure here never gets in the way of signing in.
 async function openSettingsIfSetupIncomplete_(){
   const raw = location.hash.replace(/^#\/?/, "");
-  if (raw && raw !== "picker" && raw !== "orders") return;
+  if (raw && raw !== "picker" && raw !== "orders" && raw !== "home") return;
   if (!adminCanOpen_("settings")) return;   // only an admin can finish it there
   try{
     const res = await fetch("/api/orders", { method: "POST", headers: {"Content-Type": "application/json"},
@@ -1123,13 +1127,167 @@ async function openOrderFromDashboard_(orgId, orderId){
   }
 }
 
+// ---- Home (2026-11): the page the admin opens on ---------------------------------------------------
+// Open orders counted by the step each one is waiting on (every order in exactly one tile: the first step it
+// hasn't done), then the year's and the month's money. A tile opens #home/<stage>: those orders, every shop.
+const HOME_STAGES_ = [
+  { key: "new",    label: "New",               hint: "Waiting for payment" },
+  { key: "paid",   label: "Paid",              hint: "Blanks not ordered yet",   work: ["blankorder", "Blanks to order"] },
+  { key: "blanks", label: "Waiting on blanks", hint: "Ordered, not received",    work: ["blankorder", "Blanks to order"] },
+  { key: "run",    label: "Ready to run",      hint: "Blanks in hand, not made", work: ["runorder", "Run Order"] },
+  { key: "qa",     label: "Ready to QA",       hint: "Made, not QA'd and packed" },
+  { key: "ship",   label: "Ready to ship",     hint: "Packed, not shipped or delivered" },
+];
+const homeMoney_ = (n) => (Number(n) < 0 ? "−$" : "$") + Math.abs(Math.round(Number(n) || 0)).toLocaleString("en-US");
+// When Home's figures were worked out, as the admin's own date and time: "Tue, Nov 17, 2:05 PM".
+function homeUpdatedAt_(iso){
+  const t = new Date(iso);
+  return isNaN(t) ? "" : t.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+// The figures come from getDashboard (db.js), which works them out at most once an hour and keeps the answer.
+// The Refresh data button asks the server to work them out again now (not a reload of the page) and redraws them.
+async function renderHome(app){
+  adminSetHash("home");
+  document.title = adminTitle_("Home");
+  const today = rushLocalToday_();
+  app.innerHTML = `
+    ${adminPageHead_("Home")}
+    <div class="admin-panel home-dash" style="--org-accent:var(--accent);max-width:980px;margin:8px auto 60px;">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;">
+        <h2 style="font-size:20px;margin:0;">Dashboard</h2>
+        <span style="font-size:13px;color:var(--ink-soft,#666);">All shops · ${escapeHtml(new Date(today + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }))}</span>
+      </div>
+      <div class="home-refresh-row">
+        <button type="button" class="admin-btn" id="homeRefresh" title="Work the figures out again now. They're otherwise kept for up to an hour.">↻ Refresh data</button>
+        <span class="home-note" id="homeUpdated" style="margin:0;">Loading&hellip;</span>
+      </div>
+      <h3 class="home-h">Orders</h3>
+      <div id="homeStages" class="home-tiles">${HOME_STAGES_.map(s => `<a class="home-tile" href="#home/${s.key}" data-stage="${s.key}"><span class="home-lbl">${escapeHtml(s.label)}</span><span class="home-num">…</span><span class="home-hint">${escapeHtml(s.hint)}</span></a>`).join("")}</div>
+      <div id="homeStagesNote" class="home-note"></div>
+      ${adminCanOpen_("revenue") ? `<div id="homeMoney"></div>` : ""}
+    </div>`;
+  document.getElementById("homeRefresh").onclick = () => loadHome_(true);
+  await loadHome_(false);
+}
+
+async function loadHome_(fresh){
+  const btn = document.getElementById("homeRefresh"), upd = document.getElementById("homeUpdated");
+  if (!btn || !upd) return;
+  btn.disabled = true;
+  if (fresh) { btn.textContent = "Refreshing…"; upd.textContent = "Working the figures out again…"; }
+  let d;
+  try { d = await hoopApi_({ action: "getDashboard", today: rushLocalToday_(), fresh }); }
+  catch (e) { upd.textContent = "Couldn't load the dashboard: " + (e.message || "unknown error"); return; }
+  finally { if (document.body.contains(btn)) { btn.disabled = false; btn.textContent = "↻ Refresh data"; } }
+  if (location.hash !== "#home" || !document.body.contains(upd)) return;   // gone to another page while it loaded
+  upd.textContent = "Data last updated " + (homeUpdatedAt_(d.cachedAt) || homeUpdatedAt_(new Date().toISOString()));
+  upd.title = d.cachedAt ? new Date(d.cachedAt).toLocaleString() : "";
+  document.querySelectorAll("#homeStages .home-tile").forEach(t => {
+    const n = Number((d.stages || {})[t.dataset.stage]) || 0;
+    t.querySelector(".home-num").textContent = n;
+    t.classList.toggle("home-tile-zero", !n);
+  });
+  const open = Number(d.open) || 0;
+  document.getElementById("homeStagesNote").textContent = `${open} open order${open === 1 ? "" : "s"}` + (d.onTheWay ? ` · ${d.onTheWay} shipped and on the way` : "");
+  if (document.getElementById("homeMoney")) drawHomeMoney_(d);
+}
+
+function drawHomeMoney_(d){
+  const el = document.getElementById("homeMoney");
+  if (!el) return;
+  const y = d.year, m = d.month;
+  if (!y || !m) { el.innerHTML = `<div class="home-note">The money figures didn't come back — try Refresh.</div>`; return; }
+  const monthName = new Date(d.monthFrom + "T12:00:00").toLocaleDateString(undefined, { month: "long" });
+  const card = (label, v, sub, title) => `<div class="home-card" title="${escapeHtml(title || "")}"><span class="home-lbl">${escapeHtml(label)}</span><span class="home-val">${homeMoney_(v)}</span><span class="home-hint">${escapeHtml(sub)}</span></div>`;
+  const books = featureOn_("bookkeeping");
+  const expTitle = (p) => `Expenses ${homeMoney_(p.recordedExpenses)} + cost of goods ${homeMoney_(p.cogs)}` + (p.writeoffs ? ` + write-offs ${homeMoney_(p.writeoffs)}` : "");
+  const revTitle = (p) => `Sales less tax ${homeMoney_(p.revenue - p.otherIncome)}` + (p.otherIncome ? ` + other income ${homeMoney_(p.otherIncome)}` : "") + " — shipping and rush fees included";
+  const pct = (p) => p.productRevenue > 0 ? Math.round(p.productNet / p.productRevenue * 100) + "%" : "—";
+  const net = (v) => `<td class="home-num-cell" style="font-weight:600;color:${v < 0 ? "#b03a2e" : "#15803d"};">${homeMoney_(v)}</td>`;
+  const row = (label, p) => `<tr><td class="home-row-lbl">${label}</td><td class="home-num-cell">${homeMoney_(p.productRevenue)}</td><td class="home-num-cell">${homeMoney_(p.cogs)}</td>${net(p.productNet)}<td class="home-num-cell">${pct(p)}</td></tr>`;
+  const links = [["revenue", "Revenue report"], ["expenses", "Expenses"], ["cogs", "Inventory and COGS"]].filter(([h]) => adminCanOpen_(h))
+    .map(([h, t]) => `<a href="#${h}">${t} →</a>`).join(" · ");
+  const warn = y.missingCost ? `<div class="home-note" style="color:#b45309;">${y.missingCost} made line${y.missingCost === 1 ? " has" : "s have"} no cost this year, so COGS reads low — see Inventory and COGS.</div>` : "";
+  el.innerHTML = `
+    <h3 class="home-h">Business totals</h3>
+    <div class="home-tiles home-tiles-4">
+      ${card("Revenue · year to date", y.revenue, "Jan 1 to today", revTitle(y))}
+      ${card("Expenses · year to date", y.expenses, books ? "Jan 1 to today" : "Cost of goods only — bookkeeping is off", expTitle(y))}
+      ${card("Revenue · month to date", m.revenue, monthName + " 1 to today", revTitle(m))}
+      ${card("Expenses · month to date", m.expenses, books ? monthName + " 1 to today" : "Cost of goods only", expTitle(m))}
+    </div>
+    <h3 class="home-h">Product sales</h3>
+    <div style="overflow-x:auto;border:1px solid var(--border,#ddd);border-radius:8px;">
+      <table class="home-table">
+        <thead><tr><th></th><th>Revenue</th><th>COGS</th><th>Net income</th><th>Margin</th></tr></thead>
+        <tbody>${row("Year to date", y)}${row("Month to date", m)}</tbody>
+      </table>
+    </div>
+    <div class="home-note">Revenue is goods sold less sales tax and discounts, by the date the order was placed; COGS is the blanks, finished stock and transfers used.</div>
+    ${warn}
+    ${links ? `<div class="home-note">${links}</div>` : ""}`;
+}
+
+// #home/<stage>: the open orders waiting on that step, every shop, oldest first. A row opens the order in its shop.
+async function renderHomeStage(app, key){
+  const st = HOME_STAGES_.find(s => s.key === key);
+  if (!st) { renderHome(app); return; }
+  adminSetHash("home/" + key);
+  document.title = adminTitle_(st.label);
+  const work = st.work && adminCanOpen_(st.work[0]) ? `<a class="admin-btn" href="#${st.work[0]}">Open ${escapeHtml(st.work[1])} →</a>` : "";
+  app.innerHTML = `
+    ${adminPageHead_(st.label, { crumbs: [{ label: "Home", hash: "home" }, { label: st.label }] })}
+    <div class="admin-panel" style="--org-accent:var(--accent);max-width:980px;margin:8px auto 60px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+        <div><a href="#home" style="font-size:13px;">← Home</a><h2 style="font-size:20px;margin:4px 0 0;">${escapeHtml(st.label)} <span id="homeStageCount" style="color:var(--ink-soft,#666);font-weight:400;"></span></h2>
+          <div style="font-size:13px;color:var(--ink-soft,#666);">${escapeHtml(st.hint)} · all shops, oldest first</div></div>
+        ${work}
+      </div>
+      <div id="homeStageBody" class="admin-summary">Loading&hellip;</div>
+    </div>`;
+  const el = document.getElementById("homeStageBody");
+  let orders;
+  // Live, not the hour-old counts: this is the list to work from (getOpenOrders gives each order its homeStage).
+  try { orders = ((await hoopApi_({ action: "getOpenOrders" })).orders || []).filter(o => o.homeStage === key); }
+  catch (e) { el.textContent = "Couldn't load the orders: " + (e.message || "unknown error"); return; }
+  document.getElementById("homeStageCount").textContent = "(" + orders.length + ")";
+  if (!orders.length) { el.innerHTML = `<div style="color:#555;">No orders are waiting on this step.</div>`; return; }
+  const money = (n) => "$" + Number(n || 0).toFixed(2);
+  const th = "padding:7px 10px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;white-space:nowrap;";
+  const td = "padding:8px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#111;background:#fff;";
+  const sub = "color:#666;font-size:12px;";
+  const now = Date.now();
+  const rows = orders.map(o => {
+    const active = (o.items || []).filter(it => !it.cancelDate);
+    const lines = active.slice(0, 3).map(it => escapeHtml(`${it.qty}× ${it.name}${it.size ? ` (${it.size})` : ""}`)).join("<br>")
+      + (active.length > 3 ? `<br><span style="${sub}">+${active.length - 3} more</span>` : "");
+    const days = o.placedAt ? Math.floor((now - new Date(o.placedAt).getTime()) / 86400000) : null;
+    const due = Number(o.balanceDue) || 0;
+    return `<tr class="dash-row" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" style="cursor:pointer;">
+      <td style="${td}white-space:nowrap;">${o.placedAt ? escapeHtml(new Date(o.placedAt).toLocaleDateString()) : ""}${days !== null ? `<br><span style="${sub}${days >= 21 ? "color:#b45309;font-weight:600;" : ""}">${days} day${days === 1 ? "" : "s"} ago</span>` : ""}</td>
+      <td style="${td}white-space:nowrap;font-family:monospace;font-size:12px;">${escapeHtml(o.orderId)}${o.dueDate ? `<br><span style="${sub}">due ${escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString())}</span>` : ""}</td>
+      <td style="${td}">${escapeHtml(o.orgName)}</td>
+      <td style="${td}">${escapeHtml(o.customerName || "")}${rushPill_(o)}</td>
+      <td style="${td}font-size:13px;">${lines}</td>
+      <td style="${td}text-align:right;white-space:nowrap;">${money(o.effectiveTotal)}</td>
+      <td style="${td}text-align:right;white-space:nowrap;font-weight:600;color:${due > 0.005 ? "#b03a2e" : "#15803d"};">${due > 0.005 ? money(due) : "Paid"}</td>
+    </tr>`;
+  }).join("");
+  el.innerHTML = `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
+      <thead><tr><th style="${th}">Placed</th><th style="${th}">Order</th><th style="${th}">Shop</th><th style="${th}">Customer</th><th style="${th}">Items</th><th style="${th}text-align:right;">Total</th><th style="${th}text-align:right;">Balance due</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div style="${sub}margin-top:6px;">Click an order to open it in its shop's orders list.</div>`;
+  el.querySelectorAll(".dash-row").forEach(tr => tr.onclick = () => openOrderFromDashboard_(tr.dataset.org, tr.dataset.order));
+}
+
 // Persistent admin header, shown on every admin page once signed in. One line: Orders, then a
 // series of dropdown groups. It lives outside #app so the page renderers (which replace #app's
 // contents) never touch it. Each item is either ["hash","Label"] (a page) or {action, label} (a
 // function call). ADMIN_NAV_TOOLS is kept (flat list of every page hash) for other code that
 // still iterates it — see below.
 const ADMIN_NAV_GROUPS = [
-  // Orders, Run Order, Run Transfer Sheets and Manage catalog are the buttons before these menus.
+  // Home, Orders, Run Order, Run Transfer Sheets and Manage catalog are the buttons before these menus.
   { label: "Catalog", items: [
     ["setup", "Shop setup"], ["designs", "Designs"], ["graphics", "Graphics"], ["categories", "Product categories"], ["locations", "Decoration locations"],
     ["brandrules", "Brand rules"], ["packages", "Package sizes"],
@@ -1594,7 +1752,7 @@ function adminNavActive_(){
   const raw = location.hash.replace(/^#\/?/, "");
   const m = raw.match(/^orders(?:\/([^/]+))?$/);
   if(m) return "orders";
-  if(raw === "picker" || raw === "") return "orders";
+  if(raw === "picker" || raw === "" || raw === "home" || raw.startsWith("home/")) return "home";
   if(raw.startsWith("catalog")) return "catalog";
   // A page with a shop or record in its address belongs to its menu entry (#designs/<shop>/3 → Designs).
   const top = raw.split("/")[0];
@@ -1699,7 +1857,7 @@ function renderAdminNav(){
   // every page, grouped, so nothing hides inside a dropdown that can run off the screen.
   const navGroups = adminNavGroups_();   // pages of switched-off features are left out, here and in the sheet
   // The same top-level pages as the desktop row (Run Transfer Sheets was missing from the phone menu).
-  const top = [["orders", "Orders"], ["runorder", "Run Order"], ["runtransfer", "Run Transfer Sheets"], ["catalog", "Manage catalog"]].filter(it => adminPageOn_(it[0]));
+  const top = [["home", "Home"], ["orders", "Orders"], ["runorder", "Run Order"], ["runtransfer", "Run Transfer Sheets"], ["catalog", "Manage catalog"]].filter(it => adminPageOn_(it[0]));
   const current = top.concat(...ADMIN_NAV_GROUPS.map(g => g.items.filter(Array.isArray))).find(it => it[0] === active);
   const currentLabel = current ? current[1] : "";
   const sheetItem = (it) => Array.isArray(it)
@@ -1707,6 +1865,7 @@ function renderAdminNav(){
     : `<button type="button" class="admin-nav-btn" onclick="closeNavDropdowns();${it.action}">${escapeHtml(it.label)}</button>`;
   nav.innerHTML = `
     <div class="admin-nav-row">
+      <button type="button" class="admin-nav-btn${active === "home" ? " active" : ""}" onclick="navGo('home')">Home</button>
       <button type="button" class="admin-nav-btn${active === "orders" ? " active" : ""}" onclick="navGo('orders')">Orders</button>
       ${adminPageOn_("runorder") ? `<button type="button" class="admin-nav-btn${active === "runorder" ? " active" : ""}" onclick="navGo('runorder')">Run Order</button>` : ""}
       <button type="button" class="admin-nav-btn${active === "runtransfer" ? " active" : ""}" onclick="navGo('runtransfer')">Run Transfer Sheets</button>

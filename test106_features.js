@@ -425,7 +425,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     "setRushFee", "recordTracking", "bulkRecordTracking", "setShippingInfo", "setShippingPaidAmount", "createShippingPaymentLink", "sendInvoice", "getInvoiceDocument", "getOrderPdf", "updateOrderDate", "setOrderDates", "setOrderDueDate", "bulkSetDueDate",
     "addBlankShipment", "updateBlankShipment", "deleteBlankShipment", "getBlankShipments", "getOrderItemFiles", "saveOrderItemFile", "deleteOrderItemFile",
     // Reports that aren't bookkeeping
-    "getAuditLog", "getRevenueReport", "getSalesTaxReport", "getInventoryReport",
+    "getAuditLog", "getRevenueReport", "getDashboard", "getSalesTaxReport", "getInventoryReport",
     // Shops, products, catalog, settings
     "listOrgsAdmin", "createOrg", "setupOrgDomain", "getOrgDomainStatus", "updateOrg", "listProducts", "createProduct", "updateProduct", "importProducts", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "getCatalogIssues", "publish",
     "getGlobalSettings", "updateGlobalSettings", "getSetupStatus", "getCloudflareSetup", "connectCloudflare", "getBusinessProfile", "updateBusinessProfile", "getEmailSettings", "updateEmailSettings", "previewCustomerEmail", "samplePdf", "sendSampleEmail", "getLocaleSettings", "updateLocaleSettings", "getFeatures", "updateFeatures", "getShipFromAddress", "getSalesTaxSettings", "updateSalesTaxSettings",

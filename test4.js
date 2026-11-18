@@ -175,7 +175,7 @@ html = html.replace(
   window.document.querySelector(".admin-pass-submit").click();
   await new Promise(r=>setTimeout(r,150));
   pickerHtml = window.document.body.innerHTML;
-  console.log("Correct passphrase shows the org picker:", pickerHtml.includes("Example League 101"));
+  console.log("Correct passphrase opens Home, with the shops loaded:", pickerHtml.includes("home-tile") && window.eval("adminOrgs.map(o => o.name).join()").includes("Example League 101"));
 
   window.selectAdminOrg("league-101");
   await new Promise(r=>setTimeout(r,150));

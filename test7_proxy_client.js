@@ -178,7 +178,7 @@ function lastToastText(win){
   console.log("\n=== Admin subdomain: no org resolved, shows the org picker instead of a storefront ===");
   const pickerHtml = adminWindow.document.body.innerHTML;
   console.log("Catalog endpoint called with no org data returned to the picker (no client list leaked before auth):", adminCalls.some(c => c.url.startsWith("/api/catalog")));
-  console.log("Org picker shows both shop names, gated behind the passphrase prompt:", pickerHtml.includes("Example League 101") && pickerHtml.includes("Example Crew Co"));
+  console.log("Signing in opens Home with both shops loaded, gated behind the passphrase prompt:", pickerHtml.includes("home-tile") && adminWindow.eval("adminOrgs.map(o => o.name).join()").includes("Example League 101") && adminWindow.eval("adminOrgs.map(o => o.name).join()").includes("Example Crew Co"));
   console.log("Client sent the admin passphrase to listOrgs:", adminCalls.some(c => c.body && c.body.action === "listOrgs" && c.body.key === "proxy-passphrase"));
 
   console.log("\n=== Admin subdomain: selecting a shop reuses the passphrase and shows its orders ===");

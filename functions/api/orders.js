@@ -97,7 +97,7 @@ import {
   voidFinishedGoodsMovement, getFinishedGoodsValuation, WRITEOFF_REASONS,
   updateOrderPlacedAt, setOrderDueDate,
   insertAuditLog, getAuditLog,
-  getRevenueData,
+  getRevenueData, getDashboard, homeOrderStage,
   getSalesTaxSettings, setSalesTaxSettings, setOrgTaxExemption, getSalesTaxReport,
   getSalesTaxRefunds, PAYMENT_METHODS, methodFromPaymentMethod, getCardPaymentsMissingFees, setPaymentFee, getSalesTaxReturn, getTaxedResalePurchases, getStripeLinkedPayments, setPaymentDate,
   getDigestState, getDigestRun, getOrdersForDigest, getUnsentOwnerNotices, getFailedAdminLogins,
@@ -352,7 +352,7 @@ const STAFF_ACTIONS = [
   "getReadyToShip", "setReadyToShipQty", "makeForStock", "getFinishedGoodsMovements", "voidFinishedGoodsMovement", "listGraphics", "saveGraphic", "deleteGraphic", "setProductGraphicColorBlocked", "getTierPrices",
   "setTierPrices", "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "getTransferMovements", "getTransferSheet",
   "voidTransferMovement", "restoreTransferMovement", "getTransferQueue", "setTransferReceived", "getGangSheet", "makeTransferLine",
-  "setTransfersApplied", "refreshOrderFromCatalog", "listOrgs", "getOrders", "getOrdersAllShops", "getOpenOrders", "getRevenueReport",
+  "setTransfersApplied", "refreshOrderFromCatalog", "listOrgs", "getOrders", "getOrdersAllShops", "getOpenOrders", "getRevenueReport", "getDashboard",
   "listAccounts", "setPaymentAccount", "listExpenseCategories", "listExpenses", "getExpenseReport", "saveExpense", "previewExpenseImport",
   "importExpenses", "deleteExpense", "getPendingCommunications", "checkDeliveries", "checkBlankShipments", "setOrderCompleted", "getSalesTaxReport",
   "markPaidManual", "resendEmail", "addPayment", "recordRefund", "setRefundShipping", "setPaymentDate", "deletePayment", "voidPayment",
@@ -791,7 +791,8 @@ export async function onRequestPost(context) {
     if (denied) return denied;
     const [orders, orgs] = await Promise.all([getOpenOrders(env.DB), getAllOrgs(env.DB)]);
     const names = Object.fromEntries(orgs.map(o => [o.orgId, o.name]));
-    return jsonResponse({ status: "ok", orders: orders.map(o => ({ ...o, orgName: names[o.orgId] || o.orgId })) });
+    // homeStage: the step it's waiting on (Home's tiles, db.js homeOrderStage).
+    return jsonResponse({ status: "ok", orders: orders.map(o => ({ ...o, orgName: names[o.orgId] || o.orgId, homeStage: homeOrderStage(o) })) });
   }
 
   // ---- getAuditLog — admin fetches the audit log with optional filters --------
@@ -807,6 +808,16 @@ export async function onRequestPost(context) {
       limit:    body.limit    ? Number(body.limit)           : 20,
     });
     return jsonResponse({ status: "ok", entries });
+  }
+
+  // ---- getDashboard — admin Home: orders by step and the money, kept for an hour (db.js getDashboard) ----
+  if (body.action === "getDashboard") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_ROLE[body.action]);
+    if (denied) return denied;
+    // The admin's own today (their time zone), so "this month" turns over at their midnight.
+    const today = String(body.today || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(today)) return jsonResponse({ status: "error", message: "Invalid date — expected YYYY-MM-DD" }, 400);
+    return jsonResponse({ status: "ok", ...(await getDashboard(env.DB, { today, fresh: body.fresh === true })) });
   }
 
   // ---- getRevenueReport — admin revenue breakdown by org for a date range ----

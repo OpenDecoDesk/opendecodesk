@@ -13162,8 +13162,84 @@ export async function getRevenueData(db, dateFrom, dateTo) {
   return results.map(r => {
     const a = orderAmountsOfRow_(r);
     return { orderId: r.orderId, orgId: r.orgId, itemSubtotal: fromCents(r.itemsCents), discountAmount: fromCents(r.discountCents),
-      shippingCost: fromCents(a.shippingCents), rushFee: fromCents(a.rushCents), salesTax: fromCents(a.taxCents), effectiveTotal: fromCents(a.owedCents), received: r.received };
+      shippingCost: fromCents(a.shippingCents), rushFee: fromCents(a.rushCents), salesTax: fromCents(a.taxCents), effectiveTotal: fromCents(a.owedCents), received: r.received,
+      netSalesCents: a.netSalesCents, rushNetCents: a.rushNetCents, shippingCents: a.shippingCents };
   });
+}
+
+// ---- Admin home dashboard (2026-11): the step each open order is waiting on ------------------------
+// One step per order (FULFILLMENT_STAGES' order in admin.js): the first it hasn't done. "" once it's shipped
+// or delivered and only waiting to be closed out. `o` is an order as getOpenOrders returns it.
+export const HOME_STAGES = ["new", "paid", "blanks", "run", "qa", "ship"];
+export function homeOrderStage(o){
+  if (!o.paid && !o.paidForWork) return "new";
+  if (o.digitalOnly) return "ship";   // downloads only: nothing to make; paid → deliver the files and complete it
+  const blanks = o.needsBlanks !== false;
+  if (blanks && !o.blankOrderedAt) return "paid";
+  if (blanks && !o.blankReceivedAt) return "blanks";
+  if (!o.manufacturedAt) return "run";
+  if (!o.qaPackedAt) return "qa";
+  if (!o.shippedAt && !o.deliveredAt) return "ship";
+  return "";
+}
+
+// Home's figures — order counts by step and the money (getDashboardMoney) — worked out at most once an
+// hour: the answer is kept in global_settings 'dashboardCache' with when it was made, and handed back
+// until it's an hour old or the admin's day changes (a new month starts a new month-to-date).
+// `fresh` works them out again now (Home's Refresh). `today` is the admin's own YYYY-MM-DD.
+export const DASHBOARD_TTL_MS = 60 * 60 * 1000;
+export async function getDashboard(db, { today, fresh = false, now = Date.now() } = {}) {
+  if (!fresh) {
+    const row = await db.prepare("SELECT value FROM global_settings WHERE key = 'dashboardCache'").first().catch(() => null);
+    const c = row ? tryParse_(row.value, null) : null;
+    if (c && c.today === today && Number(c.at) <= now && now - Number(c.at) < DASHBOARD_TTL_MS && c.data) return { ...c.data, cachedAt: new Date(Number(c.at)).toISOString(), cached: true };
+  }
+  const [open, money] = await Promise.all([
+    getOpenOrders(db),
+    getDashboardMoney(db, { yearFrom: today.slice(0, 4) + "-01-01", monthFrom: today.slice(0, 7) + "-01", to: today }),
+  ]);
+  const stages = Object.fromEntries(HOME_STAGES.map(k => [k, 0]));
+  let onTheWay = 0;
+  for (const o of open) { const k = homeOrderStage(o); if (k) stages[k]++; else onTheWay++; }
+  const data = { stages, open: open.length, onTheWay, ...money };
+  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('dashboardCache', ?)")
+    .bind(JSON.stringify({ at: now, today, data })).run();
+  return { ...data, cachedAt: new Date(now).toISOString(), cached: false };
+}
+
+// ---- Admin home dashboard (2026-11): the year's and the month's money at a glance ----------------
+// From the same places as the reports, so the figures match them for the same dates:
+//   productRevenue  goods sold, less sales tax and discounts, no shipping (Revenue report, by order placed)
+//   cogs            blanks + finished stock + estimates (Inventory & COGS) + transfer sheets used
+//   revenue         productRevenue + shipping and rush fees charged (less their tax) + other income
+//   expenses        recorded expenses + cogs + write-offs (blanks and transfers)
+// `yearFrom` / `monthFrom` / `to` are YYYY-MM-DD (the admin's own today). Dollars out.
+export async function getDashboardMoney(db, { yearFrom, monthFrom, to }) {
+  const period = async (from) => {
+    const a = from + "T00:00:00.000Z", b = to + "T23:59:59.999Z";
+    const sumCents = async (sql) => {
+      try { return Number(((await db.prepare(sql).bind(from, to).first()) || {}).c) || 0; }
+      catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return 0; throw e; }
+    };
+    const [sales, cogs, tCogs, otherCents, expenseCents] = await Promise.all([
+      getRevenueData(db, a, b), getCogsReport(db, a, b), getTransferCogs(db, a, b),
+      sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM other_income WHERE deletedAt IS NULL AND incomeDate >= ? AND incomeDate <= ?"),
+      sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM expenses WHERE deletedAt IS NULL AND expenseDate >= ? AND expenseDate <= ?"),
+    ]);
+    const add = (rows, k) => rows.reduce((t, r) => t + Math.round((Number(r[k]) || 0) * 100), 0);
+    const goods = sales.reduce((t, r) => t + r.netSalesCents, 0);
+    const extras = sales.reduce((t, r) => t + r.shippingCents + r.rushNetCents, 0);
+    const cogsCents = add(cogs.rows, "cogs") + add(tCogs, "cogs");
+    const writeoffCents = add(cogs.rows, "writeoffs") + add(tCogs, "writeoffs");
+    return {
+      revenue: fromCents(goods + extras + otherCents), expenses: fromCents(expenseCents + cogsCents + writeoffCents),
+      recordedExpenses: fromCents(expenseCents), writeoffs: fromCents(writeoffCents), otherIncome: fromCents(otherCents),
+      productRevenue: fromCents(goods), cogs: fromCents(cogsCents), productNet: fromCents(goods - cogsCents),
+      estimatedCogs: fromCents(add(cogs.rows, "estimatedPart")), missingCost: cogs.missingCost.length, orders: sales.length,
+    };
+  };
+  const [year, month] = await Promise.all([period(yearFrom), period(monthFrom)]);
+  return { year, month, yearFrom, monthFrom, to };
 }
 
 // Sales-tax report (accrual, by the month the order was placed). One row per

@@ -11,7 +11,7 @@ const strip = (src) => src
   .replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "")
   .replace(/export (async function|function|const)/g, "$1");
 const dbSrc = strip(read("functions/_lib/db.js"));
-const lib = new Function(dbSrc + "\nreturn { insertOrder, getDashboardMoney, getDashboard, homeOrderStage, DASHBOARD_TTL_MS };")();
+const lib = new Function(dbSrc + "\nreturn { insertOrder, getDashboardMoney, getDashboard, homeOrderStage, DASHBOARD_TTL_MS, setFeatures };")();
 const pad = (n) => String(n).padStart(2, "0");
 const now = new Date();
 const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
@@ -75,6 +75,7 @@ const at = (day) => day + "T12:00:00.000Z";
   const api = new Function(
     strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
     "const requireAdmin = async (env, host) => host.kind === 'admin' ? null : jsonResponse({ status: 'error', message: 'Admin only' }, 403); const adminActor = () => 'test';\n" +
+    "const adminUser = () => globalThis.__homeUser || null;\n" +
     "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
     "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
     "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +
@@ -92,6 +93,26 @@ const at = (day) => day + "T12:00:00.000Z";
   console.log("refused away from the admin subdomain:", r.status >= 400 && !r.body.year);
   r = await call({ action: "getOpenOrders" });
   console.log("getOpenOrders gives each order the step it's waiting on:", r.body.orders.find(o => o.orderId === "QA1").homeStage === "qa" && r.body.orders.find(o => o.orderId === "GONE1").homeStage === "");
+
+  console.log("\n=== The money is a manager's (getDashboard as staff) ===");
+  globalThis.__homeUser = { role: "staff" };
+  r = await call({ action: "getDashboard", today });
+  console.log("staff get the step counts and when they were worked out, and no money at all:", r.status === 200 && r.body.stages.new === 3 && r.body.open === 9 && r.body.onTheWay === 1 && !!r.body.cachedAt
+    && ["year", "month", "saleDate", "yearFrom", "monthFrom", "bookkeeping"].every(k => !(k in r.body)) && !/productRevenue|expenses|cogs/.test(JSON.stringify(r.body)));
+  globalThis.__homeUser = { role: "manager" };
+  r = await call({ action: "getDashboard", today });
+  console.log("a manager gets the money, from the same kept answer:", r.status === 200 && r.body.cached === true && r.body.year.productRevenue === 9 * 46);
+  globalThis.__homeUser = null;
+
+  console.log("\n=== Bookkeeping off (getDashboardMoney) ===");
+  await lib.getDashboard(d1, { today, fresh: true });
+  await lib.setFeatures(d1, { bookkeeping: false });
+  console.log("saving the features drops Home's kept figures, so the switch shows at once:", d1._raw.exec("SELECT count(*) FROM global_settings WHERE key = 'dashboardCache'")[0].values[0][0] === 0);
+  const off = await lib.getDashboardMoney(d1, { yearFrom, monthFrom, to: today });
+  console.log("recorded expenses and other income (Bookkeeping's pages) are left out; COGS stays:", off.bookkeeping === false && off.year.recordedExpenses === 0 && off.year.otherIncome === 0
+    && off.year.expenses === 18 && off.year.cogs === 18 && off.year.revenue === 9 * 46 + 8 && off.year.productRevenue === 9 * 46);
+  await lib.setFeatures(d1, { bookkeeping: true });
+  console.log("…and on again they're back:", (await lib.getDashboardMoney(d1, { yearFrom, monthFrom, to: today })).bookkeeping === true);
 
   console.log("\n=== Kept for an hour (getDashboard) ===");
   const t0 = Date.now();
@@ -151,6 +172,25 @@ const at = (day) => day + "T12:00:00.000Z";
     tile("new").querySelector(".home-num").textContent === "4" && !reloads.length && !w.document.getElementById("homeRefresh").disabled && /^Data last updated/.test(updText()));
   d1._raw.run("DELETE FROM order_items WHERE orderId = 'LATE2'"); d1._raw.run("DELETE FROM orders WHERE orderId = 'LATE2'");
   await lib.getDashboard(d1, { today, fresh: true });
+
+  // Bookkeeping off: the expenses cards say what they add up.
+  await lib.setFeatures(d1, { bookkeeping: false }); w.eval("siteFeatures.bookkeeping = false;");
+  await route("#home");
+  await wait(() => w.document.querySelector(".home-table"));
+  const hints = [...w.document.querySelectorAll(".home-card .home-hint")].map(e => e.textContent);
+  console.log("bookkeeping off: the expenses cards are the cost of goods, and say so:", [...w.document.querySelectorAll(".home-card .home-val")].map(e => e.textContent)[1] === "$18"
+    && hints[1] === "Cost of goods — bookkeeping is off" && hints[3] === "Cost of goods — bookkeeping is off" && !w.document.querySelector('#homeMoney a[href="#expenses"]'));
+  await lib.setFeatures(d1, { bookkeeping: true }); w.eval("delete siteFeatures.bookkeeping;");
+  // Staff: the order tiles, and no money anywhere on the page or in its menus.
+  globalThis.__homeUser = { role: "staff" }; w.eval('adminMe = { role: "staff", name: "Sam" };');
+  await route("#home");
+  await wait(() => tile("new") && tile("new").querySelector(".home-num").textContent !== "…");
+  const navText = (w.document.querySelector(".admin-nav-row") || {}).textContent || "";
+  console.log("staff see the step tiles but no business totals or product sales:", tile("new").querySelector(".home-num").textContent === "3" && !w.document.getElementById("homeMoney") && !w.document.querySelector(".home-card"));
+  console.log("…and no Revenue, Sales tax, Inventory & COGS or Expenses in the menus:", !/Revenue report|Sales tax report|Inventory & COGS|Expenses/.test(w.document.body.innerHTML.match(/admin-nav[\s\S]*?<\/nav>|$/)[0] + navText));
+  await route("#revenue");
+  console.log("…and opening the Revenue report says it's a manager's page instead of loading it:", !w.document.getElementById("revFrom") && /manager/i.test(w.document.getElementById("app").textContent));
+  globalThis.__homeUser = null; w.eval("adminMe = null;");
 
   await route("#home/new");
   await wait(() => w.document.querySelector("#homeStageBody tr[data-order]"));

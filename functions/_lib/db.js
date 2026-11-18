@@ -3059,6 +3059,8 @@ export async function setFeatures(db, p) {
   const next = await getFeatures(db);
   for (const k of FEATURE_KEYS_) if (p && typeof p[k] === "boolean") next[k] = p[k];
   await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('features', ?)").bind(JSON.stringify(next)).run();
+  // Home's kept figures depend on Bookkeeping (getDashboardMoney): work them out again on the next visit.
+  await db.prepare("DELETE FROM global_settings WHERE key = 'dashboardCache'").run().catch(() => {});
   return next;
 }
 // SQL: true unless the feature was saved as false. For rules that live in a query (which orders
@@ -13295,16 +13297,20 @@ export async function getDashboard(db, { today, fresh = false, now = Date.now() 
 // `yearFrom` / `monthFrom` / `to` are YYYY-MM-DD (the admin's own today). Dollars out.
 export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis }) {
   basis = basis || await getSaleDateBasis(db);
+  // Bookkeeping off: recorded expenses and other income (Expenses, Accounts & money) are its pages, so they're
+  // left out; cost of goods and write-offs are stock, and stay.
+  const books = (await getFeatures(db)).bookkeeping !== false;
   const period = async (from) => {
     const a = from + "T00:00:00.000Z", b = to + "T23:59:59.999Z";
     const sumCents = async (sql) => {
       try { return Number(((await db.prepare(sql).bind(from, to).first()) || {}).c) || 0; }
       catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return 0; throw e; }
     };
+    const none = async () => 0;
     const [sales, cogs, tCogs, otherCents, expenseCents] = await Promise.all([
       getRevenueData(db, a, b, { basis }), getCogsReport(db, a, b, { basis }), getTransferCogs(db, a, b, { basis }),
-      sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM other_income WHERE deletedAt IS NULL AND incomeDate >= ? AND incomeDate <= ?"),
-      sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM expenses WHERE deletedAt IS NULL AND expenseDate >= ? AND expenseDate <= ?"),
+      books ? sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM other_income WHERE deletedAt IS NULL AND incomeDate >= ? AND incomeDate <= ?") : none(),
+      books ? sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM expenses WHERE deletedAt IS NULL AND expenseDate >= ? AND expenseDate <= ?") : none(),
     ]);
     const add = (rows, k) => rows.reduce((t, r) => t + Math.round((Number(r[k]) || 0) * 100), 0);
     const goods = sales.reduce((t, r) => t + r.netSalesCents, 0);
@@ -13319,7 +13325,7 @@ export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis }) 
     };
   };
   const [year, month] = await Promise.all([period(yearFrom), period(monthFrom)]);
-  return { year, month, yearFrom, monthFrom, to, saleDate: basis };
+  return { year, month, yearFrom, monthFrom, to, saleDate: basis, bookkeeping: books };
 }
 
 // Sales-tax report (accrual, by the month the order was placed). One row per

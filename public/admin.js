@@ -1193,6 +1193,37 @@ async function loadHome_(fresh){
   if (document.getElementById("homeMoney")) drawHomeMoney_(d);
 }
 
+// Home's "Where the money went": one donut per period, a slice per expense type (the categories, then cost of goods
+// and write-offs), so it adds up to the Expenses card. A type keeps its colour in both pies: cost of goods is always
+// green, write-offs amber, and a category's colour follows its id.
+const HOME_PIE_COLORS_ = ["#2a78d6", "#6250d6", "#eb6834", "#e87ba4", "#e34948", "#1baf7a", "#8a6d3b"];
+function homePieColor_(s){
+  if (s.key === "cogs") return "#008300";
+  if (s.key === "writeoffs") return "#eda100";
+  const id = Number(s.id);
+  return s.id == null || !isFinite(id) ? "#898781" : HOME_PIE_COLORS_[Math.abs(id) % HOME_PIE_COLORS_.length];
+}
+function homePie_(label, p, emptyText){
+  const slices = (p.byType || []).filter(s => Number(s.amount) > 0);
+  const total = slices.reduce((t, s) => t + Number(s.amount), 0);
+  const r = 58, c = 2 * Math.PI * r, pct = (v) => Math.round(v / total * 100) + "%";
+  let off = 0;
+  const arcs = total > 0 ? slices.map(s => {
+    const len = Number(s.amount) / total * c, gap = slices.length > 1 ? 1.5 : 0;
+    const arc = `<circle cx="75" cy="75" r="${r}" fill="none" stroke="${homePieColor_(s)}" stroke-width="24" stroke-dasharray="${Math.max(len - gap, 0.5).toFixed(2)} ${c.toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 75 75)"><title>${escapeHtml(s.name)} ${homeMoney_(s.amount)} (${pct(s.amount)})</title></circle>`;
+    off += len; return arc;
+  }).join("") : `<circle cx="75" cy="75" r="${r}" fill="none" stroke="#e4e4e0" stroke-width="24"></circle>`;
+  const legend = total > 0
+    ? `<table class="home-legend">${slices.map(s => `<tr><td><span class="home-swatch" style="background:${homePieColor_(s)}"></span>${escapeHtml(s.name)}</td><td class="home-num-cell">${homeMoney_(s.amount)}</td><td class="home-legend-pct">${pct(s.amount)}</td></tr>`).join("")}</table>`
+    : `<div class="home-note" style="margin:0;">${escapeHtml(emptyText)}</div>`;
+  const refunded = (p.refundedTypes || []).length
+    ? `<div class="home-note">Not shown: refunds outweigh what was spent on ${escapeHtml(p.refundedTypes.join(", "))}.</div>` : "";
+  return `<div class="home-pie"><div class="home-pie-chart"><span class="home-lbl">${escapeHtml(label)}</span>
+      <svg width="150" height="150" viewBox="0 0 150 150" role="img" aria-label="${escapeHtml(label)} expenses by type">${arcs}
+        <text x="75" y="73" text-anchor="middle" class="home-pie-total">${homeMoney_(total)}</text><text x="75" y="91" text-anchor="middle" class="home-pie-sub">expenses</text></svg></div>
+    <div class="home-pie-legend">${legend}${refunded}</div></div>`;
+}
+
 function drawHomeMoney_(d){
   const el = document.getElementById("homeMoney");
   if (!el) return;
@@ -1219,6 +1250,12 @@ function drawHomeMoney_(d){
       ${card("Revenue · month to date", m.revenue, monthName + " 1 to today", revTitle(m))}
       ${card("Expenses · month to date", m.expenses, books ? monthName + " 1 to today" : offSub(m), expTitle(m))}
     </div>
+    <h3 class="home-h">Where the money went</h3>
+    <div class="home-pies">
+      ${homePie_("Year to date", y, "No expenses yet this year.")}
+      ${homePie_("Month to date", m, "No expenses yet this month.")}
+    </div>
+    <div class="home-note">Each pie adds up to the Expenses card above it. Hover a slice for its amount.</div>
     <h3 class="home-h">Product sales</h3>
     <div style="overflow-x:auto;border:1px solid var(--border,#ddd);border-radius:8px;">
       <table class="home-table">

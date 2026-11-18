@@ -71,6 +71,26 @@ const at = (day) => day + "T12:00:00.000Z";
   console.log("business revenue adds shipping charged and other income:", m.year.revenue === 9 * 46 + 8 + 30 && m.year.otherIncome === 30);
   console.log("business expenses = recorded expenses + COGS (last year's expense left out):", m.year.expenses === 120 + 18 && m.year.recordedExpenses === 120);
 
+  console.log("\n=== Expenses by type, for Home's pies (getDashboardMoney byType) ===");
+  {
+    // c1 is the category the $120 expense above went in; c2 and c3 are two others.
+    const c1 = d1._raw.exec("SELECT id, name FROM expense_categories WHERE id = ?", [cat])[0].values[0];
+    const [c2, c3] = d1._raw.exec("SELECT id, name FROM expense_categories WHERE id != ? ORDER BY id LIMIT 2", [cat])[0].values;
+    // Added for this block only: $40 today in a second category; in a third, $15 spent and a $25 refund today.
+    d1._raw.run("INSERT INTO expenses (expenseDate, description, categoryId, amountCents, createdAt, updatedAt) VALUES (?, 'Ink', ?, 4000, 'x', 'x'), (?, 'Tape', ?, 1500, 'x', 'x'), (?, 'Refund', ?, -2500, 'x', 'x')",
+      [today, c2[0], today, c3[0], today, c3[0]]);
+    const b = await lib.getDashboardMoney(d1, { yearFrom, monthFrom, to: today });
+    const names = b.year.byType.map(t => t.name + " " + t.amount).join(", ");
+    console.log("one slice per category spent on, largest first, then cost of goods:", names === `${c1[1]} 120, ${c2[1]} 40, Cost of goods 18`);
+    console.log("…the same for the month:", b.month.byType.map(t => t.name + " " + t.amount).join(", ") === names);
+    console.log("no write-offs slice when there are none:", !b.year.byType.some(t => t.key === "writeoffs"));
+    console.log("a category whose refunds outweigh it isn't a slice, and is named instead:", b.year.refundedTypes.length === 1 && b.year.refundedTypes[0] === c3[1]);
+    console.log("cost of goods is keyed so it keeps its colour; categories carry their id:", b.year.byType[2].key === "cogs" && b.year.byType[0].id === c1[0]);
+    d1._raw.run("DELETE FROM expenses WHERE createdAt = 'x'");
+    const a = await lib.getDashboardMoney(d1, { yearFrom, monthFrom, to: today });
+    console.log("the slices add up to the Expenses card:", a.year.byType.reduce((t, x) => t + x.amount, 0) === a.year.expenses && a.month.byType.reduce((t, x) => t + x.amount, 0) === a.month.expenses);
+  }
+
   console.log("\n=== getDashboard admin action (orders.js) ===");
   const api = new Function(
     strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
@@ -111,6 +131,7 @@ const at = (day) => day + "T12:00:00.000Z";
   const off = await lib.getDashboardMoney(d1, { yearFrom, monthFrom, to: today });
   console.log("recorded expenses and other income (Bookkeeping's pages) are left out; COGS stays:", off.bookkeeping === false && off.year.recordedExpenses === 0 && off.year.otherIncome === 0
     && off.year.expenses === 18 && off.year.cogs === 18 && off.year.revenue === 9 * 46 + 8 && off.year.productRevenue === 9 * 46);
+  console.log("…and the pies are just cost of goods (no categories):", off.year.byType.length === 1 && off.year.byType[0].key === "cogs" && off.year.byType[0].amount === 18);
   await lib.setFeatures(d1, { bookkeeping: true });
   console.log("…and on again they're back:", (await lib.getDashboardMoney(d1, { yearFrom, monthFrom, to: today })).bookkeeping === true);
 
@@ -152,6 +173,16 @@ const at = (day) => day + "T12:00:00.000Z";
   console.log("each tile links to its list:", tile("run").getAttribute("href") === "#home/run");
   const cards = [...w.document.querySelectorAll(".home-card .home-val")].map(e => e.textContent);
   console.log("business totals: revenue and expenses, year and month:", cards.length === 4 && cards[0] === "$" + (9 * 46 + 38) && cards[1] === "$138");
+  const pies = [...w.document.querySelectorAll(".home-pie")];
+  const legend = (pie) => [...pie.querySelectorAll(".home-legend tr")].map(tr => [...tr.cells].map(c => c.textContent).join("|"));
+  const cat1 = d1._raw.exec("SELECT name FROM expense_categories WHERE id = ?", [cat])[0].values[0][0];
+  console.log("Where the money went: a pie for the year and one for the month, between the totals and product sales:", pies.length === 2
+    && /Year to date/.test(pies[0].textContent) && /Month to date/.test(pies[1].textContent)
+    && w.document.querySelector(".home-tiles-4").compareDocumentPosition(pies[0]) & 4 && pies[1].compareDocumentPosition(w.document.querySelector(".home-table")) & 4);
+  console.log("…each with a legend by type: amount and share:", legend(pies[0]).join(",") === `${cat1}|$120|87%,Cost of goods|$18|13%`);
+  console.log("…a slice per type with its amount on hover, and the total in the middle:", pies[0].querySelectorAll("svg circle").length === 2
+    && pies[0].querySelector("svg circle title").textContent === `${cat1} $120 (87%)` && pies[0].querySelector(".home-pie-total").textContent === "$138");
+  console.log("…cost of goods is always green:", [...pies[0].querySelectorAll(".home-swatch")][1].getAttribute("style").includes("#008300"));
   const tRows = [...w.document.querySelectorAll(".home-table tbody tr")].map(tr => [...tr.cells].map(c => c.textContent));
   console.log("product sales: revenue, COGS, net income and margin for the year and the month:",
     tRows.length === 2 && tRows[0][0] === "Year to date" && tRows[0][1] === "$414" && tRows[0][2] === "$18" && tRows[0][3] === "$396" && tRows[0][4] === "96%");

@@ -7579,7 +7579,7 @@ async function consumeTransfersForItem_(db, item, transferIds, at = null) {
 
 // Consume a fully-made configurable line's transfer applications (customer options + reorder QR)
 // exactly once — whichever screen completed it (embroidery Run Order hoopings OR Run Transfer
-// Sheets). Idempotent (a prior consume movement for this line = already done) and a no-op on a
+// Sheets). Idempotent (a prior live consume movement for this line = already done; a voided one doesn't count) and a no-op on a
 // pre-0036 schema. Called when a line reaches its full manufacturedQty.
 async function consumeLineTransfersOnce_(db, orderId, itemId, at = null) {
   try {
@@ -7588,7 +7588,7 @@ async function consumeLineTransfersOnce_(db, orderId, itemId, at = null) {
     if (!cfg) return;
     const transferIds = (cfg.locations || []).filter(l => l.kind === "transfer" && Number(l.transferId)).map(l => Number(l.transferId));
     if (!transferIds.length) return;
-    const already = await db.prepare("SELECT COUNT(*) n FROM transfer_movements WHERE itemId=? AND kind='consume'").bind(Number(itemId)).first();
+    const already = await db.prepare("SELECT COUNT(*) n FROM transfer_movements WHERE itemId=? AND kind='consume' AND voidedAt IS NULL").bind(Number(itemId)).first();
     if (already && Number(already.n) > 0) return;
     await consumeTransfersForItem_(db, { id: item.id, orderId: item.orderId, qty: Math.max(1, Number(item.qty) || 1) }, transferIds, at);
   } catch (e) { if (!/no such (table|column)/i.test(String(e && e.message))) throw e; }
@@ -7996,7 +7996,7 @@ export async function getTransferQueue(db) {
 
 // Whether each queued line has its transfers in hand, worked out from transfer stock rather than only the
 // "Mark transfer received" flag (which receiving a sheet never set, so lines filled from stock sat under
-// "Waiting" forever). Per line: `source` = "used" (a consume movement exists — the line was made and its
+// "Waiting" forever). Per line: `source` = "used" (a live consume movement exists — a voided one doesn't count; the line was made and its
 // transfers came out of stock), "marked" (the flag), "stock" (stock covers every application) or "" (not in
 // hand); `inStock[i]` per transfer entry; `short` = what's missing. Stock is shared out like blanks' Use from
 // stock: lines marked received hold theirs first (that sheet was bought for them), then the rest in queue
@@ -8009,7 +8009,7 @@ async function transfersInHand_(db, rows) {
   try {
     for (let i = 0; i < ids.length; i += 90) {
       const chunk = ids.slice(i, i + 90);
-      const { results } = await db.prepare(`SELECT DISTINCT itemId FROM transfer_movements WHERE kind='consume' AND itemId IN (${chunk.map(() => "?").join(",")})`).bind(...chunk).all();
+      const { results } = await db.prepare(`SELECT DISTINCT itemId FROM transfer_movements WHERE kind='consume' AND voidedAt IS NULL AND itemId IN (${chunk.map(() => "?").join(",")})`).bind(...chunk).all();
       for (const m of results) used.add(Number(m.itemId));
     }
     const { results } = await db.prepare("SELECT id, name, quantity FROM transfers").all();

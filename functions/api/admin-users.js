@@ -6,6 +6,8 @@
  *                                          → { user: { id, name, email, role, roleName }, pending, require2fa,
  *                                              permissions: {fn: level}, areas }   (functions/_lib/permissions.js)
  *   Everything else needs Users and roles (settings.users) on the caller's role — read to look, edit to change:
+ *   { action: "savePrefs", prefs }         any signed-in user: their own settings (Home's hidden blocks), kept on
+ *                                          the account → { prefs }. `me` returns them too.
  *   { action: "list" }                     → { users: [...], require2fa }
  *   { action: "listRoles" }                → { roles: [...], areas, myRank, myLevels }
  *   { action: "saveRole", key?, name, rank, permissions }   a new role (no key) or a change to one
@@ -43,7 +45,7 @@ import {
   require2fa, setRequire2fa, recoveryCodesLeft,
 } from "../_lib/adminAuth.js";
 import { insertAuditLog, listUsers, getUserById, getUserByEmail, insertUser, updateUser, setUserRoleAndStatus, deleteUserSessions,
-  listRoles, getRoleRow, insertRole, updateRole, deleteRole, roleInUse } from "../_lib/db.js";
+  listRoles, getRoleRow, insertRole, updateRole, deleteRole, roleInUse, getUserPrefs, saveUserPrefs } from "../_lib/db.js";
 import { resolveRole } from "../_lib/adminAuth.js";
 import { PERMISSION_AREAS, PERM_FUNCTIONS, DEFAULT_ROLES, normalizePermissions, effectivePermissions, effectiveLevel, permRank } from "../_lib/permissions.js";
 
@@ -64,7 +66,7 @@ export async function onRequestPost(context){
   try{ body = await request.json(); }
   catch(e){ return bad("Bad request"); }
   const action = String((body && body.action) || "");
-  const self = action === "me";
+  const self = action === "me" || action === "savePrefs";   // the caller's own: who they are, their own settings
 
   // "me" is everyone's; the rest is user management: Users and roles (settings.users) on the caller's
   // role — read to look, edit to change, full to delete a role. The install-wide 2FA switch is an admin's.
@@ -77,11 +79,20 @@ export async function onRequestPost(context){
   const me = adminUser(request);
 
   try{
+    if(action === "savePrefs"){
+      // Only the caller's own row. The installer's passphrase has no account to keep them on.
+      if(me && me.pending) return bad("Finish setting up your account first.", 403);
+      if(!me || me.id == null) return bad("Settings are kept on a user account — sign in with one to keep them everywhere.", 409);
+      const r = await saveUserPrefs(env.DB, me.id, body.prefs);
+      if(r.error) return bad(r.error);
+      return jsonResponse({status:"ok", prefs: r.prefs});
+    }
     if(self){
       const ri = me && me.roleInfo;
       return jsonResponse({status:"ok", user: me && me.id != null ? { id: me.id, name: me.name, email: me.email, role: me.role, roleName: ri ? ri.name : "" } : null,
         pending: (me && me.pending) || null, require2fa: await require2fa(env),
-        permissions: ri ? effectivePermissions(ri) : {}, areas: PERMISSION_AREAS});
+        permissions: ri ? effectivePermissions(ri) : {}, areas: PERMISSION_AREAS,
+        prefs: me && me.id != null ? await getUserPrefs(env.DB, me.id) : null});
     }
     if(!me || me.id == null || me.bootstrap) return bad("Sign in through the admin page first.", 403);
 

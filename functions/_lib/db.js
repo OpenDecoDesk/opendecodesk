@@ -2903,6 +2903,39 @@ export async function getUserById(db, id) {
   return (await db.prepare(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`).bind(id).first()) || null;
 }
 
+// A user's own settings (migrations/0091): a JSON object, {} when none or unreadable. On a database from before
+// 0091 there's nowhere to keep them: {} to read, and saving says so.
+export const HOME_BLOCKS = ["orders", "totals", "inout", "pies", "sales"];   // Home's blocks, top to bottom
+export const USER_PREFS_MAX = 4096;
+export async function getUserPrefs(db, id) {
+  try {
+    const r = await db.prepare("SELECT prefs FROM users WHERE id = ?").bind(Number(id)).first();
+    const v = r && r.prefs ? JSON.parse(r.prefs) : {};
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch (e) { if (/no such column/i.test(String(e && e.message)) || e instanceof SyntaxError) return {}; throw e; }
+}
+// Only what we know is kept: { home: { hidden: [known block keys] } }. Returns the cleaned value, or null when
+// `patch` isn't usable. Unknown top-level keys are dropped; keys it doesn't name keep their stored value.
+export function cleanUserPrefs(patch) {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return null;
+  const out = {};
+  if ("home" in patch) {
+    const h = patch.home;
+    if (!h || typeof h !== "object" || !Array.isArray(h.hidden)) return null;
+    out.home = { hidden: HOME_BLOCKS.filter(k => h.hidden.includes(k)) };
+  }
+  return out;
+}
+export async function saveUserPrefs(db, id, patch) {
+  const clean = cleanUserPrefs(patch);
+  if (!clean) return { error: "Those settings aren't in a form that can be saved." };
+  const merged = Object.assign(await getUserPrefs(db, id), clean);
+  const json = JSON.stringify(merged);
+  if (json.length > USER_PREFS_MAX) return { error: "Those settings are too big to save." };
+  await db.prepare("UPDATE users SET prefs = ? WHERE id = ?").bind(json, Number(id)).run();
+  return { prefs: merged };
+}
+
 export async function getUserByEmail(db, email) {
   return (await db.prepare(`SELECT ${USER_COLUMNS} FROM users WHERE email = ? ORDER BY id LIMIT 1`).bind(String(email || "").trim().toLowerCase()).first()) || null;
 }
@@ -11042,7 +11075,7 @@ function expenseDeductibleCents_(row) {
 }
 function parseExpenseCategory_(r) {
   return { id: Number(r.id), name: r.name, deductionType: r.deductionType, scheduleCLine: r.scheduleCLine || "",
-    deductiblePct: Number(r.deductiblePct), useTaxable: !!r.useTaxable, expenseCount: Number(r.expenseCount || 0), recurringCount: Number(r.recurringCount || 0) };
+    deductiblePct: Number(r.deductiblePct), useTaxable: !!r.useTaxable, systemKey: r.systemKey || "", expenseCount: Number(r.expenseCount || 0), recurringCount: Number(r.recurringCount || 0) };
 }
 function parseExpense_(r) {
   return {
@@ -11093,6 +11126,9 @@ export async function saveExpenseCategory(db, id, { name, deductionType, schedul
 }
 // Refused (false) while any expense — even a deleted one — uses the category.
 export async function deleteExpenseCategory(db, id) {
+  // A built-in category the app relies on (systemKey, migrations/0090: Home's sales tax paid) stays.
+  const sys = await db.prepare("SELECT systemKey FROM expense_categories WHERE id = ?").bind(Number(id)).first().catch(() => null);
+  if (sys && sys.systemKey) return false;
   const used = await db.prepare("SELECT count(*) AS n FROM expenses WHERE categoryId = ?").bind(Number(id)).first();
   if (Number(used.n) > 0) return false;
   const rules = await db.prepare("SELECT count(*) AS n FROM recurring_expenses WHERE categoryId = ?").bind(Number(id)).first().catch(() => ({ n: 0 }));
@@ -13317,28 +13353,51 @@ export function homeOrderStage(o){
   return "";
 }
 
-// Home's figures — order counts by step and the money (getDashboardMoney) — worked out at most once an
-// hour: the answer is kept in global_settings 'dashboardCache' with when it was made, and handed back
-// until it's an hour old or the admin's day changes (a new month starts a new month-to-date).
-// `fresh` works them out again now (Home's Refresh). `today` is the admin's own YYYY-MM-DD.
+// Home's figures, worked out only for the blocks the page shows (HOME_BLOCKS; a user hides the rest, admin-users
+// savePrefs) and each kept up to an hour in global_settings 'dashboardCache', part by part with when it was made:
+//   orders    order counts by step (getOpenOrders)              ← the Orders block
+//   money     the year's and month's money (getDashboardMoney) ← Business totals, Product sales, the pies;
+//             with the expenses by category (`cats`) only when the pies are shown
+//   inOut     money in and out by month (getMoneyInOutByMonth) ← Money in and out
+// A part is handed back until it's an hour old or the admin's day changes (a new month starts a new
+// month-to-date); a missing or stale one is worked out and added. `fresh` works the asked-for parts out again now
+// (Home's Refresh). `blocks` omitted = all of them. `today` is the admin's own YYYY-MM-DD. The reply has only the
+// parts asked for, `blocks` (the ones it answers for), and `cachedAt` — when the oldest of them was worked out.
 export const DASHBOARD_TTL_MS = 60 * 60 * 1000;
-export async function getDashboard(db, { today, fresh = false, now = Date.now() } = {}) {
-  if (!fresh) {
-    const row = await db.prepare("SELECT value FROM global_settings WHERE key = 'dashboardCache'").first().catch(() => null);
-    const c = row ? tryParse_(row.value, null) : null;
-    if (c && c.today === today && Number(c.at) <= now && now - Number(c.at) < DASHBOARD_TTL_MS && c.data) return { ...c.data, cachedAt: new Date(Number(c.at)).toISOString(), cached: true };
+export async function getDashboard(db, { today, fresh = false, now = Date.now(), blocks } = {}) {
+  const shown = Array.isArray(blocks) ? HOME_BLOCKS.filter(k => blocks.includes(k)) : HOME_BLOCKS.slice();
+  const want = { orders: shown.includes("orders"), money: ["totals", "sales", "pies"].some(k => shown.includes(k)),
+    cats: shown.includes("pies"), inOut: shown.includes("inout") };
+  const row = await db.prepare("SELECT value FROM global_settings WHERE key = 'dashboardCache'").first().catch(() => null);
+  const c = row ? tryParse_(row.value, null) : null;
+  const kept = c && c.today === today && c.parts && typeof c.parts === "object" ? c.parts : {};
+  const usable = (k, ok = true) => !fresh && ok && kept[k] && Number(kept[k].at) <= now && now - Number(kept[k].at) < DASHBOARD_TTL_MS && kept[k].data;
+  const yearFrom = today.slice(0, 4) + "-01-01", monthFrom = today.slice(0, 7) + "-01";
+  const parts = {}, work = [];
+  const take = (k, ok, make) => {
+    if (usable(k, ok)) { parts[k] = kept[k]; return; }
+    work.push(make().then(data => { parts[k] = { at: now, data, ...(k === "money" ? { cats: want.cats } : {}) }; }));
+  };
+  if (want.orders) take("orders", true, async () => {
+    const open = await getOpenOrders(db);
+    const stages = Object.fromEntries(HOME_STAGES.map(k => [k, 0]));
+    let onTheWay = 0;
+    for (const o of open) { const k = homeOrderStage(o); if (k) stages[k]++; else onTheWay++; }
+    return { stages, open: open.length, onTheWay };
+  });
+  // Kept money without the categories won't do once the pies are shown; kept with them does for anything.
+  if (want.money) take("money", !want.cats || !!(kept.money && kept.money.cats), () => getDashboardMoney(db, { yearFrom, monthFrom, to: today, byCategory: want.cats }));
+  if (want.inOut) take("inOut", true, async () => ({ inOut: await getMoneyInOutByMonth(db, { yearFrom, to: today }) }));
+  await Promise.all(work);
+  if (work.length) {
+    await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('dashboardCache', ?)")
+      .bind(JSON.stringify({ today, parts: { ...kept, ...parts } })).run();
   }
-  const [open, money] = await Promise.all([
-    getOpenOrders(db),
-    getDashboardMoney(db, { yearFrom: today.slice(0, 4) + "-01-01", monthFrom: today.slice(0, 7) + "-01", to: today }),
-  ]);
-  const stages = Object.fromEntries(HOME_STAGES.map(k => [k, 0]));
-  let onTheWay = 0;
-  for (const o of open) { const k = homeOrderStage(o); if (k) stages[k]++; else onTheWay++; }
-  const data = { stages, open: open.length, onTheWay, ...money };
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('dashboardCache', ?)")
-    .bind(JSON.stringify({ at: now, today, data })).run();
-  return { ...data, cachedAt: new Date(now).toISOString(), cached: false };
+  const used = Object.values(parts);
+  const at = used.length ? Math.min(...used.map(p => Number(p.at))) : now;
+  const data = Object.assign({}, ...used.map(p => p.data));
+  if (data.year && !want.cats) { delete data.year.byType; delete data.year.refundedTypes; delete data.month.byType; delete data.month.refundedTypes; }
+  return { ...data, blocks: shown, cachedAt: new Date(at).toISOString(), cached: !work.length };
 }
 
 // ---- Admin home dashboard (2026-11): the year's and the month's money at a glance ----------------
@@ -13349,7 +13408,7 @@ export async function getDashboard(db, { today, fresh = false, now = Date.now() 
 //   revenue         productRevenue + shipping and rush fees charged (less their tax) + other income
 //   expenses        recorded expenses + cogs + write-offs (blanks and transfers)
 // `yearFrom` / `monthFrom` / `to` are YYYY-MM-DD (the admin's own today). Dollars out.
-export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis }) {
+export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis, byCategory: withCats = true }) {
   basis = basis || await getSaleDateBasis(db);
   // Bookkeeping off: recorded expenses and other income (Expenses, Accounts & money) are its pages, so they're
   // left out; cost of goods and write-offs are stock, and stay.
@@ -13374,7 +13433,7 @@ export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis }) 
       getRevenueData(db, a, b, { basis }), getCogsReport(db, a, b, { basis }), getTransferCogs(db, a, b, { basis }),
       books ? sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM other_income WHERE deletedAt IS NULL AND incomeDate >= ? AND incomeDate <= ?") : none(),
       books ? sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM expenses WHERE deletedAt IS NULL AND expenseDate >= ? AND expenseDate <= ?") : none(),
-      books ? byCategory() : [],
+      books && withCats ? byCategory() : [],
     ]);
     const add = (rows, k) => rows.reduce((t, r) => t + Math.round((Number(r[k]) || 0) * 100), 0);
     const goods = sales.reduce((t, r) => t + r.netSalesCents, 0);
@@ -13390,7 +13449,8 @@ export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis }) 
     if (cogsCents > 0) byType.push({ key: "cogs", name: "Cost of goods", amount: fromCents(cogsCents) });
     if (writeoffCents > 0) byType.push({ key: "writeoffs", name: "Write-offs", amount: fromCents(writeoffCents) });
     return {
-      byType, refundedTypes: rows.filter(r => r.cents < 0).map(r => r.name),
+      // (Without the categories — Home's pies hidden — there are no slices to give.)
+      ...(withCats ? { byType, refundedTypes: rows.filter(r => r.cents < 0).map(r => r.name) } : {}),
       revenue: fromCents(goods + extras + otherCents), expenses: fromCents(expenseCents + cogsCents + writeoffCents),
       recordedExpenses: fromCents(expenseCents), writeoffs: fromCents(writeoffCents), otherIncome: fromCents(otherCents),
       productRevenue: fromCents(goods), cogs: fromCents(cogsCents), productNet: fromCents(goods - cogsCents),
@@ -13399,6 +13459,84 @@ export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis }) 
   };
   const [year, month] = await Promise.all([period(yearFrom), period(monthFrom)]);
   return { year, month, yearFrom, monthFrom, to, saleDate: basis, bookkeeping: books };
+}
+
+// ---- Home's "Money in and out" (2026-11): cash, month by month, nothing left out ---------------------
+// Each month of the year so far, by the date the money moved (not the sale date):
+//   in   payments    customer payments less refunds and lost disputes, less their sales tax (order_payments)
+//        otherIncome other income (Accounts & money)
+//        contributions owner's money put in (owner_transactions 'contribution')
+//        taxCollected the sales tax inside those payments: each payment's share of its order's tax
+//   out  expenses    recorded expenses, every category but sales tax paid (refunds negative)
+//        blanks / transfers  blanks and transfer sheets bought (stock purchases, qty × unit cost)
+//        cardFees    processing fees on payments
+//        draws       owner's money taken out (owner_transactions 'draw')
+//        taxPaid     expenses in the built-in "Sales tax paid to the state" category (migrations/0090)
+// Transfers between the business's own accounts aren't money in or out. Test and voided orders, and voided
+// payments, are left out. Bookkeeping off: other income, expenses, owner money and tax paid are its pages, so
+// they're left out (blanks, transfer sheets, payments and card fees stay). `yearFrom` / `to` YYYY-MM-DD. Dollars out.
+export const SALES_TAX_PAID_KEY = "sales_tax_paid";
+export async function getMoneyInOutByMonth(db, { yearFrom, to }) {
+  const books = (await getFeatures(db)).bookkeeping !== false;
+  const a = yearFrom + "T00:00:00.000Z", b = to + "T23:59:59.999Z";
+  const months = [];
+  for (let m = yearFrom.slice(0, 7); m <= to.slice(0, 7); ) {
+    months.push(m);
+    const [y, mo] = m.split("-").map(Number);
+    m = mo === 12 ? (y + 1) + "-01" : y + "-" + String(mo + 1).padStart(2, "0");
+  }
+  const cents = Object.fromEntries(months.map(m => [m, { payments: 0, otherIncome: 0, contributions: 0, taxCollected: 0,
+    expenses: 0, blanks: 0, transfers: 0, cardFees: 0, draws: 0, taxPaid: 0 }]));
+  const put = (month, k, c) => { if (cents[month]) cents[month][k] += Number(c) || 0; };
+  const rows = async (sql, ...binds) => {
+    try { return (await db.prepare(sql).bind(...binds).all()).results || []; }
+    catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return []; throw e; }
+  };
+  const [pays, other, owner, exp, blanks, sheets] = await Promise.all([
+    // Each order's payments in a month, with what the order comes to and its tax (orderAmounts).
+    withTaxMode_((tm) => db.prepare(rushSql_(tm, `
+      SELECT substr(p.receivedAt, 1, 7) AS month, SUM(p.amountCents) AS amountCents, SUM(p.feeCents) AS feeCents,
+             SUM(CASE WHEN p.amountCents < 0 THEN COALESCE(p.shippingCents, 0) ELSE 0 END) AS refundShippingCents,
+             ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")}
+      FROM order_payments p JOIN orders o ON o.orderId = p.orderId
+      WHERE p.voidedAt IS NULL AND p.receivedAt >= ? AND p.receivedAt <= ? AND o.isTest = 0 AND o.voidedAt IS NULL
+      GROUP BY o.orderId, substr(p.receivedAt, 1, 7)`)).bind(a, b).all()).then(r => r.results || []),
+    books ? rows("SELECT substr(incomeDate, 1, 7) AS month, SUM(amountCents) AS c FROM other_income WHERE deletedAt IS NULL AND incomeDate >= ? AND incomeDate <= ? GROUP BY month", yearFrom, to) : [],
+    books ? rows("SELECT substr(txDate, 1, 7) AS month, kind, SUM(amountCents) AS c FROM owner_transactions WHERE deletedAt IS NULL AND txDate >= ? AND txDate <= ? GROUP BY month, kind", yearFrom, to) : [],
+    books ? rows(`SELECT substr(e.expenseDate, 1, 7) AS month, (c.systemKey IS NOT NULL AND c.systemKey = '${SALES_TAX_PAID_KEY}') AS tax, SUM(e.amountCents) AS c
+      FROM expenses e LEFT JOIN expense_categories c ON c.id = e.categoryId
+      WHERE e.deletedAt IS NULL AND e.expenseDate >= ? AND e.expenseDate <= ? GROUP BY month, tax`, yearFrom, to)
+      .then(r => r.length ? r : rows("SELECT substr(expenseDate, 1, 7) AS month, 0 AS tax, SUM(amountCents) AS c FROM expenses WHERE deletedAt IS NULL AND expenseDate >= ? AND expenseDate <= ? GROUP BY month", yearFrom, to)) : [],
+    rows("SELECT substr(occurredAt, 1, 7) AS month, SUM(qtyDelta * unitCostCents) AS c FROM inventory_movements WHERE kind = 'purchase' AND voidedAt IS NULL AND occurredAt >= ? AND occurredAt <= ? GROUP BY month", a, b),
+    rows("SELECT substr(occurredAt, 1, 7) AS month, SUM(qtyDelta * unitCostCents) AS c FROM transfer_movements WHERE kind = 'purchase' AND voidedAt IS NULL AND occurredAt >= ? AND occurredAt <= ? GROUP BY month", a, b),
+  ]);
+  for (const r of pays) {
+    // The tax in what was paid: the payment's share of the order's tax. A refund's shipping part carries none.
+    const o = orderAmountsOfRow_(r), amt = Number(r.amountCents) || 0, ship = Number(r.refundShippingCents) || 0;
+    const base = o.owedCents - o.shippingCents, taxable = amt > 0 ? amt : amt + Math.min(ship, -amt);
+    const tax = o.taxCents > 0 && o.owedCents > 0 ? Math.round(taxable * o.taxCents / (amt > 0 ? o.owedCents : Math.max(base, 1))) : 0;
+    const t = Math.sign(tax) * Math.min(Math.abs(tax), Math.abs(amt));
+    put(r.month, "taxCollected", t); put(r.month, "payments", amt - t); put(r.month, "cardFees", r.feeCents);
+  }
+  for (const r of other) put(r.month, "otherIncome", r.c);
+  for (const r of owner) put(r.month, r.kind === "draw" ? "draws" : "contributions", r.c);
+  for (const r of exp) put(r.month, Number(r.tax) ? "taxPaid" : "expenses", r.c);
+  for (const r of blanks) put(r.month, "blanks", r.c);
+  for (const r of sheets) put(r.month, "transfers", r.c);
+  const IN = ["payments", "otherIncome", "contributions", "taxCollected"], OUT = ["expenses", "blanks", "transfers", "cardFees", "draws", "taxPaid"];
+  const dollars = (c, keys) => Object.fromEntries(keys.map(k => [k, fromCents(c[k])]));
+  const total = (c, keys) => keys.reduce((t, k) => t + c[k], 0);
+  return {
+    months: months.map(m => ({ month: m, in: dollars(cents[m], IN), out: dollars(cents[m], OUT),
+      totalIn: fromCents(total(cents[m], IN)), totalOut: fromCents(total(cents[m], OUT)) })),
+    totalIn: fromCents(months.reduce((t, m) => t + total(cents[m], IN), 0)),
+    totalOut: fromCents(months.reduce((t, m) => t + total(cents[m], OUT), 0)),
+    taxCollected: fromCents(months.reduce((t, m) => t + cents[m].taxCollected, 0)),
+    taxPaid: fromCents(months.reduce((t, m) => t + cents[m].taxPaid, 0)),
+    contributions: fromCents(months.reduce((t, m) => t + cents[m].contributions, 0)),
+    draws: fromCents(months.reduce((t, m) => t + cents[m].draws, 0)),
+    bookkeeping: books,
+  };
 }
 
 // Sales-tax report (accrual, by the month the order was placed). One row per

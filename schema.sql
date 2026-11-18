@@ -141,7 +141,8 @@ CREATE TABLE IF NOT EXISTS users (
   recoveryCodes      TEXT,
   createdAt          TEXT    NOT NULL,
   updatedAt          TEXT    NOT NULL,
-  lastLoginAt        TEXT
+  lastLoginAt        TEXT,
+  prefs              TEXT     -- the user's own settings, JSON; NULL = defaults (0091)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email <> '';
 
@@ -1067,8 +1068,10 @@ CREATE TABLE IF NOT EXISTS expense_categories (
   deductiblePct INTEGER NOT NULL DEFAULT 100 CHECK (deductiblePct BETWEEN 0 AND 100),
   createdAt     TEXT NOT NULL,
   updatedAt     TEXT NOT NULL,
-  useTaxable    INTEGER NOT NULL DEFAULT 0 CHECK (useTaxable IN (0, 1))  -- owes use tax if untaxed (0013)
+  useTaxable    INTEGER NOT NULL DEFAULT 0 CHECK (useTaxable IN (0, 1)),  -- owes use tax if untaxed (0013)
+  systemKey     TEXT   -- a category the app relies on, e.g. 'sales_tax_paid' (0090); can't be deleted
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_expense_categories_system ON expense_categories(systemKey) WHERE systemKey IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS expenses (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1135,6 +1138,9 @@ INSERT OR IGNORE INTO expense_categories (name, deductionType, scheduleCLine, de
   ('Rent / lease',                           'deductible',   '20b', 100, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   ('Bank & other fees',                      'deductible',   '27a', 100, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   ('Personal / non-deductible',              'none',         '',    0,   strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+-- Sales tax paid to the state (migrations/0090): Home's "Money in and out" shows it as sales tax going out.
+INSERT OR IGNORE INTO expense_categories (name, deductionType, scheduleCLine, deductiblePct, createdAt, updatedAt, systemKey) VALUES
+  ('Sales tax paid to the state', 'none', '', 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'sales_tax_paid');
 
 -- Audit log — admin changes to orders (see migrations/0002 and 0004)
 CREATE TABLE IF NOT EXISTS audit_log (

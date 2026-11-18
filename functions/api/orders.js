@@ -763,10 +763,13 @@ export async function onRequestPost(context) {
     // The admin's own today (their time zone), so "this month" turns over at their midnight.
     const today = String(body.today || "").trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(today)) return jsonResponse({ status: "error", message: "Invalid date — expected YYYY-MM-DD" }, 400);
-    const d = await getDashboard(env.DB, { today, fresh: body.fresh === true });
-    // The business's money is a manager's (seesPricing_'s rule): staff get the order counts only. The kept
-    // answer stays whole, so one cache serves every role.
-    if (!seesPricing_()) return jsonResponse({ status: "ok", stages: d.stages, open: d.open, onTheWay: d.onTheWay, cachedAt: d.cachedAt, cached: d.cached });
+    // Only the blocks the page shows (the user's choice, Home's ⚙) are worked out; none named = all of them.
+    // The business's money is a manager's (seesPricing_'s rule): staff get the order counts only, so nothing
+    // else is worked out for them. The kept parts are the same for every role.
+    let blocks = Array.isArray(body.blocks) ? body.blocks.filter(b => typeof b === "string") : undefined;
+    if (!seesPricing_()) blocks = !blocks || blocks.includes("orders") ? ["orders"] : [];
+    const d = await getDashboard(env.DB, { today, fresh: body.fresh === true, blocks });
+    if (!seesPricing_()) return jsonResponse({ status: "ok", stages: d.stages, open: d.open, onTheWay: d.onTheWay, blocks: d.blocks, cachedAt: d.cachedAt, cached: d.cached });
     // Home's pies split recorded expenses by category, which is the Expenses page's (finance.expenses). A role that
     // sees the money but not Expenses gets them as one "Recorded expenses" slice, so the pie still adds up.
     if (!seesExpenses_()) {
@@ -1404,6 +1407,7 @@ export async function onRequestPost(context) {
       const id = Number(body.categoryId);
       const cat = id ? await getExpenseCategory(env.DB, id) : null;
       if (!cat) return jsonResponse({ status: "error", message: "Category not found" }, 404);
+      if (cat.systemKey) return bad(`"${cat.name}" is built in (Home shows it as sales tax paid to the state) — it can be renamed but not deleted`);
       if (cat.expenseCount > 0) return bad(`"${cat.name}" is used by ${cat.expenseCount} expense${cat.expenseCount === 1 ? "" : "s"} — move them to another category first`);
       if (cat.recurringCount > 0) return bad(`"${cat.name}" is used by ${cat.recurringCount} recurring expense${cat.recurringCount === 1 ? "" : "s"} — change ${cat.recurringCount === 1 ? "its" : "their"} category first`);
       const auditErr = await auditStrict({ orgId: null, orderId: null, action: "expense_category.deleted", detail: cat });

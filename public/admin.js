@@ -26,6 +26,8 @@ let adminMe = null;
 // it is about. The menu, the router and the buttons hide what a role can't use; the server is what
 // actually refuses it. Not known yet (or an older server): nothing is hidden.
 let adminPerms = null, adminAreas = null;
+// The signed-in user's own settings (admin-users "me" / savePrefs, kept on the account): { home: { hidden: [...] } }.
+let adminPrefs = null;
 const ADMIN_ROLE_LABELS = { staff: "Back office", manager: "Manager", admin: "Admin", production: "Production" };
 const ADMIN_LEVEL_RANK_ = { none: 0, read: 1, edit: 2, full: 3 };
 function adminLevel_(fn){ if (!adminPerms) return "full"; const l = Object.prototype.hasOwnProperty.call(adminPerms, fn) ? adminPerms[fn] : "none"; return ADMIN_LEVEL_RANK_[l] != null ? l : "none"; }
@@ -995,6 +997,7 @@ async function refreshAdminMe_(){
       adminMe = data.user;
       if(data.permissions && typeof data.permissions === "object"){ adminPerms = data.permissions; adminApplyPerms_(document.body); }
       if(Array.isArray(data.areas)) adminAreas = data.areas;
+      if(data.prefs && typeof data.prefs === "object") adminPrefs = data.prefs;
       updateStoredSession_();
     }
   }catch(e){ /* keep what we had */ }
@@ -1191,28 +1194,98 @@ function homeUpdatedAt_(iso){
 
 // The figures come from getDashboard (db.js), which works them out at most once an hour and keeps the answer.
 // The Refresh data button asks the server to work them out again now (not a reload of the page) and redraws them.
+// Home's blocks, top to bottom (db.js HOME_BLOCKS). Each user picks which show (⚙, homeLayoutModal_); the choice is
+// kept on their account (admin-users savePrefs), so it follows them to any browser. Only the shown blocks' figures
+// are asked for. The money blocks are a manager's (the Revenue report's rule), so others aren't offered them.
+const HOME_BLOCKS_ = [
+  { key: "orders", label: "Orders", hint: "Open orders by the step each is waiting on" },
+  { key: "totals", label: "Business totals", hint: "Revenue and expenses, year and month to date", money: true },
+  { key: "inout", label: "Money in and out", hint: "Cash in and out, month by month", money: true },
+  { key: "pies", label: "Where the money went", hint: "Expenses by type, year and month", money: true },
+  { key: "sales", label: "Product sales", hint: "Revenue, cost of goods and margin", money: true },
+];
+const HOME_LOCAL_KEY_ = "oddHomeHidden";   // a passphrase session (no user account): this browser only
+function homeHasAccount_(){ return !!(adminMe && adminMe.id != null); }
+function homeAvailable_(){ return HOME_BLOCKS_.filter(b => !b.money || adminCanOpen_("revenue")); }
+function homeHidden_(){
+  if (homeHasAccount_()) return ((adminPrefs && adminPrefs.home && adminPrefs.home.hidden) || []).slice();
+  try { const v = JSON.parse(localStorage.getItem(HOME_LOCAL_KEY_) || "[]"); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+}
+function homeShown_(){ const hidden = homeHidden_(); return homeAvailable_().map(b => b.key).filter(k => !hidden.includes(k)); }
+
 async function renderHome(app){
   adminSetHash("home");
   document.title = adminTitle_("Home");
   const today = rushLocalToday_();
+  const shown = homeShown_();
   app.innerHTML = `
     ${adminPageHead_("Home")}
     <div class="admin-panel home-dash" style="--org-accent:var(--accent);max-width:980px;margin:8px auto 60px;">
       <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;">
         <h2 style="font-size:20px;margin:0;">Dashboard</h2>
-        <span style="font-size:13px;color:var(--ink-soft,#666);">All shops · ${escapeHtml(new Date(today + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }))}</span>
+        <span style="display:flex;align-items:center;gap:10px;">
+          <span style="font-size:13px;color:var(--ink-soft,#666);">All shops · ${escapeHtml(new Date(today + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }))}</span>
+          <button type="button" class="home-cog" id="homeCog" aria-label="Choose what Home shows" title="Choose what Home shows">⚙</button>
+        </span>
       </div>
-      <div class="home-refresh-row">
+      ${shown.length ? `<div class="home-refresh-row">
         <button type="button" class="admin-btn" id="homeRefresh" title="Work the figures out again now. They're otherwise kept for up to an hour.">↻ Refresh data</button>
         <span class="home-note" id="homeUpdated" style="margin:0;">Loading&hellip;</span>
-      </div>
+      </div>` : `<div class="home-note" id="homeAllHidden" style="margin-top:14px;">Everything on Home is hidden — use ⚙ to choose what to show.</div>`}
+      ${shown.includes("orders") ? `<div data-home-block="orders">
       <h3 class="home-h">Orders</h3>
       <div id="homeStages" class="home-tiles">${HOME_STAGES_.map(s => `<a class="home-tile" href="#home/${s.key}" data-stage="${s.key}"><span class="home-lbl">${escapeHtml(s.label)}</span><span class="home-num">…</span><span class="home-hint">${escapeHtml(s.hint)}</span></a>`).join("")}</div>
-      <div id="homeStagesNote" class="home-note"></div>
-      ${adminCanOpen_("revenue") ? `<div id="homeMoney"></div>` : ""}
+      <div id="homeStagesNote" class="home-note"></div></div>` : ""}
+      ${shown.some(k => k !== "orders") ? `<div id="homeMoney"></div>` : ""}
     </div>`;
+  document.getElementById("homeCog").onclick = () => homeLayoutModal_(app);
+  if (!shown.length) return;
   document.getElementById("homeRefresh").onclick = () => loadHome_(true);
   await loadHome_(false);
+}
+
+// ⚙: one checkbox per block this user can see. Save redraws Home at once (asking only for what's now shown) and
+// keeps the choice on the account; a passphrase session keeps it in this browser.
+function homeLayoutModal_(app){
+  const hidden = homeHidden_(), account = homeHasAccount_();
+  const rows = homeAvailable_().map(b => `<label class="home-layout-row"><input type="checkbox" data-block="${b.key}" ${hidden.includes(b.key) ? "" : "checked"}>
+      <span><strong>${escapeHtml(b.label)}</strong><br><span class="home-hint">${escapeHtml(b.hint)}</span></span></label>`).join("");
+  const { ov, close } = inventoryModal_("Choose what Home shows", `
+    <div id="homeLayoutRows">${rows}</div>
+    ${account ? `<div class="home-note">Kept on your account, so it's the same in any browser you sign in from.</div>`
+      : `<div class="home-note">Saved in this browser only — sign in with a user account to keep it everywhere.</div>`}
+    <div id="homeLayoutErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:6px;"></div>
+    <div style="display:flex;justify-content:space-between;gap:8px;margin-top:8px;flex-wrap:wrap;">
+      <button type="button" class="admin-btn" id="homeLayoutAll" style="background:#fff;color:var(--ink);border:1px solid var(--card-line);">Show all</button>
+      <span style="display:flex;gap:8px;">
+        <button type="button" class="admin-btn" id="homeLayoutCancel" style="background:#fff;color:var(--ink);border:1px solid var(--card-line);">Cancel</button>
+        <button type="button" class="admin-btn" id="homeLayoutSave">Save</button>
+      </span>
+    </div>`, 420);
+  ov.querySelector("#homeLayoutCancel").onclick = close;
+  ov.querySelector("#homeLayoutAll").onclick = () => ov.querySelectorAll("[data-block]").forEach(c => { c.checked = true; });
+  ov.querySelector("#homeLayoutSave").onclick = async () => {
+    const btn = ov.querySelector("#homeLayoutSave"), err = ov.querySelector("#homeLayoutErr");
+    // Blocks this user isn't offered keep whatever was stored for them.
+    const offered = homeAvailable_().map(b => b.key);
+    const next = [...homeHidden_().filter(k => !offered.includes(k)), ...[...ov.querySelectorAll("[data-block]")].filter(c => !c.checked).map(c => c.dataset.block)];
+    err.textContent = "";
+    if (account) {
+      btn.disabled = true; btn.textContent = "Saving…";
+      try {
+        const res = await fetch("/api/admin-users", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "savePrefs", key: adminKey, prefs: { home: { hidden: next } } }) });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || data.status !== "ok") throw new Error((data && data.message) || "Couldn't save — try again.");
+        adminPrefs = data.prefs || adminPrefs;
+      } catch (e) { err.textContent = e.message || "Couldn't save — try again."; btn.disabled = false; btn.textContent = "Save"; return; }
+    } else {
+      try { localStorage.setItem(HOME_LOCAL_KEY_, JSON.stringify(next)); } catch (e) { /* private window: this visit only */ }
+      adminPrefs = Object.assign({}, adminPrefs, { home: { hidden: next } });
+    }
+    close();
+    if (document.body.contains(app) && location.hash === "#home") await renderHome(app);
+  };
 }
 
 async function loadHome_(fresh){
@@ -1221,7 +1294,7 @@ async function loadHome_(fresh){
   btn.disabled = true;
   if (fresh) { btn.textContent = "Refreshing…"; upd.textContent = "Working the figures out again…"; }
   let d;
-  try { d = await hoopApi_({ action: "getDashboard", today: rushLocalToday_(), fresh }); }
+  try { d = await hoopApi_({ action: "getDashboard", today: rushLocalToday_(), fresh, blocks: homeShown_() }); }
   catch (e) { upd.textContent = "Couldn't load the dashboard: " + (e.message || "unknown error"); return; }
   finally { if (document.body.contains(btn)) { btn.disabled = false; btn.textContent = "↻ Refresh data"; } }
   if (location.hash !== "#home" || !document.body.contains(upd)) return;   // gone to another page while it loaded
@@ -1233,7 +1306,7 @@ async function loadHome_(fresh){
     t.classList.toggle("home-tile-zero", !n);
   });
   const open = Number(d.open) || 0;
-  document.getElementById("homeStagesNote").textContent = `${open} open order${open === 1 ? "" : "s"}` + (d.onTheWay ? ` · ${d.onTheWay} shipped and on the way` : "");
+  if (document.getElementById("homeStagesNote")) document.getElementById("homeStagesNote").textContent = `${open} open order${open === 1 ? "" : "s"}` + (d.onTheWay ? ` · ${d.onTheWay} shipped and on the way` : "");
   if (document.getElementById("homeMoney")) drawHomeMoney_(d);
 }
 
@@ -1269,11 +1342,83 @@ function homePie_(label, p, emptyText){
     <div class="home-pie-legend">${legend}${refunded}</div></div>`;
 }
 
+// Home's "Money in and out" (getMoneyInOutByMonth): a pair of bars per month of the year so far, money in on the
+// left and out on the right, cash by the date it moved. Sales tax is yellow on both: collected on top of each in
+// bar, paid to the state on top of the out bar the month it's paid. Owner money has its own colors.
+const HOME_INOUT_PARTS_ = {
+  in: [["payments", "Customer payments (less tax)", "#2a78d6"], ["otherIncome", "Other income", "#2a78d6"],
+       ["contributions", "Owner put in", "#6250d6"], ["taxCollected", "Sales tax collected", "#eda100"]],
+  out: [["expenses", "Expenses", "#eb6834"], ["blanks", "Blanks bought", "#eb6834"], ["transfers", "Transfer sheets bought", "#eb6834"],
+        ["cardFees", "Card fees", "#eb6834"], ["draws", "Owner took out", "#8a6d3b"], ["taxPaid", "Sales tax paid to the state", "#eda100"]],
+};
+function homeInOut_(io){
+  if (!io || !Array.isArray(io.months) || !io.months.length) return "";
+  if (!io.months.some(mo => Number(mo.totalIn) || Number(mo.totalOut))) return `<div class="home-inout"><div class="home-note" style="margin:0;">No money in or out yet this year.</div></div>`;
+  const H = 200, top = 12, x0 = 52, slot = 46, bw = 15, base = top + H;
+  const W = x0 + slot * io.months.length + 8;
+  const sumPos = (side, mo) => HOME_INOUT_PARTS_[side].reduce((t, [k]) => t + Math.max(0, Number(mo[side][k]) || 0), 0);
+  const peak = Math.max(1, ...io.months.flatMap(mo => [sumPos("in", mo), sumPos("out", mo)]));
+  // A round step for the gridlines: 1, 2, 2.5 or 5 × a power of ten, four or five lines.
+  const raw = peak / 4, p10 = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(f => f * p10).find(s => s >= raw);
+  const max = Math.ceil(peak / step) * step, yOf = (v) => base - v / max * H;
+  const tick = (v) => v === 0 ? "0" : v >= 1000 ? "$" + (v / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 }) + "k" : "$" + v;
+  let grid = "";
+  for (let v = 0; v <= max + 1e-9; v += step) {
+    grid += `${v ? `<line x1="${x0}" x2="${W}" y1="${yOf(v).toFixed(1)}" y2="${yOf(v).toFixed(1)}" stroke="#e4e4e0"/>` : ""}<text x="${x0 - 6}" y="${(yOf(v) + 4).toFixed(1)}" text-anchor="end" class="home-inout-tick">${tick(v)}</text>`;
+  }
+  const label = (mo) => new Date(mo.month + "-15T12:00:00").toLocaleDateString(undefined, { month: "short" });
+  const bar = (side, mo, x) => {
+    const parts = HOME_INOUT_PARTS_[side].map(([k, name, color]) => ({ name, color, v: Number(mo[side][k]) || 0 })).filter(p => p.v);
+    const total = side === "in" ? mo.totalIn : mo.totalOut;
+    const tip = `${label(mo)} ${side === "in" ? "in" : "out"} ${homeMoney_(total)}` + parts.map(p => `\n  ${p.name} ${homeMoney_(p.v)}`).join("")
+      + (parts.some(p => p.v < 0) ? "\n  (a negative part is more refunded than paid, and isn't drawn)" : "");
+    let y = base, rects = "";
+    // Parts of one color draw as one block (the hover still lists each).
+    const drawn = parts.filter(p => p.v > 0).reduce((a, p) => {
+      const last = a[a.length - 1];
+      if (last && last.color === p.color) last.v += p.v; else a.push({ color: p.color, v: p.v });
+      return a;
+    }, []);
+    drawn.forEach((p, i) => {
+      const h = p.v / max * H; y -= h;
+      const last = i === drawn.length - 1;
+      rects += `<rect x="${x}" y="${y.toFixed(1)}" width="${bw}" height="${Math.max(h - (last ? 0 : 1), 0.5).toFixed(1)}" fill="${p.color}"${last ? ` rx="2"` : ""}></rect>`;
+    });
+    // The hover reaches the whole column, so a month with nothing (or very little) still answers.
+    return `<g><title>${escapeHtml(tip)}</title><rect x="${x}" y="${top}" width="${bw}" height="${H}" fill="transparent"></rect>${rects}</g>`;
+  };
+  const cols = io.months.map((mo, i) => {
+    const x = x0 + i * slot + (slot - 2 * bw - 2) / 2;
+    return bar("in", mo, x) + bar("out", mo, x + bw + 2)
+      + `<text x="${(x + bw + 1).toFixed(1)}" y="${base + 15}" text-anchor="middle" class="home-inout-tick">${escapeHtml(label(mo))}</text>`;
+  }).join("");
+  const sw = (c, t) => `<span><span class="home-swatch" style="background:${c}"></span>${t}</span>`;
+  const legend = [sw("#2a78d6", "In"), sw("#eb6834", "Out"), sw("#eda100", "Sales tax"), sw("#6250d6", "Owner put in"), sw("#8a6d3b", "Owner took out")].join("");
+  const tile = (lbl, v, sub) => `<div class="home-inout-total"><span class="home-lbl">${lbl}</span><span class="home-val">${homeMoney_(v)}</span><span class="home-hint">${escapeHtml(sub)}</span></div>`;
+  const inSub = [io.taxCollected ? homeMoney_(io.taxCollected) + " sales tax" : "", io.contributions ? homeMoney_(io.contributions) + " owner put in" : ""].filter(Boolean);
+  const outSub = [io.taxPaid ? homeMoney_(io.taxPaid) + " sales tax paid" : "", io.draws ? homeMoney_(io.draws) + " owner took out" : ""].filter(Boolean);
+  const left = Math.round((Number(io.totalIn) - Number(io.totalOut)) * 100) / 100;
+  return `<div class="home-inout">
+      <div class="home-inout-legend">${legend}</div>
+      <div class="home-inout-scroll"><svg viewBox="0 0 ${W} ${base + 22}" style="min-width:${Math.min(W, 520)}px" width="100%" role="img" aria-label="Money in and out by month, this year">${grid}<line x1="${x0}" x2="${W}" y1="${base}" y2="${base}" stroke="#c3c2b7"/>${cols}</svg></div>
+      <div class="home-inout-totals">
+        ${tile("In · year to date", io.totalIn, inSub.length ? "incl. " + inSub.join(", ") : "Jan 1 to today")}
+        ${tile("Out · year to date", io.totalOut, outSub.length ? "incl. " + outSub.join(", ") : "Jan 1 to today")}
+        ${tile("Left over", left, "in minus out")}
+      </div>
+    </div>
+    <div class="home-note">Left bar of each month is money in, right is money out, on the day it moved. Hover a bar for its parts.${io.bookkeeping === false ? " Bookkeeping is off, so other income, expenses, owner money and sales tax paid aren't counted." : " Record a payment of sales tax to the state as an expense in “Sales tax paid to the state”."}</div>`;
+}
+
 function drawHomeMoney_(d){
   const el = document.getElementById("homeMoney");
   if (!el) return;
-  const y = d.year, m = d.month;
-  if (!y || !m) { el.innerHTML = `<div class="home-note">The money figures didn't come back — try Refresh.</div>`; return; }
+  const shown = homeShown_(), on = (k) => shown.includes(k);
+  const needMoney = ["totals", "pies", "sales"].some(on);
+  const y = d.year || {}, m = d.month || {};
+  if ((needMoney && (!d.year || !d.month)) || (on("inout") && !d.inOut)) { el.innerHTML = `<div class="home-note">The money figures didn't come back — try Refresh.</div>`; return; }
+  if (!needMoney) { el.innerHTML = on("inout") ? `<div data-home-block="inout"><h3 class="home-h">Money in and out</h3>${homeInOut_(d.inOut)}</div>` : ""; return; }
   const monthName = new Date(d.monthFrom + "T12:00:00").toLocaleDateString(undefined, { month: "long" });
   const card = (label, v, sub, title) => `<div class="home-card" title="${escapeHtml(title || "")}"><span class="home-lbl">${escapeHtml(label)}</span><span class="home-val">${homeMoney_(v)}</span><span class="home-hint">${escapeHtml(sub)}</span></div>`;
   // From the same reply as the figures (getDashboardMoney), so the label always matches what was added up.
@@ -1288,19 +1433,23 @@ function drawHomeMoney_(d){
     .map(([h, t]) => `<a href="#${h}">${t} →</a>`).join(" · ");
   const warn = y.missingCost ? `<div class="home-note" style="color:#b45309;">${y.missingCost} made line${y.missingCost === 1 ? " has" : "s have"} no cost this year, so COGS reads low — see Inventory and COGS.</div>` : "";
   el.innerHTML = `
+    ${on("totals") ? `<div data-home-block="totals">
     <h3 class="home-h">Business totals</h3>
     <div class="home-tiles home-tiles-4">
       ${card("Revenue · year to date", y.revenue, "Jan 1 to today", revTitle(y))}
       ${card("Expenses · year to date", y.expenses, books ? "Jan 1 to today" : offSub(y), expTitle(y))}
       ${card("Revenue · month to date", m.revenue, monthName + " 1 to today", revTitle(m))}
       ${card("Expenses · month to date", m.expenses, books ? monthName + " 1 to today" : offSub(m), expTitle(m))}
-    </div>
+    </div></div>` : ""}
+    ${on("inout") && d.inOut ? `<div data-home-block="inout"><h3 class="home-h">Money in and out</h3>${homeInOut_(d.inOut)}</div>` : ""}
+    ${on("pies") && y.byType ? `<div data-home-block="pies">
     <h3 class="home-h">Where the money went</h3>
     <div class="home-pies">
       ${homePie_("Year to date", y, "No expenses yet this year.")}
       ${homePie_("Month to date", m, "No expenses yet this month.")}
     </div>
-    <div class="home-note">Each pie adds up to the Expenses card above it. Hover a slice for its amount.</div>
+    <div class="home-note">Each pie adds up to that period's expenses (the Business totals' Expenses cards). Hover a slice for its amount.</div></div>` : ""}
+    ${on("sales") ? `<div data-home-block="sales">
     <h3 class="home-h">Product sales</h3>
     <div style="overflow-x:auto;border:1px solid var(--border,#ddd);border-radius:8px;">
       <table class="home-table">
@@ -1309,7 +1458,7 @@ function drawHomeMoney_(d){
       </table>
     </div>
     <div class="home-note home-basis">Revenue is goods sold less sales tax and discounts; COGS is the blanks, finished stock and transfers used on those same orders — ${escapeHtml(saleDateNote_(d.saleDate))}.</div>
-    ${warn}
+    ${warn}</div>` : ""}
     ${links ? `<div class="home-note">${links}</div>` : ""}`;
 }
 
@@ -17698,7 +17847,7 @@ function showExpenseCategoriesModal_(){
       <td style="padding:5px 4px;text-align:center;font-size:12px;color:#666;">${c ? c.expenseCount : ""}</td>
       <td style="padding:5px 4px;white-space:nowrap;">
         <button type="button" class="admin-btn" data-save="${c ? c.id : "new"}" style="padding:3px 8px;font-size:12px;">${c ? "Save" : "Add"}</button>
-        ${c ? `<button type="button" data-del="${c.id}" ${c.expenseCount > 0 ? `disabled title="Used by ${c.expenseCount} expense(s) — can't delete"` : `title="Delete category"`} style="padding:3px 8px;font-size:12px;border-radius:4px;border:1px solid #fca5a5;background:#fee2e2;color:#b03a2e;cursor:${c.expenseCount > 0 ? "not-allowed" : "pointer"};opacity:${c.expenseCount > 0 ? ".45" : "1"};">Delete</button>` : ""}
+        ${c && c.systemKey ? `<span title="Payments of collected sales tax to the state. Home shows them as sales tax going out. It can be renamed but not deleted." style="font-size:11px;color:#666;">Built in</span>` : c ? `<button type="button" data-del="${c.id}" ${c.expenseCount > 0 ? `disabled title="Used by ${c.expenseCount} expense(s) — can't delete"` : `title="Delete category"`} style="padding:3px 8px;font-size:12px;border-radius:4px;border:1px solid #fca5a5;background:#fee2e2;color:#b03a2e;cursor:${c.expenseCount > 0 ? "not-allowed" : "pointer"};opacity:${c.expenseCount > 0 ? ".45" : "1"};">Delete</button>` : ""}
       </td></tr>`;
   const { ov } = inventoryModal_("Expense categories", `
     <div style="font-size:12px;color:#555;margin-bottom:10px;"><strong>Deductible</strong>: ordinary expenses (Schedule C Part II). <strong>Depreciation</strong>: capital equipment such as machines (Form 4562). <strong>None</strong>: not deductible. Deductible % is for items only partly deductible — business meals are 50%. <strong>Use tax</strong>: goods you buy and use (equipment, supplies) — use tax is owed when the seller didn't charge sales tax. A category can only be deleted when no expense uses it.</div>

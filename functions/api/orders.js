@@ -1394,7 +1394,9 @@ export async function onRequestPost(context) {
       const before = id ? await getExpenseCategory(env.DB, id) : null;
       if (id && !before) return jsonResponse({ status: "error", message: "Category not found" }, 404);
       const fields = { name, deductionType: c.deductionType, scheduleCLine: c.deductionType === "depreciation" ? (line || "13") : line, deductiblePct,
-        useTaxable: c.useTaxable === true || c.useTaxable === 1 || c.useTaxable === "1" };
+        useTaxable: c.useTaxable === true || c.useTaxable === 1 || c.useTaxable === "1",
+        // Purchases that last (migrations/0092): kept out of Home's operating profit. Depreciation always is.
+        capital: c.deductionType === "depreciation" || c.capital === true || c.capital === 1 || c.capital === "1" };
       if (id) {
         const auditErr = await auditStrict({ orgId: null, orderId: null, action: "expense_category.updated", detail: { id, from: before, to: fields } });
         if (auditErr) return auditErr;

@@ -27,7 +27,7 @@ const lib = new Function(strip(read("functions/_lib/db.js")) + "\nreturn { inser
   console.log("it can't be deleted, even unused:", (await lib.deleteExpenseCategory(d1, taxCat)) === false && !!one("SELECT id FROM expense_categories WHERE id = ?", [taxCat]));
   console.log("the category list says which one it is:", (await lib.listExpenseCategories(d1)).filter(c => c.systemKey).map(c => c.id).join() === String(taxCat));
   run("UPDATE expense_categories SET name = 'State sales tax' WHERE id = ?", [taxCat]);   // renamed: still found by its key
-  const otherCat = one("SELECT id FROM expense_categories WHERE systemKey IS NULL ORDER BY id LIMIT 1");
+  const otherCat = one("SELECT id FROM expense_categories WHERE systemKey IS NULL AND capital = 0 ORDER BY id LIMIT 1");
 
   // Orders: one line each. A ($107 with $7 tax inside, inclusive); B ($100 + $7 tax on top + $10 shipping = $117); a test order.
   const order = async (orderId, extra = {}) => lib.insertOrder(d1, Object.assign({ orderId, orgId: "prime", customerName: "C", contact: orderId + "@x.com",

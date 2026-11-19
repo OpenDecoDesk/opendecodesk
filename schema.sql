@@ -1069,7 +1069,8 @@ CREATE TABLE IF NOT EXISTS expense_categories (
   createdAt     TEXT NOT NULL,
   updatedAt     TEXT NOT NULL,
   useTaxable    INTEGER NOT NULL DEFAULT 0 CHECK (useTaxable IN (0, 1)),  -- owes use tax if untaxed (0013)
-  systemKey     TEXT   -- a category the app relies on, e.g. 'sales_tax_paid' (0090); can't be deleted
+  systemKey     TEXT,  -- a category the app relies on, e.g. 'sales_tax_paid' (0090); can't be deleted
+  capital       INTEGER NOT NULL DEFAULT 0 CHECK (capital IN (0, 1))  -- purchases that last; kept out of operating profit (0092)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_expense_categories_system ON expense_categories(systemKey) WHERE systemKey IS NOT NULL;
 
@@ -1141,6 +1142,11 @@ INSERT OR IGNORE INTO expense_categories (name, deductionType, scheduleCLine, de
 -- Sales tax paid to the state (migrations/0090): Home's "Money in and out" shows it as sales tax going out.
 INSERT OR IGNORE INTO expense_categories (name, deductionType, scheduleCLine, deductiblePct, createdAt, updatedAt, systemKey) VALUES
   ('Sales tax paid to the state', 'none', '', 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'sales_tax_paid');
+-- Capital purchases (migrations/0092): Depreciation categories are always capital; small equipment is deducted now but
+-- still kept out of Home's operating profit.
+UPDATE expense_categories SET capital = 1 WHERE deductionType = 'depreciation';
+INSERT OR IGNORE INTO expense_categories (name, deductionType, scheduleCLine, deductiblePct, createdAt, updatedAt, capital) VALUES
+  ('Small equipment & tools', 'deductible', '22', 100, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1);
 
 -- Audit log — admin changes to orders (see migrations/0002 and 0004)
 CREATE TABLE IF NOT EXISTS audit_log (

@@ -32,7 +32,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   console.log("=== Migration 0012: seeded categories ===");
   let r = await call({ action: "listExpenseCategories" });
   const cats = r.body.categories, byName = (n) => cats.find(c => c.name === n);
-  console.log("16 starting categories, and the built-in sales tax paid one (0090):", cats.length === 17 && cats.filter(c => c.systemKey).map(c => c.systemKey).join() === "sales_tax_paid");
+  console.log("16 starting categories, the built-in sales tax paid one (0090) and small equipment (0092):", cats.length === 18 && cats.filter(c => c.systemKey).map(c => c.systemKey).join() === "sales_tax_paid");
   console.log("machines → depreciation, line 13; meals → deductible 50%, line 24b; personal → none:",
     byName("Equipment & machines").deductionType === "depreciation" && byName("Equipment & machines").scheduleCLine === "13" &&
     byName("Meals (50%)").deductiblePct === 50 && byName("Meals (50%)").scheduleCLine === "24b" &&
@@ -47,6 +47,17 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   console.log("duplicate name (any case) refused:", r.status === 400 && /already exists/.test(r.body.message));
   r = await call({ action: "saveExpenseCategory", category: { id: softId, name: "Digitizing software", deductionType: "deductible", scheduleCLine: "27a", deductiblePct: 100 } });
   console.log("category renamed (audited with before/after):", r.status === 200 && r.body.categories.some(c => c.name === "Digitizing software") && audits("expense_category.updated") === 1);
+  // Capital (migrations/0092): kept apart from the tax side, and always on for Depreciation.
+  r = await call({ action: "saveExpenseCategory", category: { name: "Hand tools", deductionType: "deductible", scheduleCLine: "22", capital: true } });
+  let capCats = (await call({ action: "listExpenseCategories" })).body.categories;
+  console.log("a Deductible category can be marked capital:", r.body.status === "ok" && capCats.find(c => c.name === "Hand tools").capital === true && capCats.find(c => c.name === "Hand tools").deductionType === "deductible");
+  r = await call({ action: "saveExpenseCategory", category: { name: "Big gear", deductionType: "depreciation", capital: false } });
+  capCats = (await call({ action: "listExpenseCategories" })).body.categories;
+  console.log("a Depreciation category is always capital, even sent unticked:", capCats.find(c => c.name === "Big gear").capital === true
+    && d1.q("SELECT capital FROM expense_categories WHERE name = 'Big gear'")[0].capital === 1);
+  console.log("ordinary categories aren't capital; equipment and small equipment are (0092):", capCats.find(c => c.name === "Digitizing software").capital === false
+    && capCats.find(c => c.name === "Equipment & machines").capital === true && capCats.find(c => c.name === "Small equipment & tools").capital === true);
+  d1._raw.run("DELETE FROM expense_categories WHERE name IN ('Hand tools', 'Big gear')");   // (not through the API: the deletes below count audits)
   r = await call({ action: "saveExpenseCategory", category: { name: "Bad", deductionType: "sometimes" } });
   const r2 = await call({ action: "saveExpenseCategory", category: { name: "Bad", deductionType: "deductible", scheduleCLine: "99" } });
   const r3 = await call({ action: "saveExpenseCategory", category: { name: "Bad", deductionType: "deductible", deductiblePct: 150 } });

@@ -202,8 +202,32 @@ const at = (day) => day + "T12:00:00.000Z";
   const tot = [...inout.querySelectorAll(".home-inout-total .home-val")].map(e => e.textContent);
   // In: this year's payments ($46 × 7 paid orders) + $30 other income; out: the $120 expense.
   console.log("…with the year's in, out and what's left:", tot.join(",") === "$352,$120,$232");
-  const thisMonth = [...inout.querySelectorAll("svg > g")].slice(-2).map(g => g.querySelector("title").textContent);
-  console.log("…hovering this month's bars gives their parts:", /in \$352/.test(thisMonth[0]) && /Customer payments \(less tax\) \$322/.test(thisMonth[0]) && /Other income \$30/.test(thisMonth[0]) && /Expenses \$120/.test(thisMonth[1]));
+  const thisMonth = [...inout.querySelectorAll("svg > g")].slice(-2);
+  console.log("…each bar says its parts to a screen reader:", /money in \$352/.test(thisMonth[0].getAttribute("aria-label")) && /Customer payments \(less tax\) \$322/.test(thisMonth[0].getAttribute("aria-label")) && /Expenses \$120/.test(thisMonth[1].getAttribute("aria-label")));
+  // Hovering a part of a bar: a box with the month, the bar's total, and each part with its amount, the hovered one in bold.
+  const tipBox = inout.querySelector(".home-inout-tip");
+  const hover = (el) => el.dispatchEvent(new w.MouseEvent("pointermove", { bubbles: true, clientX: 10, clientY: 10 }));
+  const blueIn = thisMonth[0].querySelector('.home-inout-seg[fill="#2a78d6"]');
+  hover(blueIn);
+  const tipRows = [...tipBox.querySelectorAll("tr")].map(tr => (tr.classList.contains("hot") ? "*" : "") + [...tr.cells].map(c => c.textContent).join("="));
+  console.log("hovering a part of a bar shows its type and amount, the hovered ones in bold:", !tipBox.hidden && /money in \$352/.test(tipBox.querySelector(".home-inout-tip-h").textContent)
+    && tipRows.join(",") === "*Customer payments (less tax)=$322,*Other income=$30");
+  hover(thisMonth[1].querySelector(".home-inout-seg"));
+  console.log("…the out bar's part likewise:", /money out \$120/.test(tipBox.textContent) && [...tipBox.querySelectorAll("tr.hot")].map(tr => tr.textContent).join() === "Expenses$120");
+  hover(w.document.querySelector(".home-h"));
+  console.log("…and moving off the chart hides it:", tipBox.hidden);
+  {
+    // Ten categories this year: eight colours of their own, the two smallest folded into one grey slice; no colour twice,
+    // and each category the same colour in both pies.
+    const byType = Array.from({ length: 10 }, (_, i) => ({ key: "c" + (i + 1), id: i + 1, name: "Cat " + (i + 1), amount: 100 - i }))
+      .concat([{ key: "cogs", name: "Cost of goods", amount: 5 }]);
+    const month = byType.filter(t => ["c3", "c10", "c1", "cogs"].includes(t.key));
+    const colors = w.homePieColors_({ byType }, { byType: month });
+    const yr = colors.fold({ byType }), mo = colors.fold({ byType: month });
+    console.log("pie colours: never the same twice in a pie, however many categories:", new Set(yr.map(s => s.color)).size === yr.length && yr.length === 10
+      && yr[8].key === "other" && yr[8].name === "Other categories (2)" && yr[8].amount === 91 + 92 && yr[9].key === "cogs");
+    console.log("…a category keeps its colour in both pies:", mo.every(s => s.color === (yr.find(t => t.key === s.key) || yr.find(t => t.key === "other")).color) && new Set(mo.map(s => s.color)).size === mo.length);
+  }
   console.log("…cost of goods is always green:", [...pies[0].querySelectorAll(".home-swatch")][1].getAttribute("style").includes("#008300"));
   const tRows = [...w.document.querySelectorAll(".home-table tbody tr")].map(tr => [...tr.cells].map(c => c.textContent));
   console.log("product sales: revenue, COGS, net income and margin for the year and the month:",

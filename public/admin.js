@@ -1311,28 +1311,44 @@ async function loadHome_(fresh){
 }
 
 // Home's "Where the money went": one donut per period, a slice per expense type (the categories, then cost of goods
-// and write-offs), so it adds up to the Expenses card. A type keeps its colour in both pies: cost of goods is always
-// green, write-offs amber, and a category's colour follows its id.
-const HOME_PIE_COLORS_ = ["#2a78d6", "#6250d6", "#eb6834", "#e87ba4", "#e34948", "#1baf7a", "#8a6d3b"];
-function homePieColor_(s){
-  if (s.key === "cogs") return "#008300";
-  if (s.key === "writeoffs") return "#eda100";
-  if (s.key === "recorded") return "#2a78d6";
-  const id = Number(s.id);
-  return s.id == null || !isFinite(id) ? "#898781" : HOME_PIE_COLORS_[Math.abs(id) % HOME_PIE_COLORS_.length];
+// and write-offs), so it adds up to the Expenses card. No two slices share a colour, and a type keeps its colour in
+// both pies: cost of goods is always green, write-offs amber, and the categories take the palette in the order of the
+// year's spending (homePieColors_). Past the palette, the smallest categories fold into one grey "Other categories".
+const HOME_PIE_COLORS_ = ["#2a78d6", "#eb6834", "#e87ba4", "#6250d6", "#e34948", "#8a6d3b", "#1f9eb0", "#5c6b7a"];
+const HOME_PIE_FIXED_ = { cogs: "#008300", writeoffs: "#eda100", other: "#b4b2a9" };
+function homePieColors_(year, month){
+  const spent = {};
+  for (const [w, p] of [[1e9, year], [1, month]]) for (const s of (p.byType || [])) {
+    if (HOME_PIE_FIXED_[s.key] || !(Number(s.amount) > 0)) continue;
+    spent[s.key] = (spent[s.key] || 0) + w * Number(s.amount);   // ranked by the year, then the month
+  }
+  const keys = Object.keys(spent).sort((a, b) => spent[b] - spent[a] || a.localeCompare(b));
+  const colorOf = Object.fromEntries(keys.slice(0, HOME_PIE_COLORS_.length).map((k, i) => [k, HOME_PIE_COLORS_[i]]));
+  // A pie's slices with the categories past the palette folded into one, so every slice has its own colour.
+  const fold = (p) => {
+    const out = [], extra = [];
+    for (const s of (p.byType || []).filter(s => Number(s.amount) > 0)) (HOME_PIE_FIXED_[s.key] || colorOf[s.key] ? out : extra).push(s);
+    if (extra.length) {
+      const amt = Math.round(extra.reduce((t, s) => t + Number(s.amount), 0) * 100) / 100;
+      const at = out.findIndex(s => s.key === "cogs" || s.key === "writeoffs");
+      out.splice(at < 0 ? out.length : at, 0, { key: "other", name: `Other categories (${extra.length})`, amount: amt, detail: extra.map(s => s.name).join(", ") });
+    }
+    return out.map(s => ({ ...s, color: HOME_PIE_FIXED_[s.key] || colorOf[s.key] }));
+  };
+  return { fold };
 }
-function homePie_(label, p, emptyText){
-  const slices = (p.byType || []).filter(s => Number(s.amount) > 0);
+function homePie_(label, p, emptyText, colors){
+  const slices = colors.fold(p);
   const total = slices.reduce((t, s) => t + Number(s.amount), 0);
   const r = 58, c = 2 * Math.PI * r, pct = (v) => Math.round(v / total * 100) + "%";
   let off = 0;
   const arcs = total > 0 ? slices.map(s => {
     const len = Number(s.amount) / total * c, gap = slices.length > 1 ? 1.5 : 0;
-    const arc = `<circle cx="75" cy="75" r="${r}" fill="none" stroke="${homePieColor_(s)}" stroke-width="24" stroke-dasharray="${Math.max(len - gap, 0.5).toFixed(2)} ${c.toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 75 75)"><title>${escapeHtml(s.name)} ${homeMoney_(s.amount)} (${pct(s.amount)})</title></circle>`;
+    const arc = `<circle cx="75" cy="75" r="${r}" fill="none" stroke="${s.color}" stroke-width="24" stroke-dasharray="${Math.max(len - gap, 0.5).toFixed(2)} ${c.toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 75 75)"><title>${escapeHtml(s.name)} ${homeMoney_(s.amount)} (${pct(s.amount)})${s.detail ? ": " + escapeHtml(s.detail) : ""}</title></circle>`;
     off += len; return arc;
   }).join("") : `<circle cx="75" cy="75" r="${r}" fill="none" stroke="#e4e4e0" stroke-width="24"></circle>`;
   const legend = total > 0
-    ? `<table class="home-legend">${slices.map(s => `<tr><td><span class="home-swatch" style="background:${homePieColor_(s)}"></span>${escapeHtml(s.name)}</td><td class="home-num-cell">${homeMoney_(s.amount)}</td><td class="home-legend-pct">${pct(s.amount)}</td></tr>`).join("")}</table>`
+    ? `<table class="home-legend">${slices.map(s => `<tr><td><span class="home-swatch" style="background:${s.color}"></span><span${s.detail ? ` title="${escapeHtml(s.detail)}"` : ""}>${escapeHtml(s.name)}</span></td><td class="home-num-cell">${homeMoney_(s.amount)}</td><td class="home-legend-pct">${pct(s.amount)}</td></tr>`).join("")}</table>`
     : `<div class="home-note" style="margin:0;">${escapeHtml(emptyText)}</div>`;
   const refunded = (p.refundedTypes || []).length
     ? `<div class="home-note">Not shown: refunds outweigh what was spent on ${escapeHtml(p.refundedTypes.join(", "))}.</div>` : "";
@@ -1371,22 +1387,25 @@ function homeInOut_(io){
   const bar = (side, mo, x) => {
     const parts = HOME_INOUT_PARTS_[side].map(([k, name, color]) => ({ name, color, v: Number(mo[side][k]) || 0 })).filter(p => p.v);
     const total = side === "in" ? mo.totalIn : mo.totalOut;
-    const tip = `${label(mo)} ${side === "in" ? "in" : "out"} ${homeMoney_(total)}` + parts.map(p => `\n  ${p.name} ${homeMoney_(p.v)}`).join("")
-      + (parts.some(p => p.v < 0) ? "\n  (a negative part is more refunded than paid, and isn't drawn)" : "");
+    const head = `${label(mo)} · money ${side === "in" ? "in" : "out"} ${homeMoney_(total)}`;
+    const note = parts.some(p => p.v < 0) ? "A negative part is more refunded than paid, and isn't drawn." : "";
+    // The hover box (homeInOutTip_): the bar's parts, type and amount, with the ones under the pointer in bold.
+    const tip = (hot) => escapeHtml(JSON.stringify({ h: head, n: note, r: parts.map(p => [p.name, homeMoney_(p.v), p.color, hot.includes(p.name) ? 1 : 0]) }));
     let y = base, rects = "";
-    // Parts of one color draw as one block (the hover still lists each).
+    // Parts of one color draw as one block; hovering it names each part in it.
     const drawn = parts.filter(p => p.v > 0).reduce((a, p) => {
       const last = a[a.length - 1];
-      if (last && last.color === p.color) last.v += p.v; else a.push({ color: p.color, v: p.v });
+      if (last && last.color === p.color) { last.v += p.v; last.names.push(p.name); } else a.push({ color: p.color, v: p.v, names: [p.name] });
       return a;
     }, []);
     drawn.forEach((p, i) => {
       const h = p.v / max * H; y -= h;
       const last = i === drawn.length - 1;
-      rects += `<rect x="${x}" y="${y.toFixed(1)}" width="${bw}" height="${Math.max(h - (last ? 0 : 1), 0.5).toFixed(1)}" fill="${p.color}"${last ? ` rx="2"` : ""}></rect>`;
+      rects += `<rect class="home-inout-seg" data-tip="${tip(p.names)}" x="${x}" y="${y.toFixed(1)}" width="${bw}" height="${Math.max(h - (last ? 0 : 1), 0.5).toFixed(1)}" fill="${p.color}"${last ? ` rx="2"` : ""}></rect>`;
     });
-    // The hover reaches the whole column, so a month with nothing (or very little) still answers.
-    return `<g><title>${escapeHtml(tip)}</title><rect x="${x}" y="${top}" width="${bw}" height="${H}" fill="transparent"></rect>${rects}</g>`;
+    // The empty column above the bar answers too, so a month with nothing (or very little) still says so.
+    const all = `${head}` + parts.map(p => `, ${p.name} ${homeMoney_(p.v)}`).join("");
+    return `<g role="img" aria-label="${escapeHtml(all)}"><rect data-tip="${tip([])}" x="${x}" y="${top}" width="${bw}" height="${H}" fill="transparent"></rect>${rects}</g>`;
   };
   const cols = io.months.map((mo, i) => {
     const x = x0 + i * slot + (slot - 2 * bw - 2) / 2;
@@ -1399,8 +1418,10 @@ function homeInOut_(io){
   const inSub = [io.taxCollected ? homeMoney_(io.taxCollected) + " sales tax" : "", io.contributions ? homeMoney_(io.contributions) + " owner put in" : ""].filter(Boolean);
   const outSub = [io.taxPaid ? homeMoney_(io.taxPaid) + " sales tax paid" : "", io.draws ? homeMoney_(io.draws) + " owner took out" : ""].filter(Boolean);
   const left = Math.round((Number(io.totalIn) - Number(io.totalOut)) * 100) / 100;
+  homeInOutTipListen_();
   return `<div class="home-inout">
       <div class="home-inout-legend">${legend}</div>
+      <div class="home-inout-tip" hidden></div>
       <div class="home-inout-scroll"><svg viewBox="0 0 ${W} ${base + 22}" style="min-width:${Math.min(W, 520)}px" width="100%" role="img" aria-label="Money in and out by month, this year">${grid}<line x1="${x0}" x2="${W}" y1="${base}" y2="${base}" stroke="#c3c2b7"/>${cols}</svg></div>
       <div class="home-inout-totals">
         ${tile("In · year to date", io.totalIn, inSub.length ? "incl. " + inSub.join(", ") : "Jan 1 to today")}
@@ -1408,7 +1429,35 @@ function homeInOut_(io){
         ${tile("Left over", left, "in minus out")}
       </div>
     </div>
-    <div class="home-note">Left bar of each month is money in, right is money out, on the day it moved. Hover a bar for its parts.${io.bookkeeping === false ? " Bookkeeping is off, so other income, expenses, owner money and sales tax paid aren't counted." : " Record a payment of sales tax to the state as an expense in “Sales tax paid to the state”."}</div>`;
+    <div class="home-note">Left bar of each month is money in, right is money out, on the day it moved. Hover (or tap) a bar for its parts.${io.bookkeeping === false ? " Bookkeeping is off, so other income, expenses, owner money and sales tax paid aren't counted." : " Record a payment of sales tax to the state as an expense in “Sales tax paid to the state”."}</div>`;
+}
+
+// The hover box for Money in and out: one listener for the page (the chart is redrawn often), a box per chart.
+// Pointer over a part of a bar: the month, the bar's total, and each part with its amount, the hovered ones in bold.
+// A tap does the same on a phone; moving off the chart hides it.
+let _homeInOutTipOn = false;
+function homeInOutTipListen_(){
+  if (_homeInOutTipOn) return;
+  _homeInOutTipOn = true;
+  const show = (e) => {
+    const t = e.target && e.target.closest ? e.target.closest(".home-inout [data-tip]") : null;
+    const wrap = e.target && e.target.closest ? e.target.closest(".home-inout") : null;
+    const box = wrap && wrap.querySelector(".home-inout-tip");
+    document.querySelectorAll(".home-inout-tip").forEach(b => { if (b !== box || !t) b.hidden = true; });
+    if (!t || !box) return;
+    let d; try { d = JSON.parse(t.getAttribute("data-tip")); } catch (err) { return; }
+    box.innerHTML = `<div class="home-inout-tip-h">${escapeHtml(d.h)}</div>` + (d.r.length ? `<table>${d.r.map(([n, a, c, hot]) =>
+      `<tr${hot ? ` class="hot"` : ""}><td><span class="home-swatch" style="background:${c}"></span>${escapeHtml(n)}</td><td class="home-num-cell">${escapeHtml(a)}</td></tr>`).join("")}</table>` : `<div class="home-hint">Nothing this month.</div>`)
+      + (d.n ? `<div class="home-hint">${escapeHtml(d.n)}</div>` : "");
+    box.hidden = false;
+    const r = wrap.getBoundingClientRect(), bw = box.offsetWidth, bh = box.offsetHeight;
+    let left = e.clientX - r.left + 14, top = e.clientY - r.top - bh - 10;
+    if (left + bw > r.width - 4) left = e.clientX - r.left - bw - 14;
+    if (top < 4) top = e.clientY - r.top + 16;
+    box.style.left = Math.max(4, left) + "px"; box.style.top = top + "px";
+  };
+  document.addEventListener("pointermove", show);
+  document.addEventListener("pointerdown", show);
 }
 
 function drawHomeMoney_(d){
@@ -1432,6 +1481,7 @@ function drawHomeMoney_(d){
   const links = [["revenue", "Revenue report"], ["expenses", "Expenses"], ["cogs", "Inventory and COGS"]].filter(([h]) => adminCanOpen_(h))
     .map(([h, t]) => `<a href="#${h}">${t} →</a>`).join(" · ");
   const warn = y.missingCost ? `<div class="home-note" style="color:#b45309;">${y.missingCost} made line${y.missingCost === 1 ? " has" : "s have"} no cost this year, so COGS reads low — see Inventory and COGS.</div>` : "";
+  const pieColors = homePieColors_(y, m);
   el.innerHTML = `
     ${on("totals") ? `<div data-home-block="totals">
     <h3 class="home-h">Business totals</h3>
@@ -1445,8 +1495,8 @@ function drawHomeMoney_(d){
     ${on("pies") && y.byType ? `<div data-home-block="pies">
     <h3 class="home-h">Where the money went</h3>
     <div class="home-pies">
-      ${homePie_("Year to date", y, "No expenses yet this year.")}
-      ${homePie_("Month to date", m, "No expenses yet this month.")}
+      ${homePie_("Year to date", y, "No expenses yet this year.", pieColors)}
+      ${homePie_("Month to date", m, "No expenses yet this month.", pieColors)}
     </div>
     <div class="home-note">Each pie adds up to that period's expenses (the Business totals' Expenses cards). Hover a slice for its amount.</div></div>` : ""}
     ${on("sales") ? `<div data-home-block="sales">

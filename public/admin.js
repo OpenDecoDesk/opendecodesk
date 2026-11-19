@@ -1315,7 +1315,9 @@ async function loadHome_(fresh){
 // both pies: cost of goods is always green, write-offs amber, and the categories take the palette in the order of the
 // year's spending (homePieColors_). Past the palette, the smallest categories fold into one grey "Other categories".
 const HOME_PIE_COLORS_ = ["#2a78d6", "#eb6834", "#e87ba4", "#6250d6", "#e34948", "#8a6d3b", "#1f9eb0", "#5c6b7a"];
-const HOME_PIE_FIXED_ = { cogs: "#008300", writeoffs: "#eda100", other: "#b4b2a9" };
+// Capital purchases (migrations/0092: equipment and tools, kept out of operating profit) are charcoal, in both charts.
+const HOME_CAPITAL_COLOR_ = "#3d3a35";
+const HOME_PIE_FIXED_ = { cogs: "#008300", writeoffs: "#eda100", other: "#b4b2a9", capital: HOME_CAPITAL_COLOR_ };
 function homePieColors_(year, month){
   const spent = {};
   for (const [w, p] of [[1e9, year], [1, month]]) for (const s of (p.byType || [])) {
@@ -1333,7 +1335,9 @@ function homePieColors_(year, month){
       const at = out.findIndex(s => s.key === "cogs" || s.key === "writeoffs");
       out.splice(at < 0 ? out.length : at, 0, { key: "other", name: `Other categories (${extra.length})`, amount: amt, detail: extra.map(s => s.name).join(", ") });
     }
-    return out.map(s => ({ ...s, color: HOME_PIE_FIXED_[s.key] || colorOf[s.key] }));
+    // The capital slice names the categories in it.
+    return out.map(s => ({ ...s, color: HOME_PIE_FIXED_[s.key] || colorOf[s.key],
+      ...(Array.isArray(s.parts) && s.parts.length ? { detail: s.parts.map(x => `${x.name} ${homeMoney_(x.amount)}`).join(", ") } : {}) }));
   };
   return { fold };
 }
@@ -1364,7 +1368,7 @@ function homePie_(label, p, emptyText, colors){
 const HOME_INOUT_PARTS_ = {
   in: [["payments", "Customer payments (less tax)", "#2a78d6"], ["otherIncome", "Other income", "#2a78d6"],
        ["contributions", "Owner put in", "#6250d6"], ["taxCollected", "Sales tax collected", "#eda100"]],
-  out: [["expenses", "Expenses", "#eb6834"], ["blanks", "Blanks bought", "#eb6834"], ["transfers", "Transfer sheets bought", "#eb6834"],
+  out: [["expenses", "Expenses", "#eb6834"], ["capital", "Capital purchases", HOME_CAPITAL_COLOR_], ["blanks", "Blanks bought", "#eb6834"], ["transfers", "Transfer sheets bought", "#eb6834"],
         ["cardFees", "Card fees", "#eb6834"], ["draws", "Owner took out", "#8a6d3b"], ["taxPaid", "Sales tax paid to the state", "#eda100"]],
 };
 function homeInOut_(io){
@@ -1413,7 +1417,7 @@ function homeInOut_(io){
       + `<text x="${(x + bw + 1).toFixed(1)}" y="${base + 15}" text-anchor="middle" class="home-inout-tick">${escapeHtml(label(mo))}</text>`;
   }).join("");
   const sw = (c, t) => `<span><span class="home-swatch" style="background:${c}"></span>${t}</span>`;
-  const legend = [sw("#2a78d6", "In"), sw("#eb6834", "Out"), sw("#eda100", "Sales tax"), sw("#6250d6", "Owner put in"), sw("#8a6d3b", "Owner took out")].join("");
+  const legend = [sw("#2a78d6", "In"), sw("#eb6834", "Out"), sw(HOME_CAPITAL_COLOR_, "Capital purchases"), sw("#eda100", "Sales tax"), sw("#6250d6", "Owner put in"), sw("#8a6d3b", "Owner took out")].join("");
   const tile = (lbl, v, sub) => `<div class="home-inout-total"><span class="home-lbl">${lbl}</span><span class="home-val">${homeMoney_(v)}</span><span class="home-hint">${escapeHtml(sub)}</span></div>`;
   const inSub = [io.taxCollected ? homeMoney_(io.taxCollected) + " sales tax" : "", io.contributions ? homeMoney_(io.contributions) + " owner put in" : ""].filter(Boolean);
   const outSub = [io.taxPaid ? homeMoney_(io.taxPaid) + " sales tax paid" : "", io.draws ? homeMoney_(io.draws) + " owner took out" : ""].filter(Boolean);
@@ -1475,6 +1479,14 @@ function drawHomeMoney_(d){
   const offSub = (p) => "Cost of goods" + (p.writeoffs ? " and write-offs" : "") + " — bookkeeping is off";
   const expTitle = (p) => `Expenses ${homeMoney_(p.recordedExpenses)} + cost of goods ${homeMoney_(p.cogs)}` + (p.writeoffs ? ` + write-offs ${homeMoney_(p.writeoffs)}` : "");
   const revTitle = (p) => `Sales less tax ${homeMoney_(p.revenue - p.otherIncome)}` + (p.otherIncome ? ` + other income ${homeMoney_(p.otherIncome)}` : "") + " — shipping and rush fees included";
+  // Operating profit: revenue less running costs — capital purchases (equipment, tools) and sales tax paid to the
+  // state left out. A reply from before they were worked out has no figure: the card says so.
+  const opTitle = (p) => `Revenue ${homeMoney_(p.revenue)} − running costs ${homeMoney_(p.operatingExpenses)}`
+    + (p.capital ? ` (capital purchases ${homeMoney_(p.capital)} left out)` : "") + (p.taxPaid ? ` (sales tax paid ${homeMoney_(p.taxPaid)} left out)` : "");
+  const opCard = (label, p, sub) => `<div class="home-card" title="${p.operatingProfit == null ? "" : escapeHtml(opTitle(p))}"><span class="home-lbl">${escapeHtml(label)}</span>`
+    + (p.operatingProfit == null ? `<span class="home-val">—</span><span class="home-hint">Refresh to work it out</span></div>`
+      : `<span class="home-val" style="color:${p.operatingProfit < 0 ? "#b03a2e" : "#15803d"};">${homeMoney_(p.operatingProfit)}</span><span class="home-hint">${escapeHtml(sub)}</span></div>`);
+  const capSub = books ? "Equipment and tools — not in operating profit" : "Bookkeeping is off";
   const pct = (p) => p.productRevenue > 0 ? Math.round(p.productNet / p.productRevenue * 100) + "%" : "—";
   const net = (v) => `<td class="home-num-cell" style="font-weight:600;color:${v < 0 ? "#b03a2e" : "#15803d"};">${homeMoney_(v)}</td>`;
   const row = (label, p) => `<tr><td class="home-row-lbl">${label}</td><td class="home-num-cell">${homeMoney_(p.productRevenue)}</td><td class="home-num-cell">${homeMoney_(p.cogs)}</td>${net(p.productNet)}<td class="home-num-cell">${pct(p)}</td></tr>`;
@@ -1490,7 +1502,12 @@ function drawHomeMoney_(d){
       ${card("Expenses · year to date", y.expenses, books ? "Jan 1 to today" : offSub(y), expTitle(y))}
       ${card("Revenue · month to date", m.revenue, monthName + " 1 to today", revTitle(m))}
       ${card("Expenses · month to date", m.expenses, books ? monthName + " 1 to today" : offSub(m), expTitle(m))}
-    </div></div>` : ""}
+      ${opCard("Operating profit · year to date", y, "Revenue less running costs")}
+      ${card("Capital purchases · year to date", y.capital, capSub)}
+      ${opCard("Operating profit · month to date", m, "Revenue less running costs")}
+      ${card("Capital purchases · month to date", m.capital, capSub)}
+    </div>
+    <div class="home-note">Operating profit leaves out capital purchases — expenses in a category marked Capital (equipment, tools) — and sales tax paid to the state. Mark which categories are capital in Expenses → ⚙ (Manage categories).</div></div>` : ""}
     ${on("inout") && d.inOut ? `<div data-home-block="inout"><h3 class="home-h">Money in and out</h3>${homeInOut_(d.inOut)}</div>` : ""}
     ${on("pies") && y.byType ? `<div data-home-block="pies">
     <h3 class="home-h">Where the money went</h3>
@@ -1498,7 +1515,7 @@ function drawHomeMoney_(d){
       ${homePie_("Year to date", y, "No expenses yet this year.", pieColors)}
       ${homePie_("Month to date", m, "No expenses yet this month.", pieColors)}
     </div>
-    <div class="home-note">Each pie adds up to that period's expenses (the Business totals' Expenses cards). Hover a slice for its amount.</div></div>` : ""}
+    <div class="home-note">Each pie adds up to that period's expenses (the Business totals' Expenses cards). Capital purchases — the categories marked Capital — are one charcoal slice. Hover a slice for its amount.</div></div>` : ""}
     ${on("sales") ? `<div data-home-block="sales">
     <h3 class="home-h">Product sales</h3>
     <div style="overflow-x:auto;border:1px solid var(--border,#ddd);border-radius:8px;">
@@ -16552,7 +16569,7 @@ function shopRateDraw_(){
       <tbody id="srEquipment">${v.equipment.map(e => `<tr data-exp="${e.expenseId}"><td style="${td}">${escapeHtml(e.description)}</td><td style="${td}">${escapeHtml(e.date)}</td>
         <td style="${td}text-align:right;">${srMoney_(e.cost)}</td><td style="${td}"><input type="number" class="sr-life" min="1" max="50" step="1" value="${e.life}" style="${inp}width:70px;">${e.lifeOverridden ? ` <span title="Your figure — ${e.defaultLife} years from the expense's depreciation choice">✎</span>` : ""}</td>
         <td style="${td}text-align:right;" class="sr-peryear">${srMoney_(e.perYear)}</td></tr>`).join("") || `<tr><td colspan="5" style="${td}color:#666;">No equipment expenses still within their life.</td></tr>`}</tbody></table>
-    <div class="admin-note" style="margin-top:4px;">The life starts from the depreciation choice on the expense (MACRS 5 or 7 years; 5 otherwise). Equipment counts every year until its life is used up, also when bought before the period.</div>
+    <div class="admin-note" style="margin-top:4px;">Expenses in capital categories (equipment, tools). The life starts from the depreciation choice on the expense (MACRS 5 or 7 years; 5 otherwise). Equipment counts every year until its life is used up, also when bought before the period.</div>
     <div style="text-align:right;font-size:13px;margin-top:6px;">Equipment <b id="srEquipmentTotal">${srMoney_(v.equipment_total)}</b> a year</div>
     ${sec("Your pay and profit (optional)")}
     <div style="display:flex;gap:16px;flex-wrap:wrap;">
@@ -17419,7 +17436,7 @@ function expFillCategorySelect_(selectedId){
   if (!sel) return;
   const keep = selectedId || sel.value;
   sel.innerHTML = `<option value="">Choose…</option>` + _exp.categories.map(c =>
-    `<option value="${c.id}">${escapeHtml(c.name)}${c.deductionType === "depreciation" ? " (depreciation)" : c.deductionType === "none" ? " (not deductible)" : ""}</option>`).join("");
+    `<option value="${c.id}">${escapeHtml(c.name)}${c.deductionType === "depreciation" ? " (depreciation)" : c.deductionType === "none" ? " (not deductible)" : c.capital ? " (capital)" : ""}</option>`).join("");
   if (keep && _exp.categories.some(c => String(c.id) === String(keep))) sel.value = String(keep);
   expOnCategoryChange_();
 }
@@ -17894,15 +17911,16 @@ function showExpenseCategoriesModal_(){
       <td style="padding:5px 4px;"><select data-f="scheduleCLine" style="${inp}max-width:190px;">${lineOpts(c ? c.scheduleCLine : "")}</select></td>
       <td style="padding:5px 4px;"><input data-f="deductiblePct" type="number" min="0" max="100" step="1" value="${c ? c.deductiblePct : 100}" style="${inp}width:62px;"></td>
       <td style="padding:5px 4px;text-align:center;"><input data-f="useTaxable" type="checkbox" ${c && c.useTaxable ? "checked" : ""} title="Goods the business buys and uses: use tax is owed when the vendor doesn't charge sales tax"></td>
+      <td style="padding:5px 4px;text-align:center;"><input data-f="capital" type="checkbox" ${c && (c.capital || c.deductionType === "depreciation") ? "checked" : ""}${c && c.deductionType === "depreciation" ? " disabled" : ""} title="${c && c.deductionType === "depreciation" ? "Depreciation categories are always capital" : "Equipment and other purchases that last: kept out of Home's operating profit"}"></td>
       <td style="padding:5px 4px;text-align:center;font-size:12px;color:#666;">${c ? c.expenseCount : ""}</td>
       <td style="padding:5px 4px;white-space:nowrap;">
         <button type="button" class="admin-btn" data-save="${c ? c.id : "new"}" style="padding:3px 8px;font-size:12px;">${c ? "Save" : "Add"}</button>
         ${c && c.systemKey ? `<span title="Payments of collected sales tax to the state. Home shows them as sales tax going out. It can be renamed but not deleted." style="font-size:11px;color:#666;">Built in</span>` : c ? `<button type="button" data-del="${c.id}" ${c.expenseCount > 0 ? `disabled title="Used by ${c.expenseCount} expense(s) — can't delete"` : `title="Delete category"`} style="padding:3px 8px;font-size:12px;border-radius:4px;border:1px solid #fca5a5;background:#fee2e2;color:#b03a2e;cursor:${c.expenseCount > 0 ? "not-allowed" : "pointer"};opacity:${c.expenseCount > 0 ? ".45" : "1"};">Delete</button>` : ""}
       </td></tr>`;
   const { ov } = inventoryModal_("Expense categories", `
-    <div style="font-size:12px;color:#555;margin-bottom:10px;"><strong>Deductible</strong>: ordinary expenses (Schedule C Part II). <strong>Depreciation</strong>: capital equipment such as machines (Form 4562). <strong>None</strong>: not deductible. Deductible % is for items only partly deductible — business meals are 50%. <strong>Use tax</strong>: goods you buy and use (equipment, supplies) — use tax is owed when the seller didn't charge sales tax. A category can only be deleted when no expense uses it.</div>
+    <div style="font-size:12px;color:#555;margin-bottom:10px;"><strong>Deductible</strong>: ordinary expenses (Schedule C Part II). <strong>Depreciation</strong>: capital equipment such as machines (Form 4562). <strong>None</strong>: not deductible. Deductible % is for items only partly deductible — business meals are 50%. <strong>Use tax</strong>: goods you buy and use (equipment, supplies) — use tax is owed when the seller didn't charge sales tax. <strong>Capital</strong>: equipment and other purchases that last — Home keeps them out of operating profit. It doesn't change the tax side: a small machine deducted now under the de minimis rule is Deductible and Capital; Depreciation categories are always Capital. A category can only be deleted when no expense uses it.</div>
     <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;font-size:13px;">
-      <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:5px 4px;">Name</th><th style="padding:5px 4px;">Deduction</th><th style="padding:5px 4px;">Sched. C line</th><th style="padding:5px 4px;">Ded. %</th><th style="padding:5px 4px;" title="Use tax applies when no sales tax was charged">Use tax</th><th style="padding:5px 4px;"># used</th><th></th></tr></thead>
+      <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:5px 4px;">Name</th><th style="padding:5px 4px;">Deduction</th><th style="padding:5px 4px;">Sched. C line</th><th style="padding:5px 4px;">Ded. %</th><th style="padding:5px 4px;" title="Use tax applies when no sales tax was charged">Use tax</th><th style="padding:5px 4px;" title="Purchases that last: kept out of Home's operating profit">Capital</th><th style="padding:5px 4px;"># used</th><th></th></tr></thead>
       <tbody id="expCatRows">${_exp.categories.map(row).join("")}${row(null)}</tbody>
     </table></div>
     <div id="expCatErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>`, 900);
@@ -17916,6 +17934,9 @@ function showExpenseCategoriesModal_(){
     const tr = e.target.closest("tr");
     if (e.target.value === "none") tr.querySelector('[data-f="deductiblePct"]').value = "0";
     if (e.target.value === "depreciation") tr.querySelector('[data-f="scheduleCLine"]').value = "13";
+    // Depreciation is always capital: ticked and locked; another type unlocks it as it was.
+    const cap = tr.querySelector('[data-f="capital"]');
+    if (cap) { if (e.target.value === "depreciation") cap.checked = true; cap.disabled = e.target.value === "depreciation"; }
   });
   ov.addEventListener("click", async (e) => {
     const errEl = ov.querySelector("#expCatErr");
@@ -17929,7 +17950,7 @@ function showExpenseCategoriesModal_(){
         if (!f("name").trim()) { errEl.textContent = "Enter a category name."; return; }
         const d = await expApi_({ action: "saveExpenseCategory", category: { id: saveId === "new" ? undefined : Number(saveId),
           name: f("name").trim(), deductionType: f("deductionType"), scheduleCLine: f("scheduleCLine"), deductiblePct: f("deductiblePct"),
-          useTaxable: tr.querySelector('[data-f="useTaxable"]').checked } });
+          useTaxable: tr.querySelector('[data-f="useTaxable"]').checked, capital: tr.querySelector('[data-f="capital"]').checked } });
         redraw(d.categories);
         showToast(saveId === "new" ? "Category added." : "Category saved.");
       } else {

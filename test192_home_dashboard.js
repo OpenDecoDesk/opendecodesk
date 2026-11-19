@@ -55,7 +55,8 @@ const at = (day) => day + "T12:00:00.000Z";
   // Cost of goods: QA1's lines made today at an estimated $9 a shirt ($18).
   d1._raw.run("UPDATE order_items SET cogsCents = 1800, cogsSource = 'estimate' WHERE orderId = 'QA1'");
   // An expense of $120 today, one of $50 last year; other income of $30 today.
-  const cat = d1._raw.exec("SELECT id FROM expense_categories LIMIT 1")[0].values[0][0];
+  // A running-cost category (not capital — migrations/0092 keeps those out of operating profit and in a slice of their own).
+  const cat = d1._raw.exec("SELECT id FROM expense_categories WHERE capital = 0 AND systemKey IS NULL ORDER BY id LIMIT 1")[0].values[0][0];
   d1._raw.run("INSERT INTO expenses (expenseDate, description, categoryId, amountCents, createdAt, updatedAt) VALUES (?, 'Thread', ?, 12000, 't', 't'), (?, 'Old', ?, 5000, 't', 't')", [today, cat, lastYear, cat]);
   d1._raw.run("INSERT INTO accounts (name, type, createdAt, updatedAt) VALUES ('Bank', 'checking', 't', 't')");
   const acct = d1._raw.exec("SELECT id FROM accounts LIMIT 1")[0].values[0][0];
@@ -76,7 +77,7 @@ const at = (day) => day + "T12:00:00.000Z";
   {
     // c1 is the category the $120 expense above went in; c2 and c3 are two others.
     const c1 = d1._raw.exec("SELECT id, name FROM expense_categories WHERE id = ?", [cat])[0].values[0];
-    const [c2, c3] = d1._raw.exec("SELECT id, name FROM expense_categories WHERE id != ? ORDER BY id LIMIT 2", [cat])[0].values;
+    const [c2, c3] = d1._raw.exec("SELECT id, name FROM expense_categories WHERE id != ? AND capital = 0 AND systemKey IS NULL ORDER BY id LIMIT 2", [cat])[0].values;
     // Added for this block only: $40 today in a second category; in a third, $15 spent and a $25 refund today.
     d1._raw.run("INSERT INTO expenses (expenseDate, description, categoryId, amountCents, createdAt, updatedAt) VALUES (?, 'Ink', ?, 4000, 'x', 'x'), (?, 'Tape', ?, 1500, 'x', 'x'), (?, 'Refund', ?, -2500, 'x', 'x')",
       [today, c2[0], today, c3[0], today, c3[0]]);
@@ -185,7 +186,8 @@ const at = (day) => day + "T12:00:00.000Z";
   console.log("shipped orders aren't on a tile, but are mentioned:", /9 open orders · 1 shipped and on the way/.test(w.document.getElementById("homeStagesNote").textContent));
   console.log("each tile links to its list:", tile("run").getAttribute("href") === "#home/run");
   const cards = [...w.document.querySelectorAll(".home-card .home-val")].map(e => e.textContent);
-  console.log("business totals: revenue and expenses, year and month:", cards.length === 4 && cards[0] === "$" + (9 * 46 + 38) && cards[1] === "$138");
+  console.log("business totals: revenue and expenses, year and month:", cards.length === 8 && cards[0] === "$" + (9 * 46 + 38) && cards[1] === "$138");
+  console.log("…then operating profit and capital purchases (none here, so profit is revenue less expenses):", cards[4] === "$" + (9 * 46 + 38 - 138) && cards[5] === "$0");
   const pies = [...w.document.querySelectorAll(".home-pie")];
   const legend = (pie) => [...pie.querySelectorAll(".home-legend tr")].map(tr => [...tr.cells].map(c => c.textContent).join("|"));
   const cat1 = d1._raw.exec("SELECT name FROM expense_categories WHERE id = ?", [cat])[0].values[0][0];

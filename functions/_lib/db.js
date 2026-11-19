@@ -2209,12 +2209,12 @@ export async function computeShopRate(db, input = null, { today = new Date() } =
   const cats = s.categories && typeof s.categories === "object" ? s.categories : {};
   const lives = s.lives && typeof s.lives === "object" ? s.lives : {};
   const share = (r) => Math.round(Number(r.amountCents) * Number(r.businessUsePct || 100) / 100);
-  // Running costs: the period's expenses by category, except equipment.
+  // Running costs: the period's expenses by category, except capital ones (equipment, tools — migrations/0092).
   const { results: inPeriod } = await db.prepare(`${EXPENSE_SELECT_} WHERE e.expenseDate >= ? AND e.expenseDate <= ? AND e.deletedAt IS NULL`).bind(per.from, per.to).all();
   const byCat = new Map();
-  for (const c of await listExpenseCategories(db)) if (c.deductionType !== "depreciation") byCat.set(Number(c.id), { categoryId: Number(c.id), name: c.name, fromExpensesCents: 0, count: 0 });
+  for (const c of await listExpenseCategories(db)) if (!c.capital) byCat.set(Number(c.id), { categoryId: Number(c.id), name: c.name, fromExpensesCents: 0, count: 0 });
   for (const r of inPeriod) {
-    if (r.deductionType === "depreciation") continue;
+    if (isCapitalCategory_(r)) continue;
     const c = byCat.get(Number(r.categoryId)); if (!c) continue;
     c.fromExpensesCents += share(r); c.count++;
   }
@@ -2227,8 +2227,8 @@ export async function computeShopRate(db, input = null, { today = new Date() } =
   }).sort((a, b) => a.name.localeCompare(b.name));
   const extras = (Array.isArray(s.extras) ? s.extras : []).map(x => ({ label: String((x && x.label) || "").slice(0, 100), cents: Math.max(0, Math.round(Number(x && x.cents) || 0)) })).filter(x => x.label || x.cents);
   const runningCents = running.reduce((n, c) => n + c.cents, 0) + extras.reduce((n, x) => n + x.cents, 0);
-  // Equipment: every equipment expense bought by the period's end whose life isn't used up at its start.
-  const { results: gear } = await db.prepare(`${EXPENSE_SELECT_} WHERE c.deductionType = 'depreciation' AND e.deletedAt IS NULL AND e.expenseDate <= ? ORDER BY e.expenseDate`).bind(per.to).all();
+  // Equipment: every expense in a capital category bought by the period's end whose life isn't used up at its start.
+  const gear = await capitalRows_(db, `${EXPENSE_SELECT_} WHERE {CAP} AND e.deletedAt IS NULL AND e.expenseDate <= ? ORDER BY e.expenseDate`, [per.to]);
   const equipment = [];
   for (const r of gear) {
     const defaultLife = SHOP_RATE_LIFE_[r.depMethod] || 5;
@@ -11073,14 +11073,27 @@ function expenseDeductibleCents_(row) {
   const amt = Number(row.amountCents);
   return Math.sign(amt) * Math.round(Math.abs(amt) * Number(row.deductiblePct) * Number(row.businessUsePct) / 10000);
 }
+// A capital category (migrations/0092): purchases that last, kept out of Home's operating profit. Depreciation is
+// always capital; on a database from before 0092 (no column) it's the only kind.
+function isCapitalCategory_(r) {
+  return r.deductionType === "depreciation" || Number(r.capital) === 1;
+}
+// SQL over expenses e JOIN expense_categories c with {CAP} where "is it capital" goes; run again with Depreciation
+// alone on a database from before 0092. Rows out.
+async function capitalRows_(db, sql, binds) {
+  const run = async (cap) => ((await db.prepare(sql.replace(/\{CAP\}/g, cap)).bind(...binds).all()).results || []);
+  try { return await run("(c.deductionType = 'depreciation' OR COALESCE(c.capital, 0) = 1)"); }
+  catch (e) { if (/no such column: c\.capital|no such column: capital/i.test(String(e && e.message))) return run("(c.deductionType = 'depreciation')"); throw e; }
+}
 function parseExpenseCategory_(r) {
   return { id: Number(r.id), name: r.name, deductionType: r.deductionType, scheduleCLine: r.scheduleCLine || "",
-    deductiblePct: Number(r.deductiblePct), useTaxable: !!r.useTaxable, systemKey: r.systemKey || "", expenseCount: Number(r.expenseCount || 0), recurringCount: Number(r.recurringCount || 0) };
+    deductiblePct: Number(r.deductiblePct), useTaxable: !!r.useTaxable, systemKey: r.systemKey || "",
+    capital: isCapitalCategory_(r), expenseCount: Number(r.expenseCount || 0), recurringCount: Number(r.recurringCount || 0) };
 }
 function parseExpense_(r) {
   return {
     id: Number(r.id), date: r.expenseDate, description: r.description, vendor: r.vendor || "",
-    categoryId: Number(r.categoryId), category: r.categoryName || "", deductionType: r.deductionType || "",
+    categoryId: Number(r.categoryId), category: r.categoryName || "", deductionType: r.deductionType || "", capital: isCapitalCategory_(r),
     scheduleCLine: r.scheduleCLine || "", deductiblePct: Number(r.deductiblePct ?? 100),
     amount: fromCents(r.amountCents), businessUsePct: Number(r.businessUsePct), deductible: fromCents(expenseDeductibleCents_(r)),
     receiptKey: r.receiptKey || "", receiptName: r.receiptName || "",
@@ -11113,15 +11126,17 @@ export async function findExpenseCategoryByName(db, name) {
   const r = await db.prepare("SELECT id FROM expense_categories WHERE name = ? COLLATE NOCASE").bind(String(name).trim()).first();
   return r ? Number(r.id) : null;
 }
-export async function saveExpenseCategory(db, id, { name, deductionType, scheduleCLine, deductiblePct, useTaxable }) {
+// `capital` (migrations/0092) is always on for a Depreciation category.
+export async function saveExpenseCategory(db, id, { name, deductionType, scheduleCLine, deductiblePct, useTaxable, capital }) {
   const now = new Date().toISOString();
+  const cap = deductionType === "depreciation" || capital ? 1 : 0;
   if (id) {
-    await db.prepare("UPDATE expense_categories SET name = ?, deductionType = ?, scheduleCLine = ?, deductiblePct = ?, useTaxable = ?, updatedAt = ? WHERE id = ?")
-      .bind(String(name).trim(), deductionType, scheduleCLine || "", Number(deductiblePct), useTaxable ? 1 : 0, now, Number(id)).run();
+    await db.prepare("UPDATE expense_categories SET name = ?, deductionType = ?, scheduleCLine = ?, deductiblePct = ?, useTaxable = ?, capital = ?, updatedAt = ? WHERE id = ?")
+      .bind(String(name).trim(), deductionType, scheduleCLine || "", Number(deductiblePct), useTaxable ? 1 : 0, cap, now, Number(id)).run();
     return Number(id);
   }
-  const r = await db.prepare(`INSERT INTO expense_categories (name, deductionType, scheduleCLine, deductiblePct, useTaxable, createdAt, updatedAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`).bind(String(name).trim(), deductionType, scheduleCLine || "", Number(deductiblePct), useTaxable ? 1 : 0, now, now).first();
+  const r = await db.prepare(`INSERT INTO expense_categories (name, deductionType, scheduleCLine, deductiblePct, useTaxable, capital, createdAt, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`).bind(String(name).trim(), deductionType, scheduleCLine || "", Number(deductiblePct), useTaxable ? 1 : 0, cap, now, now).first();
   return Number(r.id);
 }
 // Refused (false) while any expense — even a deleted one — uses the category.
@@ -11137,7 +11152,7 @@ export async function deleteExpenseCategory(db, id) {
   return true;
 }
 
-const EXPENSE_SELECT_ = `SELECT e.*, c.name AS categoryName, c.deductionType, c.scheduleCLine, c.deductiblePct, c.useTaxable
+const EXPENSE_SELECT_ = `SELECT e.*, c.name AS categoryName, c.deductionType, c.scheduleCLine, c.deductiblePct, c.useTaxable, c.capital
   FROM expenses e JOIN expense_categories c ON c.id = e.categoryId`;
 // dateFrom/dateTo are YYYY-MM-DD (inclusive).
 export async function listExpenses(db, dateFrom, dateTo, { includeDeleted = false } = {}) {
@@ -13364,13 +13379,16 @@ export function homeOrderStage(o){
 // (Home's Refresh). `blocks` omitted = all of them. `today` is the admin's own YYYY-MM-DD. The reply has only the
 // parts asked for, `blocks` (the ones it answers for), and `cachedAt` — when the oldest of them was worked out.
 export const DASHBOARD_TTL_MS = 60 * 60 * 1000;
+// Bumped when a part's shape changes (2: capital purchases and operating profit, migrations/0092), so an hour-old
+// answer in the old shape isn't handed back.
+const DASHBOARD_CACHE_V_ = 2;
 export async function getDashboard(db, { today, fresh = false, now = Date.now(), blocks } = {}) {
   const shown = Array.isArray(blocks) ? HOME_BLOCKS.filter(k => blocks.includes(k)) : HOME_BLOCKS.slice();
   const want = { orders: shown.includes("orders"), money: ["totals", "sales", "pies"].some(k => shown.includes(k)),
     cats: shown.includes("pies"), inOut: shown.includes("inout") };
   const row = await db.prepare("SELECT value FROM global_settings WHERE key = 'dashboardCache'").first().catch(() => null);
   const c = row ? tryParse_(row.value, null) : null;
-  const kept = c && c.today === today && c.parts && typeof c.parts === "object" ? c.parts : {};
+  const kept = c && c.today === today && c.v === DASHBOARD_CACHE_V_ && c.parts && typeof c.parts === "object" ? c.parts : {};
   const usable = (k, ok = true) => !fresh && ok && kept[k] && Number(kept[k].at) <= now && now - Number(kept[k].at) < DASHBOARD_TTL_MS && kept[k].data;
   const yearFrom = today.slice(0, 4) + "-01-01", monthFrom = today.slice(0, 7) + "-01";
   const parts = {}, work = [];
@@ -13391,7 +13409,7 @@ export async function getDashboard(db, { today, fresh = false, now = Date.now(),
   await Promise.all(work);
   if (work.length) {
     await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('dashboardCache', ?)")
-      .bind(JSON.stringify({ today, parts: { ...kept, ...parts } })).run();
+      .bind(JSON.stringify({ v: DASHBOARD_CACHE_V_, today, parts: { ...kept, ...parts } })).run();
   }
   const used = Object.values(parts);
   const at = used.length ? Math.min(...used.map(p => Number(p.at))) : now;
@@ -13407,6 +13425,9 @@ export async function getDashboard(db, { today, fresh = false, now = Date.now(),
 //   cogs            blanks + finished stock + estimates (Inventory & COGS) + transfer sheets used
 //   revenue         productRevenue + shipping and rush fees charged (less their tax) + other income
 //   expenses        recorded expenses + cogs + write-offs (blanks and transfers)
+//   capital         expenses in capital categories (migrations/0092: equipment, tools — purchases that last)
+//   taxPaid         expenses in the built-in "Sales tax paid to the state" category (revenue is already less tax)
+//   operatingExpenses  expenses less capital and sales tax paid; operatingProfit = revenue − operatingExpenses
 // `yearFrom` / `monthFrom` / `to` are YYYY-MM-DD (the admin's own today). Dollars out.
 export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis, byCategory: withCats = true }) {
   basis = basis || await getSaleDateBasis(db);
@@ -13420,38 +13441,57 @@ export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis, by
       catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return 0; throw e; }
     };
     const none = async () => 0;
-    // Recorded expenses by category, for Home's "Where the money went" pies.
+    // Recorded expenses by category, for Home's "Where the money went" pies, each saying whether it's capital.
     const byCategory = async () => {
       try {
-        const { results } = await db.prepare(`SELECT e.categoryId id, COALESCE(c.name, 'Uncategorized') name, SUM(e.amountCents) c
-          FROM expenses e LEFT JOIN expense_categories c ON c.id = e.categoryId
-          WHERE e.deletedAt IS NULL AND e.expenseDate >= ? AND e.expenseDate <= ? GROUP BY e.categoryId`).bind(from, to).all();
-        return results || [];
+        return await capitalRows_(db, `SELECT e.categoryId id, COALESCE(c.name, 'Uncategorized') name, MAX(CASE WHEN {CAP} THEN 1 ELSE 0 END) cap,
+          SUM(e.amountCents) c FROM expenses e LEFT JOIN expense_categories c ON c.id = e.categoryId
+          WHERE e.deletedAt IS NULL AND e.expenseDate >= ? AND e.expenseDate <= ? GROUP BY e.categoryId`, [from, to]);
       } catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return []; throw e; }
     };
-    const [sales, cogs, tCogs, otherCents, expenseCents, cats] = await Promise.all([
+    // Expenses in capital categories, and sales tax paid to the state: neither is a running cost.
+    const capitalCents = async () => {
+      try {
+        const r = await capitalRows_(db, `SELECT COALESCE(SUM(e.amountCents), 0) c FROM expenses e JOIN expense_categories c ON c.id = e.categoryId
+          WHERE {CAP} AND e.deletedAt IS NULL AND e.expenseDate >= ? AND e.expenseDate <= ?`, [from, to]);
+        return Number((r[0] || {}).c) || 0;
+      } catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return 0; throw e; }
+    };
+    const [sales, cogs, tCogs, otherCents, expenseCents, cats, capCents, taxPaidCents] = await Promise.all([
       getRevenueData(db, a, b, { basis }), getCogsReport(db, a, b, { basis }), getTransferCogs(db, a, b, { basis }),
       books ? sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM other_income WHERE deletedAt IS NULL AND incomeDate >= ? AND incomeDate <= ?") : none(),
       books ? sumCents("SELECT COALESCE(SUM(amountCents), 0) c FROM expenses WHERE deletedAt IS NULL AND expenseDate >= ? AND expenseDate <= ?") : none(),
       books && withCats ? byCategory() : [],
+      books ? capitalCents() : none(),
+      books ? sumCents(`SELECT COALESCE(SUM(e.amountCents), 0) c FROM expenses e JOIN expense_categories c ON c.id = e.categoryId
+        WHERE c.systemKey = '${SALES_TAX_PAID_KEY}' AND e.deletedAt IS NULL AND e.expenseDate >= ? AND e.expenseDate <= ?`) : none(),
     ]);
     const add = (rows, k) => rows.reduce((t, r) => t + Math.round((Number(r[k]) || 0) * 100), 0);
     const goods = sales.reduce((t, r) => t + r.netSalesCents, 0);
     const extras = sales.reduce((t, r) => t + r.shippingCents + r.rushNetCents, 0);
     const cogsCents = add(cogs.rows, "cogs") + add(tCogs, "cogs");
     const writeoffCents = add(cogs.rows, "writeoffs") + add(tCogs, "writeoffs");
-    // The pie's slices: each category with more spent than refunded (largest first), then cost of goods and
-    // write-offs, so they add up to `expenses`. A category whose refunds outweigh it can't be a slice: it's named
-    // in `refundedTypes` instead.
-    const rows = cats.map(r => ({ key: "c" + (r.id == null ? "" : r.id), id: r.id, name: String(r.name), cents: Number(r.c) || 0 }));
+    // The pie's slices: each running-cost category with more spent than refunded (largest first), then cost of goods,
+    // write-offs, and the capital categories together as one "Capital purchases" slice (its `parts` name each), so
+    // they add up to `expenses`. A category (or the capital ones together) whose refunds outweigh it can't be a
+    // slice: it's named in `refundedTypes` instead.
+    const all = cats.map(r => ({ key: "c" + (r.id == null ? "" : r.id), id: r.id, name: String(r.name), cents: Number(r.c) || 0, cap: Number(r.cap) === 1 }));
+    const rows = all.filter(r => !r.cap), capRows = all.filter(r => r.cap);
     const byType = rows.filter(r => r.cents > 0).sort((x, y) => y.cents - x.cents || x.name.localeCompare(y.name))
       .map(r => ({ key: r.key, id: r.id, name: r.name, amount: fromCents(r.cents) }));
     if (cogsCents > 0) byType.push({ key: "cogs", name: "Cost of goods", amount: fromCents(cogsCents) });
     if (writeoffCents > 0) byType.push({ key: "writeoffs", name: "Write-offs", amount: fromCents(writeoffCents) });
+    const capSum = capRows.reduce((t, r) => t + r.cents, 0);
+    if (capSum > 0) byType.push({ key: "capital", name: "Capital purchases", amount: fromCents(capSum),
+      parts: capRows.filter(r => r.cents).sort((x, y) => y.cents - x.cents || x.name.localeCompare(y.name)).map(r => ({ name: r.name, amount: fromCents(r.cents) })) });
+    const refundedTypes = rows.filter(r => r.cents < 0).map(r => r.name).concat(capSum < 0 ? ["capital purchases"] : []);
+    const operatingCents = expenseCents - capCents - taxPaidCents + cogsCents + writeoffCents;
     return {
       // (Without the categories — Home's pies hidden — there are no slices to give.)
-      ...(withCats ? { byType, refundedTypes: rows.filter(r => r.cents < 0).map(r => r.name) } : {}),
+      ...(withCats ? { byType, refundedTypes } : {}),
       revenue: fromCents(goods + extras + otherCents), expenses: fromCents(expenseCents + cogsCents + writeoffCents),
+      capital: fromCents(capCents), taxPaid: fromCents(taxPaidCents), operatingExpenses: fromCents(operatingCents),
+      operatingProfit: fromCents(goods + extras + otherCents - operatingCents),
       recordedExpenses: fromCents(expenseCents), writeoffs: fromCents(writeoffCents), otherIncome: fromCents(otherCents),
       productRevenue: fromCents(goods), cogs: fromCents(cogsCents), productNet: fromCents(goods - cogsCents),
       estimatedCogs: fromCents(add(cogs.rows, "estimatedPart")), missingCost: cogs.missingCost.length, orders: sales.length,
@@ -13467,7 +13507,8 @@ export async function getDashboardMoney(db, { yearFrom, monthFrom, to, basis, by
 //        otherIncome other income (Accounts & money)
 //        contributions owner's money put in (owner_transactions 'contribution')
 //        taxCollected the sales tax inside those payments: each payment's share of its order's tax
-//   out  expenses    recorded expenses, every category but sales tax paid (refunds negative)
+//   out  expenses    recorded expenses, every category but sales tax paid and capital ones (refunds negative)
+//        capital     expenses in capital categories (migrations/0092: equipment, tools)
 //        blanks / transfers  blanks and transfer sheets bought (stock purchases, qty × unit cost)
 //        cardFees    processing fees on payments
 //        draws       owner's money taken out (owner_transactions 'draw')
@@ -13486,7 +13527,7 @@ export async function getMoneyInOutByMonth(db, { yearFrom, to }) {
     m = mo === 12 ? (y + 1) + "-01" : y + "-" + String(mo + 1).padStart(2, "0");
   }
   const cents = Object.fromEntries(months.map(m => [m, { payments: 0, otherIncome: 0, contributions: 0, taxCollected: 0,
-    expenses: 0, blanks: 0, transfers: 0, cardFees: 0, draws: 0, taxPaid: 0 }]));
+    expenses: 0, capital: 0, blanks: 0, transfers: 0, cardFees: 0, draws: 0, taxPaid: 0 }]));
   const put = (month, k, c) => { if (cents[month]) cents[month][k] += Number(c) || 0; };
   const rows = async (sql, ...binds) => {
     try { return (await db.prepare(sql).bind(...binds).all()).results || []; }
@@ -13503,10 +13544,12 @@ export async function getMoneyInOutByMonth(db, { yearFrom, to }) {
       GROUP BY o.orderId, substr(p.receivedAt, 1, 7)`)).bind(a, b).all()).then(r => r.results || []),
     books ? rows("SELECT substr(incomeDate, 1, 7) AS month, SUM(amountCents) AS c FROM other_income WHERE deletedAt IS NULL AND incomeDate >= ? AND incomeDate <= ? GROUP BY month", yearFrom, to) : [],
     books ? rows("SELECT substr(txDate, 1, 7) AS month, kind, SUM(amountCents) AS c FROM owner_transactions WHERE deletedAt IS NULL AND txDate >= ? AND txDate <= ? GROUP BY month, kind", yearFrom, to) : [],
-    books ? rows(`SELECT substr(e.expenseDate, 1, 7) AS month, (c.systemKey IS NOT NULL AND c.systemKey = '${SALES_TAX_PAID_KEY}') AS tax, SUM(e.amountCents) AS c
+    books ? capitalRows_(db, `SELECT substr(e.expenseDate, 1, 7) AS month, (c.systemKey IS NOT NULL AND c.systemKey = '${SALES_TAX_PAID_KEY}') AS tax,
+      COALESCE({CAP}, 0) AS cap, SUM(e.amountCents) AS c
       FROM expenses e LEFT JOIN expense_categories c ON c.id = e.categoryId
-      WHERE e.deletedAt IS NULL AND e.expenseDate >= ? AND e.expenseDate <= ? GROUP BY month, tax`, yearFrom, to)
-      .then(r => r.length ? r : rows("SELECT substr(expenseDate, 1, 7) AS month, 0 AS tax, SUM(amountCents) AS c FROM expenses WHERE deletedAt IS NULL AND expenseDate >= ? AND expenseDate <= ? GROUP BY month", yearFrom, to)) : [],
+      WHERE e.deletedAt IS NULL AND e.expenseDate >= ? AND e.expenseDate <= ? GROUP BY month, tax, cap`, [yearFrom, to])
+      .catch(e => { if (/no such (table|column)/i.test(String(e && e.message))) return []; throw e; })
+      .then(r => r.length ? r : rows("SELECT substr(expenseDate, 1, 7) AS month, 0 AS tax, 0 AS cap, SUM(amountCents) AS c FROM expenses WHERE deletedAt IS NULL AND expenseDate >= ? AND expenseDate <= ? GROUP BY month", yearFrom, to)) : [],
     rows("SELECT substr(occurredAt, 1, 7) AS month, SUM(qtyDelta * unitCostCents) AS c FROM inventory_movements WHERE kind = 'purchase' AND voidedAt IS NULL AND occurredAt >= ? AND occurredAt <= ? GROUP BY month", a, b),
     rows("SELECT substr(occurredAt, 1, 7) AS month, SUM(qtyDelta * unitCostCents) AS c FROM transfer_movements WHERE kind = 'purchase' AND voidedAt IS NULL AND occurredAt >= ? AND occurredAt <= ? GROUP BY month", a, b),
   ]);
@@ -13520,10 +13563,10 @@ export async function getMoneyInOutByMonth(db, { yearFrom, to }) {
   }
   for (const r of other) put(r.month, "otherIncome", r.c);
   for (const r of owner) put(r.month, r.kind === "draw" ? "draws" : "contributions", r.c);
-  for (const r of exp) put(r.month, Number(r.tax) ? "taxPaid" : "expenses", r.c);
+  for (const r of exp) put(r.month, Number(r.tax) ? "taxPaid" : Number(r.cap) ? "capital" : "expenses", r.c);
   for (const r of blanks) put(r.month, "blanks", r.c);
   for (const r of sheets) put(r.month, "transfers", r.c);
-  const IN = ["payments", "otherIncome", "contributions", "taxCollected"], OUT = ["expenses", "blanks", "transfers", "cardFees", "draws", "taxPaid"];
+  const IN = ["payments", "otherIncome", "contributions", "taxCollected"], OUT = ["expenses", "capital", "blanks", "transfers", "cardFees", "draws", "taxPaid"];
   const dollars = (c, keys) => Object.fromEntries(keys.map(k => [k, fromCents(c[k])]));
   const total = (c, keys) => keys.reduce((t, k) => t + c[k], 0);
   return {
@@ -13533,6 +13576,7 @@ export async function getMoneyInOutByMonth(db, { yearFrom, to }) {
     totalOut: fromCents(months.reduce((t, m) => t + total(cents[m], OUT), 0)),
     taxCollected: fromCents(months.reduce((t, m) => t + cents[m].taxCollected, 0)),
     taxPaid: fromCents(months.reduce((t, m) => t + cents[m].taxPaid, 0)),
+    capital: fromCents(months.reduce((t, m) => t + cents[m].capital, 0)),
     contributions: fromCents(months.reduce((t, m) => t + cents[m].contributions, 0)),
     draws: fromCents(months.reduce((t, m) => t + cents[m].draws, 0)),
     bookkeeping: books,

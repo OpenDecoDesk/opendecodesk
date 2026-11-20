@@ -14022,6 +14022,40 @@ function attrSel_(v) { return String(v).replace(/["\\]/g, "\\$&"); }
 // `title` is HTML: escape anything that came from data (a name, a file name) before passing it — test146 checks every call.
 // The one pop-up window. title is HTML (escape values); opts.onClose runs when it's closed with ✕ or Escape (a
 // window that answers a question resolves "cancelled" there); close() from the window's own buttons doesn't run it.
+// A window's width is set for its usual content, but a long name (a select sized to its longest option), a wide
+// table or a row of fields can need more. Rather than scroll sideways, the window grows to fit what's in it — up to
+// 95% of the screen; only then does it scroll. It re-checks as rows are added or the content changes, and never
+// shrinks back while open. Applies to every window: .admin-modal (inventoryModal_) and .admin-pass-overlay boxes.
+function fitModalWidth_(box){
+  if (!box || box.__fitWidth) return;
+  box.__fitWidth = true;
+  let busy = false;
+  const fit = () => {
+    if (busy || !box.isConnected) return;
+    const extra = box.scrollWidth - box.clientWidth;
+    if (extra <= 1) return;
+    busy = true;
+    const max = Math.floor(window.innerWidth * 0.95);
+    const now = box.getBoundingClientRect().width;
+    if (now < max) { box.style.maxWidth = "95vw"; box.style.width = Math.min(max, Math.ceil(now + extra + 2)) + "px"; }
+    busy = false;
+  };
+  fit();
+  let queued = false;
+  const later = () => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; fit(); }); };
+  new MutationObserver(later).observe(box, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["style", "class", "hidden"] });
+  box.addEventListener("change", later);
+  box.addEventListener("input", later);
+}
+if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" && document.body) {
+  new MutationObserver(muts => {
+    for (const m of muts) for (const n of m.addedNodes) {
+      if (n.nodeType !== 1 || !n.classList) continue;
+      if (n.classList.contains("admin-modal") || n.classList.contains("admin-pass-overlay")) fitModalWidth_(n.firstElementChild);
+    }
+  }).observe(document.body, { childList: true });
+}
+
 function inventoryModal_(title, bodyHtml, width, opts){
   const ov = document.createElement("div");
   ov.className = "admin-modal";
@@ -16970,7 +17004,7 @@ function blankOrderForm_(el, opts){
     g.style.cssText = "border:1px solid #e5e7eb;border-radius:6px;padding:8px;margin-bottom:8px;";
     const first = !groupsEl.children.length;
     g.innerHTML = `<div style="display:flex;gap:8px;align-items:flex-end;justify-content:space-between;">
-        <label style="font-size:12px;font-weight:600;">Blank<br><select class="rcc-blank" style="${inp}"><option value="">Choose…</option>${blanks.map(b => `<option value="${b.id}"${preset && preset.blankId === b.id ? " selected" : ""}>${escapeHtml(blankName(b))}</option>`).join("")}</select></label>
+        <label style="font-size:12px;font-weight:600;flex:1;min-width:0;">Blank<br><select class="rcc-blank" style="${inp}width:100%;max-width:100%;"><option value="">Choose…</option>${blanks.map(b => `<option value="${b.id}"${preset && preset.blankId === b.id ? " selected" : ""}>${escapeHtml(blankName(b))}</option>`).join("")}</select></label>
         ${first ? "" : `<button type="button" class="rcc-rm admin-btn-danger" style="padding:3px 8px;border-radius:4px;cursor:pointer;font-size:12px;">Remove</button>`}</div>
       <div class="rcc-sizes"></div>`;
     groupsEl.appendChild(g);
@@ -21981,7 +22015,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
   if (ed) for (const r of ed.rows) if (!items.some(t => Number(t.id) === Number(r.transferId))) items.push({ id: r.transferId, name: r.name });
   const opt = (sel) => items.map(t => `<option value="${Number(t.id)}"${Number(sel) === Number(t.id) ? " selected" : ""}>${escapeHtml(t.name)}</option>`).join("");
   const rowHtml = (r) => `<tr class="trRow">
-    <td style="padding:3px 4px;"><select class="trItem" style="${inp}">${opt(r && r.transferId)}</select></td>
+    <td style="padding:3px 4px;"><select class="trItem" style="${inp}max-width:300px;">${opt(r && r.transferId)}</select></td>
     <td style="padding:3px 4px;"><input class="trCount" type="number" min="1" value="${r ? Number(r.count) : ""}" style="${inp}width:70px;"></td>
     <td style="padding:3px 4px;"><input class="trPct" type="number" min="0" max="100" step="0.1" value="${r ? Number(r.pctOfSheet) : ""}" style="${inp}width:70px;"></td>
     <td style="padding:3px 4px;" class="trRowDollars">—</td>
@@ -22027,7 +22061,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
       : `<div style="color:#b03a2e;">Add a transfer item first (+ New transfer).</div>`}
     <div id="trErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:6px;"></div>
     <div id="trPreview"></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" id="trCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button><button type="button" id="trSave" class="admin-btn">${ed ? "Preview changes" : "Receive"}</button></div>`, 640);
+    <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" id="trCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button><button type="button" id="trSave" class="admin-btn">${ed ? "Preview changes" : "Receive"}</button></div>`, 760);
   loadAccounts_().then(d => { const cc = d.accounts.find(a => a.type === "credit_card" && a.active);
     const sel = ed ? (ed.paidPersonally ? "personal" : (ed.accountId || "")) : ((cc && cc.id) || "");
     ov.querySelector("#trPaid").innerHTML = accountOptions_(d.accounts, sel, { personal: true, blank: ed ? !ed.accountId && !ed.paidPersonally : !cc }); })

@@ -22338,10 +22338,28 @@ function embroideryFileProblem_(fileName, role) {
   if (role === "machine" && DESIGN_NATIVE_EXTS.includes(ext)) return `A .${ext} is a design-software project file — choose it as the Design file. The Machine file is the stitch file the machine runs (e.g. .dst, .dsb, .pes).`;
   return "";
 }
-// Stitch files this page can read (needle stops, preview, colors): Tajima .dst and Barudan .dsb.
-const STITCH_PREVIEW_EXTS = ["dst", "dsb"];
+// Stitch files this page can read (needle stops, preview, the file's own thread colors). Tajima .dst and Barudan
+// .dsb are read here; the rest by public/admin-stitch.js, loaded the first time one is read (ensureStitchReaders_).
+// .vip, .csd, .sst and .fdr have no public description to read them from; design-software files (.emb …) are closed.
+const STITCH_PREVIEW_EXTS = ["dst", "dsb", "pes", "pec", "phb", "phc", "jef", "sew", "vp3", "xxx", "pcs", "pcm", "exp", "stx",
+  "emd", "tap", "u01", "dsz", "gt", "10o", "inb", "ksm", "new", "max", "tbf", "hus", "shv"];
 const stitchExt_ = (nameOrExt) => String(nameOrExt || "").toLowerCase().replace(/^.*\./, "");
 const canPreviewStitch_ = (nameOrExt) => STITCH_PREVIEW_EXTS.includes(stitchExt_(nameOrExt));
+// "Preview available for … files only" without a list that runs off the canvas.
+const STITCH_NO_PREVIEW_MSG = "This file type can't be previewed";
+let _stitchReadersPromise = null;
+function ensureStitchReaders_(nameOrExt){
+  const ext = stitchExt_(nameOrExt);
+  if (ext === "dst" || ext === "dsb" || !canPreviewStitch_(ext) || window.StitchReaders) return Promise.resolve();
+  if (!_stitchReadersPromise) _stitchReadersPromise = new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = "/admin-stitch.js";
+    sc.onload = () => resolve();
+    sc.onerror = () => { _stitchReadersPromise = null; reject(new Error("Couldn't load the stitch-file readers")); };
+    document.head.appendChild(sc);
+  });
+  return _stitchReadersPromise;
+}
 
 // Reads a Tajima .dst (512-byte header, then 3-byte records) and counts its needle stops —
 // the color blocks that actually contain stitches, i.e. how many thread-map entries the design
@@ -22378,10 +22396,17 @@ function parseDst_(buffer){
     try { const b64 = new TextDecoder("ascii").decode(data).replace(/\s/g, ""); data = Uint8Array.from(atob(b64), c => c.charCodeAt(0)); } catch (e) {}
   }
   if (data.length < 512) throw new Error("File is too short to be a DST file.");
-  const stitches = [];
-  let x = 0, y = 0, color = 0, stitchCount = 0, colorChanges = 0;
+  // Some design software lists the threads in the header: "TC:#rrggbb,description,catalog number" per color.
+  const tc = [];
+  String.fromCharCode.apply(null, data.subarray(0, 512)).split(/[\r\n]+/).forEach(line => {
+    const m = line.match(/^TC:\s*#?([0-9a-fA-F]{6})\s*,\s*([^,]*?)\s*,\s*([^,\x1a]*?)\s*$/);
+    if (m) tc.push({ hex: m[1].toLowerCase(), brand: "", code: m[3], name: m[2], chart: "" });
+  });
+  const stitches = [], fileColors = [];
+  // color = the needle stop: a block counts once it stitches (as parseDsb_), so a color change with nothing
+  // stitched after it doesn't shift the colors. raw = the file's own color-block number (for the TC list).
+  let x = 0, y = 0, color = 0, raw = 0, stitched = false, stitchCount = 0, colorChanges = 0;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  const blockHasStitch = {};
   for (let i = 512; i + 2 < data.length; i += 3) {
     const b0 = data[i], b1 = data[i + 1], b2 = data[i + 2];
     if ((b2 & 0xF3) === 0xF3) break; // end of file
@@ -22392,15 +22417,17 @@ function parseDst_(buffer){
     if (b1 & 0x80) dy += 3; if (b1 & 0x40) dy -= 3; if (b1 & 0x20) dy += 27; if (b1 & 0x10) dy -= 27;
     if (b2 & 0x04) dx += 81; if (b2 & 0x08) dx -= 81; if (b2 & 0x20) dy += 81; if (b2 & 0x10) dy -= 81;
     x += dx; y += dy;
-    if ((b2 & 0xC3) === 0xC3) { colorChanges++; color++; continue; } // colour change: advance block, no stitch
+    if ((b2 & 0xC3) === 0xC3) { colorChanges++; raw++; if (stitched) { color++; stitched = false; } continue; } // colour change: no stitch
     const jump = (b2 & 0x83) === 0x83;
     stitches.push({ x, y, jump, color });
-    if (!jump) { stitchCount++; blockHasStitch[color] = true;
+    if (!jump) { stitchCount++;
+      if (!stitched) { stitched = true; fileColors[color] = tc[raw] || null; }
       if (x < minX) minX = x; if (y < minY) minY = y; if (x > maxX) maxX = x; if (y > maxY) maxY = y; }
   }
   if (!stitchCount) throw new Error("No stitches found in this DST file.");
-  return { stitches, needleStops: Object.keys(blockHasStitch).length, colorChanges, stitchCount,
-    bbox: { minX, minY, maxX, maxY } };
+  const needleStops = color + (stitched ? 1 : 0);
+  return { stitches, needleStops, colorChanges, stitchCount,
+    fileColors: Array.from({ length: needleStops }, (_, i) => fileColors[i] || null), bbox: { minX, minY, maxX, maxY } };
 }
 
 // Barudan .dsb: the same 512-byte header as a .dst, then 3-byte records — a control byte, then Y, then X as
@@ -22442,20 +22469,25 @@ function parseDsb_(buffer){
   }
   if (!stitchCount) throw new Error("No stitches found in this DSB file.");
   const needleStops = color + (blockStitched ? 1 : 0);
-  return { stitches, needleStops, colorChanges, stitchCount, needles: needles.slice(0, needleStops), bbox: { minX, minY, maxX, maxY } };
+  return { stitches, needleStops, colorChanges, stitchCount, needles: needles.slice(0, needleStops),
+    fileColors: Array.from({ length: needleStops }, () => null), bbox: { minX, minY, maxX, maxY } };
 }
 
-// Reads a stitch file this page understands (canPreviewStitch_) by its extension or file name.
+// Reads a stitch file this page understands (canPreviewStitch_) by its extension or file name. Formats other
+// than .dst/.dsb need public/admin-stitch.js: `await ensureStitchReaders_(name)` first.
 function parseStitchFile_(buffer, nameOrExt){
   const ext = stitchExt_(nameOrExt);
   if (ext === "dsb") return parseDsb_(buffer);
   if (ext === "dst") return parseDst_(buffer);
-  throw new Error("Preview is available for .DST and .DSB files only.");
+  if (!canPreviewStitch_(ext)) throw new Error(STITCH_NO_PREVIEW_MSG + ".");
+  if (!window.StitchReaders) throw new Error("The stitch-file readers aren't loaded yet.");
+  return window.StitchReaders.read(buffer, ext);
 }
-// Needle stops of a stitch file (the thread map's length): DST through its own counter, DSB through the parser.
+// Needle stops of a stitch file (the thread map's length): DST through its own counter, the rest through the parser.
 function analyzeStitchNeedleStops_(buffer, nameOrExt){
-  if (stitchExt_(nameOrExt) === "dsb") { const p = parseDsb_(buffer); return { needleStops: p.needleStops, colorChanges: p.colorChanges, stitches: p.stitchCount, needles: p.needles }; }
-  return analyzeDstNeedleStops_(buffer);
+  if (stitchExt_(nameOrExt) === "dst") return analyzeDstNeedleStops_(buffer);
+  const p = parseStitchFile_(buffer, nameOrExt);
+  return { needleStops: p.needleStops, colorChanges: p.colorChanges, stitches: p.stitchCount, needles: p.needles };
 }
 
 // Distinct fallback colours for needle blocks that don't have a thread picked yet, so the preview
@@ -22631,22 +22663,36 @@ async function loadDesignDetail_(designId){
           <td data-label="Stitches" style="padding:5px 6px;">${v.stitchCount != null ? Number(v.stitchCount).toLocaleString() : '<span style="color:#888;font-weight:400;">not known</span>'} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-vid="${v.id}" data-did="${design.id}" data-cur="${v.stitchCount == null ? "" : v.stitchCount}" data-need="catalog.designs:edit" onclick="setVersionStitches_(this)">Set</button></td>
           <td data-label="Notes" style="padding:5px 6px;color:#666;">${escapeHtml(v.notes)}</td>
         </tr>`).join("")}</tbody></table>
-      ${versions[0].threadColors.length ? `<div style="margin-top:10px;font-size:13px;"><b>Current thread map</b> (needle order):<br>
-        ${versions[0].threadColors.map((tc, i) => `${i + 1}. ${threadSwatch_(tc.threadId)}${escapeHtml(threadName_(tc.threadId))}`).join("<br>")}
+      ${versions[0].threadColors.length || canPreviewStitch_(versions[0].machineFileExt) ? `<div id="dsgThreadMap" style="margin-top:10px;font-size:13px;">${versions[0].threadColors.length ? `<b>Current thread map</b> (needle order):<br>
+        ${versions[0].threadColors.slice().sort((a, b) => a.needle - b.needle).map((tc, i) => `${Number(tc.needle) || i + 1}. ${threadSwatch_(tc.threadId)}${escapeHtml(threadName_(tc.threadId))}`).join("<br>")}` : ""}
       </div>` : ""}` : `<div style="color:#888;margin-top:8px;">No versions uploaded yet.</div>`}
     </div>`;
-  // Render the current version's design onto the detail canvas, coloured by its thread map.
+  // Render the current version's design onto the detail canvas, coloured by its thread map (else the file's own
+  // colors), and show next to the thread map what the file itself says for each stop.
   if (versions.length && canPreviewStitch_(versions[0].machineFileExt)) {
     const threadsById = {}; threads.forEach(t => { threadsById[t.id] = t; });
     const cur = versions[0];
-    const rows = (cur.threadColors || []).slice().sort((a, b) => a.needle - b.needle).map(tc => ({ threadId: tc.threadId }));
+    const rows = threadRowsByNeedle_(cur.threadColors);
     (async () => {
       const canvas = document.getElementById("dsgDetailCanvas"), info = document.getElementById("dsgDetailCanvasInfo");
       if (!canvas) return;
       try {
+        await ensureStitchReaders_(cur.machineFileExt);
         const parsed = parseStitchFile_(await fetchDesignFileBytes_(cur.machineFileKey), cur.machineFileExt);
-        renderDstPreview_(canvas, parsed, dstColorForNeedle_(rows, threadsById));
+        renderDstPreview_(canvas, parsed, dstColorForNeedle_(rows, threadsById, parsed.fileColors));
         if (info) info.textContent = `${parsed.needleStops} needle stop${parsed.needleStops === 1 ? "" : "s"} · ${parsed.stitchCount.toLocaleString()} stitches · current version (${(cur.uploadedAt || "").slice(0, 10)})`;
+        // Once the file is read, the thread map lists every stop it has — an empty one too — with what the file
+        // names for it and its flags (the closest-thread buttons belong to Edit colors, not here).
+        const map = document.getElementById("dsgThreadMap");
+        const fcs = parsed.fileColors || [];
+        if (map && (rows.length || fcs.some(Boolean))) {
+          const n = Math.max(rows.length, parsed.needleStops);
+          map.innerHTML = `<b>Current thread map</b> (needle order):` + Array.from({ length: n }, (_, i) => {
+            const tid = rows[i] && rows[i].threadId;
+            return `<div>${i + 1}. ${tid ? threadSwatch_(tid) + escapeHtml(threadName_(tid)) : `<span style="color:#888;">no thread picked</span>`}</div>` +
+              fileColorNoteHtml_(fcs[i], rows[i], i, threads, threadsById, "dsgDetailSuggest").replace(/<button[\s\S]*?<\/button>/g, "").replace(/ · <span style="color:#666;">Closest:<\/span> ?/, "");
+          }).join("");
+        }
         // A version uploaded before stitch counts were kept (migrations/0071) gets its count from this read.
         if (cur.stitchCount == null && parsed.stitchCount) designApi_({ action: "setDesignVersionStitches", versionId: cur.id, stitchCount: parsed.stitchCount }).catch(() => {});
       } catch (e) { if (info) info.textContent = "Couldn't render preview: " + e.message; }
@@ -22751,15 +22797,119 @@ function fillDesignThumbs_(root){
 }
 const isImageExt_ = (ext) => ["png", "jpg", "jpeg", "webp", "gif"].includes(String(ext || "").toLowerCase());
 
-// Helper: a function blockIndex -> "#hex" for the preview, using the picked thread's colour,
-// else a distinct fallback so unmapped blocks are still visible as separate areas.
-function dstColorForNeedle_(rows, threadsById){
+// Helper: a function blockIndex -> "#hex" for the preview, using the picked thread's colour, else the color the
+// machine file itself gives that stop (fileColors, from parseStitchFile_), else a distinct fallback so unmapped
+// blocks are still visible as separate areas.
+function dstColorForNeedle_(rows, threadsById, fileColors){
   return (i) => {
     const tid = rows[i] && rows[i].threadId;
     const t = tid && threadsById[tid];
     if (t && /^[0-9a-fA-F]{6}$/.test(t.colorHex || "")) return "#" + t.colorHex;
+    const fc = fileColors && fileColors[i];
+    if (fc && /^[0-9a-f]{6}$/i.test(fc.hex || "")) return "#" + fc.hex;
     return DST_PREVIEW_PALETTE[i % DST_PREVIEW_PALETTE.length];
   };
+}
+
+// ---- A machine file's own thread colors against the thread catalog ----
+// Many formats say which thread each needle stop uses: a brand + thread number (.pes v5+, .vp3), a maker's chart
+// color (.jef, .hus, .pec …) or just a color (.xxx, .pcs). An exact match is picked for that stop; a color with
+// no match is flagged red ("not in the thread catalog"), and a picked thread with none on hand amber.
+const threadOnHand_ = (t) => ((t && t.inventory) || []).reduce((n, i) => n + (Number(i.quantity) || 0), 0);
+// Whether the shop counts thread stock at all — without it, "none on hand" would flag every thread.
+const threadStockKept_ = (threads) => (threads || []).some(t => (t.inventory || []).length);
+const normBrand_ = (b) => String(b || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+// Brands in files that name another, and design-software placeholders that aren't a thread brand at all.
+const FILE_BRAND_ALIAS_ = { embroidery: "brother", brotherembroidery: "brother", ra: "robisonanton", rarayon: "robisonantonrayon",
+  rapolyester: "robisonantonpolyester", rasuperbritepolyester: "robisonantonsuperbritepolyester" };
+const FILE_BRAND_PLACEHOLDER_ = ["", "default", "hatchdefault", "applique", "basting", "custom", "unknown"];
+function fileBrand_(b){
+  const n = normBrand_(b);
+  return FILE_BRAND_PLACEHOLDER_.includes(n) ? "" : (FILE_BRAND_ALIAS_[n] || n);
+}
+const normCode_ = (c) => String(c == null ? "" : c).trim().toLowerCase().replace(/^0+(?=.)/, "");
+// How well a catalog thread's brand (+ type + weight) fits the brand a file gives: 0 = not that brand.
+function threadBrandFit_(t, fb){
+  const brand = normBrand_(t.brand);
+  if (!fb || !brand) return 0;
+  if (!fb.includes(brand) && !brand.includes(fb) && fb.slice(0, 5) !== brand.slice(0, 5)) return 0;
+  const type = normBrand_(t.type), weight = normBrand_(t.weight);
+  return 1 + (type && fb.includes(type) ? 2 : 0) + (weight && fb.includes(weight) ? 1 : 0);
+}
+function hexToLab_(hex){
+  const n = parseInt(hex, 16), lin = (v) => { v /= 255; return v > 0.04045 ? Math.pow((v + 0.055) / 1.055, 2.4) : v / 12.92; };
+  const r = lin((n >> 16) & 255), g = lin((n >> 8) & 255), b = lin(n & 255);
+  const f = (v) => v > 0.008856 ? Math.cbrt(v) : 7.787 * v + 16 / 116;
+  const x = f((r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047), y = f(r * 0.2126 + g * 0.7152 + b * 0.0722), z = f((r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883);
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}
+// The catalog thread a file color names, or null. Returns { thread, by: "code" | "name" | "color" | null, nearest }:
+// `nearest` is up to 3 catalog threads closest in color — offered as suggestions, never picked for you.
+function matchFileColor_(fc, threads){
+  const res = { thread: null, by: null, nearest: [] };
+  if (!fc) return res;
+  const hex = /^[0-9a-f]{6}$/i.test(fc.hex || "") ? fc.hex.toLowerCase() : "";
+  const fb = fileBrand_(fc.brand), code = normCode_(fc.code), name = String(fc.name || "").trim().toLowerCase();
+  const best = (list, fit) => list.length ? list.slice().sort((a, b) => (fit ? fit(b) - fit(a) : 0) || ((threadOnHand_(b) > 0) - (threadOnHand_(a) > 0)))[0] : null;
+  const fit = (t) => threadBrandFit_(t, fb);
+  if (fb && code) {
+    const t = best(threads.filter(t => fit(t) && normCode_(t.code) === code), fit);
+    if (t) return Object.assign(res, { thread: t, by: "code" });
+  }
+  if (fb && name) {
+    const t = best(threads.filter(t => fit(t) && String(t.name || "").trim().toLowerCase() === name), fit);
+    if (t) return Object.assign(res, { thread: t, by: "name" });
+  }
+  if (hex) {
+    const t = best(threads.filter(t => String(t.colorHex || "").toLowerCase() === hex));
+    if (t) return Object.assign(res, { thread: t, by: "color" });
+    const lab = hexToLab_(hex), d = (t) => { const o = hexToLab_(t.colorHex); return Math.hypot(o[0] - lab[0], o[1] - lab[1], o[2] - lab[2]); };
+    res.nearest = threads.filter(t => /^[0-9a-f]{6}$/i.test(t.colorHex || "")).map(t => ({ t, d: d(t) })).sort((a, b) => a.d - b.d).slice(0, 3).map(x => x.t);
+  }
+  return res;
+}
+// Fills each EMPTY row whose stop the file names with its exact catalog match; picked rows are left alone.
+// Returns how many it filled.
+function autoPickFileColors_(rows, fileColors, threads){
+  let n = 0;
+  (fileColors || []).forEach((fc, i) => {
+    if (!fc || !rows[i] || rows[i].threadId) return;
+    const m = matchFileColor_(fc, threads);
+    if (m.thread) { rows[i].threadId = m.thread.id; n++; }
+  });
+  return n;
+}
+const fileColorLabel_ = (fc) => [fc.brand, fc.code, fc.name].filter(Boolean).join(" ") || fc.chart || "#" + fc.hex;
+const threadShortLabel_ = (t) => `${t.brand}${t.type ? " " + t.type : ""} ${t.code}${t.name ? " " + t.name : ""}`;
+const colorChip_ = (hex, title) => `<span title="${escapeHtml(title || "")}" style="display:inline-block;width:12px;height:12px;border-radius:2px;border:1px solid #999;vertical-align:middle;background:#${escapeHtml(hex)};"></span>`;
+// The line under a thread-map row: what the file says for this stop, and a flag — red when no catalog thread
+// matches (with the nearest ones to pick from), amber when the picked thread has none on hand.
+function fileColorNoteHtml_(fc, row, i, threads, threadsById, cls){
+  const t = row && row.threadId ? threadsById[row.threadId] : null;
+  const parts = [];
+  if (fc) {
+    const m = matchFileColor_(fc, threads);
+    parts.push(`<span style="color:#666;">File: ${fc.hex ? colorChip_(fc.hex, "#" + fc.hex) + " " : ""}${escapeHtml(fileColorLabel_(fc))}</span>`);
+    if (!m.thread) {
+      parts.push(`<span class="dsg-flag-missing" style="color:#b03a2e;font-weight:600;">⚠ Not in thread catalog</span>`);
+      if (m.nearest.length && !(t)) parts.push(`<span style="color:#666;">Closest:</span> ` + m.nearest.map(n =>
+        `<button type="button" class="${cls}" data-i="${i}" data-tid="${n.id}" title="Pick ${escapeHtml(threadShortLabel_(n))}" style="font-size:11px;padding:1px 6px;margin:1px 2px;">${colorChip_(n.colorHex)} ${escapeHtml(n.brand)} ${escapeHtml(n.code)}</button>`).join(""));
+    } else if (t && m.thread.id !== t.id && String(t.colorHex || "").toLowerCase() !== String(fc.hex || "").toLowerCase()) {
+      parts.push(`<span style="color:#888;">(a different thread is picked)</span>`);
+    }
+  }
+  if (t && threadStockKept_(threads) && threadOnHand_(t) <= 0) parts.push(`<span class="dsg-flag-nostock" style="color:#b45309;font-weight:600;">⚠ None on hand</span>`);
+  return parts.length ? `<div class="dsg-file-note" style="font-size:11px;margin:-3px 0 7px 26px;line-height:1.6;">${parts.join(" · ")}</div>` : "";
+}
+// "3 picked from the file's colors · 1 not in the catalog · 2 none on hand" for the stop summary.
+function fileColorSummaryHtml_(rows, fileColors, threads, threadsById, autoPicked){
+  const missing = (fileColors || []).filter(fc => fc && !matchFileColor_(fc, threads).thread).length;
+  const noStock = threadStockKept_(threads) ? rows.filter(r => r.threadId && threadsById[r.threadId] && threadOnHand_(threadsById[r.threadId]) <= 0).length : 0;
+  const bits = [];
+  if (autoPicked) bits.push(`<span style="color:#15803d;">${autoPicked} picked from the file's colors</span>`);
+  if (missing) bits.push(`<span style="color:#b03a2e;">${missing} not in the thread catalog</span>`);
+  if (noStock) bits.push(`<span style="color:#b45309;">${noStock} none on hand</span>`);
+  return bits.length ? `<div style="margin-bottom:2px;">${bits.join(" · ")}</div>` : "";
 }
 function drawPreviewPlaceholder_(canvas, text){
   const ctx = canvas && canvas.getContext && canvas.getContext("2d");
@@ -22769,6 +22919,14 @@ function drawPreviewPlaceholder_(canvas, text){
   ctx.fillText(text, canvas.width / 2, canvas.height / 2);
 }
 
+// A saved thread map ([{needle, threadId}]) as rows by stop position: needle n is row n−1, and a needle with no
+// thread stays an empty row instead of closing up the gap.
+function threadRowsByNeedle_(threadColors){
+  const rows = [];
+  (threadColors || []).forEach(tc => { const n = Number(tc && tc.needle); if (n >= 1 && n <= 999) rows[n - 1] = { threadId: tc.threadId }; });
+  for (let i = 0; i < rows.length; i++) if (!rows[i]) rows[i] = { threadId: "" };
+  return rows;
+}
 // "Copy threads from previous version" (upload window): the previous version is the design's current
 // one — the newest upload, which the version being added replaces. Its thread map is copied stop by
 // stop by needle position: needle 1 -> stop 1, and so on. When the new machine file has FEWER stops,
@@ -22814,7 +22972,8 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
   const threadsById = {}; threads.forEach(t => { threadsById[t.id] = t; });
   const threadOptions = designThreadRowsHtml_(threads);
   let rows = [{ threadId: "" }];
-  let parsed = null; // parseDst_ result once a DST machine file is chosen
+  let parsed = null; // parseStitchFile_ result once a readable machine file is chosen
+  let autoPicked = 0; // stops filled from the file's own thread colors
   const { ov, close } = inventoryModal_(escapeHtml(opts.title || (itemId ? "Upload order design" : "Upload design version")), `
     <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;">
       <div style="flex:0 0 340px;max-width:100%;">
@@ -22828,7 +22987,7 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
       </div>
       <div style="flex:1;min-width:230px;">
         <div style="font-size:12px;font-weight:600;margin-bottom:4px;">Thread color map (needle order)</div>
-        <div style="font-size:11px;color:#888;margin-bottom:8px;">Pick a thread per needle stop — the preview recolors live.</div>
+        <div style="font-size:11px;color:#888;margin-bottom:8px;">Pick a thread per needle stop — the preview recolors live. When the file names its threads, the matching catalog threads are picked for you; you can still change any of them.</div>
         <div id="dsgvThreadRows" style="max-height:320px;overflow:auto;"></div>
         <button type="button" id="dsgvAddThread" class="admin-btn" style="font-size:11px;padding:3px 8px;margin-top:6px;">+ Add thread</button>
         ${designId && !itemId ? `<button type="button" id="dsgvCopyPrev" class="admin-btn" style="font-size:11px;padding:3px 8px;margin-top:6px;" disabled title="Looking for a previous version…">Copy threads from previous version</button>
@@ -22841,26 +23000,30 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
       <button type="button" id="dsgvSave" class="admin-btn">Upload</button>
     </div>`, 820);
   const canvas = ov.querySelector("#dsgvCanvas");
-  const renderPreview = () => { if (parsed) renderDstPreview_(canvas, parsed, dstColorForNeedle_(rows, threadsById)); };
-  drawPreviewPlaceholder_(canvas, "Select a .DST or .DSB machine file to preview");
+  const fileColors = () => (parsed && parsed.fileColors) || [];
+  const renderPreview = () => { if (parsed) renderDstPreview_(canvas, parsed, dstColorForNeedle_(rows, threadsById, fileColors())); };
+  drawPreviewPlaceholder_(canvas, "Select a machine file to preview");
   let neededStops = 0, stopsSummary = "";
   const drawStops = () => {
     const el = ov.querySelector("#dsgvStops");
     if (!neededStops) { el.innerHTML = ""; return; }
     const filled = rows.filter(r => r.threadId).length;
     const ok = filled === neededStops;
-    el.innerHTML = stopsSummary + `<span style="color:${ok ? "#15803d" : "#b45309"};">${ok ? "✓" : "⚠"} ${filled} of ${neededStops} needle definition${neededStops === 1 ? "" : "s"} picked</span>`;
+    el.innerHTML = stopsSummary + fileColorSummaryHtml_(rows.slice(0, neededStops), fileColors(), threads, threadsById, autoPicked) +
+      `<span style="color:${ok ? "#15803d" : "#b45309"};">${ok ? "✓" : "⚠"} ${filled} of ${neededStops} needle definition${neededStops === 1 ? "" : "s"} picked</span>`;
   };
   const drawRows = () => {
     drawStops();
+    const colorOf = dstColorForNeedle_(rows, threadsById, fileColors());
     ov.querySelector("#dsgvThreadRows").innerHTML = rows.map((r, i) => `
       <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
-        <span style="display:inline-block;width:12px;height:12px;border-radius:2px;border:1px solid #999;background:${dstColorForNeedle_(rows, threadsById)(i)};"></span>
+        <span style="display:inline-block;width:12px;height:12px;border-radius:2px;border:1px solid #999;background:${colorOf(i)};"></span>
         <span style="font-size:12px;color:#888;width:20px;">${i + 1}.</span>
         <select data-i="${i}" class="dsgvThreadSelect" style="flex:1;font-size:13px;padding:4px 6px;">${threadOptions(r.threadId)}</select>
         <button type="button" data-i="${i}" class="dsgvRemoveRow" style="font-size:11px;padding:2px 8px;">✕</button>
-      </div>`).join("");
+      </div>${fileColorNoteHtml_(fileColors()[i], r, i, threads, threadsById, "dsgvSuggest")}`).join("");
     ov.querySelectorAll(".dsgvThreadSelect").forEach(sel => sel.onchange = () => { rows[Number(sel.dataset.i)].threadId = Number(sel.value) || ""; drawRows(); renderPreview(); });
+    ov.querySelectorAll(".dsgvSuggest").forEach(btn => btn.onclick = () => { rows[Number(btn.dataset.i)].threadId = Number(btn.dataset.tid); drawRows(); renderPreview(); });
     ov.querySelectorAll(".dsgvRemoveRow").forEach(btn => btn.onclick = () => { rows.splice(Number(btn.dataset.i), 1); drawRows(); renderPreview(); });
   };
   drawRows();
@@ -22868,10 +23031,11 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
   ov.querySelector("#dsgvMachineFile").onchange = async (e) => {
     const file = e.target.files[0];
     const el = ov.querySelector("#dsgvStops");
-    neededStops = 0; stopsSummary = ""; parsed = null; el.innerHTML = "";
-    if (!file) { drawPreviewPlaceholder_(canvas, "Select a .DST or .DSB machine file to preview"); return; }
-    if (!canPreviewStitch_(file.name)) { drawPreviewPlaceholder_(canvas, "Preview available for .DST and .DSB files only"); drawRows(); return; }
+    neededStops = 0; stopsSummary = ""; parsed = null; autoPicked = 0; el.innerHTML = "";
+    if (!file) { drawPreviewPlaceholder_(canvas, "Select a machine file to preview"); return; }
+    if (!canPreviewStitch_(file.name)) { drawPreviewPlaceholder_(canvas, STITCH_NO_PREVIEW_MSG); drawRows(); return; }
     try {
+      await ensureStitchReaders_(file.name);
       parsed = parseStitchFile_(await file.arrayBuffer(), file.name);
       neededStops = parsed.needleStops;
       // A .dsb names the needle each color runs on (the digitizer's setup) — shown for reference.
@@ -22883,6 +23047,8 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
         while (rows.length < neededStops) rows.push({ threadId: "" });
         while (rows.length > neededStops && !rows[rows.length - 1].threadId) rows.pop();
       }
+      // Stops still empty get the catalog thread the file itself names (picked by hand or copied stay as they are).
+      autoPicked = autoPickFileColors_(rows, parsed.fileColors, threads);
       drawRows(); renderPreview();
     } catch (err) { const kind = stitchExt_(file.name).toUpperCase(); drawPreviewPlaceholder_(canvas, "Couldn't read this " + kind); el.innerHTML = `<span style="color:#b03a2e;">Couldn't read the ${kind} file: ${escapeHtml(err.message)}</span>`; }
   };
@@ -22899,7 +23065,7 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
   };
   const copyBtn = ov.querySelector("#dsgvCopyPrev");
   if (copyBtn) {
-    copyBtn.onclick = () => { copyPrev_(); drawRows(); renderPreview(); };
+    copyBtn.onclick = () => { copyPrev_(); if (parsed) autoPicked = autoPickFileColors_(rows, parsed.fileColors, threads); drawRows(); renderPreview(); };
     designApi_({ action: "getDesign", id: designId }).then(d => {
       const v = ((d && d.versions) || [])[0];
       if (v && (v.threadColors || []).some(tc => tc && tc.threadId)) {
@@ -22926,13 +23092,14 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
     const machineFile = ov.querySelector("#dsgvMachineFile").files[0];
     if (!designFile && !itemId) { err.textContent = "Choose a design file."; return; }
     if (!machineFile) { err.textContent = "Choose a machine file."; return; }
-    const threadColors = rows.filter(r => r.threadId).map((r, i) => ({ needle: i + 1, threadId: r.threadId }));
+    // Kept at each stop's own position: an empty stop between picked ones stays empty (stop 3's thread is needle 3).
+    const threadColors = rows.map((r, i) => ({ needle: i + 1, threadId: r.threadId })).filter(tc => tc.threadId);
     try {
       const [designUp, machineUp] = await Promise.all([designFile ? uploadFile_(designFile, "design") : Promise.resolve(null), uploadFile_(machineFile, "machine")]);
       const files = { designFileKey: designUp ? designUp.key : "", designFileName: designUp ? designUp.name : "", designFileExt: designUp ? designUp.ext : "",
         machineFileKey: machineUp.key, machineFileName: machineUp.name, machineFileExt: machineUp.ext,
         threadColors, notes: ov.querySelector("#dsgvNotes").value.trim(),
-        // Read from the file above (DST / DSB); a machine's stitch counter adds it for every run (migrations/0071).
+        // Read from the file above; a machine's stitch counter adds it for every run (migrations/0071).
         stitchCount: parsed && parsed.stitchCount ? parsed.stitchCount : null };
       if (itemId) await designApi_(Object.assign({ action: "saveOrderItemDesign", itemId, location: opts.location || "" }, files));
       else await designApi_(Object.assign({ action: "saveDesignVersion", designId }, files));
@@ -22949,7 +23116,7 @@ function showEditVersionColorsModal_(version, onDone){
   const threadsById = {}; threads.forEach(t => { threadsById[t.id] = t; });
   const threadOptions = designThreadRowsHtml_(threads);
   // Start from the saved map (needle order); may be grown to the DST's stop count once parsed.
-  let rows = (version.threadColors || []).slice().sort((a, b) => a.needle - b.needle).map(tc => ({ threadId: tc.threadId }));
+  let rows = threadRowsByNeedle_(version.threadColors);
   if (!rows.length) rows = [{ threadId: "" }];
   let parsed = null;
   const { ov, close } = inventoryModal_("Edit thread colors — " + escapeHtml((version.uploadedAt || "").slice(0, 10)), `
@@ -22971,15 +23138,18 @@ function showEditVersionColorsModal_(version, onDone){
       <button type="button" id="dsgcSave" class="admin-btn">Save colors</button>
     </div>`, 820);
   const canvas = ov.querySelector("#dsgcCanvas");
-  const renderPreview = () => { if (parsed) renderDstPreview_(canvas, parsed, dstColorForNeedle_(rows, threadsById)); };
+  const fileColors = () => (parsed && parsed.fileColors) || [];
+  const renderPreview = () => { if (parsed) renderDstPreview_(canvas, parsed, dstColorForNeedle_(rows, threadsById, fileColors())); };
   const drawRows = () => {
+    const colorOf = dstColorForNeedle_(rows, threadsById, fileColors());
     ov.querySelector("#dsgcThreadRows").innerHTML = rows.map((r, i) => `
       <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
-        <span style="display:inline-block;width:12px;height:12px;border-radius:2px;border:1px solid #999;background:${dstColorForNeedle_(rows, threadsById)(i)};"></span>
+        <span style="display:inline-block;width:12px;height:12px;border-radius:2px;border:1px solid #999;background:${colorOf(i)};"></span>
         <span style="font-size:12px;color:#888;width:20px;">${i + 1}.</span>
         <select data-i="${i}" class="dsgcThreadSelect" style="flex:1;font-size:13px;padding:4px 6px;">${threadOptions(r.threadId)}</select>
-      </div>`).join("");
+      </div>${fileColorNoteHtml_(fileColors()[i], r, i, threads, threadsById, "dsgcSuggest")}`).join("");
     ov.querySelectorAll(".dsgcThreadSelect").forEach(sel => sel.onchange = () => { rows[Number(sel.dataset.i)].threadId = Number(sel.value) || ""; drawRows(); renderPreview(); });
+    ov.querySelectorAll(".dsgcSuggest").forEach(btn => btn.onclick = () => { rows[Number(btn.dataset.i)].threadId = Number(btn.dataset.tid); drawRows(); renderPreview(); });
   };
   drawPreviewPlaceholder_(canvas, "Loading preview…");
   drawRows();
@@ -22987,12 +23157,16 @@ function showEditVersionColorsModal_(version, onDone){
   // Fetch + parse the machine file for the live preview (best-effort; editing still works without it).
   (async () => {
     const info = ov.querySelector("#dsgcInfo");
-    if (!canPreviewStitch_(version.machineFileExt)) { drawPreviewPlaceholder_(canvas, "Preview available for .DST and .DSB files only"); info.textContent = ""; return; }
+    if (!canPreviewStitch_(version.machineFileExt)) { drawPreviewPlaceholder_(canvas, STITCH_NO_PREVIEW_MSG); info.textContent = ""; return; }
     try {
+      await ensureStitchReaders_(version.machineFileExt);
       parsed = parseStitchFile_(await fetchDesignFileBytes_(version.machineFileKey), version.machineFileExt);
-      info.textContent = `${parsed.needleStops} needle stops · ${parsed.stitchCount.toLocaleString()} stitches`;
-      // Grow (never shrink below the saved map) to the DST's stop count so every block is editable.
+      // Grow (never shrink below the saved map) to the file's stop count so every block is editable.
       while (rows.length < parsed.needleStops) rows.push({ threadId: "" });
+      // Empty stops get the catalog thread the file names — saved only with Save colors; picked ones never change.
+      const filled = autoPickFileColors_(rows, parsed.fileColors, threads);
+      info.textContent = `${parsed.needleStops} needle stops · ${parsed.stitchCount.toLocaleString()} stitches` +
+        (filled ? ` · ${filled} empty stop${filled === 1 ? "" : "s"} filled from the file's colors — Save colors to keep` : "");
       drawRows(); renderPreview();
     } catch (e) { drawPreviewPlaceholder_(canvas, "Couldn't load preview"); info.textContent = e.message; }
   })();
@@ -24236,7 +24410,7 @@ async function renderRunOrder(app, opts){
       <div class="run-job-card" data-itemid="${job.itemId}" data-pkey="${pkey}" style="border:1px solid ${run ? "#2c6b2f" : "#ddd"};border-radius:10px;padding:16px;margin-bottom:14px;background:${run ? "#f3f9f4" : "#fff"};">
         <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;">
           <div style="display:flex;gap:12px;align-items:flex-start;">
-            ${step.machineFileKey && /\.(dst|dsb)$/i.test(step.machineFileName || "") ? `<canvas class="run-job-canvas" data-pkey="${pkey}" width="150" height="150" title="Design preview" style="width:150px;height:150px;flex:0 0 auto;background:#faf9f6;border:1px solid #eee;border-radius:6px;"></canvas>` : ""}
+            ${step.machineFileKey && canPreviewStitch_(step.machineFileName || "") ? `<canvas class="run-job-canvas" data-pkey="${pkey}" width="150" height="150" title="Design preview" style="width:150px;height:150px;flex:0 0 auto;background:#faf9f6;border:1px solid #eee;border-radius:6px;"></canvas>` : ""}
             <div>
             ${stepCount > 1 ? `<div style="font-size:12px;font-weight:700;color:#2c6b2f;text-transform:uppercase;letter-spacing:.04em;">Hooping ${stepNo} of ${stepCount} · ${escapeHtml(step.label)}</div>` : ""}
             <div style="font-weight:700;font-size:16px;">${escapeHtml(step.designName || (step.designId ? "" : "No design linked") || "No design linked")}</div>
@@ -24357,7 +24531,7 @@ async function updateRunSendLabels_(){
 }
 
 // Renders each card's hooping design onto its canvas, coloured by that hooping's thread map — same
-// stitch-file pipeline (DST / DSB) as the Designs screen. Parsed files are cached by machine-file key.
+// stitch-file pipeline (every readable format) as the Designs screen. Parsed files are cached by machine-file key.
 async function renderRunPreviews_(){
   const ctx = window._roCtx; if (!ctx) return;
   const threadsById = {}; (ctx.threads || []).forEach(t => { threadsById[t.id] = t; });
@@ -24366,10 +24540,10 @@ async function renderRunPreviews_(){
     const card = ctx.cards && ctx.cards[canvas.dataset.pkey];
     if (!card || !card.step.machineFileKey) continue;
     const key = card.step.machineFileKey;
-    const rows = (card.step.threadColors || []).slice().sort((a, b) => a.needle - b.needle).map(tc => ({ threadId: tc.threadId }));
+    const rows = threadRowsByNeedle_(card.step.threadColors);
     try {
-      if (!window._roDstCache[key]) window._roDstCache[key] = parseStitchFile_(await fetchDesignFileBytes_(key), card.step.machineFileName || "");
-      renderDstPreview_(canvas, window._roDstCache[key], dstColorForNeedle_(rows, threadsById));
+      if (!window._roDstCache[key]) { await ensureStitchReaders_(card.step.machineFileName || ""); window._roDstCache[key] = parseStitchFile_(await fetchDesignFileBytes_(key), card.step.machineFileName || ""); }
+      renderDstPreview_(canvas, window._roDstCache[key], dstColorForNeedle_(rows, threadsById, window._roDstCache[key].fileColors));
     } catch (e) { /* leave the thumbnail blank if the file can't be read */ }
   }
 }

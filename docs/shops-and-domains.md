@@ -406,8 +406,37 @@ weights use it for every product linked to that size; a weight typed on the prod
 the blank (nothing in stock, no cost) instead of being left out.
 
 **Embroidery files** in any format are accepted as a design's files; a known stitch format can't be the
-editable design file and a known project format can't be the machine file. Tajima `.dst` and Barudan
-`.dsb` files get needle stops and previews.
+editable design file and a known project format can't be the machine file. These machine files get needle
+stops, a stitch count and a preview:
+
+| Format | Machines | Thread colors in the file |
+|---|---|---|
+| `.dst` | Tajima | Only when the design software wrote `TC:` thread lines in its header |
+| `.dsb`, `.u01` | Barudan | No (needle numbers only) |
+| `.dsz` | ZSK | No (needle numbers only) |
+| `.exp`, `.stx` | Melco, Bernina, Data Stitch | No |
+| `.tap`, `.10o`, `.gt`, `.inb`, `.ksm`, `.max`, `.emd`, `.new` | Happy, Toyota, Gold Thread, Inbro, Pfaff, Elna, Ameco | No |
+| `.pes` | Brother, Babylock | Yes — version 5 and later list each thread's brand, number, name and color; older ones a Brother chart color |
+| `.pec`, `.phb`, `.phc` | Brother | Yes — a Brother chart color |
+| `.jef` | Janome, Elna | Yes — a Janome chart color with Janome's thread number |
+| `.sew` | Janome (older) | Yes — a Janome chart color |
+| `.vp3` | Pfaff, Husqvarna Viking | Yes — each thread's brand, number, name and color |
+| `.hus` | Husqvarna Viking | Yes — a Viking chart color with Viking's thread number |
+| `.shv` | Husqvarna Viking | Yes — a Viking chart color (larger `.shv` files can't be read yet) |
+| `.xxx`, `.pcs` | Singer, Pfaff | Yes — a color for each thread |
+| `.pcm` | Pfaff | Yes — one of 16 plain colors |
+| `.tbf` | Tajima | Yes — a color for each needle |
+
+`.vip`, `.csd`, `.sst` and `.fdr` can be stored but not previewed (no public description of them exists), and
+neither can design-software files such as `.emb`, `.jdx` or `.art`.
+
+When the machine file names its threads, the preview starts in the file's own colors and each needle stop
+the file names gets the matching thread from the thread catalog: the same brand and thread number first,
+then the same name for a maker's chart color, then the exact same color. A stop whose color matches nothing
+in the catalog is flagged red, **Not in thread catalog**, with the three closest catalog colors to pick from;
+a picked thread with none on hand (when the shop keeps thread stock) is flagged amber, **None on hand**. Any
+stop can still be given any thread: a match only fills a stop that's empty, never one picked by hand or
+copied from the previous version.
 
 ## Digital products: selling files
 

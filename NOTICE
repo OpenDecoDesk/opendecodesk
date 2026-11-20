@@ -12,6 +12,11 @@ This repository includes third-party software:
   Source: https://github.com/kazuhikoarase/qrcode-generator
   The word "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
 
+- Stitch-file readers (public/admin-stitch.js) — the machine-file record layouts and the machine makers'
+  thread color charts are ported from pyembroidery (EmbroidePy), Copyright (c) 2018.
+  Licensed under the MIT license: https://opensource.org/licenses/MIT
+  Source: https://github.com/EmbroidePy/pyembroidery
+
 - Fraunces (public/vendor/fonts/fraunces-*) — Copyright 2018 The Fraunces Project Authors.
   IBM Plex Sans and IBM Plex Mono (public/vendor/fonts/ibm-plex-*) — Copyright 2017 IBM Corp.,
   with Reserved Font Name "Plex".

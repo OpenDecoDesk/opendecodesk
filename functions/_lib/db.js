@@ -5188,9 +5188,9 @@ export async function deleteDesign(db, id) {
   await db.prepare("DELETE FROM designs WHERE id=?").bind(n).run();
 }
 
-// Two required files per version (migrations/0026): designFile (native, editable — .emb/.jdx/
-// etc) and machineFile (the actual stitch file a machine runs — .dst/.exp/etc; what "Send design
-// to machine" hands to the local send-agent).
+// Two files per version (migrations/0026): designFile (native, editable — .emb/.jdx/etc; optional, ''
+// when none was uploaded) and machineFile (the actual stitch file a machine runs — .dst/.exp/etc; what
+// "Send design to machine" hands to the local send-agent; always required).
 const parseDesignVersion_ = (r) => ({ id: Number(r.id), designId: Number(r.designId),
   designFileKey: r.designFileKey || "", designFileName: r.designFileName || "", designFileExt: r.designFileExt || "",
   machineFileKey: r.machineFileKey || "", machineFileName: r.machineFileName || "", machineFileExt: r.machineFileExt || "",

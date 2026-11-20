@@ -224,6 +224,16 @@ const dstTc = (tcLines, blocks) => {
   ok("an empty stop between picked ones is saved as a gap: stop 3's thread stays needle 3",
     saved && JSON.stringify(saved.threadColors) === JSON.stringify([{ needle: 1, threadId: 1 }, { needle: 3, threadId: 2 }]));
 
+  closeAll(doc);
+  saved = null; versions = [];
+  w.showDesignVersionUploadModal_(5, null);
+  await pick("only-machine.vp3", file);
+  doc.getElementById("dsgvSave").click(); await tick(60);
+  ok("a version saves with only the machine file: the design file is optional",
+    saved && saved.machineFileKey && saved.designFileKey === "" && !doc.getElementById("dsgvErr"));   // saved and closed
+  ok("the window says the design file is optional", /Design file[^<]*— optional/.test(adminJs) && !/Choose a design file/.test(adminJs));
+  ok("a version with no design file shows — instead of a Download button", /v\.designFileKey \? `/.test(adminJs));
+
   console.log("\n=== Thread stock not kept: no amber flags ===");
   closeAll(doc);
   const noStock = threads.map(t => Object.assign({}, t, { inventory: [] }));

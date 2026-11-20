@@ -5032,13 +5032,12 @@ export async function onRequestPost(context) {
       return jsonResponse({ status: "ok", id });
     }
 
-    // Records a design file already uploaded to R2 via /api/design (fileKey/fileName/fileExt),
-    // plus this version's thread-color map and notes. The upload and the DB write are two
-    // separate requests, same split as receipt.js's callers.
+    // Records the files already uploaded to R2 via /api/design, plus this version's thread-color map and
+    // notes. The upload and the DB write are two separate requests, same split as receipt.js's callers.
+    // Only the machine file is required: the editable design file is optional (not every shop has it).
     if (body.action === "saveDesignVersion") {
       const designId = Number(body.designId);
       if (!designId) return jsonResponse({ status: "error", message: "designId required" }, 400);
-      if (!String(body.designFileKey || "").trim()) return jsonResponse({ status: "error", message: "Design file required" }, 400);
       if (!String(body.machineFileKey || "").trim()) return jsonResponse({ status: "error", message: "Machine file required" }, 400);
       const id = await addDesignVersion(env.DB, designId, body);
       return jsonResponse({ status: "ok", id });

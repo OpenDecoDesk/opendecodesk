@@ -52,7 +52,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   err = ""; try { w.parseDsb_(dsb(NEEDLE(1), JMP(5, 5), END)); } catch (e) { err = e.message; }
   ok("…and so is one with no stitches", /No stitches found in this DSB/.test(err));
   ok("the shared reader picks the format by extension or file name", w.parseStitchFile_(file, "logo.DSB").needleStops === 2 && w.parseStitchFile_(file, "dsb").needles.length === 2 &&
-    w.eval("canPreviewStitch_('a.dsb') && canPreviewStitch_('DST') && !canPreviewStitch_('a.pes')"));
+    w.eval("canPreviewStitch_('a.dsb') && canPreviewStitch_('DST') && canPreviewStitch_('a.pes') && !canPreviewStitch_('a.vip') && !canPreviewStitch_('a.emb')"));
   ok("…and its needle-stop count matches", w.analyzeStitchNeedleStops_(file, "x.dsb").needleStops === 2);
 
   console.log("\n=== Uploads ===");
@@ -75,8 +75,8 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("picking a thread recolors that stop in the preview", draws.includes("#ffffff"));
 
   console.log("\n=== Every screen that previews a DST takes a DSB ===");
-  ok("the Designs screen, Edit colors and Run Order read DST and DSB through the shared reader", !/parseDst_\(await/.test(adminJs) && (adminJs.match(/parseStitchFile_\(/g) || []).length >= 5 &&
-    /\/\\\.\(dst\|dsb\)\$\/i\.test\(step\.machineFileName/.test(adminJs) && !/machineFileExt \|\| ""\)\.toLowerCase\(\) [!=]== "dst"/.test(adminJs));
+  ok("the Designs screen, Edit colors and Run Order read every stitch file through the shared reader", !/parseDst_\(await/.test(adminJs) && (adminJs.match(/parseStitchFile_\(/g) || []).length >= 5 &&
+    /canPreviewStitch_\(step\.machineFileName/.test(adminJs) && !/machineFileExt \|\| ""\)\.toLowerCase\(\) [!=]== "dst"/.test(adminJs));
 
   console.log(`\n${fail ? "FAIL" : "PASS"} — ${pass} passed, ${fail} failed`);
   if (fail) process.exit(1);

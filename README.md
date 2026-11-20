@@ -287,4 +287,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 GNU Affero General Public License v3.0 — see [LICENSE](LICENSE). The bundled PDF reader in
 `public/vendor/pdfjs/` is Mozilla's pdf.js, under the Apache License 2.0, and `public/admin-qr.js` is
-Kazuhiko Arase's QR Code Generator, under the MIT license (see [NOTICE](NOTICE)).
+Kazuhiko Arase's QR Code Generator, under the MIT license; the stitch-file readers in `public/admin-stitch.js`
+are ported from pyembroidery, under the MIT license (see [NOTICE](NOTICE)).

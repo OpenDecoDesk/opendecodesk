@@ -287,7 +287,8 @@ into and out of it, so a filed month never changes.
 ## Machine maintenance
 
 Each run adds to its machine's stitch count and run time: the design's stitch count comes from its
-Tajima `.dst` or Barudan `.dsb` machine file (or type it on the design version), and a run stopped
+machine file when Designs can read it (see the formats under Shops and domains → Embroidery files), or type it
+on the design version, and a run stopped
 part-way can say how many stitches it got through. On **Machines**, type a reading from the
 machine's own counter to set it straight.
 

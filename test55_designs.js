@@ -141,9 +141,6 @@ function makeDesignsBucket(){
   r = await call({ action: "saveDesignVersion", designId: designId2, designFileKey: "designs/x/y.emb", designFileName: "y.emb", designFileExt: "emb",
     machineFileKey: "", machineFileName: "", machineFileExt: "", threadColors: [], notes: "" });
   console.log("saveDesignVersion action refuses without a machine file:", r.status === 400 && /Machine file/.test(r.body.message));
-  r = await call({ action: "saveDesignVersion", designId: designId2, designFileKey: "", designFileName: "", designFileExt: "",
-    machineFileKey: "designs/x/y.dst", machineFileName: "y.dst", machineFileExt: "dst", threadColors: [], notes: "" });
-  console.log("saveDesignVersion action refuses without a design file:", r.status === 400 && /Design file/.test(r.body.message));
   r = await call({ action: "saveDesignVersion", designId: designId2, designFileKey: "designs/x/y.emb", designFileName: "y.emb", designFileExt: "emb",
     machineFileKey: "designs/x/y.dst", machineFileName: "y.dst", machineFileExt: "dst", threadColors: [], notes: "" });
   console.log("saveDesignVersion action records a version once both files are present:", r.status === 200 && !!r.body.id);
@@ -156,6 +153,11 @@ function makeDesignsBucket(){
   console.log("...updated the colors, files unchanged:", JSON.stringify(r.body.versions[0].threadColors) === JSON.stringify([{ needle: 1, threadId: 5 }]) && r.body.versions[0].machineFileName === "y.dst");
   r = await call({ action: "updateDesignVersionColors", threadColors: [] });
   console.log("...requires a versionId:", r.status === 400);
+  r = await call({ action: "saveDesignVersion", designId: designId2, designFileKey: "", designFileName: "", designFileExt: "",
+    machineFileKey: "designs/x/z.pes", machineFileName: "z.pes", machineFileExt: "pes", threadColors: [], notes: "" });
+  console.log("saveDesignVersion action records a version with only a machine file (the design file is optional):", r.status === 200 && !!r.body.id);
+  r = await call({ action: "getDesign", id: designId2 });
+  console.log("...it's the current version, with no design file:", r.body.versions.length === 2 && r.body.versions[0].machineFileName === "z.pes" && r.body.versions[0].designFileKey === "");
   r = await call({ action: "setProductDesign", org: "acme", productId: "cap", designId: designId2 });
   console.log("setProductDesign action:", r.status === 200);
   r = await call({ action: "deleteDesign", id: designId2 });

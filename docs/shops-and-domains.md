@@ -406,7 +406,8 @@ weights use it for every product linked to that size; a weight typed on the prod
 the blank (nothing in stock, no cost) instead of being left out.
 
 **Embroidery files** in any format are accepted as a design's files; a known stitch format can't be the
-editable design file and a known project format can't be the machine file. These machine files get needle
+editable design file and a known project format can't be the machine file. A design version needs its machine
+file; the editable design file is optional (the versions list shows — where there's none). These machine files get needle
 stops, a stitch count and a preview:
 
 | Format | Machines | Thread colors in the file |

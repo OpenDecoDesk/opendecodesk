@@ -22317,8 +22317,8 @@ async function renderRunTransfer(app){
 // One design per product (products.designId, set from the product form — see
 // loadProductDesignSection above). A design's file history is append-only (design_versions);
 // the "current" version is just the newest row, returned first by listDesignVersions.
-// A version requires TWO files: the native, editable design-software project file (what you'd
-// open to make an edit — e.g. .emb/.jdx) and the actual stitch file a machine runs (e.g.
+// A version has TWO files: the native, editable design-software project file (what you'd open to make
+// an edit — e.g. .emb/.jdx; optional) and the actual stitch file a machine runs (required; e.g.
 // .dst/.dsb/.pes — what "Send design to machine", phase 6, pushes to the machine). ANY embroidery
 // extension is accepted for either; only the formats we know are kept to their own role.
 // Mirrors functions/api/design.js (the server is what enforces it).
@@ -22657,7 +22657,7 @@ async function loadDesignDetail_(designId){
         <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:5px 6px;">Uploaded</th><th style="padding:5px 6px;">Design file</th><th style="padding:5px 6px;">Machine file</th><th style="padding:5px 6px;">Threads</th><th style="padding:5px 6px;">Stitches</th><th style="padding:5px 6px;">Notes</th></tr></thead>
         <tbody>${versions.map((v, i) => `<tr style="border-bottom:1px solid #eee;${i === 0 ? "font-weight:600;" : ""}">
           <td data-label="Uploaded" style="padding:5px 6px;">${escapeHtml((v.uploadedAt || "").slice(0, 10))}${i === 0 ? ' <span style="font-weight:400;color:#2c6b2f;">(current)</span>' : ""}</td>
-          <td data-label="Design file" style="padding:5px 6px;">${escapeHtml(v.designFileName)} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" onclick="downloadDesignFile_('${v.designFileKey.replace(/'/g, "\\'")}')">Download</button></td>
+          <td data-label="Design file" style="padding:5px 6px;">${v.designFileKey ? `${escapeHtml(v.designFileName)} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" onclick="downloadDesignFile_('${v.designFileKey.replace(/'/g, "\\'")}')">Download</button>` : '<span style="color:#888;font-weight:400;">—</span>'}</td>
           <td data-label="Machine file" style="padding:5px 6px;">${escapeHtml(v.machineFileName)} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" onclick="downloadDesignFile_('${v.machineFileKey.replace(/'/g, "\\'")}')">Download</button></td>
           <td data-label="Threads" style="padding:5px 6px;">${v.threadColors.length ? v.threadColors.map(tc => threadSwatch_(tc.threadId)).join("") + v.threadColors.length + " needle" + (v.threadColors.length === 1 ? "" : "s") : "—"} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-need="catalog.designs:edit" onclick="editVersionColors_(${v.id})">Edit colors</button></td>
           <td data-label="Stitches" style="padding:5px 6px;">${v.stitchCount != null ? Number(v.stitchCount).toLocaleString() : '<span style="color:#888;font-weight:400;">not known</span>'} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-vid="${v.id}" data-did="${design.id}" data-cur="${v.stitchCount == null ? "" : v.stitchCount}" data-need="catalog.designs:edit" onclick="setVersionStitches_(this)">Set</button></td>
@@ -22979,7 +22979,7 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
       <div style="flex:0 0 340px;max-width:100%;">
         <canvas id="dsgvCanvas" width="340" height="340" style="width:340px;max-width:100%;height:340px;background:#faf9f6;border:1px solid #ddd;border-radius:6px;display:block;"></canvas>
         <div id="dsgvStops" style="font-size:12px;margin:6px 0 10px;min-height:16px;"></div>
-        <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Design file — the editable project file from your design software (any format, e.g. .emb)${itemId ? " — optional" : ""}<br>
+        <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Design file — the editable project file from your design software (any format, e.g. .emb) — optional<br>
           <input type="file" id="dsgvDesignFile" style="font-size:13px;"></label>
         <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Machine file — the stitch file the machine runs (any format, e.g. .dst, .dsb, .pes)<br>
           <input type="file" id="dsgvMachineFile" style="font-size:13px;"></label>
@@ -23090,7 +23090,6 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
     const err = ov.querySelector("#dsgvErr");
     const designFile = ov.querySelector("#dsgvDesignFile").files[0];
     const machineFile = ov.querySelector("#dsgvMachineFile").files[0];
-    if (!designFile && !itemId) { err.textContent = "Choose a design file."; return; }
     if (!machineFile) { err.textContent = "Choose a machine file."; return; }
     // Kept at each stop's own position: an empty stop between picked ones stays empty (stop 3's thread is needle 3).
     const threadColors = rows.map((r, i) => ({ needle: i + 1, threadId: r.threadId })).filter(tc => tc.threadId);

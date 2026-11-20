@@ -22769,6 +22769,40 @@ function drawPreviewPlaceholder_(canvas, text){
   ctx.fillText(text, canvas.width / 2, canvas.height / 2);
 }
 
+// "Copy threads from previous version" (upload window): the previous version is the design's current
+// one — the newest upload, which the version being added replaces. Its thread map is copied stop by
+// stop by needle position: needle 1 -> stop 1, and so on. When the new machine file has FEWER stops,
+// the extra old needles are left out (and listed); when it has MORE, the extra stops stay empty for
+// a pick. A thread no longer in the catalog isn't copied either. neededStops = 0 (no readable
+// machine file yet) copies the whole map.
+function copyPreviousThreadMap_(prevThreadColors, neededStops, threadsById){
+  const prev = (prevThreadColors || []).filter(tc => tc && Number(tc.needle) >= 1 && tc.threadId).slice().sort((a, b) => a.needle - b.needle);
+  const known = (id) => !threadsById || !Object.keys(threadsById).length || !!threadsById[id];
+  const prevStops = prev.length ? Number(prev[prev.length - 1].needle) : 0;
+  const size = neededStops > 0 ? neededStops : prevStops;
+  const rows = Array.from({ length: Math.max(size, 1) }, () => ({ threadId: "" }));
+  const copied = [], leftOut = [], unknown = [];
+  prev.forEach(tc => {
+    const n = Number(tc.needle);
+    if (n > size) leftOut.push({ needle: n, threadId: tc.threadId });
+    else if (!known(tc.threadId)) unknown.push({ needle: n, threadId: tc.threadId });
+    else { rows[n - 1] = { threadId: tc.threadId }; copied.push({ needle: n, threadId: tc.threadId }); }
+  });
+  const empty = neededStops > 0 ? rows.map((r, i) => r.threadId ? 0 : i + 1).filter(Boolean) : [];
+  return { rows, copied, leftOut, unknown, empty, prevStops };
+}
+// The note under the copy button: what came over and what didn't.
+function copyThreadMapNoteHtml_(res, threadsById){
+  const name = (id) => { const t = threadsById[id]; return t ? `${t.brand} ${t.code}${t.name ? " " + t.name : ""}` : "thread #" + id; };
+  const list = (xs) => xs.map(x => `stop ${x.needle} (${escapeHtml(name(x.threadId))})`).join(", ");
+  const span = (ns) => ns.length === 1 ? "stop " + ns[0] : "stops " + ns.join(", ");
+  const parts = [`<span style="color:#15803d;">Copied ${res.copied.length} thread${res.copied.length === 1 ? "" : "s"} from the previous version.</span>`];
+  if (res.leftOut.length) parts.push(`<span style="color:#b45309;">Left out — this file has fewer stops than the previous version's ${res.prevStops}: ${list(res.leftOut)}.</span>`);
+  if (res.unknown.length) parts.push(`<span style="color:#b45309;">Left out — no longer in the thread catalog: ${list(res.unknown)}.</span>`);
+  if (res.empty.length) parts.push(`<span style="color:#b45309;">Still to pick — the previous version had no thread for ${span(res.empty)}.</span>`);
+  return parts.join("<br>");
+}
+
 // Also uploads an ORDER-SPECIFIC design (migrations/0032) when opts.itemId is given: the digitized
 // typed-in name for one line item (alone, or with the main design) — same files + thread map, but
 // the native design file is optional, it's stored under the line item, and opts.threads supplies
@@ -22797,6 +22831,8 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
         <div style="font-size:11px;color:#888;margin-bottom:8px;">Pick a thread per needle stop — the preview recolors live.</div>
         <div id="dsgvThreadRows" style="max-height:320px;overflow:auto;"></div>
         <button type="button" id="dsgvAddThread" class="admin-btn" style="font-size:11px;padding:3px 8px;margin-top:6px;">+ Add thread</button>
+        ${designId && !itemId ? `<button type="button" id="dsgvCopyPrev" class="admin-btn" style="font-size:11px;padding:3px 8px;margin-top:6px;" disabled title="Looking for a previous version…">Copy threads from previous version</button>
+        <div id="dsgvCopyNote" style="font-size:12px;margin-top:6px;"></div>` : ""}
       </div>
     </div>
     <div id="dsgvErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
@@ -22841,12 +22877,37 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
       // A .dsb names the needle each color runs on (the digitizer's setup) — shown for reference.
       const needleNote = (parsed.needles || []).some(n => n != null) ? ` · needles ${parsed.needles.map(n => n == null ? "?" : n).join(", ")}` : "";
       stopsSummary = `<div style="color:#111;margin-bottom:2px;"><strong>${neededStops} needle stop${neededStops === 1 ? "" : "s"}</strong> · ${parsed.colorChanges} color change${parsed.colorChanges === 1 ? "" : "s"} · ${parsed.stitchCount.toLocaleString()} stitches${needleNote}</div>`;
-      while (rows.length < neededStops) rows.push({ threadId: "" });
-      while (rows.length > neededStops && !rows[rows.length - 1].threadId) rows.pop();
+      // Copied before the file was read: copy again against the file's real stop count, so extra old needles are left out.
+      if (copiedFrom) copyPrev_();
+      else {
+        while (rows.length < neededStops) rows.push({ threadId: "" });
+        while (rows.length > neededStops && !rows[rows.length - 1].threadId) rows.pop();
+      }
       drawRows(); renderPreview();
     } catch (err) { const kind = stitchExt_(file.name).toUpperCase(); drawPreviewPlaceholder_(canvas, "Couldn't read this " + kind); el.innerHTML = `<span style="color:#b03a2e;">Couldn't read the ${kind} file: ${escapeHtml(err.message)}</span>`; }
   };
   ov.querySelector("#dsgvAddThread").onclick = () => { rows.push({ threadId: "" }); drawRows(); renderPreview(); };
+  // Copy threads from the previous version — the design's current (newest) one, read fresh from the server.
+  let prevVersion = null, copiedFrom = null;
+  const copyPrev_ = () => {
+    if (!prevVersion) return;
+    const res = copyPreviousThreadMap_(prevVersion.threadColors, neededStops, threadsById);
+    rows = res.rows; copiedFrom = prevVersion.id;
+    const note = ov.querySelector("#dsgvCopyNote");
+    if (note) note.innerHTML = copyThreadMapNoteHtml_(res, threadsById) +
+      (neededStops ? "" : `<br><span style="color:#888;">Choose the machine file to check its stops against these.</span>`);
+  };
+  const copyBtn = ov.querySelector("#dsgvCopyPrev");
+  if (copyBtn) {
+    copyBtn.onclick = () => { copyPrev_(); drawRows(); renderPreview(); };
+    designApi_({ action: "getDesign", id: designId }).then(d => {
+      const v = ((d && d.versions) || [])[0];
+      if (v && (v.threadColors || []).some(tc => tc && tc.threadId)) {
+        prevVersion = v; copyBtn.disabled = false;
+        copyBtn.title = `Copies the thread map of the version uploaded ${(v.uploadedAt || "").slice(0, 10)}, stop by stop`;
+      } else copyBtn.title = v ? "The previous version has no thread colors to copy" : "This design has no earlier version yet";
+    }).catch(() => { copyBtn.title = "Couldn't load the previous version"; });
+  }
   ov.querySelector("#dsgvCancel").onclick = close;
   const uploadFile_ = async (file, role) => {
     const ext = (file.name.split(".").pop() || "").toLowerCase();

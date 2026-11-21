@@ -455,9 +455,28 @@ export async function onRequestPost(context) {
   // order made → shipped but not order or receive its blanks.
   const stageDenied_ = (stage) => typeof adminCan !== "function" || adminCan(request, stageFn(stage), "edit") ? null
     : jsonResponse({ status: "error", code: "forbidden", message: "Your role can't set that step. Ask an admin." }, 403);
+  // An action that does more than its own level (permissions.js ACTION_PERM) asks again for the part that needs more:
+  // a removal in Edit items is a cancel, a paid local sale is a payment. Called after the action's sign-in check.
+  const can_ = (fn, level) => typeof adminCan !== "function" || adminCan(request, fn, level);
+  const forbidden_ = (message) => jsonResponse({ status: "error", code: "forbidden", message }, 403);
   // Products now below a target or a blank's MAP: all of it for a manager; a worker hears only of MAP (a vendor's
   // public price), never of costs or targets.
   const belowFor_ = (list) => seesPricing_() ? list : list.filter(p => p.belowMap).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.mapProblems || [], belowMap: true }));
+  // The order lists for a role without costs.view: each line's cost of goods and each payment's processor fee
+  // (and their total) are left out. Prices, payments and postage stay: they are what the order screens work with.
+  const orderCostsFor_ = (orders) => seesPricing_() ? orders : orders.map(o => {
+    if (!o || typeof o !== "object") return o;
+    const { processorFees, ...rest } = o;
+    if (Array.isArray(o.items)) rest.items = o.items.map(({ cogs, cogsSource, ...it }) => it);
+    if (Array.isArray(o.payments)) rest.payments = o.payments.map(({ fee, ...p }) => p);
+    return rest;
+  });
+  // Blanks for a screen that only shows them (Run Order, the blanks step): without Blanks or costs.view, no
+  // average cost or vendor price. Blanks itself shows and edits them (receiving, counting), so it keeps them.
+  const blankCostsFor_ = (blanks) => seesPricing_() || can_("inventory.blanks", "read") ? blanks : blanks.map(b => {
+    const cut = ({ purchasePrice, vendorPrice, vendorPriceAt, ...s }) => s;
+    return { ...b, sizes: (b.sizes || []).map(cut), colors: (b.colors || []).map(c => ({ ...c, sizes: (c.sizes || []).map(cut) })) };
+  });
   // Routine actions: written in context.waitUntil() so the runtime keeps the
   // D1 write alive after the response is sent. A failure is logged loudly,
   // never silently swallowed.
@@ -717,7 +736,7 @@ export async function onRequestPost(context) {
     // Optional date window (the Orders page's filter) — see getOrdersByOrg.
     const orders = await getOrdersByOrg(env.DB, org, { from: body.dateFrom, to: body.dateTo }, { limit: ORDERS_LIST_MAX + 1 });
     const more = orders.length > ORDERS_LIST_MAX;
-    return jsonResponse({ status: "ok", orders: more ? orders.slice(0, ORDERS_LIST_MAX) : orders, more, max: ORDERS_LIST_MAX });
+    return jsonResponse({ status: "ok", orders: orderCostsFor_(more ? orders.slice(0, ORDERS_LIST_MAX) : orders), more, max: ORDERS_LIST_MAX });
   }
 
   // ---- getOrdersAllShops — the "All shops" Orders page in ONE request ----
@@ -735,7 +754,7 @@ export async function onRequestPost(context) {
         getLatestVerificationsByOrg(env.DB, o.orgId).catch(() => []),
       ]);
       const more = orders.length > ORDERS_LIST_MAX;
-      return { orgId: o.orgId, name: o.name || o.orgId, orders: more ? orders.slice(0, ORDERS_LIST_MAX) : orders, more, verifications };
+      return { orgId: o.orgId, name: o.name || o.orgId, orders: orderCostsFor_(more ? orders.slice(0, ORDERS_LIST_MAX) : orders), more, verifications };
     }));
     return jsonResponse({ status: "ok", shops, max: ORDERS_LIST_MAX });
   }
@@ -747,7 +766,7 @@ export async function onRequestPost(context) {
     const [orders, orgs] = await Promise.all([getOpenOrders(env.DB), getAllOrgs(env.DB)]);
     const names = Object.fromEntries(orgs.map(o => [o.orgId, o.name]));
     // homeStage: the step it's waiting on (Home's tiles, db.js homeOrderStage).
-    return jsonResponse({ status: "ok", orders: orders.map(o => ({ ...o, orgName: names[o.orgId] || o.orgId, homeStage: homeOrderStage(o) })) });
+    return jsonResponse({ status: "ok", orders: orderCostsFor_(orders.map(o => ({ ...o, orgName: names[o.orgId] || o.orgId, homeStage: homeOrderStage(o) }))) });
   }
 
   // ---- getAuditLog — admin fetches the audit log with optional filters --------
@@ -2212,6 +2231,9 @@ export async function onRequestPost(context) {
   if (body.action === "createLocalSale") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
+    // Paid records a payment and Delivered sets a step: what Mark as paid and the step menu need on their own.
+    if (body.paid && !can_("orders.payments", "edit")) return forbidden_("Your role can't record payments. Ask an admin.");
+    if (body.delivered) { const no = stageDenied_("delivered"); if (no) return no; }
     { const locked = await periodGuard(body); if (locked) return locked; }
 
     const org = body.org;
@@ -2687,6 +2709,14 @@ export async function onRequestPost(context) {
   if (body.action === "editOrder") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
+    const removals = (Array.isArray(body.removals) ? body.removals : []).filter(r => r && Number(r.itemId));
+    const updates = (Array.isArray(body.updates) ? body.updates : []).filter(u => u && Number(u.itemId));
+    const additions = (Array.isArray(body.additions) ? body.additions : []).filter(a => a && typeof a === "object");
+    // Taking a line off cancels it and a refund is a refund: they need what Cancel and Refund need on their own
+    // (permissions.js), and asking the customer to pay needs Payments.
+    if (removals.length && !can_("orders.details", "full")) return forbidden_("Your role can't remove items from an order. Ask an admin.");
+    if (removals.some(r => Number(r.refundAmount) > 0) && !can_("orders.payments", "full")) return forbidden_("Your role can't record refunds. Ask an admin.");
+    if (body.requestPayment && !can_("orders.payments", "edit")) return forbidden_("Your role can't request payments. Ask an admin.");
     { const locked = await periodGuard(body); if (locked) return locked; }
 
     const orderId = String(body.orderId || "").trim();
@@ -2695,26 +2725,20 @@ export async function onRequestPost(context) {
     const order = await getOrderById(env.DB, orderId);
     if (!order) return jsonResponse({ status: "error", message: "Order not found" }, 404);
     const orgId = order.orgId;
+    // Every line removed or changed must be one of this order's (the closed-month check and the totals are this order's).
+    const lineIds = new Set((order.items || []).map(i => Number(i.sheetRow)));
+    if (removals.concat(updates).some(x => !lineIds.has(Number(x.itemId))))
+      return jsonResponse({ status: "error", message: "An item in this edit isn't on this order. Reload the order and try again." }, 400);
 
     // Original total for computing price diff
     const originalTotal = order.total;
 
-    // Process removals (cancel + optional refund)
-    for (const removal of (Array.isArray(body.removals) ? body.removals : [])) {
-      const itemId = Number(removal.itemId);
-      if (!itemId) continue;
-      await cancelLineItemWithReason(env.DB, itemId, String(removal.reason || "Admin edit").slice(0, 200));
-      const refund = Number(removal.refundAmount);
-      if (refund > 0) {
-        await setLineItemRefund(env.DB, itemId, refund);
-      }
-    }
-
-    // Process updates (re-price from D1 — for a configurable line the picks are re-validated and
-    // the stored snapshot is rebuilt server-side, never trusted from the client).
-    for (const upd of (Array.isArray(body.updates) ? body.updates : [])) {
+    // Price every change and addition first (re-priced from D1 — for a configurable line the picks are
+    // re-validated and the stored snapshot is rebuilt server-side, never trusted from the client), so a
+    // line that can't be priced refuses the whole edit before anything is written.
+    const updateWrites = [];
+    for (const upd of updates) {
       const itemId = Number(upd.itemId);
-      if (!itemId) continue;
       let unitPrice = 0, personalizationFee = 0, lineConfig;
       let pricing = null;
       // The customer's own design stays on the line: rebuilt from the line's saved copy, never
@@ -2733,7 +2757,7 @@ export async function onRequestPost(context) {
       }
       const prod = await env.DB.prepare("SELECT name, type FROM products WHERE orgId=? AND productId=?")
         .bind(orgId, upd.productId).first();
-      await updateOrderItem(env.DB, itemId, {
+      updateWrites.push([itemId, {
         productId: upd.productId,
         name:  prod ? prod.name  : String(upd.name  || "").slice(0, 200),
         type:  prod ? prod.type  : String(upd.type  || "").slice(0, 80),
@@ -2743,12 +2767,10 @@ export async function onRequestPost(context) {
         persName: String(upd.persName || "").slice(0, 200),
         personalizationFee,
         ...(lineConfig ? { config: lineConfig } : {}),
-      });
+      }]);
     }
-
-    // Process additions (price from D1)
-    const addedIds = [];
-    for (const add of (Array.isArray(body.additions) ? body.additions : [])) {
+    const additionWrites = [];
+    for (const add of additions) {
       let unitPrice = 0, personalizationFee = 0, lineConfig;
       let pricing = null;
       try {
@@ -2759,7 +2781,7 @@ export async function onRequestPost(context) {
       if (pricing) { unitPrice = pricing.unitPrice; personalizationFee = pricing.personalizationFee; lineConfig = pricing.config; }
       const prod = await env.DB.prepare("SELECT name, type FROM products WHERE orgId=? AND productId=?")
         .bind(orgId, add.productId).first();
-      const newId = await addOrderItem(env.DB, orderId, orgId, {
+      additionWrites.push({
         productId: add.productId,
         name:  prod ? prod.name  : String(add.name  || "").slice(0, 200),
         type:  prod ? prod.type  : String(add.type  || "").slice(0, 80),
@@ -2770,7 +2792,29 @@ export async function onRequestPost(context) {
         personalizationFee,
         ...(lineConfig ? { config: lineConfig } : {}),
       });
-      addedIds.push(newId);
+    }
+
+    // Then write: removals (cancel + optional refund), changes, additions. Should a write fail partway, the
+    // order's totals are still worked out again and the audit log says the edit was left incomplete.
+    const addedIds = [];
+    let written = 0;
+    try {
+      for (const removal of removals) {
+        const itemId = Number(removal.itemId);
+        await cancelLineItemWithReason(env.DB, itemId, String(removal.reason || "Admin edit").slice(0, 200));
+        written++;
+        const refund = Number(removal.refundAmount);
+        if (refund > 0) await setLineItemRefund(env.DB, itemId, refund);
+      }
+      for (const [itemId, fields] of updateWrites) { await updateOrderItem(env.DB, itemId, fields); written++; }
+      for (const fields of additionWrites) { addedIds.push(await addOrderItem(env.DB, orderId, orgId, fields)); written++; }
+    } catch (e) {
+      if (written) {
+        await recalcOrderTotals(env.DB, orderId).catch((e2) => console.error("editOrder: totals not recalculated for", orderId, e2));
+        audit({ orgId, orderId, action: "order.edited", detail: { removals: removals.length, updates: updates.length, additions: additions.length,
+          incomplete: true, error: String((e && e.message) || e).slice(0, 200) } });
+      }
+      throw e;
     }
 
     // Recalculate order totals
@@ -2829,8 +2873,8 @@ export async function onRequestPost(context) {
     }
 
     audit({ orgId, orderId, action: "order.edited",
-      detail: { removals: (body.removals || []).length, updates: (body.updates || []).length,
-        additions: (body.additions || []).length, priceDiff, paymentRequested: !!body.requestPayment } });
+      detail: { removals: removals.length, updates: updates.length,
+        additions: additions.length, priceDiff, paymentRequested: !!body.requestPayment } });
     return jsonResponse({ status: "ok", orderId, subtotal, total, priceDiff, addedIds, paymentUrl, emailSent });
   }
 
@@ -3996,7 +4040,7 @@ export async function onRequestPost(context) {
       const products = await getBlankProductUses(env.DB).catch((e) => { console.error("getBlankProductUses failed:", e); return {}; });
       // Sizes below their reorder point (migrations/0074).
       const lowStock = await getBlankLowStock(env.DB).catch((e) => { console.error("getBlankLowStock failed:", e); return {}; });
-      return jsonResponse({ status: "ok", blanks, reserved, needsPriceCheck, products, lowStock });
+      return jsonResponse({ status: "ok", blanks: blankCostsFor_(blanks), reserved, needsPriceCheck, products, lowStock });
     }
 
     // A blank's needle type must be one from Threads → Needle settings ("" / null = not set).
@@ -4029,7 +4073,11 @@ export async function onRequestPost(context) {
       if (!id) return jsonResponse({ status: "error", message: "id required" }, 400);
       // The for-testing flag moves the blank between inventory groups (migrations/0060) — audited when it changes.
       const before = body.forTesting !== undefined ? await env.DB.prepare("SELECT forTesting FROM blanks WHERE id=?").bind(id).first().catch(() => null) : null;
-      const priceChanges = await updateBlank(env.DB, id, body, Array.isArray(body.sizes) ? body.sizes : null, { actor: adminActor(request) });
+      // Stock on hand and average cost are Full's (Count stock, Write off, Recompute): with Edit, a save that would
+      // change them is refused (db.js writeBlankColors_ keepStock).
+      let priceChanges;
+      try { priceChanges = await updateBlank(env.DB, id, body, Array.isArray(body.sizes) ? body.sizes : null, { actor: adminActor(request), keepStock: !can_("inventory.blanks", "full") }); }
+      catch (e) { if (e && e.code === "forbidden") return forbidden_(e.message); throw e; }
       if (before && !!Number(before.forTesting) !== !!body.forTesting) audit({ orgId: null, orderId: null, action: "inventory.blank_testing_changed", detail: { blankId: id, forTesting: !!body.forTesting } });
       if (priceChanges.length) audit({ orgId: null, orderId: null, action: "inventory.vendor_prices_changed", detail: { blankId: id, changes: vendorPriceAudit_(priceChanges) } });
       // Products priced on the old vendor prices — the form offers to open them.
@@ -6005,6 +6053,19 @@ export async function onRequestPost(context) {
     const parcelLength = Math.max(0, Number(body.parcelLength) || 0);
     const parcelWidth  = Math.max(0, Number(body.parcelWidth)  || 0);
     const parcelHeight = Math.max(0, Number(body.parcelHeight) || 0);
+    // The label details (address, weight, box) are Shipping's; what the customer is charged is Payments'. A new
+    // shipping charge, or a ship-to state that moves the sales tax, needs Payments too.
+    if (!can_("orders.payments", "edit")) {
+      const cur = await env.DB.prepare("SELECT shippingCostCents, shippingAddress FROM orders WHERE orderId=?").bind(orderId).first();
+      if (cur) {
+        let curAddr = null; try { curAddr = cur.shippingAddress ? JSON.parse(cur.shippingAddress) : null; } catch (e) { curAddr = null; }
+        const curState = String((curAddr || {}).state || "").trim().toUpperCase();
+        if (Math.round(shippingCost * 100) !== (Number(cur.shippingCostCents) || 0))
+          return forbidden_("Your role can't change what the customer pays for shipping. Ask someone who handles payments.");
+        if (String(sanitizedAddr.state || "").trim().toUpperCase() !== curState)
+          return forbidden_("A different state changes the order's sales tax, so only someone who handles payments can change it.");
+      }
+    }
 
     await updateOrderShipping(env.DB, orderId, { shippingAddress: sanitizedAddr, totalWeightOz, shippingCost, shippingMethod, parcelLength, parcelWidth, parcelHeight });
     audit({ orgId: body.org || null, orderId, action: "order.shipping_set",
@@ -6227,7 +6288,7 @@ export async function onRequestPost(context) {
       if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) return jsonResponse({ status: "error", message: "Due date must be YYYY-MM-DD" }, 400);
       if ((d || null) !== (order.dueDate || null)) dueChange = d || null;
     }
-    if (!Object.keys(changes).length && dueChange === undefined) return jsonResponse({ status: "ok", order, changed: 0 });
+    if (!Object.keys(changes).length && dueChange === undefined) return jsonResponse({ status: "ok", order: orderCostsFor_([order])[0], changed: 0 });
     if (changes.manufacturedAt && !order.manufacturedAt) return jsonResponse({ status: "error", message: "Manufactured is set by marking the order made (stage menu or Run Order), not here." }, 400);
     const merged = { ...order, ...changes };
     const bad = orderDatesError(merged);
@@ -6253,7 +6314,7 @@ export async function onRequestPost(context) {
     if (auditErr) return auditErr;
     await setOrderDates(env.DB, orderId, changes);
     if (dueChange !== undefined) await setOrderDueDate(env.DB, orderId, dueChange);
-    return jsonResponse({ status: "ok", order: await getOrderById(env.DB, orderId), changed: Object.keys(to).length });
+    return jsonResponse({ status: "ok", order: orderCostsFor_([await getOrderById(env.DB, orderId)])[0], changed: Object.keys(to).length });
   }
 
   if (body.action === "updateOrderDate") {

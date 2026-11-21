@@ -103,8 +103,11 @@ const ok = (m, c) => console.log(m + ":", !!c);
 
   console.log("=== The server agrees ===");
   const agentJs = read("functions/api/agent.js"), designJs = read("functions/api/design.js");
-  ok("deleting a machine's file needs Machine files Full, scanning for machines needs Machines Edit (sending a design is part of a run)",
-    /delete: \["production\.machinefiles", "full"\], discover: \["production\.machines", "edit"\]/.test(agentJs));
+  ok("deleting a machine's file needs Machine files Full, scanning for machines needs Machines Edit",
+    /delete: \[\["production\.machinefiles", "full"\]\], discover: \[\["production\.machines", "edit"\]\]/.test(agentJs));
+  ok("sending a design onto a machine needs Run Edit or Machine files Edit (looking at its files needs only Read)",
+    /send: \[\["run\.runs", "edit"\], \["production\.machinefiles", "edit"\]\]/.test(agentJs) &&
+    /id="mfSendBtn" class="admin-btn" data-need="production\.machinefiles:edit\|run\.runs:edit"/.test(adminJs));
   ok("design files can be looked at by anyone who sees designs, orders or the production queues (Run Order shows them)",
     /\[\["catalog\.designs", "read"\], \["orders\.details", "read"\], \["run\.queue", "read"\], \["transfer\.queue", "read"\], \["production\.machinefiles", "read"\]\]/.test(designJs));
   ok("…and uploading one still needs Edit", /mayUpload = [\s\S]{0,200}adminCan\(request, "catalog\.designs", "edit"\)/.test(designJs) && /if \(!url\.searchParams\.get\("productId"\) && !mayUpload\)/.test(designJs));

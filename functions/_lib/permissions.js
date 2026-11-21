@@ -139,10 +139,12 @@ const BY_FN = {
   "inventory.blanks": {
     read: ["getInventory", "getBlanks", "getBlankMovements", "getBlankVendorPriceHistory", "getBlankLinks", "getReadyToShip", "getFinishedGoodsMovements",
       "previewBlankCatchUp", "previewVendorBlanks", "suggestColorGroups", "listVendorConnections", "fetchVendorProducts"],
-    edit: ["createInventoryItem", "updateInventoryItem", "createBlank", "updateBlank", "mergeBlanks", "receiveBlanks", "receiveBlankOrder", "addBlankSizes",
-      "readInvoiceWithAi", "markBlankPricesChecked", "setBlankLink", "saveBlankLinks", "applyBlankCatchUp", "setReadyToShipQty", "makeForStock", "importBlanks",
+    // A product's blank links are its set-up, kept by the product form (saveBlankLinks drops a link whose color or
+    // size the product no longer offers), so removing one is Edit like setting one. Merging deletes blanks: Full.
+    edit: ["createInventoryItem", "updateInventoryItem", "createBlank", "updateBlank", "receiveBlanks", "receiveBlankOrder", "addBlankSizes",
+      "readInvoiceWithAi", "markBlankPricesChecked", "setBlankLink", "saveBlankLinks", "deleteBlankLink", "applyBlankCatchUp", "setReadyToShipQty", "makeForStock", "importBlanks",
       "applyVendorBlanks", "copyVendorImage", "removeBlankImages", "restoreInventoryMovement"],
-    full: ["deleteInventoryItem", "deleteBlank", "deleteBlankLink", "writeOffBlanks", "countBlankStock", "voidInventoryMovement", "voidFinishedGoodsMovement", "recomputeBlankAverageCosts"] },
+    full: ["deleteInventoryItem", "deleteBlank", "mergeBlanks", "writeOffBlanks", "countBlankStock", "voidInventoryMovement", "voidFinishedGoodsMovement", "recomputeBlankAverageCosts"] },
   "inventory.blankorder": { read: ["getBlanksToOrder", "freeShippingSuggestions", "listVendors"], edit: ["recordRestockOrder"], full: ["cancelRestockOrder", "saveVendor", "deleteVendor"] },
   "inventory.supplierOrders": { read: ["listSupplierOrders", "checkSupplierOrderShipments", "listVendorApiLog", "getVendorApiLogEntry"], edit: ["previewSupplierOrder", "placeSupplierOrder"], full: ["cancelSupplierOrder"] },
   "inventory.transfers": {

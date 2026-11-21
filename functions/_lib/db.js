@@ -399,12 +399,35 @@ async function liveShopRows_(db, orgId) {
   const { results: products } = await db.prepare("SELECT * FROM products WHERE orgId=? ORDER BY productId").bind(orgId).all();
   return { org, products };
 }
+// The products rows of a shop published since migrations/0225 are kept in parts (catalog_snapshot_parts) of up to
+// this many bytes of JSON each, so no one value comes near D1's limit of about 2 MB however large the catalog grows.
+const SNAPSHOT_PART_BYTES_ = 1000000;
+// {org, products} from a catalog_snapshots row's json. One published before 0225 holds its products itself and is read
+// as it is; a newer one says how many parts hold them — `partRows` ({part, json}, in order) when the caller has them.
+// null = not a snapshot. Parts missing (never expected: Publish writes them in one batch) is an error, not "never
+// published", so a shop is never served its unpublished draft by mistake.
+async function snapshotRows_(db, orgId, json, partRows) {
+  const head = tryParse_(json, null);
+  if (!head || !head.org) return null;
+  if (Array.isArray(head.products)) return { org: head.org, products: head.products };
+  const n = Number(head.parts);
+  if (!Number.isInteger(n) || n < 0) return null;
+  const parts = partRows || (n ? (await db.prepare("SELECT part, json FROM catalog_snapshot_parts WHERE orgId=? ORDER BY part").bind(orgId).all()).results : []);
+  if (parts.length !== n) throw new Error(`The published catalog of ${orgId} is incomplete (${parts.length} of ${n} parts) — publish the shop again.`);
+  let products = [];
+  for (const part of parts) {
+    const list = tryParse_(part.json, null);
+    if (!Array.isArray(list)) throw new Error(`The published catalog of ${orgId} can't be read — publish the shop again.`);
+    products = products.concat(list);
+  }
+  return { org: head.org, products };
+}
 export async function getCatalogSnapshot(db, orgId) {
   let r = null;
   try { r = await db.prepare("SELECT json, publishedAt, publishedBy FROM catalog_snapshots WHERE orgId=?").bind(orgId).first(); } catch (e) { return null; }   // before 0076
   if (!r) return null;
-  const rows = tryParse_(r.json, null);
-  return rows && rows.org ? { ...rows, publishedAt: r.publishedAt, publishedBy: r.publishedBy || "" } : null;
+  const rows = await snapshotRows_(db, orgId, r.json);
+  return rows ? { ...rows, publishedAt: r.publishedAt, publishedBy: r.publishedBy || "" } : null;
 }
 // The rows shoppers get: the snapshot, else the live rows (never published).
 export async function publishedShopRows_(db, orgId) {
@@ -414,8 +437,28 @@ export async function publishShop(db, orgId, by = "") {
   const rows = await liveShopRows_(db, orgId);
   if (!rows) return null;
   const at = new Date().toISOString();
-  await db.prepare("INSERT INTO catalog_snapshots (orgId, json, publishedAt, publishedBy) VALUES (?, ?, ?, ?) ON CONFLICT(orgId) DO UPDATE SET json=excluded.json, publishedAt=excluded.publishedAt, publishedBy=excluded.publishedBy")
-    .bind(orgId, JSON.stringify(rows), at, String(by || "").slice(0, 200)).run();
+  const head = (json) => db.prepare("INSERT INTO catalog_snapshots (orgId, json, publishedAt, publishedBy) VALUES (?, ?, ?, ?) ON CONFLICT(orgId) DO UPDATE SET json=excluded.json, publishedAt=excluded.publishedAt, publishedBy=excluded.publishedBy")
+    .bind(orgId, json, at, String(by || "").slice(0, 200));
+  // The products rows in parts of up to SNAPSHOT_PART_BYTES_ (migrations/0225), in order; the shop's row, the old
+  // parts' removal and the new parts in one batch, so shoppers see the old snapshot or the new one, never a mix.
+  const enc = new TextEncoder(), parts = [];
+  let cur = [], bytes = 2;
+  for (const p of rows.products) {
+    const one = JSON.stringify(p), n = enc.encode(one).length + 1;
+    if (cur.length && bytes + n > SNAPSHOT_PART_BYTES_) { parts.push(cur); cur = []; bytes = 2; }
+    cur.push(one); bytes += n;
+  }
+  if (cur.length) parts.push(cur);
+  try {
+    await db.batch([
+      head(JSON.stringify({ org: rows.org, parts: parts.length })),
+      db.prepare("DELETE FROM catalog_snapshot_parts WHERE orgId=?").bind(orgId),
+      ...parts.map((list, i) => db.prepare("INSERT INTO catalog_snapshot_parts (orgId, part, json) VALUES (?, ?, ?)").bind(orgId, i, "[" + list.join(",") + "]")),
+    ]);
+  } catch (e) {
+    if (!/no such table/i.test(String(e && e.message))) throw e;
+    await head(JSON.stringify(rows)).run();   // a database before 0225: the whole shop in one value, as before
+  }
   return { publishedAt: at, products: rows.products.length };
 }
 // Discard unpublished changes: put the shop's settings and products back to the published snapshot. A product added
@@ -522,14 +565,39 @@ export function verifyPreviewToken(env, orgId, token) {
       return diff === 0;
     }));
 }
-// The shop as shoppers see it (published orgs row), for order submission's checks (open, deadline, delivery fees).
-export async function getPublishedOrg(db, orgId) {
-  const rows = await publishedShopRows_(db, orgId).catch(() => null);
-  return rows && rows.org ? parseOrg_(rows.org) : null;
+// One request's catalog lookups (priceLookups(), passed as opts.lookups to priceItem and to getPublishedOrg): the
+// shop's published snapshot is read and parsed once, and its tier prices, the locations and each graphic, transfer
+// and design count once, however many lines the request prices. What each line is priced from doesn't change — only
+// how often it's read. Without one, every call reads for itself, as before.
+export function priceLookups() { return new Map(); }
+function looked_(lk, key, load) {
+  if (!(lk instanceof Map)) return load();
+  if (!lk.has(key)) { const p = Promise.resolve().then(load); lk.set(key, p); p.catch(() => lk.delete(key)); }
+  return lk.get(key);
 }
-export async function publishedProductRow_(db, orgId, productId) {
-  const snap = await getCatalogSnapshot(db, orgId);
-  if (snap) return snap.products.find(p => p.productId === productId) || null;
+const publishedSnap_ = (db, orgId, lk) => looked_(lk, "snapshot\u0001" + orgId, () => getCatalogSnapshot(db, orgId));
+// The shop as shoppers see it (published orgs row), for order submission's checks (open, deadline, delivery fees).
+export async function getPublishedOrg(db, orgId, lk) {
+  try {
+    const snap = await publishedSnap_(db, orgId, lk);
+    const row = snap ? snap.org : await db.prepare("SELECT * FROM orgs WHERE orgId=?").bind(orgId).first();   // never published: live
+    return row ? parseOrg_(row) : null;
+  } catch (e) { return null; }
+}
+export async function publishedProductRow_(db, orgId, productId, lk) {
+  if (lk instanceof Map) {
+    const byId = await looked_(lk, "products\u0001" + orgId, async () => {
+      const snap = await publishedSnap_(db, orgId, lk);
+      if (!snap) return null;
+      const m = new Map();
+      for (const p of snap.products) if (!m.has(p.productId)) m.set(p.productId, p);
+      return m;
+    });
+    if (byId) return byId.get(productId) || null;
+  } else {
+    const snap = await getCatalogSnapshot(db, orgId);
+    if (snap) return snap.products.find(p => p.productId === productId) || null;
+  }
   return db.prepare("SELECT * FROM products WHERE orgId=? AND productId=?").bind(orgId, productId).first();
 }
 // Per shop: never published, published and current, or with unpublished changes (which products / shop settings).
@@ -815,14 +883,26 @@ export async function getProductsByOrg(db, orgId, visibleOnly = false) {
   const { results } = await db.prepare(sql).bind(orgId).all();
   return productsFromRows_(db, orgId, results);
 }
+// Only the named products of a shop, exactly as getProductsByOrg gives them (live, with their designs and blank
+// weights), for a caller that needs one product or a cart's few rather than the whole catalog. Unknown ids are left out.
+export async function getProductsByIds(db, orgId, productIds) {
+  const ids = [...new Set((productIds || []).filter(id => id != null && id !== "").map(String))];
+  if (!ids.length) return [];
+  const { results } = await db.prepare("SELECT * FROM products WHERE orgId=? AND productId IN (SELECT value FROM json_each(?)) ORDER BY sortOrder, productId")
+    .bind(orgId, JSON.stringify(ids)).all();
+  return productsFromRows_(db, orgId, results, ids);
+}
 // Parsed products (+ their designs) from products rows — live, or a published snapshot's (migrations/0076).
-async function productsFromRows_(db, orgId, results) {
+// `onlyIds`: the rows are just those products, so only their designs and weights are read. `pre`: the whole install's
+// lookups, already read (catalogPrefetch_, for the storefront catalog).
+async function productsFromRows_(db, orgId, results, onlyIds, pre) {
   const products = results.map(parseProduct_);
-  // Each product's designs in run order (migrations/0032) — one query for the whole org.
+  // Each product's designs in run order (migrations/0032) — one query for the whole org (or for those products).
   const byProduct = {};
   try {
-    const { results: pd } = await db.prepare(
-      "SELECT * FROM product_designs WHERE orgId=? ORDER BY sortOrder, id").bind(orgId).all();
+    const pd = pre ? (pre.productDesigns ? pre.productDesigns[orgId] || [] : []) : (await (onlyIds
+      ? db.prepare("SELECT * FROM product_designs WHERE orgId=? AND productId IN (SELECT value FROM json_each(?)) ORDER BY sortOrder, id").bind(orgId, JSON.stringify(onlyIds))
+      : db.prepare("SELECT * FROM product_designs WHERE orgId=? ORDER BY sortOrder, id").bind(orgId)).all()).results;
     for (const r of pd) (byProduct[r.productId] = byProduct[r.productId] || []).push(parseProductDesign_(r));
   } catch (e) { /* pre-0032 database */ }
   products.forEach(p => {
@@ -830,7 +910,7 @@ async function productsFromRows_(db, orgId, results) {
     if (p.customDesign) p.customDesignRequired = customDesignRequired(p);   // migrations/0054
   });
   // Shipping weight (migrations/0077): the product's own weightOz is an override; otherwise its linked blank sizes'.
-  const weights = await getBlankWeights(db, orgId);
+  const weights = pre ? pre.weights : await getBlankWeights(db, orgId, onlyIds);
   products.forEach(p => {
     const w = weights[orgId + "|" + p.productId];
     p.blankWeightOz = w ? w.max : null;
@@ -841,13 +921,16 @@ async function productsFromRows_(db, orgId, results) {
 }
 
 // Linked blank weights per product (migrations/0077): {"orgId|productId": {bySize: {size: oz}, max}} — a size's weight is
-// its heaviest linked color. orgId null = every shop. A database before 0076 answers {}.
-export async function getBlankWeights(db, orgId) {
+// its heaviest linked color. orgId null = every shop; `productIds` (with an orgId) = just those products. A database
+// before 0076 answers {}.
+export async function getBlankWeights(db, orgId, productIds) {
   const out = {};
+  const only = orgId && Array.isArray(productIds);
   try {
     const { results } = await db.prepare(`SELECT l.orgId, l.productId, l.productSize, MAX(bs.weightOz) AS w
       FROM product_blank_links l JOIN blank_sizes bs ON bs.blankId = l.blankId AND bs.color = l.blankColor AND bs.size = l.blankSize
-      WHERE bs.weightOz IS NOT NULL ${orgId ? "AND l.orgId = ?" : ""} GROUP BY l.orgId, l.productId, l.productSize`).bind(...(orgId ? [orgId] : [])).all();
+      WHERE bs.weightOz IS NOT NULL ${orgId ? "AND l.orgId = ?" : ""}${only ? " AND l.productId IN (SELECT value FROM json_each(?))" : ""}
+      GROUP BY l.orgId, l.productId, l.productSize`).bind(...(orgId ? [orgId] : []), ...(only ? [JSON.stringify(productIds.map(String))] : [])).all();
     for (const r of results) {
       const k = r.orgId + "|" + r.productId, w = Number(r.w);
       if (!(w > 0)) continue;
@@ -1947,7 +2030,8 @@ export async function setProductPersonalization(db, orgId, productId, { mode, ho
 export async function priceItem(db, orgId, productId, size, qty, personalized, config, opts = {}) {
   // The PUBLISHED product (migrations/0076) — what the shopper saw — every column, so this keeps working on a
   // database a migration behind the code. A shop never published since then is priced live, as before.
-  const row = await publishedProductRow_(db, orgId, productId);
+  const lk = opts && opts.lookups instanceof Map ? opts.lookups : null;
+  const row = await publishedProductRow_(db, orgId, productId, lk);
 
   if (!row || !row.visible) throw pricingError_(`Product not available: ${productId}`);
 
@@ -1978,7 +2062,7 @@ export async function priceItem(db, orgId, productId, size, qty, personalized, c
   // options. Validates each option server-side and returns a snapshot to store on the line.
   const custom = opts && opts.custom && typeof opts.custom === "object" ? opts.custom : {};
   if (row.configurable && Number(row.configurable)) {
-    const built = await priceConfigurable_(db, orgId, row, size, config, custom);
+    const built = await priceConfigurable_(db, orgId, row, size, config, custom, lk);
     const cfgPersCents = personalized && row.personalizationPriceCents != null ? Number(row.personalizationPriceCents) : 0;
     return { unitPrice: fromCents(unitPriceCents + built.addOnCents), personalizationFee: fromCents(cfgPersCents),
       name: productLineName(row, productId), type: row.type || "", config: built.snapshot,
@@ -1997,7 +2081,7 @@ export async function priceItem(db, orgId, productId, size, qty, personalized, c
   let needsCustomUpload = false;
   if (!hasCustom && row.customDesign) {
     let designCount = 0;
-    try { designCount = Number((await db.prepare("SELECT count(*) AS n FROM product_designs WHERE orgId=? AND productId=?").bind(orgId, productId).first()).n) || 0; }
+    try { designCount = Number((await looked_(lk, "designs\u0001" + orgId + "\u0001" + productId, () => db.prepare("SELECT count(*) AS n FROM product_designs WHERE orgId=? AND productId=?").bind(orgId, productId).first())).n) || 0; }
     catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
     needsCustomUpload = customDesignRequired({ ...row, designCount });
   }
@@ -2010,8 +2094,8 @@ export async function priceItem(db, orgId, productId, size, qty, personalized, c
   // A plain product can carry a reorder QR code too (migrations/0048): the line's snapshot then holds
   // just that automatic transfer. `plain: true` says "not a configurable line — nothing here was
   // picked", so screens that edit a configurable line's choices leave it alone.
-  const qr = await reorderQrEntry_(db, orgId, row.reorderQr);
-  const locs = [customEntry, ...(await fixedTransferEntries_(db, orgId, row)), qr].filter(Boolean);
+  const qr = await reorderQrEntry_(db, orgId, row.reorderQr, null, lk);
+  const locs = [customEntry, ...(await fixedTransferEntries_(db, orgId, row, lk)), qr].filter(Boolean);
   if (locs.length) out.config = { garmentColor: "", size: size || "", locations: locs, plain: true };
   return out;
 }
@@ -2021,14 +2105,14 @@ export async function priceItem(db, orgId, productId, size, qty, personalized, c
 // Run Transfer Sheets, transfer stock and COGS treat them like any other transfer. A graphic that's gone, or
 // isn't a transfer any more, is left out (the catalog check says so). Hidden graphics still apply: hiding one
 // only stops customers picking it.
-async function fixedTransferEntries_(db, orgId, row) {
+async function fixedTransferEntries_(db, orgId, row, lk) {
   const list = tryParse_(row && row.fixedTransfersJson, []) || [];
   if (!list.length) return [];
   const names = {};
-  try { for (const l of await listLocations(db)) names[Number(l.id)] = l.name; } catch (e) {}
+  try { for (const l of await looked_(lk, "locations", () => listLocations(db))) names[Number(l.id)] = l.name; } catch (e) {}
   const out = [];
   for (const f of list) {
-    const g = Number(f.graphicId) ? await getGraphic(db, Number(f.graphicId)) : null;
+    const g = Number(f.graphicId) ? await lookedGraphic_(db, Number(f.graphicId), lk) : null;
     if (!graphicUsableBy_(g, orgId) || g.kind !== "transfer") continue;
     const label = names[Number(f.locationId)] || "Printed transfer";
     const ink = g.inkColors.includes(String(f.ink || "")) ? String(f.ink) : (g.inkColors[0] || "");
@@ -2530,18 +2614,19 @@ export function customFromConfig(config) {
 // The automatic, unpriced reorder-QR application for a product, as a snapshot entry — or null when
 // the product has none (its own choice, else the shop's default). `orgDefault` can be passed when the
 // caller already has the shop's settings.
-async function reorderQrEntry_(db, orgId, productReorderQr, orgDefault) {
+// (`lk`: the request's priceLookups, when it has one.)
+async function reorderQrEntry_(db, orgId, productReorderQr, orgDefault, lk) {
   if (String(productReorderQr || "default") === "none") return null;
-  if (!orgDefault) { const t = await getTierPrices(db, orgId); orgDefault = { transferId: t.reorderQrTransferId, graphicId: t.reorderQrGraphicId }; }
+  if (!orgDefault) { const t = await lookedTiers_(db, orgId, lk); orgDefault = { transferId: t.reorderQrTransferId, graphicId: t.reorderQrGraphicId }; }
   const qr = resolveReorderQr_(productReorderQr, orgDefault);
   if (qr && qr.transferId) {
-    const t = await db.prepare("SELECT id, name, visible FROM transfers WHERE id=?").bind(qr.transferId).first();
+    const t = await looked_(lk, "transfer\u0001" + qr.transferId, () => db.prepare("SELECT id, name, visible FROM transfers WHERE id=?").bind(qr.transferId).first());
     return t && Number(t.visible) ? { location: "reorderqr", label: "Reorder QR", graphicId: null, kind: "transfer",
       designId: null, transferId: Number(t.id), graphicName: t.name || "Reorder QR", ink: "", tier: null, addOnCents: 0,
       imageUrl: "", thumbUrl: "", auto: true } : null;
   }
   if (qr && qr.graphicId) {   // chosen the old way, through a graphic
-    const qg = await getGraphic(db, qr.graphicId);
+    const qg = await lookedGraphic_(db, qr.graphicId, lk);
     return qg && qg.visible ? { location: "reorderqr", label: "Reorder QR", graphicId: qg.id, kind: qg.kind,
       designId: qg.designId, transferId: qg.transferId, graphicName: qg.name, ink: "", tier: null, addOnCents: 0,
       imageUrl: qg.imageUrl, thumbUrl: qg.thumbUrl, auto: true } : null;
@@ -2665,7 +2750,9 @@ export async function refreshOrderLinesFromCatalog(db, orderId, apply = true, pi
 // (stored in order_items.configJson) carries the garment color + one entry per chosen location and,
 // when enabled, the unpriced reorder-QR application. Throws pricingError_ on anything invalid or an
 // all-None line (a blank garment is never sellable).
-async function priceConfigurable_(db, orgId, productRow, size, config, custom = {}) {
+const lookedGraphic_ = (db, id, lk) => looked_(lk, "graphic\u0001" + Number(id), () => getGraphic(db, id));
+const lookedTiers_ = (db, orgId, lk) => looked_(lk, "tiers\u0001" + orgId, () => getTierPrices(db, orgId));
+async function priceConfigurable_(db, orgId, productRow, size, config, custom = {}, lk = null) {
   const cfg = config || {};
   const garmentColors = tryParse_(productRow.garmentColorsJson, []) || [];
   const productLocations = tryParse_(productRow.locationsJson, []) || [];
@@ -2682,7 +2769,7 @@ async function priceConfigurable_(db, orgId, productRow, size, config, custom = 
   if (Array.isArray(rawLocs)) for (const l of rawLocs) { if (l && l.location) picks.set(String(l.location), { graphicId: l.graphicId, ink: l.ink, custom: isCustom(l) }); }
   else if (rawLocs && typeof rawLocs === "object") for (const k of Object.keys(rawLocs)) { const l = rawLocs[k] || {}; picks.set(String(k), { graphicId: l.graphicId, ink: l.ink, custom: isCustom(l) }); }
 
-  const { tiersCents, reorderQrGraphicId, reorderQrTransferId } = await getTierPrices(db, orgId);
+  const { tiersCents, reorderQrGraphicId, reorderQrTransferId } = await lookedTiers_(db, orgId, lk);
   // Graphic + color pairs this product doesn't offer (migrations/0050).
   const blocked = tryParse_(productRow.blockedGraphicColorsJson, []) || [];
   let addOnCents = 0, needsCustomUpload = false;
@@ -2700,7 +2787,7 @@ async function priceConfigurable_(db, orgId, productRow, size, config, custom = 
     const gid = pick.graphicId == null || pick.graphicId === "" ? null : Number(pick.graphicId);
     if (!gid) continue; // "None" at this location
     if (!(loc.graphicIds || []).map(Number).includes(gid)) throw pricingError_(`That option isn't available at ${loc.label || loc.key}.`);
-    const g = await getGraphic(db, gid);
+    const g = await lookedGraphic_(db, gid, lk);
     if (!graphicUsableBy_(g, orgId) || !g.visible) throw pricingError_("That option isn't available.");
     if (g.allowedLocations.length && !g.allowedLocations.includes(String(loc.key))) throw pricingError_(`${g.name} can't go on ${loc.label || loc.key}.`);
     if (g.allowedGarmentColors.length && garmentColor && !g.allowedGarmentColors.includes(garmentColor)) throw pricingError_(`${g.name} isn't available on ${garmentColor}.`);
@@ -2716,7 +2803,7 @@ async function priceConfigurable_(db, orgId, productRow, size, config, custom = 
   }
   // The product's own printed transfers (migrations/0068) decorate it too, so with any of them every location
   // may be left at None.
-  const fixedLocs = await fixedTransferEntries_(db, orgId, productRow);
+  const fixedLocs = await fixedTransferEntries_(db, orgId, productRow, lk);
   // A product that offers no options at all (only garment colors — its decoration is its own designs, e.g. one made
   // with the New shop setup wizard) needs no pick.
   if (!snapLocs.length && !fixedLocs.length && productLocations.length) throw pricingError_("Pick at least one graphic — a blank garment can't be ordered.");
@@ -2724,7 +2811,7 @@ async function priceConfigurable_(db, orgId, productRow, size, config, custom = 
 
   // Reorder QR: an automatic, unpriced transfer application (COGS only), appended to the snapshot.
   // It's a TRANSFER linked directly (migrations/0047) — no graphic in between (see reorderQrEntry_).
-  const qrEntry = await reorderQrEntry_(db, orgId, productRow.reorderQr, { transferId: reorderQrTransferId, graphicId: reorderQrGraphicId });
+  const qrEntry = await reorderQrEntry_(db, orgId, productRow.reorderQr, { transferId: reorderQrTransferId, graphicId: reorderQrGraphicId }, lk);
   if (qrEntry) snapLocs.push(qrEntry);
   return { addOnCents, needsCustomUpload, snapshot: { garmentColor, size: size || "", locations: snapLocs } };
 }
@@ -8270,6 +8357,10 @@ export async function deleteGraphic(db, id) {
 export async function getTierPrices(db, orgId) {
   // SELECT * so a database from before 0047 (no reorderQrTransferId column) still answers.
   const r = await db.prepare("SELECT * FROM orgs WHERE orgId=?").bind(orgId).first().catch(() => null);
+  return tierPricesFromRow_(r);
+}
+// The same, from the shop's (live) orgs row.
+function tierPricesFromRow_(r) {
   const t = tryParse_(r && r.tierPricesJson, null) || { small: 100, medium: 200, large: 400 };
   return { tiersCents: { small: Number(t.small) || 0, medium: Number(t.medium) || 0, large: Number(t.large) || 0 },
     reorderQrGraphicId: r && r.reorderQrGraphicId != null ? Number(r.reorderQrGraphicId) : null,
@@ -8922,15 +9013,22 @@ export async function cancelRestockOrder(db, id) {
 // lines whose blanks are in (received, or taken with Use from stock) on real, open orders. They're still
 // on the shelf (stock comes out when the pieces are made, makeItemPieces_ / consumeBlanksForOrder), but
 // promised: Blanks to Order's `reserved`, the stock coverage below and the Blanks screen all use this.
-export async function getBlankReservations(db) {
+// `blankIds`: only those blanks are wanted (the shop page's stock), so only lines of products linked to one of them,
+// and only those links, are read — every shop's lines still count, since a blank is shared stock.
+export async function getBlankReservations(db, { blankIds } = {}) {
+  const only = Array.isArray(blankIds) ? JSON.stringify([...new Set(blankIds.map(Number))]) : null;
+  if (only === "[]") return {};
   const nb = await noBlankLine_(db);
   const [{ results: lines }, { results: links }] = await Promise.all([
     db.prepare(
       `SELECT oi.orgId, oi.productId, oi.size, oi.qty, COALESCE(oi.manufacturedQty, 0) AS made, oi.configJson
        FROM order_items oi JOIN orders o ON o.orderId = oi.orderId
        WHERE oi.cancelDate IS NULL AND o.voidedAt IS NULL AND o.isTest = 0 AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL AND o.manufacturedAt IS NULL
-         AND COALESCE(oi.blankReceivedAt, o.blankReceivedAt) IS NOT NULL AND NOT ${nb("oi")}`).all(),
-    db.prepare("SELECT orgId, productId, productColor, productSize, blankId, blankColor, blankSize FROM product_blank_links").all(),
+         AND COALESCE(oi.blankReceivedAt, o.blankReceivedAt) IS NOT NULL AND NOT ${nb("oi")}${only ? `
+         AND EXISTS (SELECT 1 FROM product_blank_links bl WHERE bl.orgId = oi.orgId AND bl.productId = oi.productId AND bl.blankId IN (SELECT value FROM json_each(?)))` : ""}`)
+      .bind(...(only ? [only] : [])).all(),
+    db.prepare(`SELECT orgId, productId, productColor, productSize, blankId, blankColor, blankSize FROM product_blank_links${only ? " WHERE blankId IN (SELECT value FROM json_each(?))" : ""}`)
+      .bind(...(only ? [only] : [])).all(),
   ]);
   const linkAt = new Map(links.map(l => [[l.orgId, l.productId, l.productColor || "", l.productSize || ""].join("\u0001"), l]));
   const out = {};
@@ -9866,17 +9964,22 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
   const sub = byList ? "SELECT value FROM json_each(?)" : `SELECT o.orderId FROM orders o WHERE ${where}`;
   binds = byList ? [JSON.stringify(orderRows.map(r => r.orderId))] : binds;
 
-  const missing = await orderDesignsMissingBy_(db, sub, binds);
+  // The orders' lines, payments, labels, blank shipments and invoices don't depend on each other: asked for together,
+  // so a page waits for one round trip to D1, not one after another. (Brand reviews and catalog changes need the
+  // lines, so they follow, together too.)
+  const [nb, dg] = await Promise.all([noBlankLine_(db), digitalLine_(db)]);
+  const [missing, { results: itemRows }, { results: paymentRows }, { results: labelRows }, shipmentsByOrder, invoices] = await Promise.all([
+    orderDesignsMissingBy_(db, sub, binds),
+    db.prepare(`SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId IN (${sub}) ORDER BY oi.id`).bind(...binds).all(),
+    db.prepare(`SELECT * FROM order_payments WHERE orderId IN (${sub}) ORDER BY receivedAt ASC`).bind(...binds).all(),
+    db.prepare(`SELECT * FROM shipping_labels WHERE orderId IN (${sub}) ORDER BY purchasedAt ASC`).bind(...binds).all(),
+    // Blank (garment) shipments per order (migrations/0039) — the Blank Shipped cell links them and the edit modal
+    // loads them. Scoped by the SAME order subquery, so a large Orders page can't hit D1's bound-parameter cap. A
+    // pre-migration DB yields {} internally.
+    blankShipmentsByOrder_(db, { sub, binds }),
+    invoicesByOrder_(db, sub, binds),   // the invoice link emailed for it, if any (0053)
+  ]);
   for (const r of orderRows) r.orderDesignsMissing = missing[r.orderId] || 0;
-
-  const nb = await noBlankLine_(db), dg = await digitalLine_(db);
-  const { results: itemRows } = await db.prepare(
-    `SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId IN (${sub}) ORDER BY oi.id`
-  ).bind(...binds).all();
-
-  const { results: paymentRows } = await db.prepare(
-    `SELECT * FROM order_payments WHERE orderId IN (${sub}) ORDER BY receivedAt ASC`
-  ).bind(...binds).all();
 
   const itemsByOrder = byId_();
   for (const it of itemRows) {
@@ -9890,22 +9993,17 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
     paymentsByOrder[p.orderId].push(parsePayment_(p));
   }
 
-  const { results: labelRows } = await db.prepare(
-    `SELECT * FROM shipping_labels WHERE orderId IN (${sub}) ORDER BY purchasedAt ASC`
-  ).bind(...binds).all();
   const labelsByOrder = byId_();
   for (const l of labelRows) (labelsByOrder[l.orderId] = labelsByOrder[l.orderId] || []).push(parseLabel_(l));
 
-  // Blank (garment) shipments per order (migrations/0039) — the Blank Shipped cell links them and
-  // the edit modal loads them. Scoped by the SAME order subquery the joins above use, so a large
-  // Orders page can't hit D1's bound-parameter cap. A pre-migration DB yields {} internally.
-  const shipmentsByOrder = await blankShipmentsByOrder_(db, { sub, binds });
-  const invoices = await invoicesByOrder_(db, sub, binds);   // the invoice link emailed for it, if any (0053)
-  // Restricted brands it has a large number of, and whether the supplier approved the logo (migrations/0075).
-  let reviews = new Map();
-  try { reviews = brandReviewsForLines_(await brandContext_(db, itemRows), itemRows); } catch (e) { console.error("brand review check failed:", e); }
-  let drift = new Map();
-  try { drift = await catalogDriftForLines_(db, itemRows); } catch (e) { console.error("catalog drift check failed:", e); }
+  // Restricted brands it has a large number of, and whether the supplier approved the logo (migrations/0075); and
+  // what the catalog has changed since each line was placed. Either failing only leaves its part out.
+  const [reviews, drift] = await Promise.all([
+    Promise.resolve().then(async () => brandReviewsForLines_(await brandContext_(db, itemRows), itemRows))
+      .catch(e => { console.error("brand review check failed:", e); return new Map(); }),
+    Promise.resolve().then(() => catalogDriftForLines_(db, itemRows))
+      .catch(e => { console.error("catalog drift check failed:", e); return new Map(); }),
+  ]);
 
   return orderRows.map((r) => {
     const o = parseOrder_(r, itemsByOrder[r.orderId] || [], paymentsByOrder[r.orderId] || [], labelsByOrder[r.orderId] || []);
@@ -9921,22 +10019,25 @@ export async function getOrderById(db, orderId) {
   const stage = await stageSql_(db);
   const row = await db.prepare(`SELECT o.*, ${stage.approval} AS needsDesignApproval, ${stage.digitizing} AS needsDigitizing FROM orders o WHERE o.orderId=?`).bind(orderId).first();
   if (!row) return null;
-  row.orderDesignsMissing = (await orderDesignsMissingBy_(db, "?", [orderId]))[orderId] || 0;
-  const nb = await noBlankLine_(db), dg = await digitalLine_(db);
-  const { results: itemRows } = await db.prepare(
-    `SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId=? ORDER BY oi.id`
-  ).bind(orderId).all();
-  const { results: paymentRows } = await db.prepare(
-    "SELECT * FROM order_payments WHERE orderId=? ORDER BY receivedAt ASC"
-  ).bind(orderId).all();
-  const { results: labelRows } = await db.prepare(
-    "SELECT * FROM shipping_labels WHERE orderId=? ORDER BY purchasedAt ASC"
-  ).bind(orderId).all();
+  // The order's parts, asked for together (as loadOrders_ does).
+  const [nb, dg] = await Promise.all([noBlankLine_(db), digitalLine_(db)]);
+  const [missing, { results: itemRows }, { results: paymentRows }, { results: labelRows }, blankShipments, invoices] = await Promise.all([
+    orderDesignsMissingBy_(db, "?", [orderId]),
+    db.prepare(`SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId=? ORDER BY oi.id`).bind(orderId).all(),
+    db.prepare("SELECT * FROM order_payments WHERE orderId=? ORDER BY receivedAt ASC").bind(orderId).all(),
+    db.prepare("SELECT * FROM shipping_labels WHERE orderId=? ORDER BY purchasedAt ASC").bind(orderId).all(),
+    Promise.resolve().then(() => getBlankShipmentsForOrder(db, orderId)).catch(() => []),
+    invoicesByOrder_(db, "?", [orderId]),
+  ]);
+  row.orderDesignsMissing = missing[orderId] || 0;
   const order = parseOrder_(row, itemRows.map(parseItem_), paymentRows.map(parsePayment_), labelRows.map(parseLabel_));
-  order.blankShipments = await getBlankShipmentsForOrder(db, orderId).catch(() => []);
-  order.invoice = (await invoicesByOrder_(db, "?", [orderId]))[orderId] || null;
-  try { order.brandReview = brandReviewsForLines_(await brandContext_(db, itemRows), itemRows).get(orderId) || []; } catch (e) { order.brandReview = []; }
-  try { order.catalogDrift = row.manufacturedAt || row.completedAt || row.voidedAt ? [] : (await catalogDriftForLines_(db, itemRows)).get(orderId) || []; } catch (e) { order.catalogDrift = []; }
+  order.blankShipments = blankShipments;
+  order.invoice = invoices[orderId] || null;
+  const settled = row.manufacturedAt || row.completedAt || row.voidedAt;
+  [order.brandReview, order.catalogDrift] = await Promise.all([
+    Promise.resolve().then(async () => brandReviewsForLines_(await brandContext_(db, itemRows), itemRows).get(orderId) || []).catch(() => []),
+    settled ? [] : Promise.resolve().then(async () => (await catalogDriftForLines_(db, itemRows)).get(orderId) || []).catch(() => []),
+  ]);
   return order;
 }
 
@@ -9949,8 +10050,9 @@ export async function getOrderById(db, orderId) {
 export async function insertOrder(db, order, pricedItems, opts = {}) {
   const stmts = [];
   // configJson is additive (migrations/0036); tolerate a pre-0036 schema (tests pin older subsets).
-  let hasConfig = false;
-  try { const { results } = await db.prepare("PRAGMA table_info(order_items)").all(); hasConfig = results.some(c => c.name === "configJson"); } catch (e) { /* ignore */ }
+  // (Only a "yes" is remembered for the database, like hasFromStockColumn_, so the check isn't run for every order.)
+  let hasConfig = db.__oiHasConfig === true;
+  if (!hasConfig) try { const { results } = await db.prepare("PRAGMA table_info(order_items)").all(); hasConfig = results.some(c => c.name === "configJson"); if (hasConfig) db.__oiHasConfig = true; } catch (e) { /* ignore */ }
 
   // Line and order totals are computed here in integer cents from the unit
   // prices, not taken from the caller's floating-point dollar sums.
@@ -9978,7 +10080,11 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   const lineRateBps = taxExempt || outOfState ? 0 : orderRateBps;
   // Each line's taxable flag: the catalog product's, or the caller's for a
   // custom (local-sale) line; default taxable.
-  const { results: prodRows } = await db.prepare("SELECT * FROM products WHERE orgId=?").bind(order.orgId).all();
+  // Only this order's products are read (not the shop's whole catalog).
+  const orderProductIds = [...new Set(pricedItems.map(it => it.productId).filter(id => id != null && id !== "").map(String))];
+  const { results: prodRows } = orderProductIds.length
+    ? await db.prepare("SELECT * FROM products WHERE orgId=? AND productId IN (SELECT value FROM json_each(?))").bind(order.orgId, JSON.stringify(orderProductIds)).all()
+    : { results: [] };
   const productRow = Object.fromEntries(prodRows.map(r => [r.productId, r]));
   const fillFromStock = !!opts.fillFromStock && !order.isTest && await hasFromStockColumn_(db);
   const productTaxable = Object.fromEntries(prodRows.map(r => [r.productId, !!r.taxable]));
@@ -10737,8 +10843,9 @@ export async function getOrderTotal(db, orderId) {
 
 // ---- Catalog data for getCatalogData() --------------------------------
 
-// One shop as the storefront needs it, from its rows (published, or live for a draft preview).
-async function catalogShopFromRows_(db, rows, rushSettings) {
+// One shop as the storefront needs it, from its rows (published, or live for a draft preview). `pre`: the whole
+// install's lookups (catalogPrefetch_) when every shop is being built at once; without it the shop reads its own.
+async function catalogShopFromRows_(db, rows, rushSettings, pre) {
   const org = parseOrg_(rows.org);
   // The rush fee this shop offers (migrations/0082), resolved here — its own rule, else the global one — as the shop page
   // needs it (dollars; null = no rush). Never the tax setting.
@@ -10747,16 +10854,16 @@ async function catalogShopFromRows_(db, rows, rushSettings) {
   // With tax added on top (taxMode "exclusive") the cart's tax estimate needs to know whether the fee is taxed.
   org.rushOffer = rushView ? { ...rushView, taxable: !!(rushSet && rushSet.taxable) } : rushView;
   const visible = rows.products.filter(p => Number(p.visible)).sort((a, b) => (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0) || String(a.productId).localeCompare(String(b.productId)));
-  let products = await productsFromRows_(db, org.orgId, visible);
+  let products = await productsFromRows_(db, org.orgId, visible, undefined, pre);
   // Blank color images (migrations/0037): each product's linked blank colors' images, keyed by the product color the
   // link is for, so the storefront can show the garment's photo per color. Images only — no stock reaches the catalog.
-  products = await attachBlankColorImages_(db, org.orgId, products);
+  products = await attachBlankColorImages_(db, org.orgId, products, pre);
   // Per-location mockups (0042) — any product's: a plain product can have mockups of its printed transfers (0067).
-  products = await attachProductGraphicImages_(db, org.orgId, products);
-  products = await attachDecorations_(db, org.orgId, products);
+  products = await attachProductGraphicImages_(db, org.orgId, products, pre);
+  products = await attachDecorations_(db, org.orgId, products, pre);
   if (!products.some(p => p.configurable)) return { ...org, products };
-  const { tiersCents } = await getTierPrices(db, org.orgId);
-  const graphics = (await listGraphics(db, org.orgId)).filter(g => g.visible).map(g => ({
+  const { tiersCents } = pre ? tierPricesFromRow_(pre.liveOrgs[org.orgId]) : await getTierPrices(db, org.orgId);
+  const graphics = (pre ? pre.graphicsFor(org.orgId) : await listGraphics(db, org.orgId)).filter(g => g.visible).map(g => ({
     id: g.id, name: g.name, kind: g.kind, tier: g.tier, addOnCents: g.tier ? (tiersCents[g.tier] || 0) : 0,
     inkColors: g.inkColors, imageUrl: g.imageUrl, thumbUrl: g.thumbUrl,
     allowedLocations: g.allowedLocations, allowedGarmentColors: g.allowedGarmentColors,
@@ -10768,9 +10875,58 @@ export async function getDraftCatalogShop(db, orgId) {
   const rows = await liveShopRows_(db, orgId);
   return rows ? catalogShopFromRows_(db, rows) : null;
 }
+// Everything the storefront catalog reads for its shops, read for the WHOLE install in one go and grouped by shop
+// in memory: each shop's published rows (its snapshot, or its live rows if never published — migrations/0076), the
+// products' designs and blank weights, blank color photos, mockups, locations, graphics and design names. So building
+// the catalog takes the same dozen or so queries however many shops there are (D1 caps the queries one request may
+// make), where building shop by shop took about ten per shop. Each read tolerates a database from before its
+// migration the way the shop-by-shop helpers do.
+async function catalogPrefetch_(db) {
+  const all = (sql, ...binds) => db.prepare(sql).bind(...binds).all().then(r => r.results || []);
+  const byOrg = (rows) => { const out = {}; for (const r of rows) (out[r.orgId] = out[r.orgId] || []).push(r); return out; };
+  const orElse = (p, v) => p.catch(() => v);
+  const withFallback = (sql, fallback) => all(sql).catch(e => { if (/no such column/i.test(String(e && e.message))) return all(fallback); throw e; });
+  const [orgRows, snapRows, partRows] = await Promise.all([
+    all("SELECT * FROM orgs ORDER BY orgId"),
+    orElse(all("SELECT orgId, json, publishedAt, publishedBy FROM catalog_snapshots"), []),   // before 0076: none
+    orElse(all("SELECT orgId, part, json FROM catalog_snapshot_parts ORDER BY orgId, part"), []),   // before 0225: none
+  ]);
+  const snapOf = new Map(snapRows.map(r => [r.orgId, r])), partsOf = byOrg(partRows);
+  const shopRows = [], unpublished = [];
+  for (const org of orgRows) {
+    const r = snapOf.get(org.orgId), rows = r ? await snapshotRows_(db, org.orgId, r.json, partsOf[org.orgId] || []) : null;
+    if (rows) shopRows.push(rows); else { unpublished.push(org.orgId); shopRows.push({ org, products: null }); }
+  }
+  const [liveProducts, productDesigns, weights, links, colors, mockups, locations, graphics, designs] = await Promise.all([
+    unpublished.length ? all("SELECT * FROM products WHERE orgId IN (SELECT value FROM json_each(?)) ORDER BY productId", JSON.stringify(unpublished)) : [],
+    orElse(all("SELECT * FROM product_designs ORDER BY sortOrder, id"), null),
+    getBlankWeights(db, null),
+    orElse(all(`SELECT l.orgId, l.productId, l.productColor, l.blankId, bc.imagesJson
+       FROM product_blank_links l JOIN blank_colors bc ON bc.blankId = l.blankId AND bc.color = l.blankColor
+       ORDER BY l.orgId, l.productId, l.productColor, l.productSize`), null),
+    orElse(all(`SELECT bc.blankId, bc.color, bc.imagesJson FROM blank_colors bc
+       WHERE bc.blankId IN (SELECT DISTINCT blankId FROM product_blank_links) ORDER BY bc.blankId, bc.color`), null),
+    orElse(all("SELECT orgId, productId, locationId, graphicId, garmentColor, imageUrl FROM product_graphic_images WHERE imageUrl <> ''"), null),
+    orElse(listLocations(db), null),
+    withFallback("SELECT * FROM graphics ORDER BY isGlobal, sortOrder, name", "SELECT * FROM graphics ORDER BY sortOrder, name").then(rows => rows.map(parseGraphic_), e => ({ error: e })),
+    orElse(withFallback("SELECT id, orgId, name, isGlobal FROM designs ORDER BY isGlobal, name", "SELECT id, orgId, name FROM designs ORDER BY name"), null),
+  ]);
+  const liveOf = byOrg(liveProducts);
+  for (const rows of shopRows) if (!rows.products) rows.products = liveOf[rows.org.orgId] || [];
+  return { shopRows, pre: {
+    liveOrgs: Object.fromEntries(orgRows.map(o => [o.orgId, o])),
+    productDesigns: productDesigns && byOrg(productDesigns), weights,
+    blankLinkImages: links && colors ? byOrg(links) : null, blankColors: links && colors ? colors : null,
+    mockups: mockups && byOrg(mockups), locations,
+    // A shop's own graphics and every global one (listGraphics), in its order.
+    graphicsFor: (orgId) => { if (graphics.error) throw graphics.error; return graphics.filter(g => g.orgId === orgId || g.isGlobal); },
+    // A shop's own designs and every global one (listDesigns), for their names.
+    designsFor: (orgId) => (designs || []).filter(d => d.orgId === orgId || !!Number(d.isGlobal)).map(d => ({ id: Number(d.id), name: d.name || "" })),
+  } };
+}
 export async function getPublicCatalogData(db) {
   // Each shop as PUBLISHED (migrations/0076): its snapshot rows, or its live rows if never published.
-  const shopRows = await Promise.all((await db.prepare("SELECT orgId FROM orgs ORDER BY orgId").all()).results.map(r => publishedShopRows_(db, r.orgId)));
+  const { shopRows, pre } = await catalogPrefetch_(db);
   const [baseSettings, salesTax, business, locale, features, categories, rushFee] = await Promise.all([
     getGlobalSettings(db),
     getSalesTaxSettings(db),
@@ -10784,7 +10940,7 @@ export async function getPublicCatalogData(db) {
 
   // Each shop with its visible products; configurable products also need the shop's visible graphics (option
   // tiles, with the tier add-on resolved) + tier prices (migrations/0036), blank color images (0037) and mockups.
-  const orgsWithProducts = await Promise.all(shopRows.filter(Boolean).map(rows => catalogShopFromRows_(db, rows, rushFee)));
+  const orgsWithProducts = await Promise.all(shopRows.map(rows => catalogShopFromRows_(db, rows, rushFee, pre)));
   // Build subdomainMap: { [subdomain]: orgId } — the published address.
   const subdomainMap = {};
   for (const org of orgsWithProducts) subdomainMap[org.subdomain] = org.orgId;
@@ -10806,22 +10962,28 @@ export async function getPublicCatalogData(db) {
 // Attaches `colorImages` { <productColor>: [imageUrls] } to each product, resolved from its blank
 // links to the linked blank colors' images (migrations/0037). Tolerates a pre-0037 DB (no
 // blank_colors / link color columns) by yielding no images.
-async function attachBlankColorImages_(db, orgId, products) {
+async function attachBlankColorImages_(db, orgId, products, pre) {
   let rows = [], colorRows = [];
-  try {
+  if (pre) {
+    if (!pre.blankLinkImages) return products;
+    rows = pre.blankLinkImages[orgId] || [];
+    colorRows = pre.blankColors;   // every shop's linked blanks' colors: only the product's own blanks are looked at
+  } else try {
     const r = await db.prepare(
       `SELECT l.productId, l.productColor, l.blankId, bc.imagesJson
        FROM product_blank_links l JOIN blank_colors bc ON bc.blankId = l.blankId AND bc.color = l.blankColor
-       WHERE l.orgId = ?`
+       WHERE l.orgId = ? ORDER BY l.orgId, l.productId, l.productColor, l.productSize`
     ).bind(orgId).all();
     rows = r.results || [];
     // Every color of the blanks this shop's products are linked to — for a garment color with no links of its own.
     colorRows = (await db.prepare(
       `SELECT bc.blankId, bc.color, bc.imagesJson FROM blank_colors bc
-       WHERE bc.blankId IN (SELECT DISTINCT blankId FROM product_blank_links WHERE orgId = ?)`
+       WHERE bc.blankId IN (SELECT DISTINCT blankId FROM product_blank_links WHERE orgId = ?) ORDER BY bc.blankId, bc.color`
     ).bind(orgId).all()).results || [];
   } catch (e) { return products; }
   if (!rows.length) return products;
+  const colorsOfBlank = new Map();
+  for (const r of colorRows) { const k = Number(r.blankId); if (!colorsOfBlank.has(k)) colorsOfBlank.set(k, []); colorsOfBlank.get(k).push(r); }
   const urlsOf = (json) => (tryParse_(json, []) || []).map(normBlankImage_).filter(Boolean).map(x => x.url);
   const byProduct = {}, blanksOf = {};
   for (const r of rows) {
@@ -10841,9 +11003,11 @@ async function attachBlankColorImages_(db, orgId, products) {
     const colors = (Array.isArray(p.garmentColors) ? p.garmentColors : []).map(c => typeof c === "object" && c ? c.color || c.name : c).filter(Boolean);
     const ids = blanksOf[p.productId];
     if (!colors.length || !ids) continue;
+    // The product's blanks' colors, in blank then color order (as the query sorts them).
+    const candidates = [...ids].sort((a, b) => a - b).flatMap(id => colorsOfBlank.get(id) || []);
     for (const c of colors) {
       if (byProduct[p.productId] && byProduct[p.productId][c]) continue;
-      const hit = colorRows.find(r => ids.has(Number(r.blankId)) && key(r.color) === key(c) && urlsOf(r.imagesJson).length);
+      const hit = candidates.find(r => key(r.color) === key(c) && urlsOf(r.imagesJson).length);
       if (hit) (byProduct[p.productId] = byProduct[p.productId] || {})[c] = urlsOf(hit.imagesJson);
     }
   }
@@ -10932,9 +11096,10 @@ export async function deleteProductGraphicImage(db, m) {
 // mockups, for the shop page (migrations/0042): a configurable product's live per-location preview, and the
 // pictures of its printed transfers (migrations/0068) — `fixedMockups` [{locationId, graphicId, label}] says which
 // keys those are (a plain product's are under garment color ""). One query per shop, whatever the number of products.
-async function attachProductGraphicImages_(db, orgId, products) {
+async function attachProductGraphicImages_(db, orgId, products, pre) {
   let rows = [];
-  try {
+  if (pre) { if (!pre.mockups) return products; rows = pre.mockups[orgId] || []; }
+  else try {
     const r = await db.prepare(
       "SELECT productId, locationId, graphicId, garmentColor, imageUrl FROM product_graphic_images WHERE orgId=? AND imageUrl <> ''"
     ).bind(orgId).all();
@@ -10944,7 +11109,7 @@ async function attachProductGraphicImages_(db, orgId, products) {
   const byProduct = {};
   for (const r of rows) (byProduct[r.productId] = byProduct[r.productId] || {})[`${r.locationId}|${r.graphicId}|${r.garmentColor}`] = r.imageUrl;
   let names = null;
-  const locName = async (id) => { if (!names) { names = {}; try { for (const l of await listLocations(db)) names[Number(l.id)] = l.name; } catch (e) {} } return names[Number(id)] || ""; };
+  const locName = async (id) => { if (!names) { names = {}; try { for (const l of (pre ? pre.locations || [] : await listLocations(db))) names[Number(l.id)] = l.name; } catch (e) {} } return names[Number(id)] || ""; };
   const out = [];
   for (const p of products) {
     const gi = byProduct[p.productId];
@@ -10963,13 +11128,13 @@ async function attachProductGraphicImages_(db, orgId, products) {
 // name, location}] — shown whether or not there's a picture of it. The embroidered graphics placed for mockups name the
 // embroidery where it sits (else the product's own designs with their placement), and its printed transfers what's
 // printed where. A configurable product's options are the customer's picks, so they aren't listed here.
-async function attachDecorations_(db, orgId, products) {
+async function attachDecorations_(db, orgId, products, pre) {
   const has = (p) => (p.designs || []).length || p.designId || (p.fixedTransfers || []).length || (p.mockupGraphics || []).length;
   if (!products.some(has)) return products;
   const graphics = {}, designs = {}, locs = {};
-  try { for (const g of await listGraphics(db, orgId)) graphics[Number(g.id)] = g; } catch (e) {}
-  try { for (const d of await listDesigns(db, orgId)) designs[Number(d.id)] = d; } catch (e) {}
-  try { for (const l of await listLocations(db)) locs[Number(l.id)] = l.name; } catch (e) {}
+  try { for (const g of (pre ? pre.graphicsFor(orgId) : await listGraphics(db, orgId))) graphics[Number(g.id)] = g; } catch (e) {}
+  try { for (const d of (pre ? pre.designsFor(orgId) : await listDesigns(db, orgId))) designs[Number(d.id)] = d; } catch (e) {}
+  try { for (const l of (pre ? pre.locations || [] : await listLocations(db))) locs[Number(l.id)] = l.name; } catch (e) {}
   return products.map(p => {
     if (!has(p)) return p;
     const out = [];
@@ -13377,7 +13542,9 @@ export async function getBlankReadyByOrg(db, orgId) {
   let rows;
   try { ({ results: rows } = await db.prepare(sql(true)).bind(orgId).all()); }
   catch (e) { ({ results: rows } = await db.prepare(sql(false)).bind(orgId).all()); }
-  const held = await getBlankReservations(db);
+  if (!rows.length) return {};
+  // What's set aside of just the blanks this shop's products use (every shop's orders count).
+  const held = await getBlankReservations(db, { blankIds: rows.map(r => Number(r.blankId)) });
   const out = {};
   for (const r of rows) {
     const free = (Number(r.quantity) || 0) - (held[[r.blankId, r.blankColor || "", r.blankSize || ""].join("|")] || 0);

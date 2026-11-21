@@ -19,6 +19,16 @@
  * ---- RESILIENCE ----
  * On a D1 read failure the last successfully-fetched catalog for this colo
  * (Cache API) is served. Only throws if there is nothing to fall back to yet.
+ *
+ * ---- IN MEMORY ----
+ * The catalog this isolate last read is also kept parsed in memory, under the
+ * same versioned key, for the same CACHE_TTL_SECONDS counted from when it was
+ * built. A request in a warm isolate then needs no Cache API read and no JSON
+ * parse of every shop's products — and on a workers.dev address, where the
+ * Cache API keeps nothing, no rebuild from D1. (A rebuild in progress isn't
+ * shared with other requests: Workers can't safely await one request's I/O
+ * from another.) The object is shared by every request the isolate serves, so
+ * callers only read it, never change it.
  */
 
 import { getPublicCatalogData, getCatalogCacheState } from "./db.js";
@@ -57,8 +67,15 @@ export function invalidateCatalogVersionCache(){
   _state = { v: null, ns: _state.ns, at: 0 };
 }
 
+// The parsed catalog this isolate last read: its cache key and when it was built (ms).
+let _mem = { key: null, data: null, builtAt: 0 };
+const BUILT_AT_HEADER = "X-Catalog-Built-At";
+function remember_(key, data, builtAt){
+  if(builtAt > 0 && Date.now() - builtAt < CACHE_TTL_SECONDS * 1000) _mem = { key, data, builtAt };
+}
+
 // Test hook.
-export function _resetCatalogCacheState(){ _state = { v: null, ns: null, at: 0 }; }
+export function _resetCatalogCacheState(){ _state = { v: null, ns: null, at: 0 }; _mem = { key: null, data: null, builtAt: 0 }; }
 
 function versionedCacheKey(ns, version){
   return CACHE_BASE + ns + "/v" + encodeURIComponent(version);
@@ -80,23 +97,33 @@ async function fetchFromD1_(env){
 
 export async function getCatalogData(env){
   const { version, ns } = await getCacheState_(env);
+  const key = versionedCacheKey(ns, version);
+  if(_mem.key === key && Date.now() - _mem.builtAt < CACHE_TTL_SECONDS * 1000) return _mem.data;
 
   const cache = caches.default;
-  const key = versionedCacheKey(ns, version);
   const cached = await cache.match(key);
   if(cached){
-    return await cached.json();
+    const data = await cached.json();
+    // An entry stored before the built-at header existed isn't kept in memory (its age is unknown).
+    remember_(key, data, Number(cached.headers.get(BUILT_AT_HEADER)) || 0);
+    return data;
   }
+  return rebuild_(env, cache, key, ns);
+}
 
+async function rebuild_(env, cache, key, ns){
   try{
     const data = await fetchFromD1_(env);
+    const builtAt = Date.now();
     const response = new Response(JSON.stringify(data), {
-      headers: { "Content-Type": "application/json", "Cache-Control": "max-age=" + CACHE_TTL_SECONDS }
+      headers: { "Content-Type": "application/json", "Cache-Control": "max-age=" + CACHE_TTL_SECONDS, [BUILT_AT_HEADER]: String(builtAt) }
     });
     await cache.put(key, response.clone());
     await cache.put(staleFallbackKey(ns), response.clone());
+    remember_(key, data, builtAt);
     return data;
   }catch(err){
+    // (The fallback copy isn't kept in memory: the next request tries D1 again.)
     const stale = await cache.match(staleFallbackKey(ns));
     if(stale){
       return await stale.json();

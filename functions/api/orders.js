@@ -50,7 +50,7 @@ import { readInvoiceWithAi } from "../_lib/invoiceAi.js";
 import { jsonResponse, featureOffResponse, signOrderToken } from "../_lib/http.js";
 import {
   getAllOrgs, getOrgById, createOrg, updateOrg, cleanDeliveryOptions, setOrgDeliveryOptions, defaultDeliveryOptions, cleanShippingAddress, stagePrereqError, stageTimeError, shopTime_, ORDER_DATE_FIELDS, orderDatesError, setOrderDates, whyNotCompletable_, getSystemIssues,
-  getProductsByOrg, productShipWeightOz, createProduct, updateProduct, setProductVisible,
+  getProductsByOrg, getProductsByIds, priceLookups, productShipWeightOz, createProduct, updateProduct, setProductVisible,
   getGlobalSettings, setGlobalSettings, getMachineSettings, setMachineSettings,
   getShipFromAddress, setShipFromAddress, shipFromMissing, getBusinessProfile, setBusinessProfile, getLocaleSettings, setLocaleSettings, FEATURES, getFeatures, setFeatures, resolveTimeZone, setOrdersCompleted, getShippedAwaitingDelivery,
   getBoxPresets, setBoxPresets,
@@ -2317,6 +2317,7 @@ export async function onRequestPost(context) {
 
     let pricedItems;
     let subtotal = 0;
+    const lookups = priceLookups();   // the shop's published catalog, read once for every line
     try {
       pricedItems = await Promise.all(
         body.items.map(async (it) => {
@@ -2335,11 +2336,11 @@ export async function onRequestPost(context) {
           if (hasCustom) {
             // For catalog products: validate the product exists but ignore its price.
             // For __custom__ items: no catalog lookup needed.
-            if (!isCustomItem) { const v = await priceItem(env.DB, org, it.productId, it.size, qty, false); catalogName = v.name; catalogType = v.type; }
+            if (!isCustomItem) { const v = await priceItem(env.DB, org, it.productId, it.size, qty, false, undefined, { lookups }); catalogName = v.name; catalogType = v.type; }
             unitPrice = rawCustom;
             personalizationFee = 0;
           } else {
-            const priced = await priceItem(env.DB, org, it.productId, it.size, qty, !!it.personalized, it.config);
+            const priced = await priceItem(env.DB, org, it.productId, it.size, qty, !!it.personalized, it.config, { lookups });
             ({ unitPrice, personalizationFee } = priced);
             lineConfig = priced.config;
             catalogName = priced.name; catalogType = priced.type;
@@ -2841,6 +2842,7 @@ export async function onRequestPost(context) {
     // re-validated and the stored snapshot is rebuilt server-side, never trusted from the client), so a
     // line that can't be priced refuses the whole edit before anything is written.
     const updateWrites = [];
+    const lookups = priceLookups();   // the shop's published catalog, read once for every change
     for (const upd of updates) {
       const itemId = Number(upd.itemId);
       let unitPrice = 0, personalizationFee = 0, lineConfig;
@@ -2850,7 +2852,7 @@ export async function onRequestPost(context) {
       const saved = (order.items || []).find(i => Number(i.sheetRow) === itemId);
       try {
         pricing = await priceItem(env.DB, orgId, upd.productId, upd.size, Number(upd.qty) || 1, !!upd.personalized, upd.config,
-          { custom: saved && saved.productId === upd.productId ? customFromConfig(saved.config) : {} });
+          { custom: saved && saved.productId === upd.productId ? customFromConfig(saved.config) : {}, lookups });
       } catch (e) {
         if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400);
       }
@@ -2878,7 +2880,7 @@ export async function onRequestPost(context) {
       let unitPrice = 0, personalizationFee = 0, lineConfig;
       let pricing = null;
       try {
-        pricing = await priceItem(env.DB, orgId, add.productId, add.size, Number(add.qty) || 1, !!add.personalized, add.config);
+        pricing = await priceItem(env.DB, orgId, add.productId, add.size, Number(add.qty) || 1, !!add.personalized, add.config, { lookups });
       } catch (e) {
         if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400);
       }
@@ -3063,7 +3065,8 @@ export async function onRequestPost(context) {
       }
       return changes;
     };
-    const productOf_ = async (orgId, productId) => (await getProductsByOrg(env.DB, orgId, false)).find(p => p.productId === productId) || null;
+    // One product as the admin has it (for the audit's before / after): only that product is read, not the shop's catalog.
+    const productOf_ = async (orgId, productId) => (await getProductsByIds(env.DB, orgId, [productId])).find(p => p.productId === productId) || null;
 
     if (body.action === "listOrgsAdmin") {
       const orgs = await getAllOrgs(env.DB);
@@ -6538,7 +6541,9 @@ export async function onRequestPost(context) {
   // Org must exist, be open for orders, and not past a hard deadline —
   // enforced here, not just in the browser.
   // The shop as PUBLISHED (migrations/0076): open / deadline / delivery fees are what the shopper saw.
-  const orgRow = await getPublishedOrg(env.DB, orgId);
+  // The shop's published catalog is read once for the whole order (priceLookups): its row here, every line's product below.
+  const lookups = priceLookups();
+  const orgRow = await getPublishedOrg(env.DB, orgId, lookups);
   if (!orgRow || !orgRow.ready) {
     return jsonResponse({ status: "error", message: "This shop is not currently accepting orders." }, 403);
   }
@@ -6610,7 +6615,7 @@ export async function onRequestPost(context) {
       items.map(async (it, n) => {
         const qty = lineQty(it.qty);
         const priced = await priceItem(
-          env.DB, orgId, it.productId, it.size, qty, !!it.personalized, it.config, { custom: customByLine[n] }
+          env.DB, orgId, it.productId, it.size, qty, !!it.personalized, it.config, { custom: customByLine[n], lookups }
         );
         if (priced.needsCustomUpload) throw Object.assign(new Error(`Upload your design to order ${priced.name || "this item"}.`), { userFacing: true });
         const { unitPrice, personalizationFee, name, type } = priced;
@@ -6636,6 +6641,10 @@ export async function onRequestPost(context) {
     if (!e || !e.userFacing) console.error("Order pricing failed:", e);
     return jsonResponse({ status: "error", message: e && e.userFacing ? e.message : "We couldn't price your order — please refresh the page and try again." }, 400);
   }
+
+  // The cart's products as the catalog has them now (weights for the box and the parcel): read once, and only those.
+  let cartProducts_ = null;
+  const cartProducts = () => cartProducts_ || (cartProducts_ = getProductsByIds(env.DB, orgId, pricedItems.map(it => it.productId)));
 
   // Digital products (migrations/0086) aren't delivered: a cart of only those needs no delivery choice, and they add
   // nothing to a mixed cart's parcel.
@@ -6691,7 +6700,7 @@ export async function onRequestPost(context) {
     // to have any order placed with no shipping charge at all.
     let fitsABox = true;
     try {
-      const products = await getProductsByOrg(env.DB, orgId, true);
+      const products = (await cartProducts()).filter(p => p.visible);
       const weightOf = new Map(products.map(p => [String(p.productId), p.weightOz]));
       let presets = null, packAs = null;
       try { presets = await getBoxPresets(env.DB); } catch (_) {}
@@ -6785,7 +6794,7 @@ export async function onRequestPost(context) {
   // Weight from the catalog, not the client (used later for label purchase).
   let serverWeightOz = 0;
   try {
-    const products = await getProductsByOrg(env.DB, orgId, false);
+    const products = await cartProducts();
     const byId = Object.fromEntries(products.map(p => [p.productId, p]));
     serverWeightOz = pricedItems.reduce((sum, it) => {
       if (digitalIds.has(String(it.productId))) return sum;

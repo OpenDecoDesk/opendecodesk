@@ -1342,6 +1342,9 @@ let currentOrgId = null;
 let currentOrg = null;
 // On the admin host: { rootDomain } from /api/catalog ("" until the site has a domain). admin.js reads it.
 let siteInfo_ = {};
+// On the admin host: the version of admin.js to load (/api/catalog's adminScript — a hash of the file, or the desktop
+// program's version), so the browser keeps the file between visits and fetches it again only after it changes.
+let adminScriptVersion_ = "";
 
 async function resolveCurrentOrg(){
   try{
@@ -1354,7 +1357,8 @@ async function resolveCurrentOrg(){
     applyBusiness_(data.business);
     applyCountry_(data.country);
     applyFeatures_(data.features);
-    if(data.status === "admin"){ applyEdition_(data.edition, data.desktopSuppliers, data.desktopEmail, data.version); applyAdminIcon_(); siteInfo_ = data.site || {}; return {admin:true}; }
+    if(data.status === "admin"){ applyEdition_(data.edition, data.desktopSuppliers, data.desktopEmail, data.version); applyAdminIcon_(); siteInfo_ = data.site || {};
+      adminScriptVersion_ = typeof data.adminScript === "string" ? data.adminScript : ""; return {admin:true}; }
     // Global settings → Features → Storefront is off: no shop is served here (see catalog.js).
     if(data.status === "closed") return {closed:true};
     if(data.status !== "ok") return null;
@@ -1381,7 +1385,8 @@ function loadAdminScript(){
   if(adminScriptPromise) return adminScriptPromise;
   adminScriptPromise = new Promise((resolve, reject) => {
     const s = document.createElement("script");
-    s.src = "admin.js?v=" + Date.now();
+    // Under its version (adminScriptVersion_), so it's kept between visits; with none known, fresh every time.
+    s.src = "admin.js" + (adminScriptVersion_ ? "?v=" + encodeURIComponent(adminScriptVersion_) : "?t=" + Date.now());
     s.onload = resolve;
     s.onerror = () => { adminScriptPromise = null; reject(new Error("Could not load admin.js")); };
     document.head.appendChild(s);

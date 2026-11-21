@@ -57,6 +57,8 @@ Object.assign(global, new Function(require("fs").readFileSync(__dirname + "/func
 global.createOrg = async () => ({});
 global.updateOrg = async () => {};
 global.getProductsByOrg = async () => [];
+global.getProductsByIds = async () => [];
+global.priceLookups = () => new Map();   // one order's catalog lookups (db.js)
 global.createProduct = async () => {};
 global.updateProduct = async () => {};
 global.setProductVisible = async () => {};

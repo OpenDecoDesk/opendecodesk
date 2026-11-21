@@ -157,4 +157,68 @@ function makeCachesMock(){
     console.log("An outage there falls back to its own last-good copy:", !!fb.subdomainMap.teststaging && !fb.subdomainMap.prod);
     _resetCatalogCacheState();
   }
+
+  console.log("\n=== The parsed catalog is kept in memory for the Cache API's 5 minutes, from when it was built ===");
+  {
+    const store = makeCachesMock(); _resetCatalogCacheState();
+    const DB = await makePlatformDb();
+    let d1Calls = 0, matches = 0;
+    const match = global.caches.default.match;
+    global.caches.default.match = async (k) => { matches++; return match(k); };
+    global.getPublicCatalogData = async () => { d1Calls++; return { subdomainMap: { x: "org-x-" + d1Calls }, orgs: {} }; };
+    const env = { DB };
+    const first = await getCatalogData(env);
+    const m0 = matches;
+    const second = await getCatalogData(env), third = await getCatalogData(env);
+    console.log("Later requests in the isolate get the same parsed catalog, with no Cache API read or rebuild:", second === first && third === first && matches === m0 && d1Calls === 1);
+    console.log("The stored copy says when it was built:", Number([...store.values()][0].headers.get("X-Catalog-Built-At")) > 0);
+    // 5 minutes after it was built, memory no longer answers (the Cache API copy has expired by then too).
+    const realNow = Date.now;
+    Date.now = () => realNow() + 301 * 1000;
+    store.clear();
+    const later = await getCatalogData(env);
+    Date.now = realNow;
+    console.log("…not past 5 minutes, then it is rebuilt:", later.subdomainMap.x === "org-x-2" && d1Calls === 2);
+    // A Publish (new version) never gets the old catalog from memory.
+    await bumpCatalogVersion(DB); invalidateCatalogVersionCache();
+    const published = await getCatalogData(env);
+    console.log("A Publish's new version is read afresh, not taken from memory:", published.subdomainMap.x === "org-x-3" && d1Calls === 3);
+    // A new isolate reading the Cache API copy keeps it in memory too (it has the built-at time).
+    _resetCatalogCacheState(); matches = 0;
+    const fromCache = await getCatalogData(env), again = await getCatalogData(env);
+    console.log("A copy read from the Cache API is kept in memory after one read:", fromCache.subdomainMap.x === "org-x-3" && again === fromCache && matches === 1 && d1Calls === 3);
+    global.caches.default.match = match;
+  }
+
+  console.log("\n=== A Cache API copy without a built-at time (stored before this) isn't kept in memory ===");
+  {
+    const store = makeCachesMock(); _resetCatalogCacheState();
+    const DB = await makePlatformDb();
+    global.getPublicCatalogData = async () => ({ subdomainMap: { x: "org-x" }, orgs: {} });
+    await getCatalogData({ DB });
+    for (const [k, r] of [...store.entries()]) store.set(k, new Response(await r.clone().text(), { headers: { "Content-Type": "application/json" } }));
+    _resetCatalogCacheState();
+    let matches = 0; const match = global.caches.default.match;
+    global.caches.default.match = async (k) => { matches++; return match(k); };
+    const a = await getCatalogData({ DB }), b = await getCatalogData({ DB });
+    console.log("Each request reads it from the Cache API (its age is unknown):", a.subdomainMap.x === "org-x" && b.subdomainMap.x === "org-x" && matches === 2);
+    global.caches.default.match = match;
+  }
+
+  console.log("\n=== The last-known-good fallback isn't kept in memory: the next request tries D1 again ===");
+  {
+    makeCachesMock(); _resetCatalogCacheState();
+    const DB = await makePlatformDb();
+    let up = true, calls = 0;
+    global.getPublicCatalogData = async () => { calls++; if(!up) throw new Error("D1 down"); return { subdomainMap: { x: "org-x-" + calls }, orgs: {} }; };
+    const env = { DB };
+    await getCatalogData(env);
+    await bumpCatalogVersion(DB); invalidateCatalogVersionCache();
+    up = false;
+    const fb = await getCatalogData(env);
+    up = true;
+    const next = await getCatalogData(env);
+    console.log("The outage gets the fallback, and the next request the rebuilt catalog:", fb.subdomainMap.x === "org-x-1" && next.subdomainMap.x === "org-x-3");
+    _resetCatalogCacheState();
+  }
 })();

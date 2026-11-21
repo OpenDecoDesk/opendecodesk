@@ -2551,71 +2551,114 @@ async function reorderQrEntry_(db, orgId, productReorderQr, orgDefault) {
 
 // An order line keeps a COPY of its options from when it was placed (configJson), so a later fix to
 // the catalog — a graphic switched from a transfer to embroidery, a transfer linked to a graphic, a
-// reorder QR turned on — doesn't reach orders that already exist. This re-reads the catalog for an
-// open order's lines: each chosen graphic's kind / design / transfer / name / picture, and the reorder
-// QR. What the customer chose (graphic, ink, color) and what they paid (price, add-ons) never change.
-// Lines that are cancelled or fully made are left alone. `apply` false = preview only.
-export async function refreshOrderLinesFromCatalog(db, orderId, apply = true) {
+// reorder QR turned on, a Printed transfer added to the product — doesn't reach orders that already exist.
+// This re-reads the catalog for an order's lines: each chosen graphic's kind / design / transfer / name /
+// picture, the product's Printed transfers and the reorder QR. What the customer chose (graphic, ink, color)
+// and what they paid (price, add-ons) never change. Cancelled lines are left alone.
+// A made line (or a completed order's) can be updated too — its record is then right for Use transfers for past
+// orders; the transfers it already took out of stock don't change (`made`, `usedStock` on the line), so on a line
+// that already took them every option starts off.
+// Each line lists its changes as options ({key, text, on}): what the catalog changed (on), and, for a reorder QR
+// or Printed transfer the catalog still has, removing it from this order (off) — for a piece made without it.
+// `changes` holds the texts of the ones that are on. `lines` are those with a change; `optional` those with only
+// removals to offer. `pick` (Map itemId → Set of keys, from the window) applies exactly those, to those lines;
+// without it every change that's on is applied. `apply` false = preview only.
+export async function refreshOrderLinesFromCatalog(db, orderId, apply = true, pick = null) {
   const order = await db.prepare("SELECT orderId, orgId, voidedAt, completedAt FROM orders WHERE orderId=?").bind(orderId).first();
   if (!order) throw new Error("Order not found");
   if (order.voidedAt) throw new Error("This order is voided");
-  if (order.completedAt) throw new Error("This order is completed — reopen it first");
   const { results: items } = await db.prepare(
     `SELECT i.id, i.name, i.size, i.qty, i.productId, i.configJson, i.cancelDate, COALESCE(i.manufacturedQty,0) AS made,
-            p.configurable, p.reorderQr, p.fixedTransfersJson, p.productId AS hasProduct
+            p.configurable, p.reorderQr, p.fixedTransfersJson, p.productId AS hasProduct,
+            EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL) AS usedStock
      FROM order_items i LEFT JOIN products p ON p.orgId = i.orgId AND p.productId = i.productId
      WHERE i.orderId = ? ORDER BY i.id`).bind(orderId).all();
   const t = await getTierPrices(db, order.orgId);
   const orgDefault = { transferId: t.reorderQrTransferId, graphicId: t.reorderQrGraphicId };
   const how = (l) => l.kind === "embroidery" ? "embroidery" : "a transfer";
-  const lines = [];
+  const lines = [], optional = [];
   for (const it of items) {
-    if (it.cancelDate || !it.hasProduct || Number(it.made) >= (Number(it.qty) || 1)) continue;
+    if (it.cancelDate || !it.hasProduct) continue;
+    const want = pick ? pick.get(Number(it.id)) : null;
+    if (pick && !want) continue;
     const old = tryParse_(it.configJson, null);
     const oldLocs = old && Array.isArray(old.locations) ? old.locations : [];
-    const changes = [], locs = [];
     const picked = Number(it.configurable) && old && !old.plain;
+    if (!picked && old && !old.plain) continue;                // a snapshot we don't understand: leave it
+    // A line that already took its transfers out of stock starts with every change off: its record would no longer
+    // match what it used.
+    const usedStock = !!Number(it.usedStock);
+    const options = [];
+    const offer = (key, text, on) => { options.push({ key, text, on: on && !usedStock }); };
+    // The customer's picks: each re-read from its graphic.
+    const graphics = [];
     if (picked) for (const l of oldLocs) {
       if (l.auto || l.fixed) continue;   // re-read below
       const g = l.graphicId ? await getGraphic(db, Number(l.graphicId)) : null;
-      if (!g) { locs.push(l); continue; }
+      if (!g) { graphics.push({ l, n: l }); continue; }
       const n = Object.assign({}, l, { kind: g.kind, designId: g.designId, transferId: g.transferId, graphicName: g.name, imageUrl: g.imageUrl, thumbUrl: g.thumbUrl });
-      if (l.kind !== n.kind) changes.push(`${n.graphicName}: ${how(l)} → ${how(n)}`);
-      else if (n.kind === "transfer" && Number(l.transferId || 0) !== Number(n.transferId || 0)) changes.push(`${n.graphicName}: ${n.transferId ? "transfer linked" : "transfer unlinked"}`);
-      else if (n.kind === "embroidery" && Number(l.designId || 0) !== Number(n.designId || 0)) changes.push(`${n.graphicName}: design changed`);
-      else if ((l.graphicName || "") !== n.graphicName) changes.push(`"${l.graphicName || ""}" is now "${n.graphicName}"`);
-      locs.push(n);
+      let text = "";
+      if (l.kind !== n.kind) text = `${n.graphicName}: ${how(l)} → ${how(n)}`;
+      else if (n.kind === "transfer" && Number(l.transferId || 0) !== Number(n.transferId || 0)) text = `${n.graphicName}: ${n.transferId ? "transfer linked" : "transfer unlinked"}`;
+      else if (n.kind === "embroidery" && Number(l.designId || 0) !== Number(n.designId || 0)) text = `${n.graphicName}: design changed`;
+      else if ((l.graphicName || "") !== n.graphicName) text = `"${l.graphicName || ""}" is now "${n.graphicName}"`;
+      if (text) offer("graphic:" + l.location, text, true);
+      graphics.push({ l, n, key: text ? "graphic:" + l.location : null });
     }
     // The product's printed transfers (migrations/0068), re-read like the QR.
     const fixed = await fixedTransferEntries_(db, order.orgId, it);
     const fkey = (l) => l.location + "|" + (l.transferId || "") + "|" + (l.graphicName || "") + "|" + (l.ink || "");
     const oldFixed = oldLocs.filter(l => l.fixed);
-    for (const f of fixed) { const o = oldFixed.find(x => x.location === f.location);
-      if (!o) changes.push(`Printed transfer added: ${f.label} — ${f.graphicName}`);
-      else if (fkey(o) !== fkey(f)) changes.push(`Printed transfer at ${f.label} is now ${f.graphicName}${f.transferId ? "" : " (no transfer linked)"}`); }
-    for (const o of oldFixed) if (!fixed.some(f => f.location === o.location)) changes.push(`Printed transfer removed: ${o.label} — ${o.graphicName}`);
-    locs.push(...fixed);
+    const fixedPairs = [...fixed.map(f => ({ f, o: oldFixed.find(x => x.location === f.location) || null })),
+      ...oldFixed.filter(o => !fixed.some(f => f.location === o.location)).map(o => ({ f: null, o }))];
+    for (const p of fixedPairs) {
+      const { f, o } = p;
+      p.key = "fixed:" + (f || o).location;
+      if (f && !o) offer(p.key, `Printed transfer added: ${f.label} — ${f.graphicName}`, true);
+      else if (f && fkey(o) !== fkey(f)) offer(p.key, `Printed transfer at ${f.label} is now ${f.graphicName}${f.transferId ? "" : " (no transfer linked)"}`, true);
+      else if (!f) offer(p.key, `Printed transfer removed: ${o.label} — ${o.graphicName}`, true);
+      else p.key = null;
+      if (f && o) offer("drop:" + "fixed:" + f.location, `Remove ${o.label} — ${o.graphicName} from this order (made without it)`, false);
+    }
     const oldQr = oldLocs.find(l => l.auto) || null;
     const qr = await reorderQrEntry_(db, order.orgId, it.reorderQr, orgDefault);
-    if (qr) locs.push(qr);
-    if (qr && !oldQr) changes.push(`Reorder QR added (${qr.graphicName})`);
-    else if (!qr && oldQr) changes.push("Reorder QR removed");
-    else if (qr && oldQr && Number(qr.transferId || 0) !== Number(oldQr.transferId || 0)) changes.push(`Reorder QR is now ${qr.graphicName}`);
-    let next;
-    if (picked) next = Object.assign({}, old, { locations: locs });
-    else if (old && !old.plain) continue;                      // a snapshot we don't understand: leave it
-    else {
-      // An ordinary line keeps the customer's own design (migrations/0054); only the QR is re-read.
-      const kept = oldLocs.filter(l => l && l.custom).concat(fixed, qr ? [qr] : []);
-      next = kept.length ? { garmentColor: "", size: it.size || "", locations: kept, plain: true } : null;
-    }
-    const nextJson = next ? JSON.stringify(next) : "";
-    if (nextJson === (it.configJson || "") || (!next && !old)) continue;
-    if (!changes.length) changes.push("Pictures / names refreshed");
-    if (apply) await db.prepare("UPDATE order_items SET configJson=? WHERE id=?").bind(nextJson, Number(it.id)).run();
-    lines.push({ itemId: Number(it.id), name: it.name || "", size: it.size || "", changes });
+    let qrKey = "qr";
+    if (qr && !oldQr) offer("qr", `Reorder QR added (${qr.graphicName})`, true);
+    else if (!qr && oldQr) offer("qr", "Reorder QR removed", true);
+    else if (qr && oldQr && Number(qr.transferId || 0) !== Number(oldQr.transferId || 0)) offer("qr", `Reorder QR is now ${qr.graphicName}`, true);
+    else qrKey = null;
+    if (qr && oldQr) offer("drop:qr", `Remove the reorder QR (${oldQr.graphicName || "Reorder QR"}) from this order (made without it)`, false);
+    // The line as chosen: a change not taken keeps what the line has; a removal leaves the entry out.
+    const build = (chosen) => {
+      const locs = graphics.map(x => x.key && !chosen(x.key) ? x.l : x.n);
+      for (const { f, o, key } of fixedPairs) {
+        if (f && o && chosen("drop:fixed:" + f.location)) continue;
+        const e = key ? (chosen(key) ? f : o) : f;
+        if (e) locs.push(e);
+      }
+      const qrNow = chosen("drop:qr") ? null : qrKey ? (chosen("qr") ? qr : oldQr) : qr;
+      let next;
+      if (picked) next = Object.assign({}, old, { locations: qrNow ? [...locs, qrNow] : locs });
+      else {
+        // An ordinary line keeps the customer's own design (migrations/0054) with its Printed transfers and QR.
+        const kept = oldLocs.filter(l => l && l.custom).concat(locs, qrNow ? [qrNow] : []);
+        next = kept.length ? { garmentColor: "", size: it.size || "", locations: kept, plain: true } : null;
+      }
+      return next ? JSON.stringify(next) : "";
+    };
+    const unchanged = (json) => json === (it.configJson || "") || (!json && !old);
+    const byDefault = (key) => options.some(o => o.key === key && o.on);
+    const defJson = build(byDefault);
+    if (!options.some(o => o.on) && !unchanged(defJson)) offer("refresh", "Pictures / names refreshed", true);
+    const made = Number(it.made) >= (Number(it.qty) || 1) || !!order.completedAt;
+    const line = { itemId: Number(it.id), name: it.name || "", size: it.size || "", made, usedStock,
+      changes: options.filter(o => want ? want.has(o.key) : o.on).map(o => o.text), options };
+    const json = want ? build((key) => want.has(key)) : defJson;
+    if (!line.changes.length || unchanged(json)) { if (!want && options.length) optional.push(line); continue; }
+    if (apply) await db.prepare("UPDATE order_items SET configJson=? WHERE id=?").bind(json, Number(it.id)).run();
+    lines.push(line);
   }
-  return { lines };
+  return { lines, optional };
 }
 
 // Validates a configurable line's chosen options and returns { addOnCents, snapshot }. The snapshot
@@ -7151,14 +7194,18 @@ export async function applyBlankCatchUp(db, itemIds) {
 // product carried any transfer (no saved options at all — e.g. ordered before the shop's reorder QR was
 // turned on). The first uses the transfers its options name ("order"); the second the transfers its
 // product carries today — the reorder QR and printed transfers ("product"), so you check those before
-// applying. A line with saved options that name no transfer is left alone: it was made without one.
+// applying. A line with saved options that name no transfer is left alone: it was made without one —
+// unless its product prints transfers today (Printed transfers, fixedTransfersJson) that the saved copy
+// doesn't name. The copy was taken before the product had them (the order was placed, or the product set up,
+// earlier), so those are offered too, each marked `added`; the window starts them unticked.
 // A line whose use was voided by hand (Transfers → History) is listed again, with the reason, so it can be
 // caught up once its transfer arrives; the window starts it unticked.
 // Each use is dated when the order was made and priced at the transfer's average cost THEN (replaying its
 // history), and, because a use dated in the past changes how many were on hand when later sheets came in,
 // later uses whose cost moves are re-costed too — except in a closed month and made-for-stock uses.
-// `itemIds` limits the plan to those lines (the apply); without it every candidate is planned.
-export async function planTransferCatchUp(db, itemIds = null) {
+// `itemIds` limits the plan to those lines (the apply); without it every candidate is planned. `pick` (a Map of
+// itemId → transfer ids, from the apply) limits a line to those of its transfers — the ones ticked in the window.
+export async function planTransferCatchUp(db, itemIds = null, pick = null) {
   const fs = await fromStockLine_(db), dg = await digitalLine_(db);
   const { results: rows } = await db.prepare(
     `SELECT i.id AS itemId, i.orderId, i.orgId, i.name, i.size, i.qty, i.configJson, o.customerName, g.name AS orgName,
@@ -7180,16 +7227,25 @@ export async function planTransferCatchUp(db, itemIds = null) {
   for (const r of rows) {
     if (want && !want.has(Number(r.itemId))) continue;
     const cfg = tryParse_(r.configJson, null);
-    let locs, source;
-    if (cfg && typeof cfg === "object") { locs = Array.isArray(cfg.locations) ? cfg.locations : []; source = "order"; }
+    let locs, source, added = [];
+    if (cfg && typeof cfg === "object") {
+      locs = Array.isArray(cfg.locations) ? cfg.locations : []; source = "order";
+      if (r.hasProduct) {
+        const saved = new Set(locs.filter(l => l && l.kind === "transfer").map(l => Number(l.transferId)));
+        added = (await fixedTransferEntries_(db, r.orgId, r)).filter(f => Number(f.transferId) && !saved.has(Number(f.transferId)));
+      }
+    }
     else if (r.hasProduct) {
       if (!orgQr.has(r.orgId)) { const t = await getTierPrices(db, r.orgId); orgQr.set(r.orgId, { transferId: t.reorderQrTransferId, graphicId: t.reorderQrGraphicId }); }
       const qr = await reorderQrEntry_(db, r.orgId, r.reorderQr, orgQr.get(r.orgId));
       locs = [...(qr ? [qr] : []), ...await fixedTransferEntries_(db, r.orgId, r)];
       source = "product";
     } else continue;
-    const tids = locs.filter(l => l && l.kind === "transfer" && Number(l.transferId)).map(l => Number(l.transferId));
-    if (tids.length) cands.push({ ...r, tids, source });
+    const isT = (l) => l && l.kind === "transfer" && Number(l.transferId);
+    let uses = [...locs.filter(isT).map(l => ({ tid: Number(l.transferId), added: false })), ...added.filter(isT).map(l => ({ tid: Number(l.transferId), added: true }))];
+    const only = pick && pick.get(Number(r.itemId));
+    if (only) uses = uses.filter(u => only.has(u.tid));
+    if (uses.length) cands.push({ ...r, uses, tids: uses.map(u => u.tid), source });
   }
   const empty = { lines: [], recost: [], totalUnits: 0, totalCents: 0, shortLines: 0, recostLines: 0, recostCents: 0, skippedClosed: 0, skippedFinished: 0, transfers: [] };
   if (!cands.length) return empty;
@@ -7204,7 +7260,7 @@ export async function planTransferCatchUp(db, itemIds = null) {
     const live = (await db.prepare("SELECT id, qtyDelta, unitCostCents, kind, reason, itemId, orderId, occurredAt FROM transfer_movements WHERE transferId = ? AND voidedAt IS NULL").bind(tid).all()).results;
     const seq = live.map(m => ({ at: String(m.occurredAt || ""), id: Number(m.id), m }));
     let n = 0;
-    for (const c of cands) for (const id of c.tids) if (id === tid) seq.push({ at: String(c.useDate), id: 1e15 + (n++), c });
+    for (const c of cands) for (const u of c.uses) if (u.tid === tid) seq.push({ at: String(c.useDate), id: 1e15 + (n++), c, added: u.added });
     seq.sort((a, b) => a.at < b.at ? -1 : a.at > b.at ? 1 : a.id - b.id);
     let qty = 0, avg = 0;
     for (const e of seq) {
@@ -7214,9 +7270,10 @@ export async function planTransferCatchUp(db, itemIds = null) {
         if (!unit) { unit = Number(t.purchasePriceCents) || 0; note = unit ? "no sheet before that date — used the transfer's current cost" : "no cost known for this transfer"; }
         const line = lines.get(Number(c.itemId)) || { itemId: Number(c.itemId), orderId: c.orderId, orgId: c.orgId, orgName: c.orgName || c.orgId, customerName: c.customerName || "", name: c.name,
           size: c.size || "", qty: q, useDate: c.useDate, source: c.source, voidedUse: c.voidedUse == null ? null : String(c.voidedUse), uses: [], costCents: 0, shortBy: 0 };
-        line.uses.push({ transferId: tid, name: t.name || "", unitCostCents: unit, qty: q, note });
+        const shortBy = Math.max(0, Math.min(q, q - Math.max(0, qty)));
+        line.uses.push({ transferId: tid, name: t.name || "", unitCostCents: unit, qty: q, note, added: !!e.added, shortBy });
         line.costCents += unit * q;
-        line.shortBy = Math.max(line.shortBy, Math.max(0, Math.min(q, q - Math.max(0, qty))));
+        line.shortBy = Math.max(line.shortBy, shortBy);
         lines.set(line.itemId, line);
         qty -= q;
         continue;

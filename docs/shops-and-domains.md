@@ -213,8 +213,12 @@ The catalog check also warns about settings that contradict each other:
 
 Each problem is outlined in the card that fixes it. An open order line placed before such a change is
 marked **Check line — doesn't match catalog** on the Orders page; Edit items → **Update from catalog**
-brings it up to date. With the Production feature off, the stitching parts (designs, What Run Order
-will do, and their warnings) are left out.
+brings it up to date. It lists each change per line with a tick, so you can take some and leave others.
+For a reorder QR or Printed transfer the catalog still has, it also offers (unticked) to remove it from a
+line made without it. It works on made and completed orders too: only the order's record changes, so follow
+it with **Use transfers for past orders** for the stock. On a line that already took its transfers out of
+stock, every change starts unticked. With the Production feature off, the stitching parts (designs, What
+Run Order will do, and their warnings) are left out.
 
 ## Versions of a product
 
@@ -301,7 +305,11 @@ before the shop's reorder QR was turned on) saved none, so making it took nothin
 Use transfers for past orders…** lists every made line whose transfers never left stock, grouped by shop. A
 line whose saved options name its transfers is ticked. A line worked out from what its product carries
 *today* is marked so and starts unticked, because it may have been made without one: tick the shop, or the
-lines, you know used it. Applying takes each one out dated the day the order was made, at the transfer's
+lines, you know used it. So does a Printed transfer the product has now that a line's saved options don't
+name (it was set up after the order was placed), marked **added from the product**. Each transfer on a line
+has its own tick, and the strip above the table ticks one transfer on every line, so you can take a shirt's
+front and back prints and leave out a QR it was made without. Applying takes each one out dated the day
+the order was made, at the transfer's
 average cost that day, and adds it to the line's cost of goods sold. Because a use dated in the past
 changes how many were on hand when later sheets came in, later uses whose average moved are re-costed too
 (not in a closed month, and not pieces made for stock). A line in a closed month can't be applied.

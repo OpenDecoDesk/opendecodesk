@@ -14295,10 +14295,13 @@ async function showBlankCatchUp_(onDone, filter){
 }
 
 // Use transfers for past orders: made lines that never took their transfers out of stock, grouped by shop.
-// A line whose saved options name its transfers is ticked; one worked out from what its product carries
-// today (it was placed before the product had a transfer) starts unticked, since it may have been made
-// without one — tick the shop, or the lines, you know used them.
-// `filter` ({transferId}, from Count stock → Past orders…) lists only the lines that use that transfer.
+// Each transfer a line would take has its own tick; the line's, the shop's, the header's and the strip of
+// transfers above the table tick several at once. A transfer named in the line's saved options is ticked; one
+// worked out from what its product carries today starts unticked, since the line may have been made without it —
+// a line with no saved options (placed before the product had a transfer), and a Printed transfer the product
+// has now that the saved options don't name (`added`). Tick the ones you know were used.
+// `filter` ({transferId}, from Count stock → Past orders…) lists only the lines that use that transfer, and ticks
+// that transfer where the product added it.
 async function showTransferCatchUp_(onDone, filter){
   if (!adminKey) adminKey = (await adminLogin()) || "";
   if (!adminKey) return;
@@ -14309,7 +14312,6 @@ async function showTransferCatchUp_(onDone, filter){
   try { d = await hoopApi_({ action: "previewTransferCatchUp" }); } catch (e) { body.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
   if (filter) {
     d.lines = d.lines.filter(l => (l.uses || []).some(u => Number(u.transferId) === Number(filter.transferId)));
-    d.shortLines = d.lines.filter(l => l.shortBy > 0).length;
     if (!d.lines.length) { body.innerHTML = `<div style="font-size:14px;color:#333;">No made orders are missing this transfer. Every made order line that uses it already took it out of stock.</div>`; return; }
   }
   if (!d.lines.length) {
@@ -14320,53 +14322,70 @@ async function showTransferCatchUp_(onDone, filter){
   const td = "padding:5px 8px;border-bottom:1px solid #e5e5e5;font-size:12px;vertical-align:top;";
   const shops = [...new Set(d.lines.map(l => l.orgId))];
   const shopName = (s) => (d.lines.find(l => l.orgId === s) || {}).orgName || s;
+  const ticked = (l, u) => !l.locked && l.voidedUse == null && l.source === "order" && (!u.added || (filter && Number(filter.transferId) === Number(u.transferId)));
+  const transfers = [...new Map(d.lines.flatMap(l => l.uses).map(u => [Number(u.transferId), u.name])).entries()];
   const row = (l) => `<tr>
-      <td style="${td}"><input type="checkbox" data-tcu="${l.itemId}" data-shop="${escapeHtml(l.orgId)}" ${l.locked ? "disabled" : l.source === "order" && l.voidedUse == null ? "checked" : ""}></td>
+      <td style="${td}"><input type="checkbox" data-tcu="${l.itemId}" data-shop="${escapeHtml(l.orgId)}" title="Tick or untick this line's transfers" ${l.locked ? "disabled" : ""}></td>
       <td style="${td}">${escapeHtml(String(l.useDate).slice(0, 10))}</td>
       <td style="${td}">${escapeHtml(l.orderId)}<div style="color:#777;">${escapeHtml(l.customerName || "")}</div></td>
       <td style="${td}">${escapeHtml(l.name)}${l.size ? " (" + escapeHtml(l.size) + ")" : ""} × ${l.qty}</td>
-      <td style="${td}">${l.uses.map(u => `${escapeHtml(u.name)} × ${u.qty} @ ${fmt(u.unitCost)}`).join("<br>")}</td>
-      <td style="${td}text-align:right;">${fmt(l.cost)}</td>
-      <td style="${td}">${l.voidedUse != null ? `<span style="color:#78350f;">Its use was voided${l.voidedUse ? " (" + escapeHtml(l.voidedUse) + ")" : ""} — tick it once its transfer is here.</span> ` : ""}${l.source === "product" ? `<span style="color:#78350f;">From the product today — the order didn't save its transfers.</span> ` : ""}<span style="color:#b03a2e;">${l.locked ? "Month closed. " : ""}${l.shortBy > 0 ? "Short " + l.shortBy + " in stock. " : ""}${escapeHtml(l.uses.map(u => u.note).filter(Boolean).join(" "))}</span></td>
+      <td style="${td}">${l.uses.map((u, i) => `<label style="display:block;cursor:pointer;white-space:nowrap;"><input type="checkbox" data-tcu-use="${l.itemId}:${i}" data-line="${l.itemId}" data-shop="${escapeHtml(l.orgId)}" data-tid="${Number(u.transferId)}" ${l.locked ? "disabled" : ticked(l, u) ? "checked" : ""}> ${escapeHtml(u.name)} × ${u.qty} @ ${fmt(u.unitCost)}${u.added ? ` <span style="color:#78350f;">(added from the product)</span>` : ""}${u.shortBy > 0 ? ` <span style="color:#b03a2e;">short ${u.shortBy}</span>` : ""}</label>`).join("")}</td>
+      <td style="${td}text-align:right;" data-tcu-cost="${l.itemId}"></td>
+      <td style="${td}">${l.voidedUse != null ? `<span style="color:#78350f;">Its use was voided${l.voidedUse ? " (" + escapeHtml(l.voidedUse) + ")" : ""} — tick it once its transfer is here.</span> ` : ""}${l.source === "product" ? `<span style="color:#78350f;">From the product today — the order didn't save its transfers.</span> ` : ""}${l.uses.some(u => u.added) ? `<span style="color:#78350f;">The order saved its transfers before the product printed the ones marked added.</span> ` : ""}<span style="color:#b03a2e;">${l.locked ? "Month closed. " : ""}${escapeHtml([...new Set(l.uses.map(u => u.note).filter(Boolean))].join(" "))}</span></td>
     </tr>`;
   body.innerHTML = `
-    <div style="font-size:13px;color:#333;margin-bottom:10px;">These order lines are made (or shipped/delivered) but never took their transfers out of stock. Applying takes each one out dated the day the order was made, at the transfer's average cost <em>on that day</em>, and adds it to the line's cost of goods sold.
-      ${filter ? "Only the lines that use this transfer are listed; a line that also uses other transfers takes those out too. " : ""}Lines marked <b>From the product today</b> were placed before their product carried a transfer (often the shop's reorder QR), so they start unticked — tick the ones you know were made with it.</div>
+    <div style="font-size:13px;color:#333;margin-bottom:10px;">These order lines are made (or shipped/delivered) but never took their transfers out of stock. Applying takes each ticked transfer out dated the day the order was made, at the transfer's average cost <em>on that day</em>, and adds it to the line's cost of goods sold.
+      ${filter ? "Only the lines that use this transfer are listed. " : ""}Transfers worked out from the product today start unticked: lines marked <b>From the product today</b> were placed before their product carried a transfer (often the shop's reorder QR), and transfers marked <b>added from the product</b> are Printed transfers the product has now that the order didn't save. Tick the ones you know were used.</div>
+    ${transfers.length > 1 ? `<div style="font-size:12px;margin-bottom:8px;display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;"><span style="color:#555;">Tick every line's:</span>${transfers.map(([tid, name]) =>
+      `<label style="cursor:pointer;white-space:nowrap;"><input type="checkbox" data-tcu-tid="${tid}"> ${escapeHtml(name)}</label>`).join("")}</div>` : ""}
     <div id="tcuSum" style="font-size:13px;font-weight:600;margin-bottom:8px;"></div>
     <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;">
-      <thead><tr><th style="${th}"><input type="checkbox" id="tcuAll" title="Tick or untick every line"></th><th style="${th}">Made</th><th style="${th}">Order</th><th style="${th}">Item</th><th style="${th}">Transfers</th><th style="${th}text-align:right;">Cost</th><th style="${th}">Notes</th></tr></thead>
+      <thead><tr><th style="${th}"><input type="checkbox" id="tcuAll" title="Tick or untick every transfer"></th><th style="${th}">Made</th><th style="${th}">Order</th><th style="${th}">Item</th><th style="${th}">Transfers</th><th style="${th}text-align:right;">Cost</th><th style="${th}">Notes</th></tr></thead>
       <tbody>${shops.map(s => `<tr><td colspan="7" style="${td}background:#fafafa;font-weight:700;"><label style="cursor:pointer;"><input type="checkbox" data-tcu-shop="${escapeHtml(s)}"> ${escapeHtml(shopName(s))}</label></td></tr>` +
         d.lines.filter(l => l.orgId === s).map(row).join("")).join("")}</tbody></table></div>
-    ${d.shortLines ? `<div style="margin-top:10px;padding:8px 12px;border:1px solid #fcd34d;background:#fffbeb;border-radius:6px;font-size:12px;color:#78350f;">${d.shortLines} line${d.shortLines === 1 ? "" : "s"} would take more transfers than were in stock on that day, so that transfer's stock goes negative until you receive the sheet they came from. If you already counted those transfers by hand AFTER those orders, applying them would count them twice; untick those lines.</div>` : ""}
-    <div style="margin-top:10px;font-size:12px;color:#666;">A use dated in the past changes how many were on hand when later sheets came in, so later uses whose average moved are re-costed too (except in a closed month, and pieces made for stock).${d.recostLines && !filter ? ` With every line ticked that's ${d.recostLines} order line${d.recostLines === 1 ? "" : "s"}, ${d.recostTotal >= 0 ? "+" : "−"}${fmt(Math.abs(d.recostTotal))}.` : ""}</div>
+    <div id="tcuShort" style="display:none;margin-top:10px;padding:8px 12px;border:1px solid #fcd34d;background:#fffbeb;border-radius:6px;font-size:12px;color:#78350f;"></div>
+    <div style="margin-top:10px;font-size:12px;color:#666;">A use dated in the past changes how many were on hand when later sheets came in, so later uses whose average moved are re-costed too (except in a closed month, and pieces made for stock).${d.recostLines && !filter ? ` With every transfer ticked that's ${d.recostLines} order line${d.recostLines === 1 ? "" : "s"}, ${d.recostTotal >= 0 ? "+" : "−"}${fmt(Math.abs(d.recostTotal))}.` : ""}</div>
     <div id="tcuErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
       <button type="button" class="admin-btn" id="tcuCancel" style="background:#fff;color:#232323;border:1px solid #999;">Cancel</button>
-      <button type="button" class="admin-btn" id="tcuApply">Apply to ticked lines</button></div>`;
-  const boxes = () => [...body.querySelectorAll("input[data-tcu]:not(:disabled)")];
+      <button type="button" class="admin-btn" id="tcuApply">Apply ticked transfers</button></div>`;
+  const useBoxes = () => [...body.querySelectorAll("input[data-tcu-use]:not(:disabled)")];
+  const useOf = (b) => { const [id, i] = b.dataset.tcuUse.split(":"); const l = d.lines.find(x => String(x.itemId) === id); return { l, u: l.uses[Number(i)] }; };
+  const group = (box, mine) => { box.checked = mine.length > 0 && mine.every(b => b.checked); box.indeterminate = !box.checked && mine.some(b => b.checked); };
   const refresh = () => {
-    const on = boxes().filter(b => b.checked).map(b => d.lines.find(l => String(l.itemId) === b.dataset.tcu));
-    const units = on.reduce((t, l) => t + l.uses.reduce((a, u) => a + u.qty, 0), 0);
-    body.querySelector("#tcuSum").textContent = `${on.length} of ${d.lines.length} lines ticked · ${units} transfer${units === 1 ? "" : "s"} · ${fmt(on.reduce((t, l) => t + l.cost, 0))} cost of goods sold`;
+    const on = useBoxes().filter(b => b.checked).map(useOf);
+    const lines = new Set(on.map(x => x.l.itemId));
+    const units = on.reduce((t, x) => t + x.u.qty, 0);
+    body.querySelector("#tcuSum").textContent = `${lines.size} of ${d.lines.length} lines ticked · ${units} transfer${units === 1 ? "" : "s"} · ${fmt(on.reduce((t, x) => t + x.u.unitCost * x.u.qty, 0))} cost of goods sold`;
     body.querySelector("#tcuApply").disabled = !on.length;
-    for (const s of body.querySelectorAll("input[data-tcu-shop]")) {
-      const mine = boxes().filter(b => b.dataset.shop === s.dataset.tcuShop);
-      s.checked = mine.length > 0 && mine.every(b => b.checked); s.indeterminate = !s.checked && mine.some(b => b.checked);
+    for (const l of d.lines) {
+      const c = body.querySelector(`[data-tcu-cost="${l.itemId}"]`);
+      if (c) c.textContent = fmt(on.filter(x => x.l === l).reduce((t, x) => t + x.u.unitCost * x.u.qty, 0));
     }
-    const all = boxes(); body.querySelector("#tcuAll").checked = all.length > 0 && all.every(b => b.checked);
+    const short = new Set(on.filter(x => x.u.shortBy > 0).map(x => x.l.itemId)).size, sh = body.querySelector("#tcuShort");
+    sh.style.display = short ? "" : "none";
+    sh.textContent = `${short} ticked line${short === 1 ? "" : "s"} would take more transfers than were in stock on that day, so that transfer's stock goes negative until you receive the sheet they came from. If you already counted those transfers by hand AFTER those orders, applying them would count them twice; untick them.`;
+    for (const b of body.querySelectorAll("input[data-tcu]:not(:disabled)")) group(b, useBoxes().filter(u => u.dataset.line === b.dataset.tcu));
+    for (const s of body.querySelectorAll("input[data-tcu-shop]")) group(s, useBoxes().filter(u => u.dataset.shop === s.dataset.tcuShop));
+    for (const t of body.querySelectorAll("input[data-tcu-tid]")) group(t, useBoxes().filter(u => u.dataset.tid === t.dataset.tcuTid));
+    group(body.querySelector("#tcuAll"), useBoxes());
   };
-  body.querySelectorAll("input[data-tcu]").forEach(b => b.addEventListener("change", refresh));
-  body.querySelectorAll("input[data-tcu-shop]").forEach(s => s.addEventListener("change", () => {
-    boxes().filter(b => b.dataset.shop === s.dataset.tcuShop).forEach(b => { b.checked = s.checked; }); refresh(); }));
-  body.querySelector("#tcuAll").addEventListener("change", (e) => { boxes().forEach(b => { b.checked = e.target.checked; }); refresh(); });
+  const setAll = (list, on) => { list.forEach(b => { b.checked = on; }); refresh(); };
+  body.querySelectorAll("input[data-tcu-use]").forEach(b => b.addEventListener("change", refresh));
+  body.querySelectorAll("input[data-tcu]").forEach(b => b.addEventListener("change", () => setAll(useBoxes().filter(u => u.dataset.line === b.dataset.tcu), b.checked)));
+  body.querySelectorAll("input[data-tcu-shop]").forEach(s => s.addEventListener("change", () => setAll(useBoxes().filter(u => u.dataset.shop === s.dataset.tcuShop), s.checked)));
+  body.querySelectorAll("input[data-tcu-tid]").forEach(t => t.addEventListener("change", () => setAll(useBoxes().filter(u => u.dataset.tid === t.dataset.tcuTid), t.checked)));
+  body.querySelector("#tcuAll").addEventListener("change", (e) => setAll(useBoxes(), e.target.checked));
   body.querySelector("#tcuCancel").onclick = close;
   body.querySelector("#tcuApply").onclick = async () => {
-    const ids = boxes().filter(b => b.checked).map(b => Number(b.dataset.tcu));
-    if (!ids.length) return;
-    if (!await askConfirm_(`Take transfers out of stock for ${ids.length} order line${ids.length === 1 ? "" : "s"}? This changes past cost of goods sold. It is recorded in the audit log.`)) return;
+    const uses = {};
+    for (const b of useBoxes().filter(b => b.checked)) (uses[b.dataset.line] = uses[b.dataset.line] || []).push(Number(b.dataset.tid));
+    const n = Object.keys(uses).length;
+    if (!n) return;
+    if (!await askConfirm_(`Take transfers out of stock for ${n} order line${n === 1 ? "" : "s"}? This changes past cost of goods sold. It is recorded in the audit log.`)) return;
     const btn = body.querySelector("#tcuApply"); btn.disabled = true;
     try {
-      const r = await hoopApi_({ action: "applyTransferCatchUp", itemIds: ids });
+      const r = await hoopApi_({ action: "applyTransferCatchUp", uses });
       showToast(`Done: ${r.applied} line${r.applied === 1 ? "" : "s"}, ${r.totalUnits} transfers, ${fmt(r.total)} cost of goods sold` +
         (r.recostLines ? `; ${r.recostLines} later line${r.recostLines === 1 ? "" : "s"} re-costed (${r.recostTotal >= 0 ? "+" : "−"}${fmt(Math.abs(r.recostTotal))}).` : "."));
       close(); if (typeof onDone === "function") onDone();
@@ -25289,20 +25308,61 @@ async function editOrder(orgId, orderId){
 }
 
 // An order line keeps a copy of its options from when it was placed, so fixing a graphic (transfer →
-// embroidery, linking its transfer) or turning on a reorder QR doesn't reach orders that already
-// exist. This shows what would change on this order, then applies it. Prices are never touched.
+// embroidery, linking its transfer), turning on a reorder QR or adding a Printed transfer to the product
+// doesn't reach orders that already exist. This lists what would change on this order, a tick for each, plus
+// (unticked) removing a reorder QR or Printed transfer from a line that was made without it; Apply writes the
+// ticked ones. A made or completed order can be updated too: only its record changes, so the window points to
+// Use transfers for past orders for its stock. Prices are never touched. Resolves true once something applied.
 async function refreshOrderFromCatalog_(order){
   const org = order._org || (currentOrg && currentOrg.id) || order.orgId || "";
-  const describe = (lines) => lines.map(l => "• " + l.name + (l.size ? " (" + l.size + ")" : "") + ": " + l.changes.join("; ")).join("\n");
-  try{
-    const pre = await hoopApi_({ action: "refreshOrderFromCatalog", org, orderId: order.orderId, preview: true });
-    if(!(pre.lines || []).length){ showToast("This order already matches the catalog — nothing to update."); return false; }
-    if(!await askConfirm_("Update this order from the catalog?\n\n" + describe(pre.lines) + "\n\nPrices and what the customer chose don't change.")) return false;
-    const res = await hoopApi_({ action: "refreshOrderFromCatalog", org, orderId: order.orderId });
-    showToast("Updated " + (res.lines || []).length + " line" + ((res.lines || []).length === 1 ? "" : "s") + " from the catalog.");
-    if(typeof route !== "undefined" && route && typeof render === "function") render();
-    return true;
-  }catch(e){ showToast((e && e.message) || "Could not update the order", true); return false; }
+  let pre;
+  try { pre = await hoopApi_({ action: "refreshOrderFromCatalog", org, orderId: order.orderId, preview: true }); }
+  catch(e){ showToast((e && e.message) || "Could not update the order", true); return false; }
+  const lines = [...(pre.lines || []), ...(pre.optional || [])];
+  if(!lines.length){ showToast("This order already matches the catalog — nothing to update."); return false; }
+  const label = (l) => escapeHtml(l.name) + (l.size ? " (" + escapeHtml(l.size) + ")" : "");
+  const kinds = [...new Map(lines.flatMap(l => l.options).map(o => [o.text, o])).values()];
+  const html = `
+    <div style="font-size:13px;color:#333;margin-bottom:10px;">Untick a change to leave the line as it is. Prices and what the customer chose don't change.${lines.some(l => l.options.some(o => !o.on)) ? " A line made without its reorder QR or a Printed transfer can have it removed from this order." : ""}</div>
+    ${kinds.length > 1 && lines.length > 1 ? `<div style="font-size:12px;margin-bottom:8px;"><div style="color:#555;margin-bottom:2px;">Tick on every line:</div>${kinds.map((o, i) =>
+      `<label style="display:block;cursor:pointer;"><input type="checkbox" data-rfc-kind="${i}"> ${escapeHtml(o.text)}</label>`).join("")}</div>` : ""}
+    <div style="border:1px solid #ddd;border-radius:6px;">${lines.map(l => `<div style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;">
+      <div style="font-weight:600;">${label(l)}</div>
+      ${l.options.map(o => `<label style="display:block;cursor:pointer;margin-left:4px;"><input type="checkbox" data-rfc-line="${l.itemId}" data-rfc-key="${escapeHtml(o.key)}" data-rfc-text="${escapeHtml(o.text)}" ${o.on ? "checked" : ""}> ${escapeHtml(o.text)}</label>`).join("")}
+      ${l.made ? `<div style="font-size:12px;color:#78350f;margin-top:2px;">Already made: this changes the order's record only. ${l.usedStock ? "The transfers it already took out of stock stay as they are." : "To take its transfers out of stock, use Use transfers for past orders (Inventory &amp; COGS) after this."}</div>` : ""}</div>`).join("")}</div>
+    <div id="rfcErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
+      <button type="button" class="admin-btn" id="rfcCancel" style="background:#fff;color:#232323;border:1px solid #999;">Cancel</button>
+      <button type="button" class="admin-btn" id="rfcApply">Apply ticked changes</button></div>`;
+  return await new Promise((resolve) => {
+    const { ov, close } = inventoryModal_("Update " + escapeHtml(order.orderId) + " from the catalog", html, 640, { onClose: () => resolve(false) });
+    const boxes = () => [...ov.querySelectorAll("input[data-rfc-key]")];
+    const refresh = () => {
+      ov.querySelector("#rfcApply").disabled = !boxes().some(b => b.checked);
+      for (const k of ov.querySelectorAll("input[data-rfc-kind]")) {
+        const mine = boxes().filter(b => b.dataset.rfcText === kinds[Number(k.dataset.rfcKind)].text);
+        k.checked = mine.length > 0 && mine.every(b => b.checked); k.indeterminate = !k.checked && mine.some(b => b.checked);
+      }
+    };
+    boxes().forEach(b => b.addEventListener("change", refresh));
+    ov.querySelectorAll("input[data-rfc-kind]").forEach(k => k.addEventListener("change", () => {
+      boxes().filter(b => b.dataset.rfcText === kinds[Number(k.dataset.rfcKind)].text).forEach(b => { b.checked = k.checked; }); refresh(); }));
+    ov.querySelector("#rfcCancel").onclick = () => { close(); resolve(false); };
+    ov.querySelector("#rfcApply").onclick = async () => {
+      const pick = {};
+      for (const b of boxes().filter(b => b.checked)) (pick[b.dataset.rfcLine] = pick[b.dataset.rfcLine] || []).push(b.dataset.rfcKey);
+      const btn = ov.querySelector("#rfcApply"); btn.disabled = true;
+      try {
+        const res = await hoopApi_({ action: "refreshOrderFromCatalog", org, orderId: order.orderId, pick });
+        const n = (res.lines || []).length;
+        showToast(n ? "Updated " + n + " line" + (n === 1 ? "" : "s") + " from the catalog." : "Nothing changed — the ticked lines already read that way.");
+        close();
+        if(typeof route !== "undefined" && route && typeof render === "function") render();
+        resolve(n > 0);
+      } catch(e){ ov.querySelector("#rfcErr").textContent = (e && e.message) || "Could not update the order"; btn.disabled = false; }
+    };
+    refresh();
+  });
 }
 
 function showEditOrderModal(order, products, ctx){
@@ -25578,7 +25638,7 @@ function showEditOrderModal(order, products, ctx){
         </div>
         ${(order.catalogDrift || []).length ? `<div class="edit-order-drift" style="font-size:13px;color:#92400e;background:#fef3c7;border:1px solid #f59e0b;border-radius:5px;padding:8px 10px;margin-bottom:12px;">⚠ ${order.catalogDrift.map(x => `<strong>${escapeHtml(x.name || "A line")}</strong>: ${x.problems.map(escapeHtml).join("; ")}`).join("<br>⚠ ")}<br>Pick the graphic on the line, or use <strong>Update from catalog…</strong> below.</div>` : ""}
         <div class="admin-pass-actions" style="flex-wrap:wrap;gap:8px;">
-          <button type="button" id="editOrderRefresh" title="Re-read this order's graphics and reorder QR from the catalog (prices don't change)" style="padding:8px 12px;font-size:13px;border-radius:5px;border:1px solid var(--border,#ccc);cursor:pointer;background:var(--surface,#fff);color:var(--ink,#111);margin-right:auto;">Update from catalog…</button>
+          <button type="button" id="editOrderRefresh" title="Re-read this order's graphics, Printed transfers and reorder QR from the catalog, choosing which changes to take (prices don't change)" style="padding:8px 12px;font-size:13px;border-radius:5px;border:1px solid var(--border,#ccc);cursor:pointer;background:var(--surface,#fff);color:var(--ink,#111);margin-right:auto;">Update from catalog…</button>
           <button type="button" class="admin-pass-cancel" id="editOrderCancel">Cancel</button>
           <button type="button" id="editOrderSave" style="padding:8px 16px;font-size:14px;font-weight:600;border-radius:5px;border:none;cursor:pointer;background:#2563eb;color:#fff;">Save changes</button>
           <button type="button" id="editOrderPay" style="display:none;padding:8px 16px;font-size:14px;font-weight:600;border-radius:5px;border:none;cursor:pointer;background:#15803d;color:#fff;">Save &amp; request payment</button>

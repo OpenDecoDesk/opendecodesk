@@ -6271,6 +6271,36 @@ export async function writeOffBlanks(db, { blankId, color, size, qty, note, occu
   ]);
 }
 
+// Count stock → Correct count (blanks): sets one blank / color / size to what was counted, as one
+// `adjust` movement for the difference at the size's current average cost (so the average doesn't
+// move; a size with no cost yet uses its vendor price). `onHand` is what the count window showed —
+// refused if the stock changed since (both statements are guarded on it, in one batch), so a use or
+// receipt recorded while counting is never overwritten. Returns { delta }.
+export async function setBlankCount(db, { blankId, color, size, counted, onHand, note, at }) {
+  const want = Math.floor(Number(counted)), shown = Math.trunc(Number(onHand));
+  if (!Number.isFinite(want) || want < 0) throw pricingError_("Enter a count of 0 or more.");
+  if (!Number.isFinite(shown)) throw pricingError_("Reload the count window and try again.");
+  const clr = color == null ? await blankScalarColor_(db, blankId) : String(color), sz = String(size || "");
+  const cur = await db.prepare("SELECT quantity, purchasePriceCents, vendorPriceCents FROM blank_sizes WHERE blankId=? AND color=? AND size=?").bind(Number(blankId), clr, sz).first();
+  if (!cur) throw pricingError_("That size isn't on file for this blank.");
+  if (Number(cur.quantity) !== shown) throw pricingError_(`The stock changed while you were counting (it's ${Number(cur.quantity)} now) — count that row again.`);
+  const delta = want - shown;
+  if (!delta) return { delta: 0 };
+  const unit = Number(cur.purchasePriceCents) || (delta > 0 ? Number(cur.vendorPriceCents) || 0 : 0);
+  const now = new Date().toISOString();
+  const G = "(SELECT quantity FROM blank_sizes WHERE blankId=? AND color=? AND size=?) = ?", gb = [Number(blankId), clr, sz, shown];
+  const res = await db.batch([
+    db.prepare(`INSERT INTO inventory_movements (blankId, blankName, color, size, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
+      SELECT ?, ?, ?, ?, ?, ?, 'adjust', ?, ?, ? WHERE ${G}`)
+      .bind(Number(blankId), await blankName_(db, blankId), clr, sz, delta, Math.max(0, Math.round(unit)),
+        String(note ? "Stock count: " + note : "Stock count").slice(0, 300), at || now, now, ...gb),
+    db.prepare(`UPDATE blank_sizes SET quantity = ? WHERE blankId=? AND color=? AND size=? AND quantity = ?`).bind(want, Number(blankId), clr, sz, shown),
+  ]);
+  if (Number(res[0] && res[0].meta && res[0].meta.changes) !== 1) throw pricingError_("The stock changed while you were counting — count that row again.");
+  if (!Number(cur.purchasePriceCents) && delta > 0 && unit) await db.prepare("UPDATE blank_sizes SET purchasePriceCents = ? WHERE blankId=? AND color=? AND size=? AND purchasePriceCents = 0").bind(unit, Number(blankId), clr, sz).run();
+  return { delta };
+}
+
 // Called when an order is marked "manufactured": each active line whose
 // product is linked to a blank consumes qty blanks at the current average
 // cost, and that becomes the line's COGS. Idempotent (skips lines that
@@ -7687,6 +7717,31 @@ export async function writeOffTransfers(db, { transferId, qty, note, occurredAt 
       kind: "writeoff", note: note || "Write-off", occurredAt }),
     db.prepare("UPDATE transfers SET quantity = quantity - ?, updatedAt=? WHERE id=?").bind(q, new Date().toISOString(), Number(transferId)),
   ]);
+}
+
+// Count stock → Correct count (transfers): the same as setBlankCount — one `adjust` movement for the
+// difference at the transfer's current average cost, refused if its stock changed since the count
+// window read it. Returns { delta }.
+export async function setTransferCount(db, { transferId, counted, onHand, note, at }) {
+  const want = Math.floor(Number(counted)), shown = Math.trunc(Number(onHand));
+  if (!Number.isFinite(want) || want < 0) throw pricingError_("Enter a count of 0 or more.");
+  if (!Number.isFinite(shown)) throw pricingError_("Reload the count window and try again.");
+  const cur = await db.prepare("SELECT name, quantity, purchasePriceCents FROM transfers WHERE id=?").bind(Number(transferId)).first();
+  if (!cur) throw pricingError_("That transfer isn't on file.");
+  if (Number(cur.quantity) !== shown) throw pricingError_(`The stock changed while you were counting (it's ${Number(cur.quantity)} now) — count that row again.`);
+  const delta = want - shown;
+  if (!delta) return { delta: 0 };
+  const now = new Date().toISOString();
+  const G = "(SELECT quantity FROM transfers WHERE id=?) = ?", gb = [Number(transferId), shown];
+  const res = await db.batch([
+    db.prepare(`INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
+      SELECT ?, ?, ?, ?, 'adjust', ?, ?, ? WHERE ${G}`)
+      .bind(Number(transferId), cur.name || "", delta, Math.max(0, Number(cur.purchasePriceCents) || 0),
+        String(note ? "Stock count: " + note : "Stock count").slice(0, 300), at || now, now, ...gb),
+    db.prepare("UPDATE transfers SET quantity = ?, updatedAt = ? WHERE id = ? AND quantity = ?").bind(want, now, Number(transferId), shown),
+  ]);
+  if (Number(res[0] && res[0].meta && res[0].meta.changes) !== 1) throw pricingError_("The stock changed while you were counting — count that row again.");
+  return { delta };
 }
 
 // Consume one application per garment of each given transfer for one line (customer-chosen options +

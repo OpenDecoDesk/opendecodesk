@@ -142,13 +142,13 @@ const BY_FN = {
     edit: ["createInventoryItem", "updateInventoryItem", "createBlank", "updateBlank", "mergeBlanks", "receiveBlanks", "receiveBlankOrder", "addBlankSizes",
       "readInvoiceWithAi", "markBlankPricesChecked", "setBlankLink", "saveBlankLinks", "applyBlankCatchUp", "setReadyToShipQty", "makeForStock", "importBlanks",
       "applyVendorBlanks", "copyVendorImage", "removeBlankImages", "restoreInventoryMovement"],
-    full: ["deleteInventoryItem", "deleteBlank", "deleteBlankLink", "writeOffBlanks", "voidInventoryMovement", "voidFinishedGoodsMovement", "recomputeBlankAverageCosts"] },
+    full: ["deleteInventoryItem", "deleteBlank", "deleteBlankLink", "writeOffBlanks", "countBlankStock", "voidInventoryMovement", "voidFinishedGoodsMovement", "recomputeBlankAverageCosts"] },
   "inventory.blankorder": { read: ["getBlanksToOrder", "freeShippingSuggestions", "listVendors"], edit: ["recordRestockOrder"], full: ["cancelRestockOrder", "saveVendor", "deleteVendor"] },
   "inventory.supplierOrders": { read: ["listSupplierOrders", "checkSupplierOrderShipments", "listVendorApiLog", "getVendorApiLogEntry"], edit: ["previewSupplierOrder", "placeSupplierOrder"], full: ["cancelSupplierOrder"] },
   "inventory.transfers": {
     read: ["listTransfers", "getTransferSheet", "getTransferMovements", "previewTransferCatchUp"],
     edit: ["saveTransfer", "receiveTransferSheet", "applyTransferCatchUp", "restoreTransferMovement"],
-    full: ["deleteTransfer", "writeOffTransfers", "voidTransferMovement", "editTransferSheet"] },
+    full: ["deleteTransfer", "writeOffTransfers", "countTransferStock", "voidTransferMovement", "editTransferSheet"] },
   "finance.expenses": {
     read: ["listExpenses", "previewExpenseImport", "listRecurringExpenses", "listExpenseCategories"],
     edit: ["saveExpense", "importExpenses", "saveRecurringExpense", "stopRecurringExpense", "saveExpenseCategory"],

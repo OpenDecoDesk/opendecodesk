@@ -178,7 +178,7 @@ export async function handleScheduled(event, env) {
       // The vendor web-service log (vendorLog.js) is only written with supplier connections on; entries older than
       // 30 days go here, as in the daily run below (this is the desktop program's only scheduled run).
       try { out.vendorLog = await cleanUpVendorApiLog(env); }
-      catch (e) { console.error("Cleaning up the vendor API log failed:", e); out.vendorLog = { error: String(e && e.message) }; }
+      catch (e) { console.error("Cleaning up the vendor API log failed:", e); out.vendorLog = { error: String(e && e.message) }; await recordSystemIssue(env.DB, "cleanup_failed", "Vendor API log: " + (e && e.message)); }
     }
     return out;
   }
@@ -193,7 +193,7 @@ export async function handleScheduled(event, env) {
   try {
     const v = await cleanUpVendorApiLog(env);
     if (v.deleted) console.log("Deleted", v.deleted, "vendor API log entr" + (v.deleted === 1 ? "y" : "ies"), "older than 30 days");
-  } catch (e) { console.error("Cleaning up the vendor API log failed (continuing with the roll-up):", e); }
+  } catch (e) { console.error("Cleaning up the vendor API log failed (continuing with the roll-up):", e); await recordSystemIssue(env.DB, "cleanup_failed", "Vendor API log: " + (e && e.message)); }
   // Customers' design uploads that never made it onto an order are deleted after 48 hours.
   try {
     const c = await customerDesign.cleanUpCustomerDesigns(env);

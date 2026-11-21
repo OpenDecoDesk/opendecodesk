@@ -5301,7 +5301,8 @@ function renderAdminOrders(app, org, opts){
     fetchOrders(org.orgId),
     !adminFeatureOn_("designVerification") ? Promise.resolve({status:"error"}) : fetch("/api/orders", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({action:"listDesignVerifications", org:org.orgId, key:adminKey})
+      body: JSON.stringify({action:"listDesignVerifications", org:org.orgId, key:adminKey,
+        dateFrom: (window._ordersFilter || {}).from || "", dateTo: (window._ordersFilter || {}).to || ""})
     }).then(r => r.ok ? r.json() : {status:"error"}).catch(() => ({status:"error"})),
     fetch("/api/orders", {
       method:"POST", headers:{"Content-Type":"application/json"},
@@ -9261,8 +9262,11 @@ async function backfillStripeFees(btn){
     const parts = [];
     if(d.updated) parts.push(`recorded fees on ${d.updated} payment${d.updated === 1 ? "" : "s"} ($${total.toFixed(2)})`);
     if(d.redated) parts.push(`corrected the date on ${d.redated} payment${d.redated === 1 ? "" : "s"}`);
-    if(parts.length) showToast("Stripe sync: " + parts.join(", ") + (nf ? ". " + nf : "."), false);
-    else if(nf) showToast(nf, true);
+    // Each click does a limited number of Stripe lookups; the next one carries on.
+    const more = d.more ? ` More payments to check${d.datesToCheck ? ` (${d.datesToCheck})` : ""} — press Sync Stripe fees & dates again to carry on.` : "";
+    if(parts.length) showToast("Stripe sync: " + parts.join(", ") + (nf ? ". " + nf : ".") + more, false);
+    else if(nf) showToast(nf + (more ? "." + more : ""), true);
+    else if(more) showToast("Stripe sync: nothing to change so far." + more, false);
     else showToast("Everything already matches Stripe.", false);
   }catch(e){ showToast("Could not reach the server.", true); }
   finally{ btn.disabled = false; btn.textContent = label; }

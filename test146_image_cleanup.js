@@ -41,7 +41,7 @@ function bucket(objects){
     list: async ({ cursor, limit }) => { const all = [...store.values()].sort((a, b) => a.key.localeCompare(b.key)); const start = Number(cursor || 0); const page = all.slice(start, start + Math.min(limit || 1000, 2));
       return { objects: page, truncated: start + 2 < all.length, cursor: String(start + 2) }; },
     head: async (k) => store.get(k) || null,
-    delete: async (k) => { store.delete(k); },
+    delete: async (k) => { for (const x of [].concat(k)) store.delete(x); },   // one key or a list, as R2 takes
   };
 }
 
@@ -99,6 +99,54 @@ function bucket(objects){
   ok("…and a delete is audited", r.status === 200 && d1.q("SELECT count(*) n FROM audit_log WHERE action='images.orphans_deleted'")[0].n === 1);
   r = await call({ action: "findOrphanImages" }, {});
   ok("no image store → it says so", r.status === 400 && /isn't set up/.test(r.body.message));
+
+  console.log("\n=== A set of referenced keys gives the same answer as the old whole-text search ===");
+  {
+    // The previous way (2026-10): every matching text value joined into one string, then searched once per file.
+    const oldOrphans = async (env, db, now) => {
+      const { results: tables } = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'd1_%' AND name NOT LIKE '_cf_%'").all();
+      const parts = [];
+      for (const t of tables) {
+        const { results: cols } = await db.prepare(`SELECT name, type FROM pragma_table_info('${t.name}')`).all();
+        for (const c of cols.filter(c => !c.type || /TEXT|CHAR|CLOB|JSON/i.test(String(c.type))).map(c => c.name)) {
+          const { results } = await db.prepare(`SELECT "${c}" AS v FROM "${t.name}" WHERE "${c}" LIKE '%uploads/%' OR "${c}" LIKE '%verify/%' OR "${c}" LIKE '%images.%'`).all();
+          for (const r of results) if (r.v) parts.push(String(r.v));
+        }
+      }
+      const text = parts.join("\n"), out = [];
+      for (const o of env.IMAGES._store.values()) {
+        if (now - new Date(o.uploaded).getTime() < 24 * 3600 * 1000) continue;
+        if (!text.includes(String(o.key).replace(/-thumb(\.[A-Za-z0-9]+)$/, "$1"))) out.push(o.key);
+      }
+      return out.sort();
+    };
+    // References written every way the database holds them: a public address with a query string, a bare key, JSON,
+    // stored HTML with escaped quotes, a sentence ending in the address, an audit entry, a thumb's own address.
+    d1._raw.run("UPDATE products SET imagesJson=? WHERE productId='tee'", [JSON.stringify([`${BASE}/uploads/acme/prod1.jpg?v=3`])]);
+    d1._raw.run("INSERT INTO audit_log (createdAt, action, detail) VALUES ('2026-10-01T00:00:00Z', 'x', ?)", [JSON.stringify({ was: "uploads/acme/audit1.png" })]);
+    d1._raw.run("INSERT INTO global_settings (key, value) VALUES ('note1', ?)", [`<img src=&quot;${BASE}/uploads/acme/html1.jpg&quot;> and see ${BASE}/verify/sentence1.png.`]);
+    d1._raw.run("INSERT INTO global_settings (key, value) VALUES ('note2', ?)", [`thumb only: ${BASE}/uploads/acme/thumbonly-thumb.jpg, bare uploads/blanks/bare1.webp`]);
+    const keys2 = ["uploads/acme/prod1.jpg", "uploads/acme/prod1-thumb.jpg", "uploads/acme/audit1.png", "uploads/acme/html1.jpg", "verify/sentence1.png",
+      "uploads/acme/thumbonly.jpg", "uploads/acme/thumbonly-thumb.jpg", "uploads/blanks/bare1.webp", "uploads/acme/lonely.jpg", "uploads/acme/lonely-thumb.jpg", "verify/lonely2.png",
+      "uploads/acme/prod1.jpg.bak", "uploads/acme/new2.jpg"];
+    const env2 = { IMAGES: bucket(keys2.map(k => obj(k, k === "uploads/acme/new2.jpg" ? fresh : old))), R2_PUBLIC_BASE: BASE };
+    const before = await oldOrphans(env2, d1, now);
+    const after = (await orphan.findOrphanImages(env2, d1, { now })).orphans.map(o => o.key).sort();
+    ok("the same orphans as before on references of every shape", JSON.stringify(after) === JSON.stringify(before) &&
+      after.includes("uploads/acme/lonely.jpg") && after.includes("verify/lonely2.png") && !after.includes("uploads/acme/html1.jpg") && !after.includes("verify/sentence1.png") && !after.includes("uploads/blanks/bare1.webp"));
+    // Read a page of rows at a time: the same answer with 2 rows a read.
+    const small = new Function(orphanSrc.replace("const ROWS_PER_READ = 2000;", "const ROWS_PER_READ = 2;") + "\nreturn { findOrphanImages, deleteOrphanImages };")();
+    for (let i = 0; i < 7; i++) d1._raw.run("INSERT INTO audit_log (createdAt, action, detail) VALUES ('2026-10-02T00:00:00Z', 'x', ?)", [`{"img":"${BASE}/uploads/acme/paged${i}.jpg"}`]);
+    env2.IMAGES._store.set("uploads/acme/paged6.jpg", obj("uploads/acme/paged6.jpg"));
+    const paged = (await small.findOrphanImages(env2, d1, { now })).orphans.map(o => o.key).sort();
+    ok("…read a page of rows at a time, the last page's reference still counts", JSON.stringify(paged) === JSON.stringify(await oldOrphans(env2, d1, now)) && !paged.includes("uploads/acme/paged6.jpg"));
+    const many = Array.from({ length: 1003 }, (_, i) => "uploads/acme/many" + i + ".jpg");
+    const delMany = await orphan.deleteOrphanImages(env2, d1, many, { now });
+    ok("deleting more than 1,000 at once: the rest are listed as kept, not silently dropped", delMany.kept.filter(k => /delete the rest next/.test(k.why)).length === 3 && delMany.kept.length === 1003);
+    await orphan.deleteOrphanImages(env2, d1, ["uploads/acme/lonely.jpg", "uploads/acme/lonely-thumb.jpg", "uploads/acme/html1.jpg"], { now });
+    ok("…and the orphans are deleted together, the one in use kept", !env2.IMAGES._store.has("uploads/acme/lonely.jpg") && !env2.IMAGES._store.has("uploads/acme/lonely-thumb.jpg") && env2.IMAGES._store.has("uploads/acme/html1.jpg"));
+    ok("no single string of every reference any more", !/parts\.join/.test(orphanSrc) && /new Set\(\)/.test(orphanSrc));
+  }
 
   console.log("\n=== The windows ===");
   const adminJs = read("public/admin.js");

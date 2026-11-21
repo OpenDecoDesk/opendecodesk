@@ -5255,7 +5255,32 @@ export async function deleteDesign(db, id) {
             (SELECT count(*) FROM products p, json_each(CASE WHEN json_valid(p.personalizationOptionDesigns) THEN p.personalizationOptionDesigns ELSE '{}' END) j WHERE j.value = ?1) AS n`
   ).bind(n).first().catch(() => null);
   if (usedAgain && Number(usedAgain.n) > 0) throw new Error("A product still uses this design (as one of its designs or for a pick-list option) — remove it there first");
-  await db.prepare("DELETE FROM designs WHERE id=?").bind(n).run();
+  const { results: files } = await db.prepare("SELECT designFileKey, machineFileKey FROM design_versions WHERE designId=?").bind(n).all();
+  await db.prepare("DELETE FROM designs WHERE id=?").bind(n).run();   // its versions go with it (ON DELETE CASCADE)
+  // The versions' files in the private DESIGNS bucket that nothing else points to: the caller deletes them.
+  return { unusedFileKeys: await designsKeysUnused_(db, files.flatMap(f => [f.designFileKey, f.machineFileKey])) };
+}
+
+// Of these DESIGNS-bucket keys, the ones no row points to any more (design versions, order lines' designs and
+// files, digital product files and their download grants, customers' uploads, brand approvals). If a table
+// can't be read, none are called unused: a file is never deleted on a guess.
+async function designsKeysUnused_(db, keys) {
+  const want = [...new Set((keys || []).filter(k => k && typeof k === "string"))];
+  if (!want.length) return [];
+  const list = JSON.stringify(want);
+  const cols = [["design_versions", "designFileKey"], ["design_versions", "machineFileKey"], ["order_item_designs", "designFileKey"], ["order_item_designs", "machineFileKey"],
+    ["order_item_files", "fileKey"], ["product_files", "fileKey"], ["download_grants", "fileKey"], ["customer_design_uploads", "fileKey"], ["brand_approvals", "fileKey"]];
+  const used = new Set();
+  for (const [t, c] of cols) {
+    try {
+      const { results } = await db.prepare(`SELECT DISTINCT ${c} AS k FROM ${t} WHERE ${c} IN (SELECT value FROM json_each(?))`).bind(list).all();
+      for (const r of results || []) used.add(r.k);
+    } catch (e) {
+      if (/no such table/i.test(String(e && e.message))) continue;   // an install from before that table: nothing in it
+      return [];
+    }
+  }
+  return want.filter(k => !used.has(k));
 }
 
 // Two files per version (migrations/0026): designFile (native, editable — .emb/.jdx/etc; optional, ''
@@ -5312,7 +5337,10 @@ export async function addOrderItemFile(db, itemId, fields) {
 }
 
 export async function deleteOrderItemFile(db, id) {
+  const row = await db.prepare("SELECT fileKey FROM order_item_files WHERE id=?").bind(Number(id)).first();
   await db.prepare("DELETE FROM order_item_files WHERE id=?").bind(Number(id)).run();
+  // Its file in the DESIGNS bucket, if nothing else points to it: the caller deletes it.
+  return { unusedFileKeys: row ? await designsKeysUnused_(db, [row.fileKey]) : [] };
 }
 
 // ---- Order-specific designs (migrations/0032) ----------------------------------------------
@@ -8011,11 +8039,21 @@ export async function restoreTransferMovement(db, id) {
 // Transfer inventory on hand + value at the end of a moment, and COGS by month — same shape as the
 // blank valuation/COGS, so the Inventory & COGS report can show a Transfers section beside blanks.
 export async function getTransferValuation(db, asOf) {
+  return (await getTransferValuations(db, [asOf]))[0];
+}
+// The same at several moments from ONE read of the history (as getInventoryValuations does for blanks).
+export async function getTransferValuations(db, asOfList) {
   const { results } = await db.prepare(
-    "SELECT transferId, transferName, qtyDelta, unitCostCents, kind FROM transfer_movements WHERE occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id"
-  ).bind(asOf).all();
+    "SELECT transferId, transferName, qtyDelta, unitCostCents, kind, occurredAt FROM transfer_movements WHERE occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id"
+  ).bind(latestMoment_(asOfList)).all();
   const state = new Map();
-  for (const m of results) {
+  const snapshot = (asOf) => {
+    const rows = [...state.values()].filter(r => r.qty !== 0)
+      .map(r => ({ transferId: r.transferId, name: r.name, qty: r.qty, avgCost: fromCents(r.avg), value: fromCents(Math.max(0, r.qty) * r.avg) }))
+      .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    return { asOf, rows, units: rows.reduce((s, r) => s + r.qty, 0), value: fromCents(rows.reduce((s, r) => s + toCents(r.value), 0)) };
+  };
+  return replayAtMoments_(results, asOfList, snapshot, (m) => {
     const key = String(m.transferId);
     const st = state.get(key) || { transferId: Number(m.transferId), name: m.transferName, qty: 0, avg: 0 };
     const d = Number(m.qtyDelta);
@@ -8025,11 +8063,22 @@ export async function getTransferValuation(db, asOf) {
     }
     st.qty += d; st.name = m.transferName || st.name;
     state.set(key, st);
+  });
+}
+// The latest of several ISO moments (what a multi-moment replay reads up to).
+const latestMoment_ = (asOfList) => asOfList.reduce((a, b) => (b > a ? b : a));
+// Replays movements (ordered by occurredAt) through `apply`, calling `snapshot(asOf)` as the replay passes each
+// moment; one result per moment, in the order given.
+function replayAtMoments_(movements, asOfList, snapshot, apply) {
+  const moments = asOfList.map((asOf, i) => ({ asOf, i })).sort((a, b) => (a.asOf < b.asOf ? -1 : a.asOf > b.asOf ? 1 : 0));
+  const out = new Array(asOfList.length);
+  let next = 0;
+  for (const m of movements) {
+    while (next < moments.length && m.occurredAt > moments[next].asOf) { out[moments[next].i] = snapshot(moments[next].asOf); next++; }
+    apply(m);
   }
-  const rows = [...state.values()].filter(r => r.qty !== 0)
-    .map(r => ({ transferId: r.transferId, name: r.name, qty: r.qty, avgCost: fromCents(r.avg), value: fromCents(Math.max(0, r.qty) * r.avg) }))
-    .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-  return { asOf, rows, units: rows.reduce((s, r) => s + r.qty, 0), value: fromCents(rows.reduce((s, r) => s + toCents(r.value), 0)) };
+  for (; next < moments.length; next++) out[moments[next].i] = snapshot(moments[next].asOf);
+  return out;
 }
 
 // Cost already taken out of stock for orders that don't count as sold yet at `asOf` (end of that
@@ -8037,22 +8086,27 @@ export async function getTransferValuation(db, asOf) {
 // before they're made (basis "placed"). The Inventory report's roll-forward needs it: stock went down
 // when the order was made, COGS when it's sold. Cents: blanks + finished stock, and transfers apart.
 export async function getOrderCostsNotYetSold(db, asOf, { basis } = {}) {
+  return (await getOrderCostsNotYetSoldAt(db, [asOf], { basis }))[0];
+}
+// The same at several moments, each table read once for all of them (a report's beginning and end).
+export async function getOrderCostsNotYetSoldAt(db, asOfList, { basis } = {}) {
   const sale = saleDateSql_(basis || await getSaleDateBasis(db), "o");
+  const sums = (col) => asOfList.map((_, i) => `COALESCE(SUM(CASE WHEN ${col} <= ? THEN -m.qtyDelta * m.unitCostCents ELSE 0 END), 0) AS c${i}`).join(", ");
   const two = async (table, kinds) => {
     const k = kinds.map(x => `'${x}'`).join(", ");
     try {
-      const used = await db.prepare(`SELECT COALESCE(SUM(-m.qtyDelta * m.unitCostCents), 0) AS c FROM ${table} m
+      const used = await db.prepare(`SELECT ${sums("m.occurredAt")} FROM ${table} m
         WHERE m.occurredAt <= ? AND m.kind IN (${k}) AND m.voidedAt IS NULL AND m.orderId IS NOT NULL
-          AND EXISTS (SELECT 1 FROM orders ox WHERE ox.orderId = m.orderId)`).bind(asOf).first();
-      const sold = await db.prepare(`SELECT COALESCE(SUM(-m.qtyDelta * m.unitCostCents), 0) AS c FROM orders o JOIN ${table} m ON m.orderId = o.orderId
-        WHERE ${sale} <= ? AND m.kind IN (${k}) AND m.voidedAt IS NULL`).bind(asOf).first();
-      return Number(used.c) - Number(sold.c);
-    } catch (e) { if (/no such table/i.test(String(e && e.message))) return 0; throw e; }
+          AND EXISTS (SELECT 1 FROM orders ox WHERE ox.orderId = m.orderId)`).bind(...asOfList, latestMoment_(asOfList)).first();
+      const sold = await db.prepare(`SELECT ${sums(sale)} FROM orders o JOIN ${table} m ON m.orderId = o.orderId
+        WHERE ${sale} <= ? AND m.kind IN (${k}) AND m.voidedAt IS NULL`).bind(...asOfList, latestMoment_(asOfList)).first();
+      return asOfList.map((_, i) => Number(used["c" + i]) - Number(sold["c" + i]));
+    } catch (e) { if (/no such table/i.test(String(e && e.message))) return asOfList.map(() => 0); throw e; }
   };
   const [blanks, finished, transfers] = await Promise.all([
     two("inventory_movements", ["consume"]), two("finished_goods_movements", ["sell", "return"]), two("transfer_movements", ["consume"]),
   ]);
-  return { blanksCents: blanks, finishedCents: finished, transfersCents: transfers };
+  return asOfList.map((_, i) => ({ blanksCents: blanks[i], finishedCents: finished[i], transfersCents: transfers[i] }));
 }
 
 export async function getTransferCogs(db, dateFrom, dateTo, { basis } = {}) {
@@ -9736,12 +9790,17 @@ export async function getOrderSource(db, orderId) {
 // is UTC — and the browser still applies the exact range (ordersDateFilter_), so nothing shown changes.
 // opts.limit: at most that many orders, the newest (the handler's cap on a window with no dates).
 export async function getOrdersByOrg(db, orgId, range = {}, opts = {}) {
+  const { where, params } = orgOrdersWindow_(orgId, range);
+  return loadOrders_(db, where, params, "placedAt DESC", opts.limit);
+}
+// The Orders page's window on one shop's orders (getOrdersByOrg): the date filter padded a day each side.
+function orgOrdersWindow_(orgId, range = {}) {
   const day = (s, add) => { const d = new Date(String(s) + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + add); return d.toISOString(); };
   const valid = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || "")) && !isNaN(Date.parse(s));
   const where = ["o.orgId = ?"], params = [orgId];
-  if (valid(range.from)) { where.push("o.placedAt >= ?"); params.push(day(range.from, -1)); }
-  if (valid(range.to))   { where.push("o.placedAt < ?");  params.push(day(range.to, 2)); }
-  return loadOrders_(db, where.join(" AND "), params, "placedAt DESC", opts.limit);
+  if (valid(range && range.from)) { where.push("o.placedAt >= ?"); params.push(day(range.from, -1)); }
+  if (valid(range && range.to))   { where.push("o.placedAt < ?");  params.push(day(range.to, 2)); }
+  return { where: where.join(" AND "), params };
 }
 
 // Every open order across all orgs: not completed, not voided, not a test, and at least one
@@ -11036,12 +11095,21 @@ export async function getVerificationsByOrder(db, orderId) {
   return results;
 }
 
-export async function getLatestVerificationsByOrg(db, orgId) {
+// The latest design verification of each order the Orders page shows: the same date window and newest-`limit`
+// orders as getOrdersByOrg (range, opts.limit), not the shop's whole history. Without the proof pictures and message
+// (the list shows status and dates, and links the customer's page by token). Index: idx_verif_org_order_sent (migrations/0216).
+export async function getLatestVerificationsByOrg(db, orgId, range = {}, opts = {}) {
+  const w = orgOrdersWindow_(orgId, range);
+  const lim = Number.isInteger(opts.limit) && opts.limit > 0 ? opts.limit : 0;
   const { results } = await db.prepare(
-    "SELECT * FROM design_verifications WHERE orgId=? ORDER BY sentAt DESC"
-  ).bind(orgId).all();
-  const seen = new Set();
-  return results.filter(r => seen.has(r.orderId) ? false : (seen.add(r.orderId), true));
+    `SELECT token, orgId, orderId, customerEmail, customerName, status, customerNote, sentAt, respondedAt, uploadCount FROM (
+       SELECT v.token, v.orgId, v.orderId, v.customerEmail, v.customerName, v.status, v.customerNote, v.sentAt, v.respondedAt, v.uploadCount,
+         ROW_NUMBER() OVER (PARTITION BY v.orderId ORDER BY v.sentAt DESC, v.rowid DESC) AS rn
+       FROM design_verifications v
+       WHERE v.orgId = ? AND v.orderId IN (SELECT o.orderId FROM orders o WHERE ${w.where} ORDER BY o.placedAt DESC${lim ? " LIMIT " + lim : ""}))
+     WHERE rn = 1 ORDER BY sentAt DESC`
+  ).bind(orgId, ...w.params).all();
+  return results;
 }
 
 // ---- Voids (migrations/0010): nothing financial is ever hard-deleted ---------
@@ -11214,8 +11282,8 @@ export async function getAccountantExport(db, dateFrom, dateTo) {
   // Inventory by group at the start and end of the period (migrations/0060): blanks for sale, blanks for
   // testing / shop use, finished stock (Schedule C Part III, beginning and ending inventory).
   const before = new Date(new Date(dateFrom).getTime() - 1).toISOString();
-  const [[b0, b1], f0, f1] = await Promise.all([getInventoryValuations(db, [before, dateTo]),
-    getFinishedGoodsValuation(db, before), getFinishedGoodsValuation(db, dateTo)]);
+  const [[b0, b1], [f0, f1]] = await Promise.all([getInventoryValuations(db, [before, dateTo]),
+    getFinishedGoodsValuations(db, [before, dateTo])]);   // each history read once for both ends
   const inventoryGroups = [
     { group: "Blanks for sale", beginning: b0.groups.forSale.value, ending: b1.groups.forSale.value },
     { group: "Blanks for testing / shop use", beginning: b0.groups.testing.value, ending: b1.groups.testing.value },
@@ -11599,8 +11667,11 @@ export async function getRecurringExpensesRecorded(db, sinceIso) {
 // payment already recorded IN the bank account (checks default there) is matched to the deposit whole.
 // One that's already matched to a statement line is left out. With `ids`, only those — used to
 // re-validate what the browser sent.
+// Only payments marked depositOpen (migrations/0218, kept by triggers) are worked through, so the cost follows the
+// few still open, not every payment ever recorded; the two conditions are still checked here. `ids` go as one
+// JSON list (D1 binds at most 100 parameters).
 export async function getDepositPayments(db, ids = null) {
-  const idFilter = ids ? ` AND p.id IN (${ids.map(() => "?").join(",") || "NULL"})` : "";
+  const idFilter = ids ? " AND p.id IN (SELECT value FROM json_each(?))" : "";
   const { results } = await db.prepare(
     `SELECT * FROM (
        SELECT p.id, p.orderId, p.method, p.amountCents, p.feeCents, p.receivedAt, p.accountId, a.name AS accountName, o.customerName, o.orgId,
@@ -11608,9 +11679,9 @@ export async function getDepositPayments(db, ids = null) {
                     WHERE c.paymentId = p.id), 0) AS allocatedCents,
          EXISTS (SELECT 1 FROM statement_matches m WHERE m.src = 'payment' AND m.srcId = p.id) AS matched
          FROM order_payments p JOIN orders o ON o.orderId = p.orderId LEFT JOIN accounts a ON a.id = p.accountId
-        WHERE p.method IN ('venmo', 'cash', 'check', 'zelle', 'card') AND p.kind = 'payment' AND p.voidedAt IS NULL AND p.accountId IS NOT NULL
+        WHERE p.depositOpen = 1 AND p.method IN ('venmo', 'cash', 'check', 'zelle', 'card') AND p.kind = 'payment' AND p.voidedAt IS NULL AND p.accountId IS NOT NULL
           AND o.voidedAt IS NULL AND o.isTest = 0${idFilter}
-     ) WHERE allocatedCents < amountCents AND matched = 0 ORDER BY receivedAt DESC, id DESC LIMIT ${ids ? 500 : 300}`).bind(...(ids || [])).all();
+     ) WHERE allocatedCents < amountCents AND matched = 0 ORDER BY receivedAt DESC, id DESC LIMIT ${ids ? 500 : 300}`).bind(...(ids ? [JSON.stringify(ids.map(Number))] : [])).all();
   return results.map(r => ({ id: Number(r.id), orderId: r.orderId, orgId: r.orgId, customerName: r.customerName, method: r.method, amountCents: Number(r.amountCents),
     feeCents: Number(r.feeCents || 0), receivedAt: r.receivedAt, accountId: Number(r.accountId), accountName: r.accountName || "",
     allocatedCents: Number(r.allocatedCents), remainingCents: Number(r.amountCents) - Number(r.allocatedCents) }));
@@ -12069,12 +12140,20 @@ async function combineReceipts_(db, moves) {
 // The register of one account: every movement from MONEY_MOVE_SOURCES (the same list the balances are summed
 // from, so it can never disagree with Accounts & money) dated on/after the account's opening date and up to
 // `dateTo`, oldest first for the running balance, returned NEWEST first. Dollars out.
+// Only the movements from `dateFrom` on are read; the balance before them is one sum per source (as
+// listAccounts adds them up), so a month's view doesn't read the account's whole history.
 export async function getAccountRegister(db, accountId, dateFrom, dateTo) {
   const acct = await db.prepare("SELECT * FROM accounts WHERE id = ?").bind(Number(accountId)).first();
   if (!acct) return null;
   const all = [];
-  const perSource = await Promise.all(MONEY_MOVE_SOURCES.map(sql => db.prepare(
-    `SELECT m.* FROM (${sql}) m WHERE m.accountId = ? AND m.d >= ? AND m.d <= ?`).bind(Number(accountId), acct.openingDate, dateTo).all()));
+  const readFrom = dateFrom > acct.openingDate ? dateFrom : acct.openingDate;
+  const [earlier, perSource] = await Promise.all([
+    Promise.all(MONEY_MOVE_SOURCES.map(sql => db.prepare(
+      `SELECT COALESCE(SUM(m.c), 0) AS c FROM (${sql}) m WHERE m.accountId = ? AND m.d >= ? AND m.d < ?`).bind(Number(accountId), acct.openingDate, readFrom).first())),
+    Promise.all(MONEY_MOVE_SOURCES.map(sql => db.prepare(
+      `SELECT m.* FROM (${sql}) m WHERE m.accountId = ? AND m.d >= ? AND m.d <= ?`).bind(Number(accountId), readFrom, dateTo).all())),
+  ]);
+  const earlierCents = earlier.reduce((s, r) => s + Number((r && r.c) || 0), 0);
   perSource.forEach(({ results }, order) => { for (const r of results) all.push({ src: r.src, srcId: Number(r.srcId), date: r.d, cents: Number(r.c), label: r.label || "", order }); });
   all.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.order - b.order || a.srcId - b.srcId);
   // One row per stock receipt (2026-10): its records — a stock row per blank / size, and any R&D expense or
@@ -12114,13 +12193,11 @@ export async function getAccountRegister(db, accountId, dateFrom, dateTo) {
     }
   }
 
-  let bal = Number(acct.openingBalanceCents) || 0, startBal = bal, totalIn = 0, totalOut = 0;
+  let bal = (Number(acct.openingBalanceCents) || 0) + earlierCents, startBal = bal, totalIn = 0, totalOut = 0;
   const rows = [];
   let open = null;   // the receipt row still taking parts
   for (const r of all) {
-    const before = r.date < dateFrom;
     bal += r.cents;
-    if (before) { startBal = bal; continue; }
     if (r.cents > 0) totalIn += r.cents; else totalOut += -r.cents;
     const g = rgroups.get(`${r.src}:${r.srcId}`);
     if (g) {
@@ -12505,14 +12582,36 @@ export async function importStatementLines(db, accountId, lines, batch) {
 
 // An account's recorded money movements between two dates (YYYY-MM-DD,
 // inclusive), each keyed "src:srcId" — the same sources as the balances.
-export async function listMoneyMoves(db, accountId, dateFrom, dateTo) {
+// opts.unmatched: only moves no statement line of this account is matched to.
+// opts.keys: only these moves ("src:srcId"), still within the account and dates.
+export async function listMoneyMoves(db, accountId, dateFrom, dateTo, opts = {}) {
   const out = [];
+  const byKey = opts.keys ? new Map() : null;
+  if (byKey) for (const k of opts.keys) { const [src, id] = String(k).split(":"); (byKey.get(src) || byKey.set(src, []).get(src)).push(Number(id)); }
   for (const sql of MONEY_MOVE_SOURCES) {
-    const { results } = await db.prepare(`SELECT * FROM (${sql}) m WHERE m.accountId = ? AND m.d >= ? AND m.d <= ?`)
-      .bind(Number(accountId), dateFrom, dateTo).all();
+    let extra = "", binds = [];
+    if (byKey) {
+      const src = (/SELECT '(\w+)' AS src/.exec(sql) || [])[1];
+      const ids = byKey.get(src);
+      if (!ids || !ids.length) continue;
+      extra = " AND m.srcId IN (SELECT value FROM json_each(?))"; binds = [JSON.stringify(ids)];
+    }
+    if (opts.unmatched) {
+      extra += ` AND NOT EXISTS (SELECT 1 FROM statement_matches sm JOIN statement_lines sl ON sl.id = sm.lineId
+        WHERE sm.src = m.src AND sm.srcId = m.srcId AND sl.accountId = ?)`;
+      binds.push(Number(accountId));
+    }
+    const { results } = await db.prepare(`SELECT * FROM (${sql}) m WHERE m.accountId = ? AND m.d >= ? AND m.d <= ?${extra}`)
+      .bind(Number(accountId), dateFrom, dateTo, ...binds).all();
     for (const r of results) out.push({ key: `${r.src}:${r.srcId}`, src: r.src, srcId: Number(r.srcId), date: r.d, cents: Number(r.c), label: r.label || "" });
   }
   return out.sort((a, b) => a.date.localeCompare(b.date) || a.key.localeCompare(b.key));
+}
+// The account's balance from its movements dated dateFrom..dateTo: one sum per source.
+async function sumMoneyMoves_(db, accountId, dateFrom, dateTo) {
+  const sums = await Promise.all(MONEY_MOVE_SOURCES.map(sql => db.prepare(
+    `SELECT COALESCE(SUM(m.c), 0) AS c FROM (${sql}) m WHERE m.accountId = ? AND m.d >= ? AND m.d <= ?`).bind(Number(accountId), dateFrom, dateTo).first()));
+  return sums.reduce((s, r) => s + Number((r && r.c) || 0), 0);
 }
 const addDays_ = (ymd, n) => new Date(Date.parse(ymd + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
 export const monthBounds = (month) => {
@@ -12574,7 +12673,7 @@ export async function matchStatementLine(db, lineId, keys) {
   const line = await getStatementLine(db, lineId);
   if (!line) return { error: "Statement line not found" };
   const taken = await matchedKeys_(db, line.accountId);
-  const moves = await listMoneyMoves(db, line.accountId, "0000-01-01", "9999-12-31");
+  const moves = await listMoneyMoves(db, line.accountId, "0000-01-01", "9999-12-31", { keys });   // only the chosen ones, not the whole history
   const byKey = new Map(moves.map(m => [m.key, m]));
   let sum = 0;
   for (const k of keys) {
@@ -12606,17 +12705,23 @@ export async function getReconciliationData(db, accountId, month) {
   const account = await db.prepare("SELECT * FROM accounts WHERE id = ?").bind(Number(accountId)).first();
   if (!account) return null;
   const { from, to } = monthBounds(month);
-  const [allMoves, taken, { results: lines }, { results: matchRows }, rec, ign] = await Promise.all([
-    listMoneyMoves(db, accountId, account.openingDate, addDays_(to, 10)),
-    matchedKeys_(db, accountId),
+  // Not the account's whole history: the book balance is one sum per source; the moves read are the ones no
+  // statement line is matched to (few, on an account that's kept reconciled) and the ones this month's lines are
+  // matched to — each within the same dates as before (opening date to 10 days past the month).
+  const end = addDays_(to, 10);
+  const [{ results: lines }, { results: matchRows }, rec, ign, throughCents, unmatchedMoves] = await Promise.all([
     db.prepare("SELECT * FROM statement_lines WHERE accountId = ? AND lineDate >= ? AND lineDate <= ? ORDER BY lineDate, id").bind(Number(accountId), from, to).all(),
     db.prepare("SELECT sm.* FROM statement_matches sm JOIN statement_lines sl ON sl.id = sm.lineId WHERE sl.accountId = ? AND sl.lineDate >= ? AND sl.lineDate <= ?").bind(Number(accountId), from, to).all(),
     db.prepare("SELECT * FROM reconciliations WHERE accountId = ? AND month = ?").bind(Number(accountId), month).first(),
     db.prepare("SELECT COALESCE(SUM(amountCents), 0) c FROM statement_lines WHERE accountId = ? AND ignoredAt IS NOT NULL AND lineDate >= ? AND lineDate <= ?").bind(Number(accountId), account.openingDate, to).first(),
+    sumMoneyMoves_(db, accountId, account.openingDate, to),
+    listMoneyMoves(db, accountId, account.openingDate, end, { unmatched: true }),
   ]);
-  const moveByKey = new Map(allMoves.map(m => [m.key, m]));
   const matchesByLine = {};
   for (const r of matchRows) (matchesByLine[r.lineId] = matchesByLine[r.lineId] || []).push(`${r.src}:${r.srcId}`);
+  const lineKeys = [...new Set(matchRows.map(r => `${r.src}:${r.srcId}`))];
+  const matchedMoves = lineKeys.length ? await listMoneyMoves(db, accountId, account.openingDate, end, { keys: lineKeys }) : [];
+  const moveByKey = new Map([...unmatchedMoves, ...matchedMoves].map(m => [m.key, m]));
   // A stock receipt's records (a row per blank / size, its R&D / personal part) are one charge on the statement,
   // so each list shows them as ONE entry with `keys` (all its records) and `parts` (2026-10, combineReceipts_).
   const entry = (e) => ({ key: e.key, keys: e.keys, date: e.date, label: e.label, amount: fromCents(e.cents),
@@ -12630,9 +12735,8 @@ export async function getReconciliationData(db, accountId, month) {
       status: l.ignoredAt ? "ignored" : broken ? "broken" : items.length ? "matched" : "unmatched",
       ignoreReason: l.ignoreReason || "", matched: (await combineReceipts_(db, items)).map(entry) });
   }
-  const through = allMoves.filter(m => m.date <= to);
-  const bookCents = Number(account.openingBalanceCents) + through.reduce((a, m) => a + m.cents, 0);
-  const uncleared = through.filter(m => !taken.has(m.key));
+  const bookCents = Number(account.openingBalanceCents) + throughCents;
+  const uncleared = unmatchedMoves.filter(m => m.date <= to);
   const unclearedCents = uncleared.reduce((a, m) => a + m.cents, 0);
   const expectedStatementCents = bookCents - unclearedCents + Number(ign.c);
   return {
@@ -12640,7 +12744,7 @@ export async function getReconciliationData(db, accountId, month) {
     month, from, to, lines: outLines,
     unmatchedBook: (await combineReceipts_(db, uncleared.filter(m => m.date >= from))).map(entry),
     unclearedEarlier: (await combineReceipts_(db, uncleared.filter(m => m.date < from))).map(entry),
-    candidates: (await combineReceipts_(db, allMoves.filter(m => !taken.has(m.key) && m.date >= addDays_(from, -10)))).map(entry),
+    candidates: (await combineReceipts_(db, unmatchedMoves.filter(m => m.date >= addDays_(from, -10)))).map(entry),
     bookBalance: fromCents(bookCents), uncleared: fromCents(unclearedCents), ignored: fromCents(Number(ign.c)),
     expectedStatementBalance: fromCents(expectedStatementCents),
     reconciled: rec ? { statementBalance: fromCents(rec.statementEndingBalanceCents), bookBalance: fromCents(rec.bookBalanceCents), at: rec.reconciledAt, by: rec.reconciledBy } : null,
@@ -12666,68 +12770,64 @@ export async function saveCsvMapping(db, accountId, mapping) {
 }
 
 // ---- Failed admin sign-ins (reported in the daily roll-up) --------------------
-// Counted at /api/admin-session (wrong passphrase / wrong 2FA code) in
-// global_settings key "failedAdminLogins": {count, passphrase, code, ips[<=10],
-// first, last}. Cleared once a roll-up reporting them is sent.
+// Counted at /api/admin-session (wrong passphrase / wrong 2FA code): one failed_admin_logins row each
+// (migrations/0215), so sign-ins failing at the same moment are each counted. Read as {count, passphrase,
+// code, ips[<=10], first, last, upToId}; once a roll-up reporting them is sent, the rows up to upToId go
+// (any recorded while it was sending stay for the next one).
 export async function recordFailedAdminLogin(db, reason, ip) {
-  const row = await db.prepare("SELECT value FROM global_settings WHERE key='failedAdminLogins'").first();
-  let v = {};
-  try { v = row ? JSON.parse(row.value) : {}; } catch (_) {}
-  const now = new Date().toISOString();
-  v.count = (Number(v.count) || 0) + 1;
-  v[reason === "code" ? "code" : "passphrase"] = (Number(v[reason === "code" ? "code" : "passphrase"]) || 0) + 1;
-  v.ips = Array.isArray(v.ips) ? v.ips : [];
-  if (ip && !v.ips.includes(ip) && v.ips.length < 10) v.ips.push(String(ip).slice(0, 45));
-  v.first = v.first || now; v.last = now;
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('failedAdminLogins', ?)").bind(JSON.stringify(v)).run();
+  await db.prepare("INSERT INTO failed_admin_logins (reason, ip, n, at) VALUES (?, ?, 1, ?)")
+    .bind(reason === "code" ? "code" : "passphrase", String(ip || "").slice(0, 45), new Date().toISOString()).run();
 }
 export async function getFailedAdminLogins(db) {
-  const row = await db.prepare("SELECT value FROM global_settings WHERE key='failedAdminLogins'").first();
-  try { const v = row ? JSON.parse(row.value) : null; return v && v.count > 0 ? v : null; } catch (_) { return null; }
+  const t = await db.prepare(`SELECT COALESCE(SUM(n), 0) AS count, COALESCE(SUM(CASE WHEN reason = 'code' THEN n ELSE 0 END), 0) AS code,
+    MIN(at) AS first, MAX(at) AS last, MAX(id) AS upToId FROM failed_admin_logins`).first();
+  if (!t || !(Number(t.count) > 0)) return null;
+  const { results } = await db.prepare("SELECT ip FROM failed_admin_logins WHERE ip <> '' AND id <= ? GROUP BY ip ORDER BY MIN(id) LIMIT 10").bind(t.upToId).all();
+  const count = Number(t.count), code = Number(t.code);
+  return { count, passphrase: count - code, code, ips: results.map(r => r.ip), first: t.first, last: t.last, upToId: Number(t.upToId) };
 }
-export async function clearFailedAdminLogins(db) {
-  await db.prepare("DELETE FROM global_settings WHERE key='failedAdminLogins'").run();
+// seen: what getFailedAdminLogins returned; only those rows go. Without it, all of them.
+export async function clearFailedAdminLogins(db, seen) {
+  if (seen && seen.upToId != null) await db.prepare("DELETE FROM failed_admin_logins WHERE id <= ?").bind(Number(seen.upToId) || 0).run();
+  else await db.prepare("DELETE FROM failed_admin_logins").run();
 }
 
 // ---- System problems for the 6 AM roll-up ---------------------------------------------------
 // Failures that would otherwise show up only in the Worker's log: an email that couldn't be sent,
 // a Stripe webhook whose update failed (Stripe retries it), a roll-up run that didn't complete.
-// Kept like failedAdminLogins — one small global_settings value, no table — and reported in the
-// next roll-up (a reason to send one), then cleared.
-// {kinds: {<kind>: {count, first, last, samples[<=5]}}}
+// One system_issues row each (migrations/0215), reported in the next roll-up (a reason to send one);
+// the roll-up then deletes the rows it reported, never ones recorded while it was sending.
+// Read as [{kind, label, count, first, last, samples[<=5], upToId}].
 export const SYSTEM_ISSUE_LABELS = {
   email_failed: "Emails that couldn't be sent at all",
   webhook_failed: "Stripe webhook updates that failed (Stripe retries these)",
   payment_needs_review: "Card payments that need a look — more than the order owed, or on a voided order (refund in Stripe if needed)",
   digest_failed: "Daily roll-ups that did not complete (the scheduled run will try again tomorrow)",
   recurring_expense_skipped: "Recurring expenses that couldn't be recorded (fix the rule on Expenses — it's recorded once fixed)",
+  cleanup_failed: "Daily clean-ups that did not complete (old log entries stay until one does)",
 };
 export async function recordSystemIssue(db, kind, sample) {
   if (!db || typeof db.prepare !== "function") return;
   try {
-    const row = await db.prepare("SELECT value FROM global_settings WHERE key='systemIssues'").first();
-    let v = {};
-    try { v = row ? JSON.parse(row.value) : {}; } catch (_) {}
-    v.kinds = v.kinds || {};
-    const now = new Date().toISOString();
-    const k = (v.kinds[kind] = v.kinds[kind] || { count: 0, first: now, samples: [] });
-    k.count++; k.last = now;
-    if (sample && k.samples.length < 5) k.samples.push(String(sample).slice(0, 200));
-    await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('systemIssues', ?)").bind(JSON.stringify(v)).run();
+    await db.prepare("INSERT INTO system_issues (kind, n, sample, at) VALUES (?, 1, ?, ?)")
+      .bind(String(kind || "").slice(0, 60), sample ? String(sample).slice(0, 200) : "", new Date().toISOString()).run();
   } catch (e) { console.error("Could not record system issue", kind, e); }
 }
 export async function getSystemIssues(db) {
-  const row = await db.prepare("SELECT value FROM global_settings WHERE key='systemIssues'").first();
-  try {
-    const v = row ? JSON.parse(row.value) : null;
-    const kinds = (v && v.kinds) || {};
-    const list = Object.entries(kinds).filter(([, k]) => k && k.count > 0)
-      .map(([kind, k]) => ({ kind, label: SYSTEM_ISSUE_LABELS[kind] || kind, count: k.count, first: k.first, last: k.last, samples: k.samples || [] }));
-    return list.length ? list : null;
-  } catch (_) { return null; }
+  const { results } = await db.prepare(`SELECT kind, SUM(n) AS count, MIN(at) AS first, MAX(at) AS last, MAX(id) AS upToId
+    FROM system_issues GROUP BY kind HAVING SUM(n) > 0 ORDER BY MIN(id)`).all();
+  if (!results.length) return null;
+  const upTo = Math.max(...results.map(r => Number(r.upToId)));
+  const { results: samples } = await db.prepare(`SELECT kind, sample FROM (SELECT kind, sample, id, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY id) AS rn
+    FROM system_issues WHERE sample <> '' AND id <= ?) WHERE rn <= 5 ORDER BY id`).bind(upTo).all();
+  return results.map(r => ({ kind: r.kind, label: SYSTEM_ISSUE_LABELS[r.kind] || r.kind, count: Number(r.count), first: r.first, last: r.last,
+    samples: samples.filter(s => s.kind === r.kind).map(s => s.sample), upToId: upTo }));
 }
-export async function clearSystemIssues(db) {
-  await db.prepare("DELETE FROM global_settings WHERE key='systemIssues'").run();
+// seen: what getSystemIssues returned; only those rows go. Without it, all of them.
+export async function clearSystemIssues(db, seen) {
+  const upTo = Array.isArray(seen) && seen.length ? Math.max(...seen.map(x => Number(x.upToId) || 0)) : null;
+  if (upTo != null) await db.prepare("DELETE FROM system_issues WHERE id <= ?").bind(upTo).run();
+  else await db.prepare("DELETE FROM system_issues").run();
 }
 
 // ---- Daily order roll-up (owner digest) -------------------------------------
@@ -12860,13 +12960,31 @@ export async function setPaymentDate(db, id, receivedAt) {
   return row.orderId;
 }
 
-// Card payments linked to a Stripe PaymentIntent (for syncing their dates).
-export async function getStripeLinkedPayments(db) {
+// Card payments linked to a Stripe PaymentIntent whose date hasn't been compared with Stripe's yet
+// (stripeCheckedAt, migrations/0217), oldest first, at most `limit` (for syncing their dates a few at a time).
+export async function getStripeLinkedPayments(db, { limit = 40 } = {}) {
   const { results } = await db.prepare(
     `SELECT id, orderId, receivedAt, externalRef, feeCents FROM order_payments
-     WHERE method = 'card' AND kind = 'payment' AND voidedAt IS NULL AND externalRef LIKE 'pi_%' ORDER BY receivedAt`
-  ).all();
+     WHERE method = 'card' AND kind = 'payment' AND voidedAt IS NULL AND externalRef LIKE 'pi_%' AND stripeCheckedAt IS NULL
+     ORDER BY receivedAt, id LIMIT ?`
+  ).bind(Math.max(1, Math.min(1000, Number(limit) || 40))).all();
   return results.map(r => ({ id: Number(r.id), orderId: r.orderId, receivedAt: r.receivedAt, externalRef: r.externalRef, feeCents: Number(r.feeCents) }));
+}
+// How many Stripe card payments still wait for their date to be compared with Stripe's.
+export async function countStripePaymentsToCheck(db) {
+  const r = await db.prepare(`SELECT COUNT(*) AS n FROM order_payments
+    WHERE method = 'card' AND kind = 'payment' AND voidedAt IS NULL AND externalRef LIKE 'pi_%' AND stripeCheckedAt IS NULL`).first();
+  return Number(r && r.n) || 0;
+}
+export async function markStripeChecked(db, id) {
+  await db.prepare("UPDATE order_payments SET stripeCheckedAt = ? WHERE id = ?").bind(new Date().toISOString(), Number(id)).run();
+}
+// Which of these PaymentIntent ids are already on a ledger entry (externalRef is UNIQUE).
+export async function stripeRefsTaken(db, refs) {
+  const list = [...new Set((refs || []).filter(Boolean).map(String))];
+  if (!list.length) return new Set();
+  const { results } = await db.prepare("SELECT externalRef FROM order_payments WHERE externalRef IN (SELECT value FROM json_each(?))").bind(JSON.stringify(list)).all();
+  return new Set(results.map(r => r.externalRef));
 }
 
 // Stripe card payments that don't have their processing fee recorded yet
@@ -13498,25 +13616,31 @@ export async function voidFinishedGoodsMovement(db, id, reason) {
 // Finished stock on hand and its value at the END of a moment (ISO), from the movements — a running
 // weighted-average cost per shop + product + size (Schedule C Part III, like getInventoryValuation).
 export async function getFinishedGoodsValuation(db, asOf) {
+  return (await getFinishedGoodsValuations(db, [asOf]))[0];
+}
+// The same at several moments from ONE read of the history (as getInventoryValuations does for blanks).
+export async function getFinishedGoodsValuations(db, asOfList) {
   let results = [];
   try {
     ({ results } = await db.prepare(
-      "SELECT orgId, productId, productName, size, variant, variantLabel, qtyDelta, unitCostCents, kind FROM finished_goods_movements WHERE occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id"
-    ).bind(asOf).all());
+      "SELECT orgId, productId, productName, size, variant, variantLabel, qtyDelta, unitCostCents, kind, occurredAt FROM finished_goods_movements WHERE occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id"
+    ).bind(latestMoment_(asOfList)).all());
   } catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
   const state = new Map();
-  for (const m of results) {
+  const snapshot = (asOf) => {
+    const rows = [...state.values()].filter(r => r.qty !== 0)
+      .map(r => ({ orgId: r.orgId, productId: r.productId, name: r.label ? r.name + " · " + r.label : r.name, size: r.size, variant: r.variant, qty: r.qty, avgCost: fromCents(r.avg), value: fromCents(Math.max(0, r.qty) * r.avg) }))
+      .sort((a, b) => (a.orgId + a.name + a.size).localeCompare(b.orgId + b.name + b.size));
+    return { asOf, rows, units: rows.reduce((s, r) => s + r.qty, 0), value: fromCents(rows.reduce((s, r) => s + toCents(r.value), 0)) };
+  };
+  return replayAtMoments_(results, asOfList, snapshot, (m) => {
     const key = heldKey_(m.orgId, m.productId, m.size, m.variant);
     const st = state.get(key) || { orgId: m.orgId, productId: m.productId, name: m.productName, size: m.size || "", variant: m.variant || "", label: "", qty: 0, avg: 0 };
     const d = Number(m.qtyDelta);
     if (d > 0 && m.kind !== "sell") { const on = Math.max(0, st.qty); st.avg = Math.round((on * st.avg + d * Number(m.unitCostCents)) / (on + d)); }
     st.qty += d; st.name = m.productName || st.name; st.label = m.variantLabel || st.label;
     state.set(key, st);
-  }
-  const rows = [...state.values()].filter(r => r.qty !== 0)
-    .map(r => ({ orgId: r.orgId, productId: r.productId, name: r.label ? r.name + " · " + r.label : r.name, size: r.size, variant: r.variant, qty: r.qty, avgCost: fromCents(r.avg), value: fromCents(Math.max(0, r.qty) * r.avg) }))
-    .sort((a, b) => (a.orgId + a.name + a.size).localeCompare(b.orgId + b.name + b.size));
-  return { asOf, rows, units: rows.reduce((s, r) => s + r.qty, 0), value: fromCents(rows.reduce((s, r) => s + toCents(r.value), 0)) };
+  });
 }
 
 // A pulled from-stock line taken back (its line cancelled, or its order voided, before it shipped):

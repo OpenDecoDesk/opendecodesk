@@ -117,16 +117,23 @@ export async function getVendorApiLogEntry(env, id) {
 }
 
 // Older than VENDOR_LOG_DAYS: the stored payloads and the rows go. Returns how many.
+// D1 binds at most 100 parameters a statement, so the rows go 90 ids at a time. Each group's payloads are deleted
+// only after its rows are: a failed row delete leaves both for the next run, never a row whose payload is gone.
+const VENDOR_LOG_DELETE_CHUNK = 90;
 export async function cleanUpVendorApiLog(env, days = VENDOR_LOG_DAYS) {
   const before = new Date(Date.now() - days * 86400000).toISOString();
   let deleted = 0;
   for (let round = 0; round < 20; round++) {
     const { results } = await env.DB.prepare("SELECT id, payloadKey FROM vendor_api_log WHERE at < ? ORDER BY id LIMIT 500").bind(before).all();
     if (!results.length) break;
-    const keys = results.map(r => r.payloadKey).filter(Boolean);
-    if (keys.length && env.RECEIPTS) { for (let i = 0; i < keys.length; i += 100) await env.RECEIPTS.delete(keys.slice(i, i + 100)); }
-    await env.DB.prepare(`DELETE FROM vendor_api_log WHERE id IN (${results.map(() => "?").join(",")})`).bind(...results.map(r => r.id)).run();
-    deleted += results.length;
+    for (let i = 0; i < results.length; i += VENDOR_LOG_DELETE_CHUNK) {
+      const chunk = results.slice(i, i + VENDOR_LOG_DELETE_CHUNK);
+      await env.DB.prepare(`DELETE FROM vendor_api_log WHERE id IN (${chunk.map(() => "?").join(",")})`).bind(...chunk.map(r => r.id)).run();
+      deleted += chunk.length;
+      const keys = chunk.map(r => r.payloadKey).filter(Boolean);
+      if (keys.length && env.RECEIPTS) await env.RECEIPTS.delete(keys);
+    }
+    if (results.length < 500) break;
   }
   return { deleted };
 }

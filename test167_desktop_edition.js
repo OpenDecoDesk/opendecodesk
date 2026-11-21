@@ -27,7 +27,8 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
     const stmts = splitSql("CREATE TABLE a (x TEXT DEFAULT 'a;b'); -- c;d\nCREATE TRIGGER t AFTER INSERT ON a BEGIN UPDATE a SET x = CASE WHEN x = ';' THEN 'y' END; DELETE FROM a WHERE 0; END;\n/* only; a comment */ INSERT INTO \"we;ird\" VALUES (1);\n-- the end");
     ok("statements split at ';' but not inside strings, comments or a trigger's BEGIN … END", stmts.length === 3 && /^(--[^\n]*\n)?CREATE TRIGGER[\s\S]*END$/.test(stmts[1]) && /'a;b'/.test(stmts[0]) && /we;ird/.test(stmts[2]));
     const trig = splitSql(src.schema).filter(s => /CREATE\s+TRIGGER/i.test(s));
-    ok("schema.sql's trigger stays one statement", trig.length === 1 && /END$/.test(trig[0]));
+    // (One trigger until migrations/0218 added the depositOpen ones.)
+    ok("schema.sql's triggers each stay one statement", trig.length > 1 && trig.length === (src.schema.match(/CREATE\s+TRIGGER/gi) || []).length && trig.every(s => /END$/.test(s)));
 
     const fresh = await createD1();
     const r = await migrate(fresh, src);

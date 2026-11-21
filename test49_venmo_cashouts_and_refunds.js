@@ -265,6 +265,8 @@ const CHECKING = 1, CARD = 2, VENMO = 3;
   d1.execFile(read("migrations/0018_payment_cashout_allocations.sql"));
   const alloc = d1.q("SELECT paymentId, transferId, amountCents FROM payment_cashouts");
   console.log("the already-cashed-out payment gets a full-amount allocation; the other is untouched:", alloc.length === 1 && alloc[0].amountCents === 4600 && alloc[0].transferId === 1);
+  // The rest of the migrations (today's code reads columns added since), then the picker.
+  for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f > "0018_payment_cashout_allocations.sql").sort()) d1.execFile(read("migrations/" + f));
   console.log("...so it's no longer offered but the other still is:", (await listed()).length === 1);
 
   // =====================================================================

@@ -174,8 +174,8 @@ async function runDailyDigestInner_(env, trigger) {
   await alerts.commit().catch((e) => console.error("pricing alerts commit failed:", e));
   await setDigestState(env.DB, { ...cursor, sentAt: new Date().toISOString() });
   await markOwnerNoticesSent(env.DB, notices.map(x => x.id));
-  if (security) await clearFailedAdminLogins(env.DB);
-  if (issues.length) await clearSystemIssues(env.DB);
+  if (security) await clearFailedAdminLogins(env.DB, security);   // only what this email reported
+  if (issues.length) await clearSystemIssues(env.DB, issues);
   return jsonResponse({ status: "ok", sent: true, orders: orders.length, notices: notices.length, delivered: deliveries.delivered.length, inTransit: inTransit.length, pickedUp: pickedUp.length });
 }
 

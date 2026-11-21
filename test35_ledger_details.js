@@ -195,4 +195,29 @@ function signed(event){
     r.body.redated >= 1 && d1.q("SELECT receivedAt FROM order_payments WHERE externalRef='pi_A'")[0].receivedAt === new Date(1785600000 * 1000).toISOString());
   r = await call({ action: "backfillStripeFees" });
   console.log("running it again changes nothing:", r.body.updated === 0 && r.body.redated === 0);
+  console.log("…and every Stripe card payment's date has been compared once:", r.body.more === false && r.body.datesToCheck === 0 &&
+    d1.q("SELECT COUNT(*) AS n FROM order_payments WHERE method='card' AND externalRef LIKE 'pi_%' AND stripeCheckedAt IS NULL")[0].n === 0);
+
+  // Years of card payments (80, already with fees) never compared with Stripe: each click does a limited number of
+  // lookups, under the Worker's subrequest limit, and the next click carries on; nothing is asked twice.
+  for (let i = 0; i < 80; i++) d1._raw.run("INSERT INTO order_payments (orderId, amountCents, feeCents, note, receivedAt, method, externalRef) VALUES ('C', 500, 20, 'Stripe', ?, 'card', ?)",
+    [new Date(Date.parse("2026-08-01T00:00:00Z") + i * 3600000).toISOString(), "pi_OLD" + i]);
+  let stripeCalls = 0;
+  global.fetch = async (url) => { url = String(url); stripeCalls++;
+    const m = /payment_intents\/pi_OLD(\d+)/.exec(url);
+    return { json: async () => (m ? { id: "pi_OLD" + m[1], latest_charge: { created: Math.floor(Date.parse("2026-08-01T00:00:00Z") / 1000) + Number(m[1]) * 3600 + (m[1] === "7" ? 7200 : 0) } } : { has_more: false, data: [] }) };
+  };
+  r = await call({ action: "backfillStripeFees" });
+  const firstCalls = stripeCalls;
+  console.log("a click stays under the free plan's 50 requests and says there's more:", r.status === 200 && firstCalls <= 40 && r.body.more === true && r.body.datesToCheck > 0);
+  let clicks = 1;
+  while (r.body.more && clicks < 5) { r = await call({ action: "backfillStripeFees" }); clicks++; }
+  console.log("…the next clicks carry on until every one is compared:", r.body.more === false && clicks === 3 &&
+    d1.q("SELECT COUNT(*) AS n FROM order_payments WHERE externalRef LIKE 'pi_OLD%' AND stripeCheckedAt IS NULL")[0].n === 0);
+  console.log("…the one Stripe charged two hours later is re-dated:", d1.q("SELECT receivedAt FROM order_payments WHERE externalRef='pi_OLD7'")[0].receivedAt === "2026-08-01T09:00:00.000Z" &&
+    d1.q("SELECT receivedAt FROM order_payments WHERE externalRef='pi_OLD8'")[0].receivedAt === "2026-08-01T08:00:00.000Z");
+  stripeCalls = 0;
+  r = await call({ action: "backfillStripeFees" });
+  console.log("…and once they're all compared, a click asks Stripe about none of them again:", r.body.more === false &&
+    stripeCalls === d1.q("SELECT COUNT(*) AS n FROM order_payments WHERE method='card' AND kind='payment' AND feeCents=0 AND voidedAt IS NULL AND externalRef LIKE 'pi_%'")[0].n);
 })().catch(e => { console.log("test35 crashed:", false); console.error(e); process.exit(1); });

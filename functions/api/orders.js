@@ -69,7 +69,7 @@ import {
   getTierPrices, setTierPrices, setOrgReorderQr, setOrgReorderQrTransfer,
   listTransfers, createTransfer, updateTransfer, deleteTransfer, receiveTransferSheet, transferSheetShares, SHEET_PCT_TOLERANCE,
   getTransferSheet, editTransferSheet, transferSheetLabel,
-  writeOffTransfers, setTransferCount, getTransferMovements, voidTransferMovement, transferMovementVoidable, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferCogs,
+  writeOffTransfers, setTransferCount, getTransferMovements, voidTransferMovement, transferMovementVoidable, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferValuations, getTransferCogs,
   getTransferQueue, setTransferReceived, getGangSheet, makeTransferLine, setTransfersApplied, lineHasEmbroidery, refreshOrderLinesFromCatalog,
   listDesigns, getDesign, saveDesign, deleteDesign, listDesignVersions, addDesignVersion, updateDesignVersionThreads, setProductDesign,
   listProductDesigns, setProductDesigns, listOrderItemDesigns, addOrderItemDesign, getCatalogIssues, getBlankReadyByOrg,
@@ -95,12 +95,12 @@ import {
   updateOrderShipping,
   addOrderPayment, getOrderPaymentById, setOrderDiscount,
   getReadyToShipByOrg, upsertReadyToShipQty, addBlankSizes, getFinishedStock, makeForStock, setFinishedCount, getFinishedGoodsMovements,
-  voidFinishedGoodsMovement, getFinishedGoodsValuation, WRITEOFF_REASONS,
+  voidFinishedGoodsMovement, getFinishedGoodsValuation, getFinishedGoodsValuations, WRITEOFF_REASONS,
   updateOrderPlacedAt, setOrderDueDate,
   insertAuditLog, getAuditLog,
-  getRevenueData, getDashboard, homeOrderStage, getAccountingSettings, setAccountingSettings, getSaleDateBasis, getOrderCostsNotYetSold,
+  getRevenueData, getDashboard, homeOrderStage, getAccountingSettings, setAccountingSettings, getSaleDateBasis, getOrderCostsNotYetSold, getOrderCostsNotYetSoldAt,
   getSalesTaxSettings, setSalesTaxSettings, setOrgTaxExemption, getSalesTaxReport,
-  getSalesTaxRefunds, PAYMENT_METHODS, methodFromPaymentMethod, getCardPaymentsMissingFees, setPaymentFee, getSalesTaxReturn, getTaxedResalePurchases, getStripeLinkedPayments, setPaymentDate,
+  getSalesTaxRefunds, PAYMENT_METHODS, methodFromPaymentMethod, getCardPaymentsMissingFees, setPaymentFee, getSalesTaxReturn, getTaxedResalePurchases, getStripeLinkedPayments, setPaymentDate, countStripePaymentsToCheck, markStripeChecked, stripeRefsTaken,
   getDigestState, getDigestRun, getOrdersForDigest, getUnsentOwnerNotices, getFailedAdminLogins,
   ACCOUNT_TYPES, OTHER_INCOME_TYPES, listAccounts, saveAccount, getAccount, getMoneyDefaults, setMoneyDefaults,
   listMoneyEntries, getMoneyEntry, saveMoneyEntry, deleteMoneyEntry, moneyEntryMonth, getMoneySummary, setPaymentAccount,
@@ -160,6 +160,15 @@ const stitchReader_ = (env) => (env && env.DESIGNS ? async (d) => {
   if (!obj) return null;
   return countStitches(await obj.arrayBuffer(), ext);
 } : null);
+
+// A deleted design's (or order line file's) files in the private DESIGNS bucket that nothing points to any more
+// (db.js deleteDesign / deleteOrderItemFile say which). The rows are already gone: a failed delete only leaves a file.
+async function deleteDesignsFiles_(env, keys) {
+  const list = (keys || []).filter(Boolean);
+  if (!list.length || !env.DESIGNS || typeof env.DESIGNS.delete !== "function") return;
+  try { await env.DESIGNS.delete(list); }
+  catch (e) { console.error("Deleting design files failed:", e); }
+}
 // Carrier rate quotes and labels work from US ZIP codes only (Region → country).
 const NO_CARRIER_SHIPPING_MSG = "Carrier shipping (rates by ZIP) is only available when the country in Global settings → Region is US. Use Local pickup or a custom delivery option with a flat fee instead.";
 
@@ -763,7 +772,7 @@ export async function onRequestPost(context) {
     const shops = await Promise.all(orgs.map(async (o) => {
       const [orders, verifications] = await Promise.all([
         getOrdersByOrg(env.DB, o.orgId, range, { limit: ORDERS_LIST_MAX + 1 }),
-        getLatestVerificationsByOrg(env.DB, o.orgId).catch(() => []),
+        getLatestVerificationsByOrg(env.DB, o.orgId, range, { limit: ORDERS_LIST_MAX + 1 }).catch(() => []),
       ]);
       const more = orders.length > ORDERS_LIST_MAX;
       return { orgId: o.orgId, name: o.name || o.orgId, orders: orderCostsFor_(more ? orders.slice(0, ORDERS_LIST_MAX) : orders), more, verifications };
@@ -2002,13 +2011,34 @@ export async function onRequestPost(context) {
   // Finds each order's PaymentIntent (from its Checkout Session), reads the
   // charge's balance transaction, and stores the fee + PaymentIntent id.
   // Idempotent: only touches card payments whose fee is still 0.
+  // Bounded: at most STRIPE_SYNC_CALLS Stripe requests a click (the Worker's subrequest limit is 50 on the
+  // free plan). Dates are compared once per payment (stripeCheckedAt, migrations/0217); `more` says there's
+  // more to look up, and the next click carries on where this one stopped.
   if (body.action === "backfillStripeFees") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     if (!env.STRIPE_SECRET_KEY) return jsonResponse({ status: "error", message: "Stripe not configured" }, 500);
+    const STRIPE_SYNC_CALLS = 35;
+    let calls = 0, stopped = false;
+    const budgetLeft = () => calls < STRIPE_SYNC_CALLS;
     const stripeGet = async (path) => {
+      calls++;
       const r = await fetch("https://api.stripe.com/v1/" + path, { headers: { Authorization: "Bearer " + env.STRIPE_SECRET_KEY } });
       return r.json();
+    };
+    // Dates: a Stripe-linked payment is dated when Stripe charged the card (entries imported or recorded late
+    // carry the day they were typed in). Each payment is compared once; a closed month is left as it is and said so.
+    const redated = [];
+    const notFound = [];
+    const syncDate = async (p, intent) => {
+      const created = intent && intent.latest_charge && typeof intent.latest_charge === "object" ? intent.latest_charge.created : intent && intent.created;
+      // Stripe answered without a charge date (an unknown or other account's PaymentIntent): nothing to compare.
+      const at = typeof created === "number" ? new Date(created * 1000).toISOString() : "";
+      if (at && Math.abs(Date.parse(at) - Date.parse(p.receivedAt)) >= 60000) {
+        if (await isMonthClosed(env.DB, monthOf(p.receivedAt)) || await isMonthClosed(env.DB, monthOf(at))) notFound.push(p.orderId + " (closed month)");
+        else { await setPaymentDate(env.DB, p.id, at); redated.push({ orderId: p.orderId, from: p.receivedAt, to: at }); }
+      }
+      await markStripeChecked(env.DB, p.id);
     };
     const missing = await getCardPaymentsMissingFees(env.DB);
     // Paid Checkout Sessions per order (metadata.orderId), with the amount
@@ -2016,7 +2046,7 @@ export async function onRequestPost(context) {
     // shipping payment), so a ledger entry is matched on order AND amount.
     const sessionsByOrder = byId_();
     let startingAfter = "";
-    for (let page = 0; page < 10 && missing.some(p => !p.externalRef); page++) {
+    for (let page = 0; page < 10 && missing.some(p => !p.externalRef) && calls < STRIPE_SYNC_CALLS - 5; page++) {
       const list = await stripeGet("checkout/sessions?limit=100" + (startingAfter ? "&starting_after=" + startingAfter : ""));
       for (const cs of (list.data || [])) {
         const oid = cs.metadata && cs.metadata.orderId;
@@ -2027,10 +2057,9 @@ export async function onRequestPost(context) {
       startingAfter = list.data[list.data.length - 1].id;
     }
     // PaymentIntents already linked to a ledger entry can't be claimed again
-    // (externalRef is UNIQUE).
-    const { results: linked } = await env.DB.prepare("SELECT externalRef FROM order_payments WHERE externalRef LIKE 'pi_%'").all();
-    const taken = new Set(linked.map(r => r.externalRef));
-    let updated = 0; const notFound = []; const results = [];
+    // (externalRef is UNIQUE): only the ones these sessions name are looked up.
+    const taken = await stripeRefsTaken(env.DB, Object.values(sessionsByOrder).flat().map(s => s.pi));
+    let updated = 0; const results = [];
     for (const p of missing) {
       try {
         let pi = (p.externalRef && p.externalRef.startsWith("pi_")) ? p.externalRef : "";
@@ -2040,6 +2069,7 @@ export async function onRequestPost(context) {
           pi = match ? match.pi : "";
         }
         if (!pi) { notFound.push(p.orderId); continue; }
+        if (!budgetLeft()) { stopped = true; break; }
         const intent = await stripeGet("payment_intents/" + encodeURIComponent(pi) + "?expand[]=latest_charge.balance_transaction");
         const bt = intent && intent.latest_charge && intent.latest_charge.balance_transaction;
         if (!bt || typeof bt.fee !== "number") { notFound.push(p.orderId); continue; }
@@ -2047,30 +2077,27 @@ export async function onRequestPost(context) {
         taken.add(pi);
         results.push({ orderId: p.orderId, fee: bt.fee / 100 });
         updated++;
+        // The same answer dates it, so it needn't be asked again below.
+        await syncDate({ ...p, externalRef: pi }, intent);
       } catch (e) {
         console.error("backfillStripeFees: payment", p.id, "failed:", e);
         notFound.push(p.orderId);
       }
     }
-    // Dates: a Stripe-linked payment is dated when Stripe charged the card
-    // (entries imported or recorded late carry the day they were typed in).
-    const redated = [];
-    for (const p of await getStripeLinkedPayments(env.DB)) {
-      try {
-        const intent = await stripeGet("payment_intents/" + encodeURIComponent(p.externalRef));
-        const created = intent && intent.latest_charge && typeof intent.latest_charge === "object" ? intent.latest_charge.created : intent && intent.created;
-        if (typeof created !== "number") continue;
-        const at = new Date(created * 1000).toISOString();
-        if (Math.abs(Date.parse(at) - Date.parse(p.receivedAt)) < 60000) continue;
-        if (await isMonthClosed(env.DB, monthOf(p.receivedAt)) || await isMonthClosed(env.DB, monthOf(at))) { notFound.push(p.orderId + " (closed month)"); continue; }
-        await setPaymentDate(env.DB, p.id, at);
-        redated.push({ orderId: p.orderId, from: p.receivedAt, to: at });
-      } catch (e) {
-        console.error("Stripe date sync: payment", p.id, "failed:", e);
+    if (!stopped) {
+      for (const p of await getStripeLinkedPayments(env.DB, { limit: Math.max(1, STRIPE_SYNC_CALLS - calls) })) {
+        if (!budgetLeft()) { stopped = true; break; }
+        try {
+          await syncDate(p, await stripeGet("payment_intents/" + encodeURIComponent(p.externalRef)));
+        } catch (e) {
+          console.error("Stripe date sync: payment", p.id, "failed:", e);
+        }
       }
     }
-    audit({ orgId: null, orderId: null, action: "payments.stripe_fees_backfilled", detail: { updated, notFound, results, redated } });
-    return jsonResponse({ status: "ok", updated, notFound, results, redated: redated.length });
+    const datesToCheck = await countStripePaymentsToCheck(env.DB);
+    const more = stopped || datesToCheck > 0;
+    audit({ orgId: null, orderId: null, action: "payments.stripe_fees_backfilled", detail: { updated, notFound, results, redated, more } });
+    return jsonResponse({ status: "ok", updated, notFound, results, redated: redated.length, more, datesToCheck });
   }
 
   // ---- setPaymentDate — correct when a (non-Stripe) entry's money arrived ------
@@ -5146,8 +5173,11 @@ export async function onRequestPost(context) {
     if (body.action === "deleteDesign") {
       const id = Number(body.id);
       if (!id) return jsonResponse({ status: "error", message: "id required" }, 400);
-      try { await deleteDesign(env.DB, id); return jsonResponse({ status: "ok" }); }
+      let gone;
+      try { gone = await deleteDesign(env.DB, id); }
       catch (e) { return jsonResponse({ status: "error", message: e.message }, 400); }
+      await deleteDesignsFiles_(env, gone && gone.unusedFileKeys);
+      return jsonResponse({ status: "ok" });
     }
 
     if (body.action === "setProductDesign") {
@@ -5247,7 +5277,8 @@ export async function onRequestPost(context) {
       // The customer's own design is what the line is made from (its copy of its options names it), so it stays.
       const f = await env.DB.prepare("SELECT uploadedBy FROM order_item_files WHERE id=?").bind(id).first();
       if (f && f.uploadedBy === "customer") return jsonResponse({ status: "error", message: "The customer's own design can't be deleted — it's what this item is made from." }, 409);
-      await deleteOrderItemFile(env.DB, id);
+      const gone = await deleteOrderItemFile(env.DB, id);
+      await deleteDesignsFiles_(env, gone && gone.unusedFileKeys);
       return jsonResponse({ status: "ok" });
     }
 
@@ -5720,17 +5751,16 @@ export async function onRequestPost(context) {
       // COGS goes by each order's sale date (Global settings → Bookkeeping); stock goes down when the order is
       // made. What sits between the two — used on orders not sold yet — is `notYetSold` at each end.
       const basis = await getSaleDateBasis(env.DB);
-      const [[beginning, ending], cogs, taxedResale, tBeginning, tEnding, tCogs, fBeginning, fEnding, nysBeg, nysEnd] = await Promise.all([
-        getInventoryValuations(env.DB, [dayBefore, dateTo + "T23:59:59.999Z"]),   // one read of the history for both
+      // Each history (blanks, transfers, finished stock, costs not yet sold) is read once for both ends.
+      const ends = [dayBefore, dateTo + "T23:59:59.999Z"];
+      const [[beginning, ending], cogs, taxedResale, [tBeginning, tEnding], tCogs, [fBeginning, fEnding], [nysBeg, nysEnd]] = await Promise.all([
+        getInventoryValuations(env.DB, ends),
         getCogsReport(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z", { basis }),
         getTaxedResalePurchases(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z"),
-        getTransferValuation(env.DB, dayBefore),
-        getTransferValuation(env.DB, dateTo + "T23:59:59.999Z"),
+        getTransferValuations(env.DB, ends),
         getTransferCogs(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z", { basis }),
-        getFinishedGoodsValuation(env.DB, dayBefore),
-        getFinishedGoodsValuation(env.DB, dateTo + "T23:59:59.999Z"),
-        getOrderCostsNotYetSold(env.DB, dayBefore, { basis }),
-        getOrderCostsNotYetSold(env.DB, dateTo + "T23:59:59.999Z", { basis }),
+        getFinishedGoodsValuations(env.DB, ends),
+        getOrderCostsNotYetSoldAt(env.DB, ends, { basis }),
       ]);
       const sum = (k) => Math.round(cogs.rows.reduce((a, r) => a + (r[k] || 0) * 100, 0)) / 100;
       const tsum = (k) => Math.round(tCogs.reduce((a, r) => a + r[k] * 100, 0)) / 100;
@@ -6094,7 +6124,8 @@ export async function onRequestPost(context) {
     if (!env.DB) return jsonResponse({ status: "error", message: "Server misconfigured" }, 500);
     const orgId = String(body.org || "").trim();
     if (!orgId) return jsonResponse({ status: "error", message: "org required" }, 400);
-    const rows = await getLatestVerificationsByOrg(env.DB, orgId);
+    // The orders getOrders returns for the same dates (the page sends both), not the shop's whole history.
+    const rows = await getLatestVerificationsByOrg(env.DB, orgId, { from: body.dateFrom, to: body.dateTo }, { limit: ORDERS_LIST_MAX + 1 });
     return jsonResponse({ status: "ok", verifications: rows });
   }
 

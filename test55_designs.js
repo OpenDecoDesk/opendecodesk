@@ -175,6 +175,37 @@ function makeDesignsBucket(){
   r = await call({ action: "getOrderItemFiles", itemId });
   console.log("...and it's gone:", r.body.files.length === 0);
 
+  console.log("\n=== Deleting a design or an order line's file deletes its files from the DESIGNS bucket ===");
+  {
+    const bucket = makeDesignsBucket();
+    bucket.delete = async (keys) => { for (const k of [].concat(keys)) bucket._store.delete(k); };
+    const callB = async (body) => {
+      const res = await api({ env: { DB: d1, DESIGNS: bucket }, waitUntil: (p) => p.then(() => {}, () => {}),
+        request: { url: "https://admin.example.com/api/orders", json: async () => Object.assign({ key: "x" }, body), headers: { get: () => null } } });
+      return { status: res.status, body: JSON.parse(await res.text()) };
+    };
+    for (const k of ["designs/9/a.emb", "designs/9/a.dst", "designs/9/b.pes", "designs/9/shared.dst", "order-files/1/e.png", "order-files/1/kept.png"]) bucket._store.set(k, { body: "x" });
+    const dId = (await callB({ action: "saveDesign", org: "acme", design: { name: "Old Patch" } })).body.id;
+    const ver = (fields) => callB({ action: "saveDesignVersion", designId: dId, designFileName: "", designFileExt: "", machineFileName: "m.dst", machineFileExt: "dst", threadColors: [], notes: "", designFileKey: "", ...fields });
+    await ver({ designFileKey: "designs/9/a.emb", designFileName: "a.emb", designFileExt: "emb", machineFileKey: "designs/9/a.dst" });
+    await ver({ machineFileKey: "designs/9/b.pes", machineFileExt: "pes" });
+    await ver({ machineFileKey: "designs/9/shared.dst" });
+    // The same stitch file is also an order line's design: it must stay.
+    d1._raw.run("INSERT INTO order_item_designs (itemId, machineFileKey, machineFileName, machineFileExt, uploadedAt, createdAt) VALUES (?, 'designs/9/shared.dst', 's.dst', 'dst', 't', 't')", [itemId]);
+    r = await callB({ action: "deleteDesign", id: dId });
+    console.log("the design's version files go from the bucket:", r.status === 200 && !bucket._store.has("designs/9/a.emb") && !bucket._store.has("designs/9/a.dst") && !bucket._store.has("designs/9/b.pes"));
+    console.log("…a file another row still points to stays:", bucket._store.has("designs/9/shared.dst"));
+    const f1 = (await callB({ action: "saveOrderItemFile", itemId, fileKey: "order-files/1/e.png", fileName: "e.png", fileExt: "png", uploadedBy: "admin" })).body.id;
+    await callB({ action: "saveOrderItemFile", itemId, fileKey: "order-files/1/kept.png", fileName: "k.png", fileExt: "png", uploadedBy: "admin" });
+    const f3 = (await callB({ action: "saveOrderItemFile", itemId, fileKey: "order-files/1/kept.png", fileName: "k2.png", fileExt: "png", uploadedBy: "admin" })).body.id;
+    r = await callB({ action: "deleteOrderItemFile", id: f1 });
+    console.log("an order line's file goes from the bucket with its row:", r.status === 200 && !bucket._store.has("order-files/1/e.png"));
+    r = await callB({ action: "deleteOrderItemFile", id: f3 });
+    console.log("…but not while another row still lists the same file:", r.status === 200 && bucket._store.has("order-files/1/kept.png"));
+    r = await call({ action: "deleteDesign", id: (await call({ action: "saveDesign", org: "acme", design: { name: "No bucket" } })).body.id });
+    console.log("with no DESIGNS bucket bound, deleting still works:", r.status === 200);
+  }
+
   console.log("\n=== functions/api/design.js: role-restricted design-version upload (no magic-byte check) ===");
   let env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", QUOTE_SIGNING_SECRET: "sekret", DESIGNS: makeDesignsBucket() };
   let res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "application/octet-stream", qs: "?designId=9&role=machine&ext=dst&name=logo.dst", body: new ArrayBuffer(2000) }, env));

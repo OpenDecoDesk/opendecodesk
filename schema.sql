@@ -112,6 +112,24 @@ CREATE TABLE IF NOT EXISTS global_settings (
   value TEXT NOT NULL
 );
 
+-- System problems and failed admin sign-ins for the daily roll-up (migrations/0215): one row per failure, so
+-- failures at the same moment are each counted; the roll-up deletes only the rows it reported (id <= the highest
+-- it read). n: how many failures the row stands for (1; totals carried over from before 0215; 0 = a sample only).
+CREATE TABLE IF NOT EXISTS system_issues (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind    TEXT    NOT NULL,
+  n       INTEGER NOT NULL DEFAULT 1 CHECK (n >= 0),
+  sample  TEXT    NOT NULL DEFAULT '',
+  at      TEXT    NOT NULL
+);
+CREATE TABLE IF NOT EXISTS failed_admin_logins (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  reason  TEXT    NOT NULL DEFAULT 'passphrase' CHECK (reason IN ('passphrase', 'code')),
+  ip      TEXT    NOT NULL DEFAULT '',
+  n       INTEGER NOT NULL DEFAULT 1 CHECK (n >= 0),
+  at      TEXT    NOT NULL
+);
+
 -- Admin sessions (migrations/0043): one row per signed-in session, keyed by the SHA-256 of the token.
 -- userId: whose it is. pending: a step that user must finish before anything else is answered
 -- ('account' | 'password' | '2fa'), else NULL (migrations/0053).
@@ -853,7 +871,12 @@ CREATE TABLE IF NOT EXISTS order_payments (
   -- (0035) how much of a refund / lost dispute was shipping — untaxed, so no sales tax is backed out of it.
   shippingCents INTEGER NOT NULL DEFAULT 0 CHECK (shippingCents >= 0),
   -- (0212) one key per Save in the admin's payment forms, so a double click or retry can't record it twice.
-  requestKey  TEXT
+  requestKey  TEXT,
+  -- (0217) when "Sync Stripe fees & dates" last compared this Stripe card payment's date with Stripe's; NULL = not yet.
+  stripeCheckedAt TEXT,
+  -- (0218) 1 = not yet fully cashed out and not matched to a bank line (the deposit picker's candidates); kept by
+  -- the payments_/cashouts_/transfers_/matches_deposit_open triggers below.
+  depositOpen INTEGER NOT NULL DEFAULT 1 CHECK (depositOpen IN (0, 1))
 );
 
 -- How much of a Venmo payment each Venmo -> bank transfer covers (migrations/0018). A payment
@@ -945,9 +968,11 @@ CREATE INDEX IF NOT EXISTS idx_items_org             ON order_items(orgId);
 CREATE INDEX IF NOT EXISTS idx_payments_order        ON order_payments(orderId);
 CREATE INDEX IF NOT EXISTS idx_payments_received     ON order_payments(receivedAt);
 CREATE INDEX IF NOT EXISTS idx_payments_cashout      ON order_payments(cashoutTransferId);
+CREATE INDEX IF NOT EXISTS idx_payments_deposit_open ON order_payments(depositOpen, kind) WHERE depositOpen = 1;   -- migrations/0218
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_external_ref ON order_payments(externalRef) WHERE externalRef <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_request_key ON order_payments(requestKey) WHERE requestKey IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_verif_order           ON design_verifications(orderId);
+CREATE INDEX IF NOT EXISTS idx_verif_org_order_sent  ON design_verifications(orgId, orderId, sentAt);   -- migrations/0216
 CREATE INDEX IF NOT EXISTS idx_products_org          ON products(orgId, visible, sortOrder);
 CREATE INDEX IF NOT EXISTS idx_blank_sizes           ON blank_sizes(blankId);
 CREATE INDEX IF NOT EXISTS idx_blank_colors          ON blank_colors(blankId);
@@ -1279,6 +1304,63 @@ CREATE TABLE IF NOT EXISTS statement_matches (
 );
 CREATE INDEX IF NOT EXISTS idx_statement_matches_line ON statement_matches(lineId);
 
+-- order_payments.depositOpen (migrations/0218): worked out again whenever a cash-out, a transfer's deletion, a
+-- statement match or the payment's amount changes, so the deposit picker reads only the open payments.
+CREATE TRIGGER IF NOT EXISTS payments_deposit_open_insert AFTER INSERT ON order_payments
+BEGIN
+  UPDATE order_payments SET depositOpen = CASE WHEN COALESCE((SELECT SUM(c.amountCents) FROM payment_cashouts c JOIN account_transfers t ON t.id = c.transferId AND t.deletedAt IS NULL
+      WHERE c.paymentId = order_payments.id), 0) < order_payments.amountCents
+    AND NOT EXISTS (SELECT 1 FROM statement_matches m WHERE m.src = 'payment' AND m.srcId = order_payments.id) THEN 1 ELSE 0 END WHERE id = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS payments_deposit_open_amount AFTER UPDATE OF amountCents ON order_payments
+BEGIN
+  UPDATE order_payments SET depositOpen = CASE WHEN COALESCE((SELECT SUM(c.amountCents) FROM payment_cashouts c JOIN account_transfers t ON t.id = c.transferId AND t.deletedAt IS NULL
+      WHERE c.paymentId = order_payments.id), 0) < order_payments.amountCents
+    AND NOT EXISTS (SELECT 1 FROM statement_matches m WHERE m.src = 'payment' AND m.srcId = order_payments.id) THEN 1 ELSE 0 END WHERE id = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS cashouts_deposit_open_insert AFTER INSERT ON payment_cashouts
+BEGIN
+  UPDATE order_payments SET depositOpen = CASE WHEN COALESCE((SELECT SUM(c.amountCents) FROM payment_cashouts c JOIN account_transfers t ON t.id = c.transferId AND t.deletedAt IS NULL
+      WHERE c.paymentId = order_payments.id), 0) < order_payments.amountCents
+    AND NOT EXISTS (SELECT 1 FROM statement_matches m WHERE m.src = 'payment' AND m.srcId = order_payments.id) THEN 1 ELSE 0 END WHERE id = NEW.paymentId;
+END;
+CREATE TRIGGER IF NOT EXISTS cashouts_deposit_open_update AFTER UPDATE ON payment_cashouts
+BEGIN
+  UPDATE order_payments SET depositOpen = CASE WHEN COALESCE((SELECT SUM(c.amountCents) FROM payment_cashouts c JOIN account_transfers t ON t.id = c.transferId AND t.deletedAt IS NULL
+      WHERE c.paymentId = order_payments.id), 0) < order_payments.amountCents
+    AND NOT EXISTS (SELECT 1 FROM statement_matches m WHERE m.src = 'payment' AND m.srcId = order_payments.id) THEN 1 ELSE 0 END WHERE id IN (OLD.paymentId, NEW.paymentId);
+END;
+CREATE TRIGGER IF NOT EXISTS cashouts_deposit_open_delete AFTER DELETE ON payment_cashouts
+BEGIN
+  UPDATE order_payments SET depositOpen = CASE WHEN COALESCE((SELECT SUM(c.amountCents) FROM payment_cashouts c JOIN account_transfers t ON t.id = c.transferId AND t.deletedAt IS NULL
+      WHERE c.paymentId = order_payments.id), 0) < order_payments.amountCents
+    AND NOT EXISTS (SELECT 1 FROM statement_matches m WHERE m.src = 'payment' AND m.srcId = order_payments.id) THEN 1 ELSE 0 END WHERE id = OLD.paymentId;
+END;
+CREATE TRIGGER IF NOT EXISTS transfers_deposit_open AFTER UPDATE OF deletedAt ON account_transfers
+BEGIN
+  UPDATE order_payments SET depositOpen = CASE WHEN COALESCE((SELECT SUM(c.amountCents) FROM payment_cashouts c JOIN account_transfers t ON t.id = c.transferId AND t.deletedAt IS NULL
+      WHERE c.paymentId = order_payments.id), 0) < order_payments.amountCents
+    AND NOT EXISTS (SELECT 1 FROM statement_matches m WHERE m.src = 'payment' AND m.srcId = order_payments.id) THEN 1 ELSE 0 END
+  WHERE id IN (SELECT paymentId FROM payment_cashouts WHERE transferId = NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS matches_deposit_open_insert AFTER INSERT ON statement_matches WHEN NEW.src = 'payment'
+BEGIN
+  UPDATE order_payments SET depositOpen = 0 WHERE id = NEW.srcId;
+END;
+CREATE TRIGGER IF NOT EXISTS matches_deposit_open_update AFTER UPDATE ON statement_matches
+BEGIN
+  UPDATE order_payments SET depositOpen = CASE WHEN COALESCE((SELECT SUM(c.amountCents) FROM payment_cashouts c JOIN account_transfers t ON t.id = c.transferId AND t.deletedAt IS NULL
+      WHERE c.paymentId = order_payments.id), 0) < order_payments.amountCents
+    AND NOT EXISTS (SELECT 1 FROM statement_matches m WHERE m.src = 'payment' AND m.srcId = order_payments.id) THEN 1 ELSE 0 END
+  WHERE (OLD.src = 'payment' AND id = OLD.srcId) OR (NEW.src = 'payment' AND id = NEW.srcId);
+END;
+CREATE TRIGGER IF NOT EXISTS matches_deposit_open_delete AFTER DELETE ON statement_matches WHEN OLD.src = 'payment'
+BEGIN
+  UPDATE order_payments SET depositOpen = CASE WHEN COALESCE((SELECT SUM(c.amountCents) FROM payment_cashouts c JOIN account_transfers t ON t.id = c.transferId AND t.deletedAt IS NULL
+      WHERE c.paymentId = order_payments.id), 0) < order_payments.amountCents
+    AND NOT EXISTS (SELECT 1 FROM statement_matches m WHERE m.src = 'payment' AND m.srcId = order_payments.id) THEN 1 ELSE 0 END WHERE id = OLD.srcId;
+END;
+
 CREATE TABLE IF NOT EXISTS reconciliations (
   accountId                  INTEGER NOT NULL REFERENCES accounts(id),
   month                      TEXT NOT NULL CHECK (month GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]'),
@@ -1332,6 +1414,18 @@ CREATE INDEX IF NOT EXISTS idx_transfer_mv_finished ON transfer_movements (finis
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_item     ON transfer_movements(transferId, occurredAt);
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_occurred ON transfer_movements(occurredAt);
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_order    ON transfer_movements(orderId);
+
+-- One account's money movements between two dates, from each source in db.js MONEY_MOVE_SOURCES (an account's
+-- register and reconciliation), by account and the day the source is dated on (migrations/0219).
+CREATE INDEX IF NOT EXISTS idx_payments_account_day     ON order_payments(accountId, substr(receivedAt, 1, 10));
+CREATE INDEX IF NOT EXISTS idx_expenses_account_date    ON expenses(accountId, expenseDate);
+CREATE INDEX IF NOT EXISTS idx_movements_account_day    ON inventory_movements(accountId, substr(occurredAt, 1, 10)) WHERE kind = 'purchase';
+CREATE INDEX IF NOT EXISTS idx_transfer_movements_account_day ON transfer_movements(accountId, substr(occurredAt, 1, 10)) WHERE kind = 'purchase';
+CREATE INDEX IF NOT EXISTS idx_labels_account_day       ON shipping_labels(accountId, substr(purchasedAt, 1, 10));
+CREATE INDEX IF NOT EXISTS idx_other_income_account     ON other_income(accountId, incomeDate);
+CREATE INDEX IF NOT EXISTS idx_owner_tx_account         ON owner_transactions(accountId, txDate);
+CREATE INDEX IF NOT EXISTS idx_transfers_from_account   ON account_transfers(fromAccountId, transferDate);
+CREATE INDEX IF NOT EXISTS idx_transfers_to_account     ON account_transfers(toAccountId, transferDate);
 
 CREATE TABLE IF NOT EXISTS graphics (
   id                       INTEGER PRIMARY KEY AUTOINCREMENT,

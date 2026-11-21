@@ -210,7 +210,7 @@ async function runRecordTests() {
   res = await mod.runDailyDigest({ ...MAIL_ENV, DB: d1 }, "scheduled");
   rec = await mod.getDigestRun(d1);
   console.log("if that email can't be sent the run still completes, says so, and the failure is queued for the next roll-up:", res.status === 200 && rec.ok === true && rec.heartbeat === "failed" &&
-    /email_failed/.test((d1.q("SELECT value FROM global_settings WHERE key='systemIssues'")[0] || {}).value || ""));
+    d1.q("SELECT id FROM system_issues WHERE kind='email_failed'").length === 1);
   mailOk = true;
   res = await mod.runDailyDigest({ ...MAIL_ENV, DB: d1 }, "scheduled");
   console.log("…and the next morning's email is a real roll-up reporting that problem, not a 'nothing new':", (await res.clone().json()).sent === true && /^Daily roll-up — /.test(emails[emails.length - 1].subject) && emails[emails.length - 1].subject !== "Daily roll-up — nothing new");

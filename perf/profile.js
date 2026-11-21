@@ -21,7 +21,7 @@ const { migrate, readSources } = require("../desktop/migrate.js");
 
 const ROOT = path.join(__dirname, "..");
 const DEFAULT_OPS = ["open-orders", "production-queue", "transfer-queue", "blanks-to-order", "orders-30d", "orders-all-shops-30d",
-  "revenue-year", "sales-tax-year", "accountant-export-year", "orders-full-history", "bulk-stage-100"];
+  "revenue-year", "sales-tax-year", "accountant-export-year", "orders-full-history", "bulk-stage-20"];
 
 function parseArgs(argv) {
   const a = { data: null, ops: DEFAULT_OPS, results: null };

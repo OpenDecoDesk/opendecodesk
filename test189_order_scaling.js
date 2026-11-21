@@ -8,8 +8,9 @@ const { JSDOM, ResourceLoader } = require("jsdom");
 //   - idx_orders_open (migrations/0087) is what Open orders and the queues search
 //   - one order's brand check reads only its own products' blank links
 //   - one read of the inventory history values it at several moments
-//   - getOrders / getOrdersAllShops return at most the newest ORDERS_LIST_MAX orders per shop, with
-//     `more`, and the Orders page says some were left out
+//   - getOrders returns at most the newest ORDERS_LIST_MAX orders of a shop, and getOrdersAllShops the newest
+//     ORDERS_LIST_MAX across every shop together (not that many per shop), with `more`, and the Orders page says
+//     some were left out
 // Real SQL (sql.js) + real db.js, orders.js and admin.js (jsdom).
 
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
@@ -115,7 +116,10 @@ const ok = (label, cond) => { if (!cond) failed++; console.log(label + ": " + !!
   ok("under the cap: every order, and more is false", r.body.orders.length === 3 && r.body.more === false);
   r = await call({ action: "getOrdersAllShops", dateFrom: "", dateTo: "" });
   const shop = (id) => r.body.shops.find(s => s.orgId === id);
-  ok("All shops: capped per shop, each saying whether it was cut", shop("prime").orders.length === 4 && shop("prime").more === true && shop("rec").orders.length === 3 && shop("rec").more === false);
+  ok("All shops: one cap over every shop together — the newest 4 of all (BIG, P5, P4 and REC's R2), and more is true",
+    shop("prime").orders.map(o => o.orderId).join(",") === "BIG,P5,P4" && shop("rec").orders.map(o => o.orderId).join(",") === "R2" && r.body.more === true && r.body.max === 4);
+  r = await call({ action: "getOrdersAllShops", dateFrom: daysAgo(4).slice(0, 10), dateTo: "" });
+  ok("…under the cap: every order in the window, and more is false", r.body.more === false && shop("prime").orders.some(o => o.orderId === "BIG"));
 
   console.log("\n=== Design verifications: only for the orders the page shows ===");
   const verif = (token, orderId, days, status) => d1._raw.run(`INSERT INTO design_verifications (token, orgId, orderId, customerEmail, message, imagesJson, status, sentAt)
@@ -126,7 +130,10 @@ const ok = (label, cond) => { if (!cond) failed++; console.log(label + ": " + !!
   ok("the latest per order, for the newest-4 orders only (P1 is past the cap)", r.status === 200 && vs.length === 1 && vs[0].orderId === "P3" && vs[0].token === "v-p3-new" && vs[0].status === "revision");
   ok("…without the proof's pictures and message (the list shows status and dates)", !("imagesJson" in vs[0]) && !("message" in vs[0]) && !!vs[0].sentAt && "respondedAt" in vs[0]);
   r = await call({ action: "getOrdersAllShops", dateFrom: "", dateTo: "" });
-  ok("All shops reads the same", JSON.stringify(shop("prime").verifications) === JSON.stringify(vs) && shop("rec").verifications.length === 0);
+  ok("All shops reads the proofs of the orders it loaded only (P3 is past the overall cap)", shop("prime").verifications.length === 0 && shop("rec").verifications.length === 0);
+  r = await call({ action: "getOrdersAllShops", dateFrom: daysAgo(7.4).slice(0, 10), dateTo: daysAgo(6.8).slice(0, 10) });
+  ok("…and the same latest proof as the shop's own list when P3 is loaded", shop("prime").orders.some(o => o.orderId === "P3") &&
+    JSON.stringify(shop("prime").verifications) === JSON.stringify(vs));
   const from = daysAgo(3).slice(0, 10);
   r = await call({ action: "listDesignVerifications", org: "prime", dateFrom: from, dateTo: "" });
   ok("a date window that leaves P3 out leaves its verification out too", r.body.verifications.length === 0);

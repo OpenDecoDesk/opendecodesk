@@ -71,11 +71,11 @@ const WRITES = [
     body: (c, i) => { const [o] = take(c.pool.stage, i); return { action: "setFulfillmentStage", org: o.orgId, orderId: o.orderId, stage: "digitizingComplete" }; } },
   { name: "update-customer", cls: "write", title: "Edit customer info",
     body: (c, i) => { const [o] = take(c.pool.info, i); return { action: "updateCustomerInfo", org: o.orgId, orderIds: [o.orderId], contact: "updated" + i + "@example.com" }; } },
-  { name: "bulk-stage-100", cls: "bulk", title: "Bulk mark stage, 100 orders",
-    body: (c, i) => ({ action: "bulkSetFulfillmentStage", orderIds: take(c.pool.bulk, i, 100).map(o => o.orderId), stage: "digitizingComplete" }) },
-  // The same 500 finished orders, reopened and completed again in turn: both directions are real work.
-  { name: "complete-500", cls: "bulk", title: "Mark 500 orders completed / reopened",
-    body: (c, i) => ({ action: "setOrderCompleted", orderIds: c.doneIds.slice(0, 500), completed: i % 2 === 1 }) },
+  { name: "bulk-stage-20", cls: "bulk", title: "Bulk mark stage, 20 orders (the most one request takes)",
+    body: (c, i) => ({ action: "bulkSetFulfillmentStage", orderIds: take(c.pool.bulk, i, 20).map(o => o.orderId), stage: "digitizingComplete" }) },
+  // The same 100 finished orders (the most one request takes), reopened and completed again in turn: both directions are real work.
+  { name: "complete-100", cls: "bulk", title: "Mark 100 orders completed / reopened",
+    body: (c, i) => ({ action: "setOrderCompleted", orderIds: c.doneIds.slice(0, 100), completed: i % 2 === 1 }) },
 ];
 
 // What the operations act on, read from the database (a node:sqlite handle): the shops, the date
@@ -96,7 +96,7 @@ function makeContext(db, shops, now = Date.now()) {
 }
 
 // How many orders the work pool needs, for `calls` calls of each write (warm-up included).
-const poolNeeds = (calls) => ({ pay: calls, stage: calls, info: calls, bulk: calls * 100 });
+const poolNeeds = (calls) => ({ pay: calls, stage: calls, info: calls, bulk: calls * 20 });
 
 // The size of an answer: its orders (all shops' together, for getOrdersAllShops), else the longest
 // list in it (lines, report rows), one level deep.

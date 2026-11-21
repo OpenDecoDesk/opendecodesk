@@ -143,6 +143,14 @@ const MSG = { to: "pat@cust.test", fromName: "Acme Tees", replyTo: "owner@acme.t
   a = await auth.orders({ action: "updateEmailSettings", emailSettings: { attachPdf: true }, mailbox: { ...box, port: 465, security: "tls" } }, cookie);
   ok("changing the server keeps the saved password (checked again before saving)", a.body.status === "ok" && a.body.mailbox.port === 465 &&
     JSON.parse(auth.d1.q("SELECT value FROM global_settings WHERE key='emailMailbox'")[0].value).password === JSON.parse(stored).password);
+  const logins = srv.messages.length;
+  a = await auth.orders({ action: "checkMailbox", mailbox: { ...box, host: "smtp.elsewhere.test" } }, cookie);
+  const a2 = await auth.orders({ action: "checkMailbox", mailbox: { ...box, user: "someone-else@mail.test" } }, cookie);
+  ok("the saved password is never tried on another server or as another username: it has to be typed again", a.body.ok === false && /enter the mailbox's password again/.test(a.body.message) &&
+    a2.body.ok === false && /enter the mailbox's password again/.test(a2.body.message));
+  a = await auth.orders({ action: "updateEmailSettings", emailSettings: { attachPdf: true }, mailbox: { ...box, host: "smtp.elsewhere.test" } }, cookie);
+  ok("…nor saved to be used there", a.status === 400 && /enter the mailbox's password again/.test(a.body.message) &&
+    JSON.parse(auth.d1.q("SELECT value FROM global_settings WHERE key='emailMailbox'")[0].value).host === "smtp.gmail.com" && srv.messages.length === logins);
   a = await auth.orders({ action: "updateEmailSettings", emailSettings: { attachPdf: true }, mailbox: { via: "hosted" } }, cookie);
   ok("switching back to the hosted service keeps the mailbox for later", a.body.mailbox.via === "hosted" && a.body.mailbox.from === "me@mail.test" && a.body.mailbox.passwordSaved);
   ok("each change is in the audit log, without the password", auth.audit("settings.email_set").length >= 3 && !JSON.stringify(auth.audit("settings.email_set")).includes("app-pass") &&

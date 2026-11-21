@@ -120,10 +120,11 @@ export async function rateLimited(env, bucket, request, limit){
   }
 }
 
-// Read-only: is this IP already at/over `limit` in this window? No write.
-export async function rateLimitCheck(env, bucket, request, limit){
+// Read-only: is this IP already at/over `limit` in this window? No write. `windowSeconds` (optional)
+// counts over a longer window than the usual minute; pass the same one to rateLimitHit.
+export async function rateLimitCheck(env, bucket, request, limit, windowSeconds){
   if(!hasDb(env)) return OPEN;
-  const w = windowInfo(bucket, request);
+  const w = windowInfo(bucket, request, windowSeconds);
   if(_blocked.has(w.key)) return blockedResult(w);
   try{
     const row = await env.DB.prepare("SELECT count FROM rate_limits WHERE key = ?").bind(w.key).first();
@@ -136,12 +137,13 @@ export async function rateLimitCheck(env, bucket, request, limit){
   }
 }
 
-// Record one failure against the bucket (pairs with rateLimitCheck).
-export async function rateLimitHit(env, bucket, request){
-  if(!hasDb(env)) return;
-  const w = windowInfo(bucket, request);
-  try{ await increment(env.DB, w); }
-  catch(err){ console.error("Rate limiter hit error (bucket=" + bucket + "), counting in memory:", err); memIncrement(w); }
+// Record one failure against the bucket (pairs with rateLimitCheck). Returns this IP's new count for
+// the window (0 with no database).
+export async function rateLimitHit(env, bucket, request, windowSeconds){
+  if(!hasDb(env)) return 0;
+  const w = windowInfo(bucket, request, windowSeconds);
+  try{ return await increment(env.DB, w); }
+  catch(err){ console.error("Rate limiter hit error (bucket=" + bucket + "), counting in memory:", err); return memIncrement(w); }
 }
 
 // One budget for the WHOLE install over a longer window, whoever is asking — for counting failed

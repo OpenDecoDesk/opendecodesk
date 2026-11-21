@@ -285,10 +285,19 @@ function withoutMailbox_(secrets) {
   return out;
 }
 
+// The saved mailbox password goes only to the server it was saved for, as the same username: another
+// server or username needs it typed again, so nothing can point the saved password at a server of its
+// own (as on the web, functions/api/orders.js). A new port or security is fine: mailer.js only ever
+// sends it encrypted, to a server proving that name.
+const SMTP_OTHER_SERVER = "The mail server or username changed: enter the mailbox's password again.";
+function smtpPasswordFits_(saved, clean) {
+  return !!(saved && clean) && String(saved.host || "") === clean.host && String(saved.user || "") === clean.user;
+}
+
 // Email through the owner's mailbox: the server settings in desktop.json, the password with the
-// secrets (encrypted where the system has a keychain). `password` empty keeps the saved one (changing
-// the server, not the password); null settings turn email off and forget both. Returns the settings
-// saved. Only while stopped, like setShippoKey.
+// secrets (encrypted where the system has a keychain). `password` empty keeps the saved one (a new
+// port or security, not a new server or username); null settings turn email off and forget both.
+// Returns the settings saved. Only while stopped, like setShippoKey.
 function setSmtp(dataDir, settings, password, { protect, unprotect } = {}) {
   const { cfg, secrets } = loadConfig(dataDir, { unprotect });
   if (!secrets) throw new Error("The saved secrets couldn't be read, so the password can't be saved with them.");
@@ -300,6 +309,7 @@ function setSmtp(dataDir, settings, password, { protect, unprotect } = {}) {
   }
   const clean = cleanSmtpSettings(settings);
   const pass = password == null ? "" : String(password);
+  if (!pass && nextSecrets.SMTP_PASSWORD && !smtpPasswordFits_(cfg.smtp, clean)) throw new Error(SMTP_OTHER_SERVER);
   if (pass) nextSecrets.SMTP_PASSWORD = pass;
   if (!nextSecrets.SMTP_PASSWORD) throw new Error("Enter the mailbox's password (or app password).");
   nextCfg.smtp = clean;
@@ -317,10 +327,13 @@ function setEmailOn(dataDir, on, { protect, unprotect } = {}) {
 }
 
 // The saved mailbox password, for checking new settings before they are saved (main.js) when the
-// owner changes the server but not the password. Never given to the page.
-function savedSmtpPassword(dataDir, { unprotect } = {}) {
-  const { secrets } = loadConfig(dataDir, { unprotect });
-  return (secrets && secrets.SMTP_PASSWORD) || "";
+// owner changes the port or security but not the password. Never given to the page. With `settings`,
+// throws when they are for another server or username (see smtpPasswordFits_).
+function savedSmtpPassword(dataDir, { unprotect } = {}, settings) {
+  const { cfg, secrets } = loadConfig(dataDir, { unprotect });
+  const pass = (secrets && secrets.SMTP_PASSWORD) || "";
+  if (pass && settings !== undefined && !smtpPasswordFits_(cfg.smtp, cleanSmtpSettings(settings))) throw new Error(SMTP_OTHER_SERVER);
+  return pass;
 }
 
 // Supplier connections (Vendor integrations: a supplier's live product data, ordering from it, its

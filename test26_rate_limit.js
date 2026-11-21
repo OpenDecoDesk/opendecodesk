@@ -262,17 +262,17 @@ function reqWithIp(ip, extra){
   // adminAuth.js — unit
   // ========================
   console.log("\n=== timingSafeEqual(): correct/incorrect comparisons ===");
-  console.log("Equal strings:", timingSafeEqual("proxy-pass", "proxy-pass") === true);
+  console.log("Equal strings:", timingSafeEqual("proxy-pass-for-tests", "proxy-pass-for-tests") === true);
   console.log("Different length:", timingSafeEqual("short", "much-longer-value") === false);
   console.log("Same length, different content:", timingSafeEqual("aaaaaaaa", "aaaaaaab") === false);
   console.log("Non-string inputs never throw, just return false:", timingSafeEqual(undefined, "x") === false && timingSafeEqual(null, "x") === false);
 
   console.log("\n=== requireAdmin(): host/passphrase/rate-limit gating ===");
   {
-    const env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass", DB: makeD1() };
+    const env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", DB: makeD1() };
     const req = reqWithIp("2.2.2.2");
 
-    const notAdmin = await requireAdmin(env, {kind:"locked", orgId:"x"}, "proxy-pass", req, "Custom not-admin message");
+    const notAdmin = await requireAdmin(env, {kind:"locked", orgId:"x"}, "proxy-pass-for-tests", req, "Custom not-admin message");
     console.log("Non-admin host refused with 403 and the caller's custom message:", notAdmin.status === 403);
     const notAdminData = JSON.parse(await notAdmin.text());
     console.log("Custom message honored:", notAdminData.message === "Custom not-admin message");
@@ -281,7 +281,7 @@ function reqWithIp(ip, extra){
     console.log("Wrong passphrase -> 401 Unauthorized:", wrongKey.status === 401);
     console.log("Message is exactly 'Unauthorized':", JSON.parse(await wrongKey.text()).message === "Unauthorized");
 
-    const ok = await requireAdmin(env, {kind:"admin"}, "proxy-pass", req, "msg");
+    const ok = await requireAdmin(env, {kind:"admin"}, "proxy-pass-for-tests", req, "msg");
     console.log("Correct passphrase -> null (proceed):", ok === null);
 
     const unconfigured = await requireAdmin({DB: makeD1()}, {kind:"admin"}, "anything", reqWithIp("2.2.2.3"), "msg");
@@ -290,24 +290,24 @@ function reqWithIp(ip, extra){
 
   console.log("\n=== requireAdmin(): rate limit blocks brute-force attempts, even a correct guess once exhausted ===");
   {
-    const env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass", DB: makeD1() };
+    const env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", DB: makeD1() };
     const req = reqWithIp("3.3.3.3");
     let last;
     for(let i = 0; i < 10; i++){ last = await requireAdmin(env, {kind:"admin"}, "wrong-guess-" + i, req, "msg"); }
     console.log("10th wrong guess still just 401 (within budget):", last.status === 401);
     const overLimit = await requireAdmin(env, {kind:"admin"}, "wrong-guess-11", req, "msg");
     console.log("11th attempt from the same IP -> 429, not 401:", overLimit.status === 429);
-    const withCorrectKey = await requireAdmin(env, {kind:"admin"}, "proxy-pass", req, "msg");
+    const withCorrectKey = await requireAdmin(env, {kind:"admin"}, "proxy-pass-for-tests", req, "msg");
     console.log("Even the CORRECT passphrase is blocked once the budget is exhausted (rate limit runs before the compare):", withCorrectKey.status === 429);
   }
 
   console.log("\n=== requireAdmin(): SUCCESSFUL requests are never counted (no D1 writes, never throttled) ===");
   {
     const db = makeD1();
-    const env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass", DB: db };
+    const env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", DB: db };
     const req = reqWithIp("3.3.3.4");
     let ok = true;
-    for(let i = 0; i < 200; i++){ ok = ok && (await requireAdmin(env, {kind:"admin"}, "proxy-pass", req, "msg")) === null; }
+    for(let i = 0; i < 200; i++){ ok = ok && (await requireAdmin(env, {kind:"admin"}, "proxy-pass-for-tests", req, "msg")) === null; }
     console.log("200 authorized admin requests in one minute all pass:", ok);
     console.log("...and cost zero rate-limit writes:", db._writes === 0);
   }
@@ -319,7 +319,7 @@ function reqWithIp(ip, extra){
   {
     const kv = makeD1();
     const env = {
-      DB: kv, PROXY_ADMIN_PASSPHRASE: "proxy-pass"
+      DB: kv, PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests"
     };
     const ip = "9.9.9.9";
     const mkReq = () => reqWithIp(ip, {
@@ -336,7 +336,7 @@ function reqWithIp(ip, extra){
     const uploadEnv = Object.assign({ IMAGES: { put: async () => {} }, R2_PUBLIC_BASE: "https://img.example.com" }, env);
     const uploadReq = reqWithIp(ip, {
       url: "https://admin.example.com/api/upload",
-      headers: { get: (h) => h === "X-Admin-Key" ? "proxy-pass" : (h === "CF-Connecting-IP" ? ip : null) },
+      headers: { get: (h) => h === "X-Admin-Key" ? "proxy-pass-for-tests" : (h === "CF-Connecting-IP" ? ip : null) },
       arrayBuffer: async () => new ArrayBuffer(10)
     });
     const uploadRes = await uploadHandler({ request: uploadReq, env: uploadEnv });
@@ -377,9 +377,9 @@ function reqWithIp(ip, extra){
     console.log("21st checkout request from the same IP -> 429:", res21.status === 429);
 
     console.log("\n=== admin_auth budget is untouched by checkout traffic sharing the same IP ===");
-    const ordersEnv = { DB: kv, PROXY_ADMIN_PASSPHRASE: "proxy-pass" };
+    const ordersEnv = { DB: kv, PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests" };
     const adminRes = await ordersHandler({
-      request: reqWithIp(ip, { json: async () => ({action:"getOrders", org:"league-101", key:"proxy-pass"}), url: "https://admin.example.com/api/orders" }),
+      request: reqWithIp(ip, { json: async () => ({action:"getOrders", org:"league-101", key:"proxy-pass-for-tests"}), url: "https://admin.example.com/api/orders" }),
       env: ordersEnv
     });
     console.log("Admin request from the SAME IP still works fine (separate bucket from checkout):", adminRes.status === 200);

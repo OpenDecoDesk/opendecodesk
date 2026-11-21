@@ -176,39 +176,39 @@ function makeDesignsBucket(){
   console.log("...and it's gone:", r.body.files.length === 0);
 
   console.log("\n=== functions/api/design.js: role-restricted design-version upload (no magic-byte check) ===");
-  let env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass", QUOTE_SIGNING_SECRET: "sekret", DESIGNS: makeDesignsBucket() };
-  let res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "application/octet-stream", qs: "?designId=9&role=machine&ext=dst&name=logo.dst", body: new ArrayBuffer(2000) }, env));
+  let env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", QUOTE_SIGNING_SECRET: "sekret", DESIGNS: makeDesignsBucket() };
+  let res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "application/octet-stream", qs: "?designId=9&role=machine&ext=dst&name=logo.dst", body: new ArrayBuffer(2000) }, env));
   let data = JSON.parse(await res.text());
   console.log("machine-file upload ok, key under designs/<designId>/:", data.status === "ok" && /^designs\/9\/[a-z0-9]{32}\.dst$/.test(data.key));
-  res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "application/octet-stream", qs: "?designId=9&role=design&ext=emb&name=logo.emb", body: new ArrayBuffer(500) }, env));
+  res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "application/octet-stream", qs: "?designId=9&role=design&ext=emb&name=logo.emb", body: new ArrayBuffer(500) }, env));
   data = JSON.parse(await res.text());
   console.log("design-file upload ok too:", data.status === "ok" && /^designs\/9\/[a-z0-9]{32}\.emb$/.test(data.key));
   console.log("exactly two objects stored:", env.DESIGNS._store.size === 2);
 
   console.log("\n=== functions/api/design.js: role restricts which extensions are accepted ===");
-  env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass", DESIGNS: makeDesignsBucket() };
-  res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "application/octet-stream", qs: "?designId=9&role=design&ext=dst&name=logo.dst", body: new ArrayBuffer(10) }, env));
+  env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", DESIGNS: makeDesignsBucket() };
+  res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "application/octet-stream", qs: "?designId=9&role=design&ext=dst&name=logo.dst", body: new ArrayBuffer(10) }, env));
   data = JSON.parse(await res.text());
   console.log("a stitch (.dst) file is refused for role=design (that's the machine role's format):", res.status === 400 && /native design format/.test(data.message));
-  res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "application/octet-stream", qs: "?designId=9&role=machine&ext=emb&name=logo.emb", body: new ArrayBuffer(10) }, env));
+  res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "application/octet-stream", qs: "?designId=9&role=machine&ext=emb&name=logo.emb", body: new ArrayBuffer(10) }, env));
   data = JSON.parse(await res.text());
   console.log("a native (.emb) file is refused for role=machine (that's the design role's format):", res.status === 400 && /stitch format/.test(data.message));
-  res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "application/octet-stream", qs: "?designId=9&ext=dst&name=logo.dst", body: new ArrayBuffer(10) }, env));
+  res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "application/octet-stream", qs: "?designId=9&ext=dst&name=logo.dst", body: new ArrayBuffer(10) }, env));
   data = JSON.parse(await res.text());
   console.log("missing role on a design-version upload is rejected:", res.status === 400 && /role/.test(data.message));
   console.log("nothing stored across any of these rejections:", env.DESIGNS._store.size === 0);
-  res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "application/octet-stream", qs: "?designId=9&role=machine&ext=exe&name=virus.exe", body: new ArrayBuffer(10) }, env));
+  res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "application/octet-stream", qs: "?designId=9&role=machine&ext=exe&name=virus.exe", body: new ArrayBuffer(10) }, env));
   data = JSON.parse(await res.text());
   console.log("a non-embroidery extension (.exe) is rejected regardless of role:", res.status === 400 && /isn't an embroidery file/.test(data.message) && env.DESIGNS._store.size === 0);
   for (const [role, ext] of [["design", "html"], ["machine", "svg"], ["machine", "png"], ["design", "pdf"], ["machine", "js"], ["machine", ""]]) {
-    res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "application/octet-stream", qs: `?designId=9&role=${role}&ext=${ext}&name=x.${ext}`, body: new ArrayBuffer(10) }, env));
+    res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "application/octet-stream", qs: `?designId=9&role=${role}&ext=${ext}&name=x.${ext}`, body: new ArrayBuffer(10) }, env));
     if (res.status !== 400) console.log(`.${ext} as role=${role} should be refused: false`);
   }
   console.log("web pages, scripts, images, PDFs and a missing extension are refused as design/machine files:", env.DESIGNS._store.size === 0);
 
   console.log("\n=== functions/api/design.js: any other embroidery format is accepted (2026-10) ===");
-  env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass", DESIGNS: makeDesignsBucket() };
-  const okUp = async (qs, contentType = "application/octet-stream") => JSON.parse(await (await designApi.post(designCtx({ key: "proxy-pass", contentType, qs, body: new ArrayBuffer(10) }, env))).text());
+  env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", DESIGNS: makeDesignsBucket() };
+  const okUp = async (qs, contentType = "application/octet-stream") => JSON.parse(await (await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType, qs, body: new ArrayBuffer(10) }, env))).text());
   let up = await okUp("?designId=9&role=machine&ext=pes&name=logo.pes");
   console.log("a Brother .pes machine file is accepted:", up.status === "ok" && /\.pes$/.test(up.key));
   up = await okUp("?designId=9&role=machine&ext=zz9&name=logo.zz9");
@@ -222,20 +222,20 @@ function makeDesignsBucket(){
   console.log("a non-image upload is always stored as application/octet-stream, whatever Content-Type was sent:", up.status === "ok" && stored && stored.httpMetadata.contentType === "application/octet-stream");
 
   console.log("\n=== functions/api/design.js: order-item upload accepts an image too, WITH magic-byte check ===");
-  env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass", DESIGNS: makeDesignsBucket() };
+  env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", DESIGNS: makeDesignsBucket() };
   const pngBuf = new ArrayBuffer(20); new Uint8Array(pngBuf).set([0x89, 0x50, 0x4e, 0x47]);
-  res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "image/png", qs: "?itemId=5&ext=png&name=photo.png", body: pngBuf }, env));
+  res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "image/png", qs: "?itemId=5&ext=png&name=photo.png", body: pngBuf }, env));
   data = JSON.parse(await res.text());
   console.log("valid PNG accepted under order-files/<itemId>/:", data.status === "ok" && /^order-files\/5\/[a-z0-9]{32}\.png$/.test(data.key));
-  res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "image/png", qs: "?itemId=5&ext=png&name=fake.png", body: new ArrayBuffer(20) }, env));
+  res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "image/png", qs: "?itemId=5&ext=png&name=fake.png", body: new ArrayBuffer(20) }, env));
   data = JSON.parse(await res.text());
   console.log("bytes that don't match declared image type are rejected:", res.status === 415);
 
   console.log("\n=== functions/api/design.js: signed link + download round trip ===");
-  env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass", QUOTE_SIGNING_SECRET: "sekret", DESIGNS: makeDesignsBucket() };
-  res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "application/octet-stream", qs: "?designId=9&role=machine&ext=dst&name=logo.dst", body: new ArrayBuffer(50) }, env));
+  env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", QUOTE_SIGNING_SECRET: "sekret", DESIGNS: makeDesignsBucket() };
+  res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "application/octet-stream", qs: "?designId=9&role=machine&ext=dst&name=logo.dst", body: new ArrayBuffer(50) }, env));
   const uploadedKey = JSON.parse(await res.text()).key;
-  res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "application/json", jsonBody: { key: uploadedKey } }, env));
+  res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "application/json", jsonBody: { key: uploadedKey } }, env));
   data = JSON.parse(await res.text());
   console.log("signed link returned:", data.status === "ok" && data.url.startsWith("/api/design?key="));
   const linkUrl = new URL("https://admin.example.com" + data.url);
@@ -246,8 +246,8 @@ function makeDesignsBucket(){
   console.log("GET with a tampered signature is refused:", res.status === 404);
 
   console.log("\n=== functions/api/design.js: rejected from a non-admin subdomain, even with the right passphrase ===");
-  env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass", DESIGNS: makeDesignsBucket() };
-  res = await designApi.post(designCtx({ key: "proxy-pass", contentType: "application/octet-stream", qs: "?designId=9&ext=dst&name=logo.dst", body: new ArrayBuffer(10),
+  env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", DESIGNS: makeDesignsBucket() };
+  res = await designApi.post(designCtx({ key: "proxy-pass-for-tests", contentType: "application/octet-stream", qs: "?designId=9&ext=dst&name=logo.dst", body: new ArrayBuffer(10),
     url: "https://acme.example.com/api/design?designId=9&ext=dst&name=logo.dst" }, env));
   console.log("refused with 403:", res.status === 403 && env.DESIGNS._store.size === 0);
 })();

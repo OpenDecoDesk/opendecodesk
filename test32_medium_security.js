@@ -91,7 +91,7 @@ const SAME = { Origin: ADMIN, "CF-Connecting-IP": "203.0.113.7" };
   const future = new Date(Date.now() + 3600e3).toISOString();
   const sessDb = await makePlatformDb();
   await seedSession(sessDb, token, future);
-  const envA = { DB: sessDb, PROXY_ADMIN_PASSPHRASE: "pw" };
+  const envA = { DB: sessDb, PROXY_ADMIN_PASSPHRASE: "pw-long-enough-pass" };
   {
     console.log("\n=== requireAdmin: cookie sessions + CSRF guard ===");
     const withCookie = (headers) => makeReq(ADMIN + "/api/orders", { headers: Object.assign({ Cookie: "__Host-odd_admin=" + token }, headers) });
@@ -106,7 +106,7 @@ const SAME = { Origin: ADMIN, "CF-Connecting-IP": "203.0.113.7" };
     r = await auth.requireAdmin(envA, { kind: "admin" }, token, makeReq(ADMIN + "/api/orders", { headers: SAME }));
     console.log("Old-style bearer token in the body → 401 (no longer accepted):", r !== null && r.status === 401);
     const pr = makeReq(ADMIN + "/api/orders", { headers: SAME });
-    r = await auth.requireAdmin(envA, { kind: "admin" }, "pw", pr);
+    r = await auth.requireAdmin(envA, { kind: "admin" }, "pw-long-enough-pass", pr);
     console.log("Passphrase path (TOTP off) still works, actor = passphrase:", r === null && auth.adminActor(pr) === "passphrase");
   }
 
@@ -187,8 +187,8 @@ const SAME = { Origin: ADMIN, "CF-Connecting-IP": "203.0.113.7" };
       getBootstrapState: async () => ({ userCount: 0, admins: [] }),   // …and no users yet: the passphrase is the way in
     });
     const O = load("functions/api/orders.js", ["onRequestPost"]);
-    const ctx = (body) => ({ env: { DB: {}, PROXY_ADMIN_PASSPHRASE: "pw" }, waitUntil: () => {},
-      request: makeReq(ADMIN + "/api/orders", { body: Object.assign({ key: "pw" }, body), headers: SAME }) });
+    const ctx = (body) => ({ env: { DB: {}, PROXY_ADMIN_PASSPHRASE: "pw-long-enough-pass" }, waitUntil: () => {},
+      request: makeReq(ADMIN + "/api/orders", { body: Object.assign({ key: "pw-long-enough-pass" }, body), headers: SAME }) });
 
     console.log("\n=== Audit: payment.voided records the amount, actor and IP ===");
     let res = await O.onRequestPost(ctx({ action: "voidPayment", paymentId: 7, org: "league-101", reason: "typo" }));

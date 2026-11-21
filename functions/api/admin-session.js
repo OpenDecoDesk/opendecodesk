@@ -31,14 +31,14 @@
 
 import { classifyHost, rootDomain } from "../_lib/hostConfig.js";
 import { getCatalogData }     from "../_lib/catalogCache.js";
-import { rateLimited, rateLimitResponse, rateLimitCheckGlobal, rateLimitHitGlobal } from "../_lib/rateLimit.js";
+import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { jsonResponse }       from "../_lib/http.js";
 import {
   timingSafeEqual, issueSession, revokeSession, readCookie, isSameOrigin,
   sessionCookieHeader, clearSessionCookieHeader, SESSION_COOKIE, SESSION_TTL_SEC, readSessionCookie,
   bootstrapState, rememberSecret, verifyUserPassword, pendingFor, revokeAllSessions, weakSetupPassword,
   looksLikeRecoveryCode, spendRecoveryCode, revokeUserSessionsFor,
-  ADMIN_AUTH_GLOBAL_BUCKET, ADMIN_AUTH_GLOBAL_WINDOW, adminAuthGlobalLimit,
+  signInBudgetBlocked, countSignInFailure,
 } from "../_lib/adminAuth.js";
 import { accessEnabled, verifyAccess } from "../_lib/access.js";
 import { verifyTOTP }         from "../_lib/totp.js";
@@ -73,9 +73,9 @@ export async function onRequestPost(context){
 
   const rl = await rateLimited(env, "admin_auth", request, 10);
   if(rl.blocked) return rateLimitResponse(rl.retryAfter);
-  // …and the install-wide budget of FAILED sign-ins (adminAuth.js), whoever is asking.
-  const all = await rateLimitCheckGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, adminAuthGlobalLimit(env), ADMIN_AUTH_GLOBAL_WINDOW);
-  if(all.blocked) return rateLimitResponse(all.retryAfter);
+  // …this address's share of the install-wide budget of FAILED sign-ins, and that budget (adminAuth.js).
+  const spent = await signInBudgetBlocked(env, request);
+  if(spent) return spent;
   if(accessEnabled(env)){
     const acc = await verifyAccess(env, request);
     if(!acc.ok) return jsonResponse({status:"error", message:acc.reason}, 403);
@@ -95,7 +95,7 @@ export async function onRequestPost(context){
   };
   const refuse = async (reason, message) => {
     await noteFailure(env, reason, request);
-    await rateLimitHitGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, ADMIN_AUTH_GLOBAL_WINDOW);
+    await countSignInFailure(env, request);
     return jsonResponse({status:"error", message: message || "Unauthorized"}, 401);
   };
 

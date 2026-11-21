@@ -46,6 +46,9 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU";
   ok("a wrong password, a wrong email, and no email are all the same refusal", (await A.signIn("olive@myshop.com", NEW + "x")).status === 401 && (await A.signIn("oliver@myshop.com", NEW)).status === 401 && (await A.signIn("", NEW)).status === 401 &&
     (await A.signIn("olive@myshop.com", "")).body.message === (await A.signIn("nobody@myshop.com", NEW)).body.message);
   ok("the session cookie is refused from another site", (await A.users({ action: "me" }, admin, { origin: "https://league.example.com" })).status === 403);
+  a = await A.password({ action: "account", name: "Someone Else", email: "someone@elsewhere.test", next: "a password chosen by someone else" }, admin);
+  ok("a session that is already set up can't change its email or password through the set-up step", a.status === 403 && a.body.code === "already_set_up" &&
+    A.user("olive@myshop.com") && A.user("someone@elsewhere.test") === null && (await A.signIn("olive@myshop.com", NEW)).status === 200 && A.sessions() >= 2);
 
   console.log("\n=== A temporary password, and changing your own ===");
   a = await A.users({ action: "create", name: "Sam Staff", email: "sam@myshop.com", role: "staff" }, admin);
@@ -95,7 +98,11 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU";
   ok("…a wrong code is refused", (await B.signIn("", "the owner's old password", "000000")).status === 401);
   a = await B.signIn("the-owner@types.anything", "the owner's old password", totpNow(SECRET));
   ok("with the code they are in, as the one admin, active, with their two-step secret kept", a.status === 200 && old.q("SELECT role, status, totpSecret FROM users").map(u => u.role + u.status + u.totpSecret).join() === "adminactive" + SECRET);
-  ok("…asked once for a name and an email, and nothing else", a.body.pending === "account" && (a = await B.password({ action: "account", name: "Pat Owner", email: "pat@myshop.com" }, a.cookie)).status === 200 && a.body.pending === null && B.sessions() === 1);
+  const patCookie = a.cookie;
+  ok("…their password can't be replaced in that step without the one they have", a.body.pending === "account" &&
+    (await B.password({ action: "account", name: "Pat Owner", email: "pat@myshop.com", next: "a brand new password" }, patCookie)).status === 401 &&
+    (await B.password({ action: "account", name: "Pat Owner", email: "pat@myshop.com", next: "a brand new password", current: "not the old one" }, patCookie)).status === 401 && old.q("SELECT email FROM users")[0].email === "");
+  ok("…asked once for a name and an email, and nothing else", (a = await B.password({ action: "account", name: "Pat Owner", email: "pat@myshop.com" }, patCookie)).status === 200 && a.body.pending === null && B.sessions() === 1);
   ok("…the same code can't be used twice", (await B.signIn("pat@myshop.com", "the owner's old password", totpNow(SECRET))).status === 401);
   ok("the old settings rows are left where they were", old.q("SELECT count(*) n FROM global_settings WHERE key IN ('adminPassword','totpSecret')")[0].n === 2);
 

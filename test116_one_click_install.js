@@ -25,8 +25,11 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
     const A = await makeAuth({ passphrase: secret });
     const a = await A.signIn("", secret);
     ok(`${what} doesn't open a new site, says where to change it, and creates nothing`, a.status === 403 && a.body.code === "weak_setup_password" && /Variables and Secrets/.test(a.body.message) && !a.cookie && A.d1.q("SELECT count(*) n FROM users")[0].n === 0);
+    const viaKey = await A.lib.requireAdmin(A.env, { kind: "admin" }, secret, { headers: { get: (n) => ({ "cf-connecting-ip": "203.0.113.9" })[String(n).toLowerCase()] || null } }, "no", "staff");
+    ok(`…nor does sending ${what} straight to the API as the key`, !!viaKey && viaKey.status === 401 && A.hits.length === 1);
   }
   const A = await makeAuth({ passphrase: "a long setup password" });
+  ok("a setup password of 12 characters or more opens the API before anyone has a password", (await A.lib.requireAdmin(A.env, { kind: "admin" }, "a long setup password", { headers: { get: () => null } }, "no", "staff")) === null);
   ok("a setup password of 12 characters or more does", (await A.signIn("", "a long setup password")).body.pending === "account");
 
   console.log("\n=== The site's own domain ===");

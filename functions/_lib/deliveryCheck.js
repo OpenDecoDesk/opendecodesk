@@ -17,10 +17,11 @@
  * The order is then ready to be marked completed (paid in full) from the
  * orders screen.
  *
- * Bounded: at most `limit` lookups per run (Cloudflare caps subrequests per
- * invocation), oldest shipments first. Anything not delivered yet, unknown to
- * the carrier, or that errors is simply checked again tomorrow — a failure
- * here never stops the roll-up (the caller wraps it).
+ * Bounded: at most `limit` outside requests per run (Cloudflare caps subrequests per
+ * invocation) — each tracking lookup is one, and each "your order has shipped" email a pickup sends
+ * is another — oldest shipments first. `requests` in the result says how many it used. Anything
+ * not delivered yet, unknown to the carrier, or that errors is simply checked again tomorrow — a
+ * failure here never stops the roll-up (the caller wraps it).
  */
 
 import { getShippedAwaitingDelivery, getLabeledAwaitingShipment, markOrderShippedByCarrier, markOrderDelivered,
@@ -92,7 +93,7 @@ const isoOr_ = (d, fallback) => { const t = new Date(d); return d && !isNaN(t.ge
 
 export async function checkShippedDeliveries(env, { limit = 40 } = {}) {
   const localDate = await localDateLabeler_(env);
-  const out = { checked: 0, delivered: [], inTransit: [], pickedUp: [], awaitingPickup: [], unknown: 0, errors: 0 };
+  const out = { checked: 0, requests: 0, delivered: [], inTransit: [], pickedUp: [], awaitingPickup: [], unknown: 0, errors: 0 };
   if (!env || !env.DB || !env.SHIPPO_API_KEY) return { ...out, skipped: "Shippo isn't configured" };
   // Tracking lookups belong to the Shipping feature (Global settings → Features): off = nothing is looked up.
   if (!(await getFeatures(env.DB)).shipping) return { ...out, skipped: "Shipping is turned off" };
@@ -100,7 +101,9 @@ export async function checkShippedDeliveries(env, { limit = 40 } = {}) {
   // 1) Labeled but not shipped: has the carrier scanned it yet?
   const awaiting = await getLabeledAwaitingShipment(env.DB, limit);
   for (const c of awaiting) {
-    out.checked++;
+    // A lookup here may lead to a shipped email: room for both, or this step stops (the rest wait for the next run).
+    if (out.requests + 2 > limit) break;
+    out.checked++; out.requests++;
     const carrier = carrierToken(c.labelCarrier, c.shippingMethod, c.tracking);
     const label = carrier.toUpperCase().replace("_EXPRESS", "");
     let tr;
@@ -116,6 +119,7 @@ export async function checkShippedDeliveries(env, { limit = 40 } = {}) {
     let customerEmailed = false;
     try {
       const order = await getOrderById(env.DB, c.orderId);
+      out.requests++;
       customerEmailed = await sendShippedEmail(env, order, { carrier: label, tracking: c.tracking, shippedAt: shippedIso });
     } catch (e) { console.error("Pickup check: shipped email failed for", c.orderId, e); }
     try {
@@ -133,10 +137,10 @@ export async function checkShippedDeliveries(env, { limit = 40 } = {}) {
   // 2) Shipped, waiting on delivery (whatever lookups are left this run).
   // Orders step 1 just looked up (and maybe marked shipped) aren't looked up twice in one run.
   const seen = new Set(awaiting.map(c => c.orderId));
-  const remaining = limit - out.checked;
+  const remaining = limit - out.requests;
   const candidates = remaining > 0 ? (await getShippedAwaitingDelivery(env.DB, remaining + seen.size)).filter(c => !seen.has(c.orderId)).slice(0, remaining) : [];
   for (const c of candidates) {
-    out.checked++;
+    out.checked++; out.requests++;
     const carrier = carrierToken(c.labelCarrier, c.shippingMethod, c.tracking);
     let tr;
     try { tr = await lookupTracking_(env, carrier, c.tracking); }

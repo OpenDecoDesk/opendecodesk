@@ -302,7 +302,10 @@ in the data folder, not deleted. You sign in with the password that was in use w
 made.
 
 A newer version of the program updates the database on its first start (the same migrations as a
-cloud install, `desktop/migrate.js`), and copies it to `backups/before-update-…` first.
+cloud install, `desktop/migrate.js`), and copies it to `backups/before-update-…` first. Each of
+these is a whole copy of your data (the database and every stored file), so only the newest three
+are kept: older ones are deleted once an update has gone through. Copies made before a restore, and
+your own backups, are never deleted by the program.
 
 ## Locked out
 

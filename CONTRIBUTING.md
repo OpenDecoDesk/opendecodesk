@@ -110,6 +110,9 @@ is neither behind a feature switch nor on its always-on list.
   that has been released.
 - Make the **same** change in `schema.sql`, which builds a new install in one go. `test33` fails
   if `schema.sql` and "all the migrations applied" ever differ.
+- Then run `node scripts/migration-list.mjs`. It rewrites `functions/_lib/migrationList.js`, the list
+  of migrations the Worker ships so it can tell when its database hasn't had them all
+  (`functions/_lib/migrationCheck.js`). `test225` fails while the list and the folder differ.
 - Prefer additive changes (a new nullable column, a new table). A migration that rebuilds a table
   must rename the old tables first, parent last, so dropping them can't cascade — see the header
   of `migrations/0006_ledger_integrity.sql`.

@@ -44,6 +44,7 @@ const vendorPriceAudit_ = (list) => (list || []).slice(0, 200).map(c => ({ color
 import { checkShippedDeliveries, checkBlankShipments } from "../_lib/deliveryCheck.js";
 import { ensureOrgDomain, getOrgDomainStatus } from "../_lib/customDomain.js";
 import { setupStatus, setupSummary } from "../_lib/setupStatus.js";
+import { pendingMigrations, pendingMigrationsNote } from "../_lib/migrationCheck.js";
 import { connectCloudflare, cloudflareTokenLink, workersDevParts } from "../_lib/cloudflareSetup.js";
 import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { readInvoiceWithAi } from "../_lib/invoiceAi.js";
@@ -3618,7 +3619,10 @@ export async function onRequestPost(context) {
         safe(() => getGlobalSettings(env.DB), {}),
       ]);
       const mailbox = await safe(async () => emailMailboxForBrowser(await getEmailMailbox(env.DB)), null);
-      const items = setupStatus(env, { business, salesTax, locale, payments: (global && global.enabledPayments) || null, mailbox });
+      // Database updates this code needs that the database hasn't had (migrationCheck.js): the Database line says so.
+      const pending = await safe(() => pendingMigrations(env.DB), null);
+      const migrations = pending ? { pending, note: pendingMigrationsNote(pending) } : null;
+      const items = setupStatus(env, { business, salesTax, locale, payments: (global && global.enabledPayments) || null, mailbox, migrations });
       return jsonResponse({ status: "ok", items, summary: setupSummary(items) });
     }
 

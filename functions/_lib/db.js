@@ -13010,6 +13010,7 @@ export const SYSTEM_ISSUE_LABELS = {
   digest_failed: "Daily roll-ups that did not complete (the scheduled run will try again tomorrow)",
   recurring_expense_skipped: "Recurring expenses that couldn't be recorded (fix the rule on Expenses — it's recorded once fixed)",
   cleanup_failed: "Daily clean-ups that did not complete (old log entries stay until one does)",
+  migrations_pending: "Database updates this version needs that haven't been applied (until they are, some pages can show $0 or empty lists; see Global settings → Setup status)",
 };
 export async function recordSystemIssue(db, kind, sample) {
   if (!db || typeof db.prepare !== "function") return;

@@ -194,6 +194,24 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
   thrown = null;
   try { server.restoreState(tmp, tmp); } catch (e) { thrown = e; }
   ok("restoring refuses a folder that isn't a backup", thrown && /isn't an OpenDecoDesk backup/.test(thrown.message));
+  {
+    // Copies made before updates: only the newest 3 are kept; nothing else in the data folder is touched.
+    const mk = (rel) => { fs.mkdirSync(path.join(tmp, rel), { recursive: true }); fs.writeFileSync(path.join(tmp, rel, "x"), "x"); };
+    const stamps = ["2026-01-01_00-00-00", "2026-02-01_00-00-00", "2026-03-01_00-00-00", "2026-04-01_00-00-00", "2026-05-01_00-00-00"];
+    for (const s of stamps) mk("backups/before-update-" + s);
+    mk("state/d1"); mk("backups/before-restore-2025-12-01_00-00-00"); mk("backups/miniflare-files-2025-12-01_00-00-00"); mk("backups/before-update-notes");
+    const logs = [];
+    const removed = server.pruneUpdateCopies(tmp, { log: (m) => logs.push(m) });
+    const left = fs.readdirSync(path.join(tmp, "backups")).sort();
+    ok("only the newest 3 copies made before an update are kept", removed.length === 2 && stamps.slice(2).every(s => left.includes("before-update-" + s))
+      && !left.includes("before-update-" + stamps[0]) && !left.includes("before-update-" + stamps[1]) && /Deleted 2 older copies/.test(logs.join("\n")));
+    ok("…never the data itself, a copy made before a restore, or anything else in backups/", fs.existsSync(path.join(tmp, "state/d1/x"))
+      && left.includes("before-restore-2025-12-01_00-00-00") && left.includes("miniflare-files-2025-12-01_00-00-00") && left.includes("before-update-notes"));
+    ok("…and running it again deletes nothing more", server.pruneUpdateCopies(tmp).length === 0 && server.pruneUpdateCopies(tmp, { keep: 0 }).length === 2
+      && fs.readdirSync(path.join(tmp, "backups")).filter(n => /^before-update-\d/.test(n)).length === 1);
+    ok("a data folder with no backups yet is fine", server.pruneUpdateCopies(path.join(tmp, "nowhere")).length === 0);
+    ok("the program prunes them only after the database was updated without trouble", /await migrate\(db, src\);[\s\S]{0,400}pruneUpdateCopies\(dataDir, \{ log \}\)/.test(read("desktop/server.js")));
+  }
   fs.rmSync(tmp, { recursive: true, force: true });
   // The log (desktop/log.js): time-stamped lines, terminal colours stripped, and a size cap.
   const { createLog } = require("./desktop/log.js");

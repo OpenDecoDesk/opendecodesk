@@ -10,6 +10,11 @@
  * one passed, the TIMEZONE variable is used, then UTC. An unknown time zone counts as UTC rather
  * than never sending. DIGEST_HOUR (plain variable, 0-23) defaults to 6.
  *
+ * The tick an hour BEFORE it is the daily housekeeping (isHousekeepingHour): Stripe fees the webhook
+ * couldn't read, old vendor web-service logs, and customers' abandoned design uploads. It runs on its
+ * own tick so its requests never come out of the roll-up's per-run allowance, and so a clean-up that
+ * fails is recorded in time for that morning's roll-up.
+ *
  * Two edge cases of "once a day", both on the day the clocks change and only when DIGEST_HOUR is
  * the hour that is skipped or repeated (1–2 AM in most zones): that day gets no roll-up, or two.
  */
@@ -32,4 +37,9 @@ export function digestHour(env) {
 
 export function isDigestHour(env, date, timeZone) {
   return localHour(date, timeZone || (env && env.TIMEZONE)) === digestHour(env);
+}
+
+// The hour before the roll-up's (wrapping past midnight): the daily housekeeping tick.
+export function isHousekeepingHour(env, date, timeZone) {
+  return localHour(date, timeZone || (env && env.TIMEZONE)) === (digestHour(env) + 23) % 24;
 }

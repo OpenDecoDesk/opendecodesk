@@ -95,6 +95,17 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   console.log("doing it again is refused — nothing is taken twice:", r.status === 400 && qty("S") === 7);
   r = await call({ action: "previewBlankCatchUp" });
   console.log("only H is still waiting:", JSON.stringify(r.body.lines.map(l => l.orderId)) === '["H"]');
+  // Two applies of H at once (a double click, two tabs): both plan H before either writes. Each line's writes are one
+  // transaction that runs only while the line still has no real cost, so only one of them takes the blank.
+  const hId = r.body.lines[0].itemId, mBefore = qty("M");
+  const [h1, h2] = await Promise.all([lib.applyBlankCatchUp(d1, [hId]), lib.applyBlankCatchUp(d1, [hId])]);
+  console.log("two applies at once take H's blank once — one consume movement, stock down by one, and it still matches the history:",
+    h1.applied.length + h2.applied.length === 1 && d1.q("SELECT count(*) n FROM inventory_movements WHERE kind='consume' AND itemId=?", hId)[0].n === 1 &&
+    qty("M") === mBefore - 1 && qty("M") === sumMoves("M"));
+  // Put H back as it was (no real cost, no use), so the rest of this test sees what it expects.
+  d1._raw.run("DELETE FROM inventory_movements WHERE kind='consume' AND itemId=?", [hId]);
+  d1._raw.run("UPDATE blank_sizes SET quantity = quantity + 1 WHERE size='M'");
+  d1._raw.run("UPDATE order_items SET cogsCents = NULL, cogsSource = NULL WHERE id=?", [hId]);
 
   console.log("\n=== COGS report and later orders ===");
   d1._raw.run("UPDATE orders SET shippedAt = manufacturedAt WHERE manufacturedAt IS NOT NULL AND shippedAt IS NULL AND deliveredAt IS NULL AND completedAt IS NULL");   // sold the day made: COGS goes by the sale date (Global settings → Bookkeeping)

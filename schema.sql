@@ -851,7 +851,9 @@ CREATE TABLE IF NOT EXISTS order_payments (
   -- (0017, superseded by payment_cashouts in 0018 — no longer written or read.)
   cashoutTransferId INTEGER REFERENCES account_transfers(id),
   -- (0035) how much of a refund / lost dispute was shipping — untaxed, so no sales tax is backed out of it.
-  shippingCents INTEGER NOT NULL DEFAULT 0 CHECK (shippingCents >= 0)
+  shippingCents INTEGER NOT NULL DEFAULT 0 CHECK (shippingCents >= 0),
+  -- (0212) one key per Save in the admin's payment forms, so a double click or retry can't record it twice.
+  requestKey  TEXT
 );
 
 -- How much of a Venmo payment each Venmo -> bank transfer covers (migrations/0018). A payment
@@ -865,6 +867,28 @@ CREATE TABLE IF NOT EXISTS payment_cashouts (
 );
 CREATE INDEX IF NOT EXISTS idx_payment_cashouts_payment  ON payment_cashouts(paymentId);
 CREATE INDEX IF NOT EXISTS idx_payment_cashouts_transfer ON payment_cashouts(transferId);
+
+-- The Stripe card page last opened for each order (migrations/0210): reused while it still charges the
+-- balance, closed (expired) before a new one is made and when the order is voided — so one order can't
+-- be paid twice by card from two open pages.
+CREATE TABLE IF NOT EXISTS checkout_sessions (
+  orderId     TEXT PRIMARY KEY REFERENCES orders(orderId) ON DELETE CASCADE,
+  sessionId   TEXT NOT NULL,
+  amountCents INTEGER NOT NULL DEFAULT 0,
+  createdAt   TEXT NOT NULL,
+  expiresAt   TEXT NOT NULL
+);
+
+-- Each Stripe dispute an order has had and its latest status (migrations/0211), so an out-of-order or
+-- retried dispute event can't move orders.disputeStatus backwards. No foreign key (see the migration).
+CREATE TABLE IF NOT EXISTS order_disputes (
+  disputeId TEXT PRIMARY KEY,
+  orderId   TEXT NOT NULL,
+  status    TEXT NOT NULL DEFAULT '',
+  createdAt TEXT NOT NULL,
+  updatedAt TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_order_disputes_order ON order_disputes(orderId);
 
 -- Stripe webhook events already processed (idempotency — see stripe-webhook.js)
 CREATE TABLE IF NOT EXISTS stripe_events (
@@ -922,6 +946,7 @@ CREATE INDEX IF NOT EXISTS idx_payments_order        ON order_payments(orderId);
 CREATE INDEX IF NOT EXISTS idx_payments_received     ON order_payments(receivedAt);
 CREATE INDEX IF NOT EXISTS idx_payments_cashout      ON order_payments(cashoutTransferId);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_external_ref ON order_payments(externalRef) WHERE externalRef <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_request_key ON order_payments(requestKey) WHERE requestKey IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_verif_order           ON design_verifications(orderId);
 CREATE INDEX IF NOT EXISTS idx_products_org          ON products(orgId, visible, sortOrder);
 CREATE INDEX IF NOT EXISTS idx_blank_sizes           ON blank_sizes(blankId);

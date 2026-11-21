@@ -3424,13 +3424,31 @@ async function saveOrder(order){
     // please refresh shipping rates") rather than a bare status code.
     let serverMsg = "";
     try{ serverMsg = (JSON.parse(errText) || {}).message || ""; }catch(_){}
-    throw new Error(serverMsg || ("Order submission failed (HTTP " + res.status + ")"));
+    // `refused`: the server answered and turned the order down (a 4xx with its reason), so nothing was
+    // recorded. A 5xx or no answer at all can't say that — the order may have been saved before it failed.
+    throw Object.assign(new Error(serverMsg || ("Order submission failed (HTTP " + res.status + ")")), { refused: res.status < 500 && !!serverMsg });
   }
   const data = await res.json().catch(() => null);
   if(data && data.status === "error"){
-    throw new Error(data.message || "Order submission failed");
+    throw Object.assign(new Error(data.message || "Order submission failed"), { refused: true });
   }
   return data || {};   // when sales tax is added on top: the order's real {total, salesTax}
+}
+
+// One order id per checkout attempt (placeOrder): kept — in this tab, across a reload — until the order is saved or
+// the cart, details or delivery change, so a retry after a lost answer sends the same order again.
+let pendingOrderAttempt_ = null;
+function orderIdForAttempt_(prefix, signature){
+  if(!pendingOrderAttempt_){ try{ pendingOrderAttempt_ = JSON.parse(sessionStorage.getItem("pendingOrderAttempt") || "null"); }catch(_){} }
+  if(pendingOrderAttempt_ && pendingOrderAttempt_.sig === signature && pendingOrderAttempt_.id) return pendingOrderAttempt_.id;
+  const id = prefix + "-" + Date.now().toString(36).toUpperCase() + "-" + crypto.getRandomValues(new Uint32Array(1))[0].toString(36).toUpperCase();
+  pendingOrderAttempt_ = { id, sig: signature };
+  try{ sessionStorage.setItem("pendingOrderAttempt", JSON.stringify(pendingOrderAttempt_)); }catch(_){}
+  return id;
+}
+function clearOrderAttempt_(){
+  pendingOrderAttempt_ = null;
+  try{ sessionStorage.removeItem("pendingOrderAttempt"); }catch(_){}
 }
 
 async function placeOrder(orgId){
@@ -3475,8 +3493,12 @@ async function placeOrder(orgId){
   const neededByEl = document.getElementById("rushNeededBy");
   if(neededByEl) rushNeededBy = neededByEl.value;
   const _orderPrefix = ((orgId || "ORD").replace(/[^A-Za-z0-9]/g, "").slice(0, 4).toUpperCase()) || "ORD";
+  // The same order id for the same checkout (same cart, details and delivery) until it's saved: a retry after a
+  // lost answer resends THIS order, which the server recognises, instead of placing a second one.
+  const _attemptSig = JSON.stringify([orgId, name, contact, paymentMethod, cart.map(({ cdPreviews, ...line }) => line),
+    delivery.kind, delivery.label || "", delivery.kind === "option" ? delivery.option.id : null, shippingAddress, orderShippingCost, !!rush, rushNeededBy || ""]);
   const order = {
-    orderId: _orderPrefix + "-" + Date.now().toString(36).toUpperCase() + "-" + crypto.getRandomValues(new Uint32Array(1))[0].toString(36).toUpperCase(),
+    orderId: orderIdForAttempt_(_orderPrefix, _attemptSig),
     orgId, customerName: name, contact, paymentMethod,
     // The design previews are this page's own object URLs — never sent.
     items: cart.map(({ cdPreviews, ...line }) => line),
@@ -3509,17 +3531,19 @@ async function placeOrder(orgId){
   let saved = null;
   try{
     saved = await saveOrder(order);
+    clearOrderAttempt_();   // saved: the next checkout is a new order
     // Tax added on top: the confirmation (and the Venmo/Zelle amount) uses the recorded total.
     if(saved && typeof saved.total === "number"){ order.total = saved.total; order.salesTax = saved.salesTax; }
   }catch(err){
-    // The order was NOT recorded — stop here. Showing the confirmation
-    // page (or handing off to Stripe, whose order lookup would fail
-    // anyway) would tell the customer an order exists when nothing was
-    // recorded. Cart is left intact for a retry.
+    // No confirmation page (and no hand-off to Stripe) without the server's word that the order exists.
+    // The cart is left intact for a retry, which resends the same order id (orderIdForAttempt_), so trying
+    // again can't place it twice. Only a refusal from the server means nothing was recorded; with no answer
+    // (a dropped connection, a server error) the order may well have been saved.
     console.error("Could not save order", err);
-    checkoutError_("Sorry — your order could not be submitted" +
-      (err && err.message ? " (" + err.message + ")" : "") +
-      ". Nothing was recorded; your cart is unchanged. Please try again in a moment.");
+    checkoutError_(err && err.refused
+      ? "Sorry — your order could not be submitted" + (err.message ? " (" + err.message + ")" : "") +
+        ". Nothing was recorded; your cart is unchanged. Please try again in a moment."
+      : "We couldn't confirm your order went through. Your cart is unchanged — please press Place order again; if the first try did reach us, it won't be placed twice.");
     if(btn){ btn.disabled = false; btn.textContent = "Place order"; }
     return;
   }

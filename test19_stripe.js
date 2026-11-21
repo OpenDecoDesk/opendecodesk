@@ -48,6 +48,14 @@ global.getOrderCheckoutState = async (db, orderId) => {
   return total === null ? null : { total, paid: global.__checkoutPaid, orgId: global.__checkoutOrg,
     voided: global.__checkoutVoided, ...row };
 };
+// The card page already open for an order (migrations/0210). By default there is none; the section
+// "a second Pay by card" below swaps in states to check checkout.js's reuse / close / refuse.
+global.__cardPage = { state: "none" };
+global.__expireResult = "closed";
+global.__savedCardPages = [];
+global.checkoutSessionState = async () => global.__cardPage;
+global.expireCheckoutSession = async () => global.__expireResult;
+global.saveCheckoutSession = async (db, orderId, id, cents, exp) => { global.__savedCardPages.push({ orderId, id, cents, exp }); };
 const { orderTokenFor } = require("./testlib/order-token");
 let checkoutSrc = fs.readFileSync(__dirname + "/functions/api/checkout.js", "utf8")
   .replace(/import \{[\s\S]*?\} from ["'][^"']+["'];\n?/g, "")
@@ -61,7 +69,7 @@ global.setOrderPaid = async () => {};
 global.setOrderRefunded = async () => {};
 global.setOrderDisputeStatus = async () => {};
 global.addOrderPayment = async () => 1;
-global.reduceShippingPaidForRefund = async () => false;
+global.isShippingPayment = async () => false;
 // Stripe event idempotency (stripe_events table) — in-memory stand-in.
 global.__processedEvents = new Set();
 global.hasProcessedStripeEvent = async (db, id) => global.__processedEvents.has(id);
@@ -72,6 +80,8 @@ global.recordSystemIssue = async (db, kind, sample) => { global.__systemIssues.p
 global.sendStripePaymentNotification = async () => {};
 global.sendRefundNotification = async () => {};
 global.sendDisputeNotification = async () => {};
+global.__problemNotices = [];
+global.sendPaymentProblemNotification = async (env, orderId, orgId, amount, problem) => { global.__problemNotices.push({ orderId, amount, problem }); };
 let webhookSrc = fs.readFileSync(__dirname + "/functions/api/stripe-webhook.js", "utf8")
   .replace(/import \{[\s\S]*?\} from ["'][^"']+["'];\n?/g, "")
   .replace(/export async function/g, "async function");
@@ -194,7 +204,49 @@ function makeGsMock(calls){ return async (url, opts) => {
   console.log("Success URL contains orderId:", params.get("success_url").includes("ORD-T1"));
   console.log("Cancel URL contains orgId:", params.get("cancel_url").includes("league-101"));
   console.log("customer_email included when contact is a valid email:", params.get("customer_email") === "a@example.com");
+  const expiresIn = Number(params.get("expires_at")) - Math.floor(Date.now() / 1000);
+  console.log("the card page closes by itself after an hour, not Stripe's 24:", expiresIn > 3500 && expiresIn <= 3600);
+  const remembered = global.__savedCardPages.slice(-1)[0];
+  console.log("the new card page is remembered for the order (id, amount, closing time):", !!remembered && remembered.orderId === "ORD-T1" && remembered.id === "cs_test_123" && remembered.cents === 4500 && !!remembered.exp);
   global.getOrderTotal = async () => 45;
+
+  console.log("\n=== checkout.js: a second Pay by card for the same order (another tab, the back button) ===");
+  {
+    const callCheckout = async () => {
+      const r = await checkoutHandler({
+        request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101"}), url:"https://example.com/api/checkout" },
+        env: { DB: {}, STRIPE_SECRET_KEY:"sk_test_fake" } });
+      return { status: r.status, body: JSON.parse(await r.text()) };
+    };
+    let created = 0, expired = 0;
+    global.fetch = async (url) => { if (String(url).includes("stripe.com")) created++; return { json: async () => ({ id: "cs_new", url: "https://checkout.stripe.com/pay/cs_new" }) }; };
+    global.expireCheckoutSession = async () => { expired++; return global.__expireResult; };
+    const success = "https://example.com/?stripe=success&orderId=ORD-T1&org=league-101";
+    global.__cardPage = { state: "open", sessionId: "cs_old", url: "https://checkout.stripe.com/pay/cs_old", amountCents: 4500, successUrl: success };
+    let r = await callCheckout();
+    console.log("the page still open for the same amount is handed back — no second page:", r.status === 200 && r.body.url === "https://checkout.stripe.com/pay/cs_old" && created === 0 && expired === 0);
+    global.__cardPage = { ...global.__cardPage, amountCents: 6000 };
+    r = await callCheckout();
+    console.log("open for a different amount (the order changed): closed first, then a new page:", r.status === 200 && r.body.url.includes("cs_new") && expired === 1 && created === 1);
+    global.__expireResult = "paid"; created = 0;
+    r = await callCheckout();
+    console.log("…and if it was paid just as it was being closed: refused, no new page:", r.status === 409 && /don't pay again/.test(r.body.message) && created === 0);
+    global.__expireResult = "unknown";
+    r = await callCheckout();
+    console.log("…or couldn't be closed: refused for now (502), no new page:", r.status === 502 && created === 0);
+    global.__expireResult = "closed";
+    global.__cardPage = { state: "paid", sessionId: "cs_old" };
+    r = await callCheckout();
+    console.log("the earlier page was just paid (webhook not in yet): refused, no new page:", r.status === 409 && created === 0);
+    global.__cardPage = { state: "unknown", sessionId: "cs_old" };
+    r = await callCheckout();
+    console.log("Stripe can't say what became of the earlier page: refused for now (502):", r.status === 502 && created === 0);
+    global.__cardPage = { state: "closed", sessionId: "cs_old" };
+    r = await callCheckout();
+    console.log("the earlier page has closed: a new one is made:", r.status === 200 && created === 1);
+    global.__cardPage = { state: "none" };
+    global.expireCheckoutSession = async () => global.__expireResult;
+  }
 
   console.log("\n=== checkout.js: blank or phone-only contact must NOT send an empty customer_email (Stripe rejects that outright) ===");
   let capturedBlankContactReq = null;
@@ -448,6 +500,33 @@ function makeGsMock(calls){ return async (url, opts) => {
     console.log("Payment row recorded with the real amount ($45):", !!row && row.amount === 45);
     console.log("Payment note flags the mismatch:", !!row && row.note.includes("MISMATCH"));
     console.log("Not force-marked paid — a short payment leaves the ledger short:", paidCalls === 0);
+    console.log("a short payment just leaves a balance — no urgent notice:", global.__problemNotices.length === 0);
+
+    console.log("\n=== stripe-webhook.js: a SECOND card page paid for an order already paid in full → recorded and flagged for a refund ===");
+    payments.clear(); notifications = 0; global.__problemNotices.length = 0; global.__systemIssues.length = 0;
+    global.getOrderTotal = async () => 0;   // the first payment already covered the balance
+    await send({id:"evt_6", type:"checkout.session.completed", data:{object:{id:"cs_6", payment_intent:"pi_6", payment_status:"paid", amount_total:4500, metadata:{orderId:"ORD-I6", orgId:"league-101"}}}});
+    const dup = payments.get("pi_6");
+    console.log("the money is still recorded (it was taken):", !!dup && dup.amount === 45);
+    console.log("…with the AMOUNT MISMATCH note:", !!dup && dup.note.includes("MISMATCH"));
+    console.log("…an urgent notice to the owner instead of the usual one:", global.__problemNotices.length === 1 && /already paid/.test(global.__problemNotices[0].problem) && notifications === 0);
+    console.log("…and a system issue for the 6 AM roll-up:", global.__systemIssues.some(i => i.kind === "payment_needs_review" && i.sample.includes("ORD-I6")));
+    global.__processedEvents.clear();
+    await send({id:"evt_6b", type:"checkout.session.completed", data:{object:{id:"cs_6", payment_intent:"pi_6", payment_status:"paid", amount_total:4500, metadata:{orderId:"ORD-I6", orgId:"league-101"}}}});
+    console.log("a redelivery of that payment isn't flagged again:", global.__problemNotices.length === 1 && payments.size === 1);
+
+    console.log("\n=== stripe-webhook.js: more than the balance (total lowered after the page opened) → flagged ===");
+    global.__problemNotices.length = 0;
+    global.getOrderTotal = async () => 30;
+    await send({id:"evt_7", type:"checkout.session.completed", data:{object:{id:"cs_7", payment_intent:"pi_7", payment_status:"paid", amount_total:4500, metadata:{orderId:"ORD-I7", orgId:"league-101"}}}});
+    console.log("recorded with the mismatch note and an urgent notice:", payments.get("pi_7").note.includes("MISMATCH") && global.__problemNotices.length === 1 && /only \$30\.00/.test(global.__problemNotices[0].problem));
+
+    console.log("\n=== stripe-webhook.js: a card page paid after the order was voided → recorded and flagged ===");
+    global.__problemNotices.length = 0;
+    global.getOrderTotal = async () => 45; global.__checkoutVoided = true;
+    await send({id:"evt_8", type:"checkout.session.completed", data:{object:{id:"cs_8", payment_intent:"pi_8", payment_status:"paid", amount_total:4500, metadata:{orderId:"ORD-I8", orgId:"league-101"}}}});
+    console.log("recorded, the note says the order was voided, and the owner is told:", /VOIDED/.test(payments.get("pi_8").note) && global.__problemNotices.length === 1 && /voided/.test(global.__problemNotices[0].problem));
+    global.__checkoutVoided = false;
 
     global.getOrderTotal = async () => 45;
     global.setOrderPaid = async () => {};

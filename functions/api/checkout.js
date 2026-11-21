@@ -44,7 +44,11 @@ import { classifyHost } from "../_lib/hostConfig.js";
 import { getCatalogData } from "../_lib/catalogCache.js";
 import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { jsonResponse, verifyOrderToken } from "../_lib/http.js";
-import { getOrderCheckoutState, getOrderInvoice, invoiceExpired } from "../_lib/db.js";
+import { getOrderCheckoutState, getOrderInvoice, invoiceExpired, checkoutSessionState, expireCheckoutSession, saveCheckoutSession } from "../_lib/db.js";
+
+// How long a card page stays payable (Stripe's minimum is 30 minutes). Short, so a page opened before the
+// order changed doesn't linger for Stripe's default 24 hours.
+const CHECKOUT_PAGE_SECONDS = 60 * 60;
 
 export async function onRequestPost(context){
   const { request, env } = context;
@@ -129,8 +133,8 @@ export async function onRequestPost(context){
     console.error("Could not verify order total for Stripe checkout — orderId:", orderId);
     return jsonResponse({status:"error", message:"Could not verify order total."}, 400);
   }
-  // (Already-paid orders were refused above, so a reload, a back-button or a replayed request
-  // can't charge twice.)
+  // (Already-paid orders were refused above, and a card page already open for this order is reused or
+  // closed below, so a reload, a back-button, a second tab or a replayed request can't charge twice.)
   // The order's own org is authoritative — not the one in the request body —
   // so Stripe metadata (and therefore webhook bookkeeping) can't be mislabeled.
   if(host.kind === "locked" && host.orgId !== state.orgId){
@@ -160,6 +164,24 @@ export async function onRequestPost(context){
   // Stripe uses integer minor units (cents)
   const amountCents = Math.round(total * 100);
 
+  // The card page already made for this order (migrations/0210). Still open for this same amount and return
+  // page: hand it back rather than open a second one that could be paid as well. Open for a different amount
+  // (the order changed): close it first. Just paid (its webhook not in yet): refuse, so it isn't paid twice.
+  const prior = await checkoutSessionState(env, String(orderId));
+  const alreadyPaid = () => jsonResponse({status:"error", message:"A card payment for this order has just gone through — it can take a minute to show. Please don't pay again."}, 409);
+  const tryLater = () => jsonResponse({status:"error", message:"Couldn't check the card payment already started for this order — please try again in a minute."}, 502);
+  if(prior.state === "paid") return alreadyPaid();
+  if(prior.state === "unknown") return tryLater();
+  if(prior.state === "open"){
+    if(prior.url && prior.amountCents === amountCents && prior.successUrl === successUrl){
+      return jsonResponse({status:"ok", url: prior.url});
+    }
+    const closed = await expireCheckoutSession(env, String(orderId));
+    if(closed === "paid") return alreadyPaid();
+    if(closed !== "closed") return tryLater();
+  }
+  const expiresAt = Math.floor(Date.now() / 1000) + CHECKOUT_PAGE_SECONDS;
+
   const params = {
     "payment_method_types[]": "card",
     "mode": "payment",
@@ -186,7 +208,8 @@ export async function onRequestPost(context){
     "payment_intent_data[metadata][orderId]": orderId,
     "payment_intent_data[metadata][orgId]": orderOrgId,
     "success_url": successUrl,
-    "cancel_url": cancelUrl
+    "cancel_url": cancelUrl,
+    "expires_at": String(expiresAt)
   };
   // Only include customer_email when there's an actual valid one — Stripe
   // rejects an explicitly-blank value with "Invalid email address" (it
@@ -224,6 +247,11 @@ export async function onRequestPost(context){
     console.error("Stripe session creation failed:", session.error ? session.error.message : JSON.stringify(session));
     return jsonResponse({status:"error", message:"Could not create payment session: " + stripeErrorDetail}, 500);
   }
+
+  // Remembered so the next "Pay by card" reuses or closes this page. A failure here doesn't stop the payment:
+  // the webhook still flags a second payment for the owner (stripe-webhook.js).
+  try{ if(session.id) await saveCheckoutSession(env.DB, String(orderId), session.id, amountCents, new Date(expiresAt * 1000).toISOString()); }
+  catch(err){ console.error("Could not remember the card page for", orderId, err); }
 
   return jsonResponse({status:"ok", url: session.url});
 }

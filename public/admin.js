@@ -3906,7 +3906,9 @@ async function cancelLineItem(orgId, sheetRow, itemName, lineTotal){
       showToast("Cancel failed: " + ((data && data.message) || "unknown error"), true);
       return;
     }
-    if(data.lateCancel){
+    if(data.alreadyCancelled){
+      showToast("This item was already canceled — nothing changed and no email was sent.");
+    } else if(data.lateCancel){
       showToast("Item canceled. ⚠ Blank was already ordered — manual reconciliation needed (inventory + refund decision).", true);
     } else {
       showToast("Item canceled." + (data.emailSent ? " Customer notified by email." : ""));
@@ -3917,33 +3919,42 @@ async function cancelLineItem(orgId, sheetRow, itemName, lineTotal){
   }
 }
 
-// Record a refund for a canceled line item. The admin must process the
-// actual money movement first (Stripe dashboard for Card; Venmo/check for
-// others) — this just records it on the line item.
+// Record a refund for a canceled line item, once the money has gone back. Money returned by Venmo, Zelle,
+// check, cash or other is added to the order's payments (a refund entry, as 💰 Payments → Record refund does),
+// so the balance, the books and the sales-tax report all see it. A card payment is refunded in the Stripe
+// Dashboard, and that refund reaches 💰 Payments by itself — so for card this only notes the refund on the line.
 async function setLineItemRefund(orgId, sheetRow, defaultAmount, paymentMethod){
-  let prompt_ = "Record refund amount (default: $" + Number(defaultAmount).toFixed(2) + "):";
-  if(paymentMethod === "Card"){
-    const fee = (Number(defaultAmount) * 0.029 + 0.30).toFixed(2);
-    prompt_ += "\n\nCard payment — process refund via Stripe Dashboard first.\nEstimated non-refundable Stripe fee: ~$" + fee + ".";
-  } else if(paymentMethod === "Venmo"){
-    prompt_ += "\n\nVenmo payment — send the refund via Venmo first.";
-  } else if(paymentMethod === "Check"){
-    prompt_ += "\n\nCheck payment — mail a check first.";
-  }
-  // Amount and when it was refunded (date and time, default now) — it used to be a typed prompt stamped "now".
+  const METHODS = { venmo: "Venmo", zelle: "Zelle", check: "Check", cash: "Cash", other: "Other", card: "Card (refunded in Stripe)" };
+  const pm = String(paymentMethod || "").toLowerCase();
+  const defaultMethod = pm in METHODS ? pm : "other";
+  const fee = (Number(defaultAmount) * 0.029 + 0.30).toFixed(2);
+  const note = (m) => m === "card"
+    ? "Refund it in the Stripe Dashboard first — the refund then appears under 💰 Payments by itself, so this only notes it on the line. Stripe keeps its fee (about $" + fee + ")."
+    : "Send the money back first (" + METHODS[m] + "). Recording it here adds the refund to 💰 Payments as money returned.";
+  // Amount, how and when it was refunded (date and time, default now).
   const got = await new Promise(resolve => {
-    const { ov, close } = inventoryModal_("Record refund", `<div style="font-size:13px;white-space:pre-line;color:#444;">${escapeHtml(prompt_)}</div>
+    const { ov, close } = inventoryModal_("Record refund", `
+      <label for="lrMethod" style="display:block;font-size:13px;font-weight:600;margin:0 0 4px;">Refunded by</label>
+      <select id="lrMethod" style="font:inherit;font-size:14px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;">
+        ${Object.entries(METHODS).map(([k, v]) => `<option value="${k}" ${k === defaultMethod ? "selected" : ""}>${escapeHtml(v)}</option>`).join("")}
+      </select>
+      <div id="lrNote" style="font-size:13px;color:#444;margin-top:8px;">${escapeHtml(note(defaultMethod))}</div>
       <label for="lrAmount" style="display:block;font-size:13px;font-weight:600;margin:12px 0 4px;">Amount refunded ($)</label>
       <input type="number" id="lrAmount" min="0" step="0.01" value="${Number(defaultAmount).toFixed(2)}" style="font:inherit;font-size:14px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;width:140px;">
       ${whenFieldHtml_("lrWhen", "When was it refunded?")}
-      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;"><button type="button" class="admin-btn admin-btn-secondary" id="lrCancel">Cancel</button><button type="button" class="admin-btn" id="lrOk">Record refund</button></div>`, 460,
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;"><button type="button" class="admin-btn admin-btn-secondary" id="lrCancel">Cancel</button><button type="button" class="admin-btn" id="lrOk">${defaultMethod === "card" ? "Note refund on line" : "Record refund"}</button></div>`, 460,
       { onClose: () => resolve(null) });
+    const methodEl = ov.querySelector("#lrMethod");
+    methodEl.onchange = () => {
+      ov.querySelector("#lrNote").textContent = note(methodEl.value);
+      ov.querySelector("#lrOk").textContent = methodEl.value === "card" ? "Note refund on line" : "Record refund";
+    };
     ov.querySelector("#lrCancel").onclick = () => { close(); resolve(null); };
     ov.querySelector("#lrOk").onclick = () => {
       const amount = parseFloat(ov.querySelector("#lrAmount").value);
       if(!isFinite(amount) || amount < 0){ showToast("Invalid amount.", true); return; }
       const at = whenFrom_(ov, "lrWhen"); if(!at) return;
-      close(); resolve({ amount, at });
+      close(); resolve({ amount, at, method: methodEl.value });
     };
   });
   if(!got) return;
@@ -3954,7 +3965,7 @@ async function setLineItemRefund(orgId, sheetRow, defaultAmount, paymentMethod){
     const res = await fetch("/api/orders", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({action:"setLineItemRefund", org:orgId, sheetRow:Number(sheetRow), refundAmount:amount, at: got.at, key:adminKey})
+      body: JSON.stringify({action:"setLineItemRefund", org:orgId, sheetRow:Number(sheetRow), refundAmount:amount, method: got.method, at: got.at, key:adminKey})
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
@@ -3962,7 +3973,9 @@ async function setLineItemRefund(orgId, sheetRow, defaultAmount, paymentMethod){
       showToast("Refund record failed: " + ((data && data.message) || "unknown error"), true);
       return;
     }
-    showToast("Refund of $" + amount.toFixed(2) + " recorded.");
+    showToast(data.ledger ? "Refund of $" + amount.toFixed(2) + " recorded — it's in 💰 Payments."
+      : got.method === "card" ? "Refund noted on the line. The Stripe refund shows in 💰 Payments once it's made."
+      : "Refund noted on the line.");
     refreshAdminOrders(orgId);
   }catch(e){
     showToast("Could not reach the server.", true);
@@ -4836,7 +4849,7 @@ async function shipOrder(orgId, orderId){
   if(btn){ btn.disabled = true; btn.textContent = "Purchasing…"; }
 
   let purchaseData;
-  try{
+  const buy = async (replaceExisting) => {
     const res = await fetch("/api/shippo-label", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
@@ -4848,12 +4861,31 @@ async function shipOrder(orgId, orderId){
         serviceToken: selectedRate.serviceToken,
         parcel: selectedRate._parcel || undefined,
         weightOz: selectedRate._weightOz || undefined,
+        ...(replaceExisting ? { replaceExisting: true } : {}),
         key: adminKey
       })
     });
-    purchaseData = await res.json();
+    return res.json();
+  };
+  try{
+    purchaseData = await buy(false);
+    // The order already has a label (bought from another tab, by another admin, or by a try whose answer
+    // was lost): the server didn't buy a second one. Reprint that one, or buy another only on purpose.
+    if(purchaseData && purchaseData.code === "label_exists"){
+      const another = await askConfirm_(purchaseData.message.replace(/\.$/, "") + " — buy another label anyway?\n\nThe shop pays for both. To print the one already bought, use the order's Label button.",
+        { confirmLabel: "Buy another label", cancelLabel: "Don't buy" });
+      if(!another){
+        if(btn){ btn.disabled = false; btn.textContent = "Ship"; }
+        showToast("No label bought. The order's Label button opens the one it already has.");
+        refreshAdminOrders(orgId);
+        return;
+      }
+      purchaseData = await buy(true);
+    }
   }catch(e){
-    showToast("Could not reach the server.", true);
+    // No answer is not "no label": Shippo may already have sold it. Trying Ship again is safe — the server
+    // refuses to buy a second label for the order without asking.
+    showToast("No answer from the server — the label may have been bought. Click Ship again to check: it won't buy a second label without asking.", true);
     if(btn){ btn.disabled = false; btn.textContent = "Ship"; }
     return;
   }
@@ -5498,7 +5530,14 @@ function renderOrderBreakdown(orders, blankLinks, blanks){
 // payment is confirmed — see the markPaidManual action in orders.js. Separate
 // from Stripe's automatic webhook path on purpose: too many payment
 // methods need a person to actually verify money arrived first.
+const markPaidInFlight_ = new Set();   // orders with a "Mark as paid" on its way — a second click is ignored
 async function markOrderPaid(orgId, orderId){
+  if(markPaidInFlight_.has(orderId)) return;
+  markPaidInFlight_.add(orderId);
+  try{ await markOrderPaidOnce_(orgId, orderId); }
+  finally{ markPaidInFlight_.delete(orderId); }
+}
+async function markOrderPaidOnce_(orgId, orderId){
   const at = await askWhen_("Mark order " + orderId + " as paid? This will email the customer confirming their order.", { whenLabel: "When was it paid?" });
   if(!at) return;
   if(!adminKey){
@@ -5509,7 +5548,8 @@ async function markOrderPaid(orgId, orderId){
     const res = await fetch("/api/orders", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({action: "markPaidManual", org: orgId, orderId: orderId, at, key: adminKey})
+      // requestId: the server books the balance once for it (migrations/0212), even if this is sent again.
+      body: JSON.stringify({action: "markPaidManual", org: orgId, orderId: orderId, at, key: adminKey, requestId: newRequestId_()})
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
@@ -5517,6 +5557,10 @@ async function markOrderPaid(orgId, orderId){
       showToast("Could not mark as paid: " + ((data && data.message) || "unknown error"), true);
       return;
     }
+    // Nothing booked: it was already paid (another admin, or the card payment came in first) — or a payment
+    // came in at that moment and changed the balance, so look again before marking it.
+    if(data.alreadyPaid) showToast("This order was already paid — nothing more was recorded and no email was sent.");
+    else if(data.amountRecorded === 0) showToast("A payment came in on this order just now — check its balance before marking it paid.", true);
     const org = (adminOrgs || []).find(o => o.orgId === orgId);
     if(org) refreshOrdersInPlace_(org);
   }catch(e){
@@ -5661,6 +5705,13 @@ async function showPaymentsModal(orgId, orderId) {
       const refundedAmount = Number(o.refundedAmount) || 0;
       const processorFees  = Number(o.processorFees) || 0;
       const labelCost      = Number(o.labelCost) || 0;
+      // Kept (received less refunded, from the entries themselves) beyond what the order comes to — the balance
+      // due stops at $0, so an overpayment (paid twice, a total lowered afterwards) is shown as a credit instead.
+      const keptCents = (o.payments || []).filter(p => !p.voidedAt).reduce((s, p) => s + Math.round(Number(p.amount) * 100), 0);
+      const credit = o.payments ? Math.round(keptCents - effectiveTotal * 100) / 100 : 0;
+      // One key per Save of each form, made when the dialog draws (migrations/0212): a double click or a
+      // retry after a dropped answer sends the same key, and the server books the money once.
+      const payRequestId = newRequestId_(), refundRequestId = newRequestId_();
       const defaultMethod  = (String(o.paymentMethod || "").toLowerCase() in METHOD_LABEL) ? String(o.paymentMethod).toLowerCase() : "other";
       const paymentRows = (o.payments || []).map(p => `
         <tr style="${p.voidedAt ? "opacity:.5;text-decoration:line-through;" : ""}">
@@ -5697,7 +5748,9 @@ async function showPaymentsModal(orgId, orderId) {
           <tr><td style="padding:3px 0;color:#666;">Net kept</td><td style="padding:3px 0;text-align:right;">$${Number(o.netReceived || 0).toFixed(2)}</td></tr>` : ""}
           ${processorFees > 0 ? `<tr><td style="padding:2px 0;color:#666;font-size:12px;">Stripe fees (expense)</td><td style="padding:2px 0;text-align:right;color:#666;font-size:12px;">$${processorFees.toFixed(2)}</td></tr>` : ""}
           ${labelCost > 0 ? `<tr><td style="padding:2px 0;color:#666;font-size:12px;">Postage paid (expense)</td><td style="padding:2px 0;text-align:right;color:#666;font-size:12px;">$${labelCost.toFixed(2)}</td></tr>` : ""}
-          <tr style="font-weight:700;border-top:1px solid #e5e7eb;color:${balanceDue > 0.005 ? "#b03a2e" : "#166534"};"><td style="padding:4px 0;">Balance due</td><td style="padding:4px 0;text-align:right;">${balanceDue > 0.005 ? "$" + balanceDue.toFixed(2) : "Settled ✓"}</td></tr>
+          ${credit > 0.005
+            ? `<tr style="font-weight:700;border-top:1px solid #e5e7eb;color:#92400e;"><td style="padding:4px 0;" title="More was received than the order comes to — refund the difference, or keep it as a credit">Credit (paid more than owed)</td><td style="padding:4px 0;text-align:right;">$${credit.toFixed(2)}</td></tr>`
+            : `<tr style="font-weight:700;border-top:1px solid #e5e7eb;color:${balanceDue > 0.005 ? "#b03a2e" : "#166534"};"><td style="padding:4px 0;">Balance due</td><td style="padding:4px 0;text-align:right;">${balanceDue > 0.005 ? "$" + balanceDue.toFixed(2) : "Settled ✓"}</td></tr>`}
         </table>
 
         ${o.payments && o.payments.length ? `
@@ -5896,10 +5949,10 @@ async function showPaymentsModal(orgId, orderId) {
         const newReceived = (Number(order.amountReceived) || 0) + amount;
         const remainder = effectiveTotalNow - newReceived;
 
-        const doSave = async (discountRemainder, discountNote) => {
+        const doSave = (discountRemainder, discountNote) => whileSaving_(ov.querySelector("#pmSavePayment"), async () => {
           try {
             const r = await fetch("/api/orders", {method:"POST",headers:{"Content-Type":"application/json"},
-              body: JSON.stringify({action:"addPayment", key:adminKey, orderId, amount,
+              body: JSON.stringify({action:"addPayment", key:adminKey, orderId, amount, requestId: payRequestId,
                 method: ov.querySelector("#pmMethod").value, reference: ov.querySelector("#pmReference").value.trim(),
                 at: paidWhen.at,
                 accountId: Number((ov.querySelector("#pmAccount") || {}).value) || undefined,
@@ -5916,10 +5969,10 @@ async function showPaymentsModal(orgId, orderId) {
             });
             updateOrderCache(orgId, orderId, updated);
             updateOrderTableRow(orgId, orderId, updated);
-            showToast("Payment recorded.");
+            showToast(d.duplicate ? "That payment was already recorded — it isn't added twice." : "Payment recorded.");
             openModal(updated);
-          } catch(e) { if(ov.querySelector("#pmError")) ov.querySelector("#pmError").textContent = "Network error."; }
-        };
+          } catch(e) { if(ov.querySelector("#pmError")) ov.querySelector("#pmError").textContent = "No answer from the server — the payment may have been recorded. Press Save again: it won't be added twice."; }
+        });
 
         if (remainder > 0.005) {
           // Ask: apply remainder as discount, leave as partial, or cancel
@@ -5944,9 +5997,9 @@ async function showPaymentsModal(orgId, orderId) {
         const refundWhen = readWhen_(ov.querySelector("#pmRefundDate"));
         if (refundWhen.error) { errEl.textContent = refundWhen.error; return; }
         if (!await askConfirm_(`Record a $${amount.toFixed(2)} refund on ${orderId}? This is added to the books as money returned.`)) return;
-        try {
+        await whileSaving_(refundBtn, async () => { try {
           const r = await fetch("/api/orders", {method:"POST",headers:{"Content-Type":"application/json"},
-            body: JSON.stringify({action:"recordRefund", key:adminKey, orderId, amount,
+            body: JSON.stringify({action:"recordRefund", key:adminKey, orderId, amount, requestId: refundRequestId,
               method: ov.querySelector("#pmRefundMethod").value, reference: ov.querySelector("#pmRefundReference").value.trim(),
               at: refundWhen.at, shippingAmount,
               accountId: Number((ov.querySelector("#pmRefundAccount") || {}).value) || undefined,
@@ -5957,9 +6010,9 @@ async function showPaymentsModal(orgId, orderId) {
             refundedAmount: d.refundedAmount, netReceived: d.netReceived, balanceDue: d.balanceDue });
           updateOrderCache(orgId, orderId, updated);
           updateOrderTableRow(orgId, orderId, updated);
-          showToast("Refund recorded.");
+          showToast(d.duplicate ? "That refund was already recorded — it isn't added twice." : "Refund recorded.");
           openModal(updated);
-        } catch(e) { errEl.textContent = "Network error."; }
+        } catch(e) { errEl.textContent = "No answer from the server — the refund may have been recorded. Press Record refund again: it won't be added twice."; } });
       };
 
       // Save discount
@@ -5968,7 +6021,7 @@ async function showPaymentsModal(orgId, orderId) {
         errEl.textContent = "";
         const amount = parseFloat(ov.querySelector("#pmDiscountAmount").value) || 0;
         const note = ov.querySelector("#pmDiscountNote").value.trim();
-        try {
+        await whileSaving_(ov.querySelector("#pmSaveDiscount"), async () => { try {
           const r = await fetch("/api/orders", {method:"POST",headers:{"Content-Type":"application/json"},
             body: JSON.stringify({action:"setDiscount", key:adminKey, orderId, amount, note})});
           const d = await r.json();
@@ -5981,7 +6034,7 @@ async function showPaymentsModal(orgId, orderId) {
           updateOrderTableRow(orgId, orderId, updated);
           showToast("Discount applied.");
           openModal(updated);
-        } catch(e) { errEl.textContent = "Network error."; }
+        } catch(e) { errEl.textContent = "Network error."; } });
       };
     }
 
@@ -5994,6 +6047,23 @@ async function showPaymentsModal(orgId, orderId) {
     openModal(order);
     ov.querySelector("#pmCloseBottom").onclick = () => { close(); resolve(); };
   });
+}
+
+// A key for one Save of a money form, sent as `requestId`: the server books the money once per key
+// (migrations/0212), so a double click, a retry after a dropped connection or a second tab can't record it twice.
+function newRequestId_() {
+  try { if (crypto.randomUUID) return crypto.randomUUID().replace(/-/g, ""); } catch (_) {}
+  const a = new Uint32Array(4); crypto.getRandomValues(a);
+  return Array.from(a, n => n.toString(16).padStart(8, "0")).join("");
+}
+// Keeps a money form's button disabled, reading "Saving…", from the click until the answer arrives.
+async function whileSaving_(btn, fn) {
+  if (!btn) return fn();
+  if (btn.disabled) return;
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "Saving…";
+  try { return await fn(); }
+  finally { if (btn.isConnected) { btn.disabled = false; btn.textContent = label; } }
 }
 
 function showBalanceMismatchPrompt(paymentAmount, remainder, doSave, errEl) {
@@ -13819,7 +13889,8 @@ function auditDetailSummary(action, detail) {
       case "order.tracking_set":  return escapeHtml(detail.trackingNumber || "—");
       case "order.bulk_tracking_set": return (detail.count || 0) + " orders · " + escapeHtml(detail.trackingNumber || "—");
       case "order.shipping_set":  return (detail.shippingCost != null ? "$" + Number(detail.shippingCost).toFixed(2) : "") + (detail.shippingMethod ? " · " + escapeHtml(detail.shippingMethod) : "") + (detail.city ? " · " + escapeHtml(detail.city) + ", " + escapeHtml(detail.state || "") : "");
-      case "payment.added":       return "$" + Number(detail.amount || 0).toFixed(2) + (detail.note ? " — " + escapeHtml(detail.note) : "");
+      case "payment.added":       return "$" + Number(detail.amount || 0).toFixed(2) + (detail.note ? " — " + escapeHtml(detail.note) : "")
+        + (detail.discountTo != null ? "; rest waived — discount $" + Number(detail.discountFrom || 0).toFixed(2) + " → $" + Number(detail.discountTo).toFixed(2) : "");
       case "payment.deleted":     return "Payment #" + (detail.paymentId || "?");
       case "item.cancelled":      return escapeHtml(detail.name || "") + (detail.size ? " / " + escapeHtml(detail.size) : "") + (detail.reason ? " — " + escapeHtml(detail.reason) : "");
       case "item.bulk_cancelled": return (detail.count || 0) + " items" + (detail.reason ? " — " + escapeHtml(detail.reason) : "");

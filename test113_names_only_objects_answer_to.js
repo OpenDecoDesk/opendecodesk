@@ -86,6 +86,18 @@ const NAMES = ["toString", "constructor", "valueOf", "hasOwnProperty", "isProtot
   ok("an ordinary order next to them has its own lines and nothing borrowed", (listed || []).find(o => o.orderId === "ORD-OK").items.length === 1 && (listed || []).find(o => o.orderId === "ORD-OK").payments.length === 0);
   r = await place("ORD-OK", [{ productId: "tee", size: "M", qty: 3 }]);
   ok("the same order id twice is answered plainly (409), and the first order stands", r.status === 409 && /already been received/.test(r.body.message) && (await saved("ORD-OK")).items[0].qty === 1);
+  // The storefront's retry after a lost answer: the SAME order again (same id, name, email and lines).
+  const before = d1.q("SELECT count(*) n FROM orders")[0].n;
+  r = await place("ORD-OK", [{ productId: "tee", size: "M", qty: 1 }]);
+  ok("the very same order sent again is answered like the first time (ok, with its card token as the first answer had) — no second order",
+    r.status === 200 && r.body.duplicate === true && "checkoutToken" in r.body &&
+    d1.q("SELECT count(*) n FROM orders")[0].n === before && (await saved("ORD-OK")).items.length === 1);
+  r = await place("ORD-OK", [{ productId: "tee", size: "M", qty: 1 }], { customerName: "Someone Else", contact: "other@x.com" });
+  ok("…but someone else's details under that id are still refused", r.status === 409);
+  const store = read("public/index.html");
+  ok("the storefront keeps one order id per checkout until it's saved, and doesn't claim 'nothing was recorded' without the server's word",
+    /orderId: orderIdForAttempt_\(_orderPrefix, _attemptSig\)/.test(store) && /clearOrderAttempt_\(\);\s+\/\/ saved/.test(store) &&
+    /err && err\.refused\s*\n?\s*\?/.test(store) && /won't be placed twice/.test(store));
 
   console.log("\n=== The admin's Designs screen ===");
   const adminJs = read("public/admin.js");

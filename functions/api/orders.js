@@ -137,6 +137,8 @@ import {
 import { verifyQuote, canonicalItems } from "../_lib/quoteToken.js";
 import { selectBox } from "../_lib/boxSize.js";
 import { verifyTurnstile } from "../_lib/turnstile.js";
+// Payments, refunds and money integrity (kept apart from the long list above).
+import { expireCheckoutSession } from "../_lib/db.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9\-]{1,64}$/;
 // The most orders one shop's list returns (getOrders, getOrdersAllShops): the newest that many.
@@ -526,6 +528,11 @@ export async function onRequestPost(context) {
     if (d < "2020-01-01") return { error: "That date is too far back" };
     return { receivedAt: d === today ? new Date().toISOString() : d + "T12:00:00.000Z" };
   };
+  // The admin form's key for one Save (`b.requestId`, made when the form opens — migrations/0212), as stored on the
+  // payment row: a double click, a retried request or a second tab sends the same key, so the money is booked once.
+  // Null when the request has none (older pages; scripts).
+  const requestKeyOf = (b, kind) => /^[A-Za-z0-9_-]{8,64}$/.test(String((b && b.requestId) || "")) ? kind + ":" + b.requestId : null;
+  const alreadyRecorded = async (key) => !!key && !!(await env.DB.prepare("SELECT 1 AS x FROM order_payments WHERE requestKey = ?").bind(key).first());
   // When something happened, as the admin chose it (2026-10): `b.at` — an ISO date-time from the browser's
   // date-and-time box (or a bare YYYY-MM-DD = that day). Not given → null (the action uses now); {error} = refused.
   const actionTime = (b, field = "at") => {
@@ -542,6 +549,8 @@ export async function onRequestPost(context) {
     const months = [];
     const a = b.action;
     if (["addPayment", "recordRefund", "markPaidManual", "createLocalSale", "createTestTransaction"].includes(a)) months.push(nowMonth());
+    // A cancelled line's refund paid back other than by card goes into the ledger, dated when it was refunded.
+    if (a === "setLineItemRefund" && b.method && String(b.method).toLowerCase() !== "card") { const t = actionTime(b); months.push(t && t.at ? t.at.slice(0, 7) : nowMonth()); }
     // A local sale dated into a closed month changes that month's sales (it was only checked against this month).
     if (a === "createLocalSale" && /^\d{4}-\d{2}-\d{2}/.test(String(b.placedAt || ""))) months.push(String(b.placedAt).slice(0, 7));
     // Making things after the fact dates their blank use (cost of goods) in the month chosen.
@@ -567,6 +576,9 @@ export async function onRequestPost(context) {
     if (["receiveTransferSheet", "writeOffTransfers"].includes(a) && /^\d{4}-\d{2}-\d{2}/.test(String(b.receivedAt || b.occurredAt || ""))) months.push(String(b.receivedAt || b.occurredAt).slice(0, 7));
     if (a === "createFromStatementLine" && b.lineId) { const l = await getStatementLine(env.DB, b.lineId); if (l) months.push(String(l.lineDate).slice(0, 7)); }
     if (["setDiscount", "editOrder", "setShippingInfo", "setShippingPaidAmount", "voidOrder", "deleteOrder", "updateOrderDate", "setRushFee"].includes(a) && b.orderId) months.push(await orderMonth(env.DB, String(b.orderId)));
+    // A payment that waives the rest of the balance as a discount changes the ORDER's month (its sales and sales
+    // tax), like setDiscount above. (A plain payment only touches the month it's received in.)
+    if (a === "addPayment" && b.discountRemainder && b.orderId) months.push(await orderMonth(env.DB, String(b.orderId)));
     if (a === "updateOrderDate" && /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || ""))) months.push(String(b.date).slice(0, 7));
     if (["cancelLineItem", "setLineItemRefund"].includes(a) && b.sheetRow) months.push(await itemOrderMonth(env.DB, b.sheetRow));
     if (a === "bulkCancelLineItems" && Array.isArray(b.sheetRows)) for (const id of b.sheetRows) months.push(await itemOrderMonth(env.DB, id));
@@ -1796,11 +1808,16 @@ export async function onRequestPost(context) {
     const when = actionTime(body);
     if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
     if (when) { const bad = stageTimeError(before, "paid", when.at); if (bad) return jsonResponse({ status: "error", message: bad + "." }, 409); }
+    // Books the balance only while nobody else has (settleOrderBalance): a repeat — a double click, a retry,
+    // another admin, a card payment landing first — records nothing and sends no second email.
     const recorded = await settleOrderBalance(env.DB, body.orderId,
-      "Marked paid manually" + (before.paymentMethod ? " (" + before.paymentMethod + ")" : ""), when ? when.at : null);
+      "Marked paid manually" + (before.paymentMethod ? " (" + before.paymentMethod + ")" : ""), when ? when.at : null,
+      requestKeyOf(body, "markPaid"));
 
     const order = await getOrderById(env.DB, body.orderId);
     const paidAt = (order && order.paidAt) || new Date().toISOString();
+    const newlyPaid = recorded > 0 || (!before.paid && !!(order && order.paid));
+    if (!newlyPaid) return jsonResponse({ status: "ok", alreadyPaid: !!(order && order.paid), amountRecorded: 0 });
     if (order && order.contact) {
       const sent = await sendPaymentConfirmedEmail(env, order, paidAt);
       if (sent) await setOrderEmailTimestamp(env.DB, body.orderId, "confirmedEmailAt", new Date().toISOString());
@@ -1866,9 +1883,20 @@ export async function onRequestPost(context) {
       if (!acct || !acct.active) return jsonResponse({ status: "error", message: "Choose an active account" }, 400);
       accountId = acct.id;
     }
-    await addOrderPayment(env.DB, orderId, amount, note, "", { method, reference, receivedAt: when ? when.receivedAt : undefined, accountId });
+    // Recorded once per Save (requestKeyOf): the same request again — a double click, a retry — changes nothing.
+    const requestKey = requestKeyOf(body, "payment");
+    const inserted = await alreadyRecorded(requestKey) ? 0
+      : await addOrderPayment(env.DB, orderId, amount, note, "", { method, reference, receivedAt: when ? when.receivedAt : undefined, accountId, ...(requestKey ? { requestKey } : {}) });
+    if (!inserted && requestKey) {
+      const same = await getOrderById(env.DB, orderId);
+      return jsonResponse({ status: "ok", orderId, duplicate: true,
+        amountReceived: same.amountReceived, balanceDue: same.balanceDue,
+        discountAmount: same.discountAmount, discountNote: same.discountNote,
+        effectiveTotal: same.effectiveTotal, salesTax: same.salesTax, payments: same.payments });
+    }
 
     // Optionally apply a discount for the remaining balance
+    let discountChange = null;
     if (body.discountRemainder) {
       const order = await getOrderById(env.DB, orderId);
       if (order) {
@@ -1877,14 +1905,18 @@ export async function onRequestPost(context) {
         const newReceived = order.amountReceived;
         const remainder = Math.max(0, order.effectiveTotal - newReceived);
         if (remainder > 0.005) {
-          await setOrderDiscount(env.DB, orderId, order.discountAmount + remainder,
-            (order.discountNote ? order.discountNote + "; " : "") + (body.discountNote || "Balance waived"));
+          const discountNote = (order.discountNote ? order.discountNote + "; " : "") + (body.discountNote || "Balance waived");
+          await setOrderDiscount(env.DB, orderId, order.discountAmount + remainder, discountNote);
+          discountChange = { from: order.discountAmount, to: Math.round((order.discountAmount + remainder) * 100) / 100, note: discountNote };
         }
       }
     }
 
     const updated = await getOrderById(env.DB, orderId);
-    audit({ orgId: body.org, orderId, action: "payment.added", detail: { amount, note, method, reference, date: body.date || "" } });
+    // The discount it applied (the rest of the balance waived) changes the order's sales and sales tax, so the
+    // audit entry shows it, before and after.
+    audit({ orgId: body.org, orderId, action: "payment.added", detail: { amount, note, method, reference, date: body.date || "",
+      ...(discountChange ? { discountFrom: discountChange.from, discountTo: discountChange.to, discountNote: discountChange.note } : {}) } });
     if (updated && updated.paid) await deliverDigital_(orderId);
     return jsonResponse({ status: "ok", orderId,
       amountReceived: updated.amountReceived, balanceDue: updated.balanceDue,
@@ -1919,6 +1951,14 @@ export async function onRequestPost(context) {
     const shipping = body.shippingAmount == null || body.shippingAmount === "" ? 0 : Number(body.shippingAmount);
     if (!Number.isFinite(shipping) || shipping < 0) return jsonResponse({ status: "error", message: "The shipping part must be $0 or more" }, 400);
     if (Math.round(shipping * 100) > Math.round(amount * 100)) return jsonResponse({ status: "error", message: "The shipping part can't be more than the refund" }, 400);
+    // Recorded once per Save (requestKeyOf): the same request again — a double click, a retry — changes nothing,
+    // and isn't audited a second time.
+    const requestKey = requestKeyOf(body, "refund");
+    if (await alreadyRecorded(requestKey)) {
+      const same = await getOrderById(env.DB, orderId);
+      return jsonResponse({ status: "ok", orderId, duplicate: true, payments: same.payments, amountReceived: same.amountReceived,
+        refundedAmount: same.refundedAmount, netReceived: same.netReceived, balanceDue: same.balanceDue });
+    }
     const auditErr = await auditStrict({ orgId: order.orgId, orderId, action: "payment.refunded",
       detail: { amount, method, reference, note, shipping } });
     if (auditErr) return auditErr;
@@ -1931,7 +1971,7 @@ export async function onRequestPost(context) {
       accountId = acct.id;
     }
     await addOrderPayment(env.DB, orderId, -amount, note, "", { method, reference, kind: "refund", receivedAt: when ? when.receivedAt : undefined, accountId,
-      shippingCents: Math.round(shipping * 100) });
+      shippingCents: Math.round(shipping * 100), ...(requestKey ? { requestKey } : {}) });
     const updated = await getOrderById(env.DB, orderId);
     return jsonResponse({ status: "ok", orderId, payments: updated.payments, amountReceived: updated.amountReceived,
       refundedAmount: updated.refundedAmount, netReceived: updated.netReceived, balanceDue: updated.balanceDue });
@@ -2186,6 +2226,12 @@ export async function onRequestPost(context) {
     // first (or refund in Stripe) so the books show the money going back.
     if (Math.round(existing.netReceived * 100) > 0) {
       return jsonResponse({ status: "error", message: `$${existing.netReceived.toFixed(2)} was received on this order. If that payment was entered by mistake, open 💰 Payments and click Void on it, then void the order. If the customer really paid, record the refund (or refund it in Stripe) first.` }, 400);
+    }
+    // A card page still open for this order (migrations/0210) is closed first, so the customer can't pay a
+    // cancelled order. One paid moments ago (its webhook not in yet) stops the void: refund it first.
+    // Stripe unreachable: the void goes ahead — a payment that still arrives is flagged for the owner.
+    if (await expireCheckoutSession(env, orderId) === "paid") {
+      return jsonResponse({ status: "error", message: "The customer has just paid this order by card — it will show under 💰 Payments in a minute. Refund it in Stripe, then void the order." }, 409);
     }
     const orgId = existing.orgId;
     const reason = String(body.reason || "").trim().slice(0, 300) || "Voided by admin";
@@ -2632,7 +2678,9 @@ export async function onRequestPost(context) {
       const bad = it0 ? stageTimeError(await getOrderById(env.DB, it0.orderId), "cancelled", when.at) : "";
       if (bad) return jsonResponse({ status: "error", message: bad + "." }, 409);
     }
-    const { lateCancel } = await cancelLineItemWithReason(env.DB, body.sheetRow, body.reason || "", when ? when.at : null);
+    const { lateCancel, changed } = await cancelLineItemWithReason(env.DB, body.sheetRow, body.reason || "", when ? when.at : null);
+    // Already cancelled (a double click, a retry, another admin): left as it was — no second email or audit entry.
+    if (changed === false) return jsonResponse({ status: "ok", alreadyCancelled: true, lateCancel: false, emailSent: false });
 
     const item = await getOrderItemById(env.DB, body.sheetRow);
     let emailSent = false;
@@ -2663,7 +2711,9 @@ export async function onRequestPost(context) {
     const results = [];
     const cancelledByOrder = byId_();
     for (const itemId of body.sheetRows) {
-      const { lateCancel } = await cancelLineItemWithReason(env.DB, itemId, body.reason || "", when ? when.at : null);
+      const { lateCancel, changed } = await cancelLineItemWithReason(env.DB, itemId, body.reason || "", when ? when.at : null);
+      // A line already cancelled is left as it was and isn't in the customer's email again.
+      if (changed === false) { results.push({ itemId, lateCancel: false, alreadyCancelled: true }); continue; }
       const item = await getOrderItemById(env.DB, itemId);
       if (item) {
         if (!cancelledByOrder[item.orderId]) cancelledByOrder[item.orderId] = [];
@@ -2678,9 +2728,10 @@ export async function onRequestPost(context) {
         await sendCancellationEmail(env, order, items, body.reason || "", anyLate);
       }
     }
-    if (body.sheetRows.length > 0) {
+    const cancelledCount = results.filter(r => !r.alreadyCancelled).length;
+    if (cancelledCount > 0) {
       audit({ orgId: body.org || null, orderId: null, action: "item.bulk_cancelled",
-        detail: { count: body.sheetRows.length, reason: body.reason || "", orderIds: Object.keys(cancelledByOrder) } });
+        detail: { count: cancelledCount, reason: body.reason || "", orderIds: Object.keys(cancelledByOrder) } });
     }
     return jsonResponse({ status: "ok", results });
   }
@@ -2698,11 +2749,37 @@ export async function onRequestPost(context) {
       const bad = it0 ? stageTimeError(await getOrderById(env.DB, it0.orderId), "refunded", when.at) : "";
       if (bad) return jsonResponse({ status: "error", message: bad + "." }, 409);
     }
-    await setLineItemRefund(env.DB, body.sheetRow, Number(body.refundAmount) || 0, when ? when.at : null);
+    // How the money went back (the line's Record refund, 2026-11). Venmo, Zelle, check, cash or other: the refund
+    // goes into the payments ledger too, exactly as 💰 Payments → Record refund would put it — so the balance, Net
+    // kept, the revenue and sales-tax reports and Reconcile all see it, not just the line. Card: the refund is
+    // made in Stripe and its webhook records it, so the line is only noted (recording it here would count it
+    // twice). No method (an older page): the line only, as before.
+    const amount = Math.max(0, Number(body.refundAmount) || 0);
+    const method = body.method == null || body.method === "" ? "" : String(body.method).toLowerCase();
+    if (method && !PAYMENT_METHODS.includes(method)) return jsonResponse({ status: "error", message: "Choose how the refund was paid" }, 400);
     const refundItem = await getOrderItemById(env.DB, body.sheetRow);
-    audit({ orgId: body.org, orderId: refundItem ? refundItem.orderId : null, action: "item.refund_set",
-      detail: { itemId: body.sheetRow, name: refundItem ? refundItem.name : null, refundAmount: Number(body.refundAmount) || 0 } });
-    return jsonResponse({ status: "ok" });
+    if (!refundItem) return jsonResponse({ status: "error", message: "Order line not found" }, 404);
+    const toLedger = !!method && method !== "card" && amount > 0;
+    if (toLedger) {
+      const order = await getOrderById(env.DB, refundItem.orderId);
+      if (!order) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+      // Keyed by the line, so the same line's refund can't go into the books twice (a double click, a retry).
+      const requestKey = "lineRefund:" + refundItem.id;
+      if (!(await alreadyRecorded(requestKey))) {
+        if (Math.round(amount * 100) > Math.round(order.netReceived * 100)) {
+          return jsonResponse({ status: "error", message: `Refund can't exceed the $${order.netReceived.toFixed(2)} kept on this order` }, 400);
+        }
+        const auditErr = await auditStrict({ orgId: order.orgId, orderId: order.orderId, action: "payment.refunded",
+          detail: { amount, method, reference: "", note: "Refund — " + refundItem.name, shipping: 0, itemId: refundItem.id } });
+        if (auditErr) return auditErr;
+        await addOrderPayment(env.DB, order.orderId, -amount, ("Refund — " + (refundItem.name || "cancelled item")).slice(0, 500), "",
+          { method, kind: "refund", receivedAt: when ? when.at : undefined, requestKey });
+      }
+    }
+    await setLineItemRefund(env.DB, body.sheetRow, amount, when ? when.at : null);
+    audit({ orgId: body.org, orderId: refundItem.orderId, action: "item.refund_set",
+      detail: { itemId: body.sheetRow, name: refundItem.name, refundAmount: amount, method, inPayments: toLedger } });
+    return jsonResponse({ status: "ok", ledger: toLedger });
   }
 
   // ---- editOrder — change/add/remove items, optionally request payment --------
@@ -6454,6 +6531,30 @@ export async function onRequestPost(context) {
   if (items.some((it) => !it || typeof it !== "object" || Array.isArray(it) || lineQty(it.qty) === null)) {
     return jsonResponse({ status: "error", message: QTY_MESSAGE }, 400);
   }
+  // The storefront keeps one order id per checkout until it hears back (index.html placeOrder), so an id already
+  // saved is usually its retry after the first answer was lost. The very same order — same shop, name, email and
+  // lines, placed in the last day, not voided — gets the answer the first one would have (ok, with its checkout
+  // token), so the customer sees the confirmation and card step for THAT order and no second one is made. Asked
+  // before anything else is re-checked (stock now held by the first try, a quote since expired…), and again if the
+  // insert below meets the id. Anything else under that id is refused (409).
+  const answerRepeatOrder = async () => {
+    // (Can't tell — the database unreadable: carry on; the insert's own UNIQUE check still catches a repeat.)
+    let prior = null;
+    try {
+      if (await env.DB.prepare("SELECT 1 AS x FROM orders WHERE orderId = ?").bind(orderId).first()) prior = await getOrderById(env.DB, orderId);
+    } catch (_) { prior = null; }
+    if (!prior) return null;
+    const norm = (s) => String(s || "").trim().toLowerCase();
+    const lines = (list) => (list || []).map(i => [i.productId || "", i.size || "", Number(i.qty) || 0].join("|")).sort().join(",");
+    const same = !prior.voidedAt && prior.orgId === orgId && norm(prior.customerName) === norm(customerName) && norm(prior.contact) === norm(contact)
+      && lines(prior.items) === lines(items) && Date.now() - Date.parse(prior.placedAt) < 24 * 3600e3;
+    if (!same) return jsonResponse({ status: "error", message: "This order has already been received." }, 409);
+    const checkoutToken = await signOrderToken(env, orderId);
+    return jsonResponse(prior.taxMode === "exclusive"
+      ? { status: "ok", duplicate: true, taxMode: "exclusive", salesTax: prior.salesTax, total: prior.total, checkoutToken }
+      : { status: "ok", duplicate: true, checkoutToken });
+  };
+  { const again = await answerRepeatOrder(); if (again) return again; }
   // …and its product is named by a string, as the catalog has it. (A number such as 101 would be
   // the same product to the database and a different key to a lookup — one reading there too.)
   if (items.some((it) => typeof it.productId !== "string" || !it.productId)) {
@@ -6684,6 +6785,8 @@ export async function onRequestPost(context) {
     // The same order id twice (a double click, a retry after a lost answer): the order is already
     // there, so say so plainly instead of failing with an error page.
     if (/UNIQUE constraint failed: orders\.orderId/i.test(String(e && e.message))) {
+      const again = await answerRepeatOrder();
+      if (again) return again;
       return jsonResponse({ status: "error", message: "This order has already been received." }, 409);
     }
     throw e;

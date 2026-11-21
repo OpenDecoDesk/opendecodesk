@@ -1156,6 +1156,18 @@ export async function sendStripePaymentNotification(env, orderId, orgId, amountP
     { to: ORDER_NOTIFICATION_EMAIL, subject, html: `<p>${escHtml(text)}</p>`, text });
 }
 
+// Sent to owner urgently when a card payment arrives that shouldn't have: more than the order owed (paid
+// twice, or the total was lowered after the card page opened) or on a voided order. The money is in the
+// ledger either way; the owner decides whether to refund it in Stripe.
+export async function sendPaymentProblemNotification(env, orderId, orgId, amountPaid, problem) {
+  const subject = `⚠️ Card payment needs a look — ${orgId} — ${orderId}`;
+  const text = `Stripe took ${fmt$(amountPaid || 0)} for order ${orderId} (org: ${orgId}), but ${problem}. It is recorded under Payments; refund it in the Stripe Dashboard if the customer shouldn't have paid it.`;
+  return queueOwnerNotice_(env, { kind: "payment", orderId, orgId, urgent: true,
+      summary: `Card payment needs a look — ${fmt$(amountPaid || 0)}`,
+      detail: `${problem.charAt(0).toUpperCase() + problem.slice(1)}. It is recorded under Payments; refund it in the Stripe Dashboard if the customer shouldn't have paid it.` },
+    { to: ORDER_NOTIFICATION_EMAIL, subject, html: `<p>${escHtml(text)}</p>`, text });
+}
+
 // Sent to owner when a refund is processed by Stripe.
 export async function sendRefundNotification(env, orderId, orgId, amountRefunded) {
   const subject = `Refund processed — ${orgId} — ${orderId}`;

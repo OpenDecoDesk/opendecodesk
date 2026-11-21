@@ -81,6 +81,9 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   ok("the preview wrote nothing", d1.q("SELECT count(*) n FROM transfer_movements WHERE kind = 'consume'")[0].n === 1 && t().quantity === 19);
 
   console.log("\n=== Apply two of the three ===");
+  // A second apply that planned at the same moment (a double click, another tab) — applied after the first below.
+  const plans = new Function(dbSrc + `\nreturn { planTransferCatchUp, applyTransferCatchUp };`)();
+  const samePlanElsewhere = await plans.planTransferCatchUp(d1, [item("O1"), item("O2")]);
   r = await call({ action: "applyTransferCatchUp", itemIds: [item("O1"), item("O2")] });
   ok("applied 2 lines, 2 transfers, $2.00", r.status === 200 && r.body.applied === 2 && r.body.totalUnits === 2 && r.body.total === 2);
   const mv = d1.q("SELECT itemId, qtyDelta, unitCostCents, occurredAt, note FROM transfer_movements WHERE kind = 'consume' AND note LIKE '%catch-up%' ORDER BY itemId");
@@ -92,6 +95,11 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   ok("audit row written", d1.q("SELECT count(*) n FROM audit_log WHERE action = 'transfer.catch_up'")[0].n === 1);
   r = await call({ action: "applyTransferCatchUp", itemIds: [item("O1"), item("O2")] });
   ok("applying the same lines again does nothing", r.status === 400 && t().quantity === 17);
+  const late = await plans.applyTransferCatchUp(d1, samePlanElsewhere);
+  ok("the same plan applied a second time (planned before the first wrote) adds no use, no cost and no re-cost",
+    late.applied === 0 && d1.q("SELECT count(*) n FROM transfer_movements WHERE kind = 'consume' AND note LIKE '%catch-up%'")[0].n === 2 &&
+    cogs(item("O1")) === 400 && cogs(item("O2")) === 400 && cogs(item("O5")) === 456);
+  ok("…and the stock is worked out from the history, not set from the old plan (still 17 at $1.56)", t().quantity === 17 && t().purchasePriceCents === 156);
   r = await call({ action: "previewTransferCatchUp" });
   ok("only O1's second line is left", r.status === 200 && r.body.lines.length === 1 && r.body.lines[0].itemId === item("O1", 1));
 

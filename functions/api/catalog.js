@@ -154,6 +154,22 @@ function toClientProduct(p){
   return out;
 }
 
+// A version for the admin's script (public/admin.js, about 2 MB): the assets layer's ETag for it — a hash of the file
+// — else, in the desktop program, the program's version. The page loads admin.js?v=<it>, so the browser keeps the
+// file (and its compiled code) from one visit to the next and fetches it again only when a deploy or an update
+// changes it. "" when neither is known: the page then loads it fresh every time, as it used to.
+async function adminScriptVersion(env, url){
+  try{
+    if(env && env.ASSETS && typeof env.ASSETS.fetch === "function"){
+      const res = await env.ASSETS.fetch(new Request(new URL("/admin.js", url).toString(), { method: "HEAD" }));
+      const tag = String((res && res.ok && res.headers.get("ETag")) || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 64);
+      if(tag) return tag;
+    }
+  }catch(e){ /* no assets binding here: fall through */ }
+  const v = String((env && env.DESKTOP_VERSION) || "").trim().replace(/[^A-Za-z0-9.]/g, "").slice(0, 40);
+  return v && v !== "dev" ? "desktop-" + v : "";
+}
+
 export async function onRequestGet(context){
   const { request, env } = context;
   const url = new URL(request.url);
@@ -211,7 +227,9 @@ export async function onRequestGet(context){
     // connections on there, or set up email (hostConfig.js desktopSuppliersOn / desktopEmailOn,
     // repeated here to keep this file's one import). version: the program's (DESKTOP_VERSION, set by
     // desktop/server.js), shown above the business's name in the admin's header.
+    // adminScript: the version to load admin.js under (adminScriptVersion above).
     return jsonResponse({status:"admin", business: catalogData.business || {}, country, features, site: { rootDomain: siteRoot },
+      adminScript: await adminScriptVersion(env, url),
       ...(host.desktop ? {edition:"desktop", version: String(env.DESKTOP_VERSION || "").trim().slice(0, 40) || "dev",
         ...(String(env.DESKTOP_SUPPLIERS || "") === "on" ? {desktopSuppliers:true} : {}),
         ...(String(env.DESKTOP_EMAIL || "") === "on" ? {desktopEmail:true} : {})} : {})});
@@ -250,13 +268,25 @@ export async function onRequestGet(context){
 
   const enabledPayments = computeEnabledPayments(org, catalogData.globalSettings, !!env.STRIPE_SECRET_KEY);
 
+  // Three fresh reads (not cached — they change with every order), made at the same time: finished stock, the digital
+  // products' files and the blanks' free stock. Each one failing only leaves its part out.
+  let shownProducts = org.products;
+  const wantFiles = shownProducts.some(p => p.digital) && env.DB && features.digital !== false;
+  const settle = (read) => Promise.resolve().then(read).then(v => ({ v }), e => ({ e }));
+  const [stockRead, filesRead, blankRead] = env.DB ? await Promise.all([
+    settle(() => getReadyToShipByOrg(env.DB, orgId)),
+    wantFiles ? settle(() => env.DB.prepare("SELECT DISTINCT productId FROM product_files WHERE orgId = ?").bind(orgId).all()) : null,
+    settle(() => getBlankReadyByOrg(env.DB, orgId)),
+  ]) : [null, null, null];
+
   // Fetch ready-to-ship stock fresh from D1 (not cached — stock changes with every fulfillment).
   // stock: {size: n} for a product with no choices; stockVariants: {combination key: {size: n}} for one with
   // color and graphic choices (migrations/0080 — index.html's stockVariantKey_ builds the key from the picks).
   let stockByProduct = {}, stockByVariant = {};
   if(env.DB){
     try{
-      const stockRows = await getReadyToShipByOrg(env.DB, orgId);
+      if(stockRead.e) throw stockRead.e;
+      const stockRows = stockRead.v;
       for(const row of stockRows){
         if(row.variant){
           const byKey = (stockByVariant[row.productId] = stockByVariant[row.productId] || {});
@@ -274,12 +304,12 @@ export async function onRequestGet(context){
   // Digital products (migrations/0086) are only shown with at least one file to download, and not at all while the
   // Digital products feature is off (they can't be ordered then). Files are read fresh, like stock: adding one shows the
   // product at once. If they can't be read, the digital products are left out rather than sold with nothing to send.
-  let shownProducts = org.products;
   if(shownProducts.some(p => p.digital)){
     let withFiles = new Set();
-    if(env.DB && features.digital !== false){
+    if(wantFiles){
       try{
-        const { results } = await env.DB.prepare("SELECT DISTINCT productId FROM product_files WHERE orgId = ?").bind(orgId).all();
+        if(filesRead.e) throw filesRead.e;
+        const { results } = filesRead.v;
         withFiles = new Set((results || []).map(r => String(r.productId)));
       }catch(e){ console.error("product files fetch failed:", e); }
     }
@@ -288,7 +318,7 @@ export async function onRequestGet(context){
   // "Ready to decorate": the linked blank's free stock per color + size (display only; non-fatal).
   let blankReady = {};
   if(env.DB){
-    try{ blankReady = await getBlankReadyByOrg(env.DB, orgId); }
+    try{ if(blankRead.e) throw blankRead.e; blankReady = blankRead.v; }
     catch(e){ console.error("blank-ready fetch failed:", e); }
   }
 

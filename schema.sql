@@ -1589,6 +1589,13 @@ CREATE TABLE IF NOT EXISTS catalog_snapshots (
   publishedAt  TEXT    NOT NULL,
   publishedBy  TEXT    NOT NULL DEFAULT ''
 );
+-- …and, for a shop published since migrations/0225, its products rows in parts of up to about 1 MB (D1 limits one value).
+CREATE TABLE IF NOT EXISTS catalog_snapshot_parts (
+  orgId  TEXT    NOT NULL,
+  part   INTEGER NOT NULL,
+  json   TEXT    NOT NULL CHECK (json_valid(json)),
+  PRIMARY KEY (orgId, part)
+);
 
 -- Every call to a connected vendor's web services; full payloads in R2 vendor-logs/ (migrations/0078).
 CREATE TABLE IF NOT EXISTS vendor_api_log (

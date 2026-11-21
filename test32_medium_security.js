@@ -226,7 +226,7 @@ const SAME = { Origin: ADMIN, "CF-Connecting-IP": "203.0.113.7" };
       getPublishedOrg: async (db, orgId) => ({ orgId, ready: true, allowOrdersAfterDeadline: true }),   // migrations/0076
       getLocaleSettings: async () => ({ timeZone: "", country: "US" }),   // the default Region
       priceItem: async () => ({ unitPrice: 25, personalizationFee: 0, name: "Club Polo", type: "shirt" }),
-      getProductsByOrg: async () => [], insertOrder: async (db, order, items) => { inserted = items; },
+      getProductsByOrg: async () => [], getProductsByIds: async () => [], priceLookups: () => new Map(), insertOrder: async (db, order, items) => { inserted = items; },
       sendOrderReceivedEmail: async () => false, sendOrderNotificationEmail: async () => false, setOrderEmailTimestamp: async () => {},
       // The REAL address check from db.js (whitelist + state-vs-ZIP), not a mock.
       cleanShippingAddress: new Function(strip(read("functions/_lib/db.js")) + "\nreturn cleanShippingAddress;")(),

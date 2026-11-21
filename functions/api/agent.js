@@ -136,9 +136,11 @@ export async function onRequestPost({ request, env }){
     return jsonResponse({ status: "ok", online: !!p, lastSeenSec: p ? p.lastSeenSec : null, agentIp: p ? p.agentIp || "" : "" });
   }
   if(op === "submit"){
-    // Sending a design is part of a run; deleting a machine's file or scanning for machines needs more.
-    const roleNeed = { delete: ["production.machinefiles", "full"], discover: ["production.machines", "edit"] }[String(body.type || "")];
-    if(roleNeed && typeof adminUser === "function" && (adminUser(request) || {}).roleInfo && !adminCan(request, roleNeed[0], roleNeed[1]))
+    // Looking (list, read) needs only the gate above. Sending a design writes a file onto the machine: part of a run,
+    // or Edit on Machine files. Deleting a machine's file or scanning for machines needs more. Any one listed is enough.
+    const roleNeed = { send: [["run.runs", "edit"], ["production.machinefiles", "edit"]],
+      delete: [["production.machinefiles", "full"]], discover: [["production.machines", "edit"]] }[String(body.type || "")];
+    if(roleNeed && typeof adminUser === "function" && (adminUser(request) || {}).roleInfo && !roleNeed.some(([fn, lvl]) => adminCan(request, fn, lvl)))
       return err("Your role can't do this. Ask an admin.", 403);
     const { job, error } = cleanJob(body);
     if(error) return err(error, 400);

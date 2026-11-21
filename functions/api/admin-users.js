@@ -25,6 +25,8 @@
  *     ranks below yours (an admin may also make someone an admin, and change another admin: nobody
  *     ranks above an admin, and a departed admin must still be removable). You only add, change or delete a
  *     role ranked below yours, and never give it more than you have yourself. Admin is locked.
+ *   - Nor, unless you are an admin, do you give a role that can do anything yours can't, or change (email, password,
+ *     two-step, role, status) a user who has one: that would hand you what your own role lacks.
  *   - A user is disabled, never deleted, so the audit log and old orders keep their attribution.
  *   - There is always at least one active admin: the statement that changes a role or a status
  *     refuses to remove the last one (functions/_lib/db.js setUserRoleAndStatus).
@@ -111,6 +113,12 @@ export async function onRequestPost(context){
     // admin may also change another admin — otherwise an admin who left could never be disabled.
     const mayTouch = async (u) => (await rankOf(u.role)) < myRank || (iAmAdmin && u.role === "admin");
     const RANK_MSG = "Only someone whose role ranks above theirs can change this user.";
+    // Rank alone isn't enough: a role ranked below yours may still allow something yours doesn't. Giving it, or
+    // resetting the sign-in of someone who has it, would hand that over, so (as with saveRole) never more than you
+    // have yourself. The functions it has beyond yours; none for an admin.
+    const myLevels = effectivePermissions(myRole);
+    const beyondMe = (r) => iAmAdmin || !r ? [] : PERM_FUNCTIONS.filter(k => permRank(effectiveLevel(r, k)) > permRank(myLevels[k]));
+    const BEYOND_MSG = (over) => "That role can do more than your own role can (" + over.slice(0, 3).join(", ") + (over.length > 3 ? ", …" : "") + "). Ask an admin.";
 
     const view = async (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, status: u.status, has2fa: !!u.totpSecret,
       recoveryCodesLeft: recoveryCodesLeft(u), mustChangePassword: !!u.mustChangePassword, passwordUsable: await userHasUsablePassword(env, u),
@@ -149,6 +157,7 @@ export async function onRequestPost(context){
       const newRole = await roleOf(role);
       if(!newRole) return bad("Choose a role.");
       if(!mayGive(newRole)) return bad("You can only give a role that ranks below your own.", 403);
+      { const over = beyondMe(newRole); if(over.length) return bad(BEYOND_MSG(over), 403); }
       if(await getUserByEmail(env.DB, email)) return bad("A user with that email already exists. A disabled user can be enabled again.", 409);
       const auditErr = await audit("security.user_created", null, { name, email, role });
       if(auditErr) return auditErr;
@@ -163,11 +172,11 @@ export async function onRequestPost(context){
     }
 
     // ---- Roles ----
-    const myLevels = effectivePermissions(myRole);
+    // withinMine: the role allows nothing beyond the caller's own, so the Users screen offers it and its users' buttons.
     const roleView = (r) => {
       const ri = resolveRole(r.key, r);
       return { key: r.key, name: r.name, rank: r.rank, builtIn: !!r.builtIn, locked: !!r.locked, userCount: r.userCount || 0,
-        permissions: ri ? ri.permissions : normalizePermissions(null), canEdit: !r.locked && r.rank < myRank };
+        permissions: ri ? ri.permissions : normalizePermissions(null), canEdit: !r.locked && r.rank < myRank, withinMine: !beyondMe(ri).length };
     };
     if(action === "listRoles"){
       let rows;
@@ -225,6 +234,8 @@ export async function onRequestPost(context){
     const isMe = target.id === me.id;
     // Your own account is changed under Security; anyone else only when your role ranks above theirs.
     if(!isMe && !(await mayTouch(target))) return bad(RANK_MSG, 403);
+    // …and never someone whose role can do more than yours: a new email or password would make their account yours.
+    if(!isMe){ const over = beyondMe(await roleOf(target.role)); if(over.length) return bad("This user's role can do more than your own role can, so only an admin can change them.", 403); }
 
     if(action === "update"){
       const name = typeof body.name === "string" ? body.name.trim() : "", email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
@@ -246,6 +257,7 @@ export async function onRequestPost(context){
       if(status !== null && status !== "active" && status !== "disabled") return bad("Choose active or disabled.");
       if(isMe) return bad("You can't change your own role or disable yourself. Someone ranked above you has to.", 409);
       if(newRole && !mayGive(newRole)) return bad("You can only give a role that ranks below your own.", 403);
+      if(newRole){ const over = beyondMe(newRole); if(over.length) return bad(BEYOND_MSG(over), 403); }
       if((role !== null && role === target.role) || (status !== null && status === target.status)) return jsonResponse({status:"ok", user: await view(target)});
       const auditAction = role !== null ? "security.user_role_changed" : status === "disabled" ? "security.user_disabled" : "security.user_enabled";
       const auditErr = await audit(auditAction, target, role !== null ? { ...who(target), from: target.role, to: role } : who(target));

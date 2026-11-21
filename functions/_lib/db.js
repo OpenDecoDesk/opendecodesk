@@ -3831,7 +3831,7 @@ async function writeBlankColors_(db, id, colors, mode, opts = {}) {
   ];
   const movements = [], priceChanges = [];
   const seen = new Set();
-  let sortOrder = 0;
+  let sortOrder = 0, costChanged = false;
   for (const c of colors) {
     const color = String(c.color || "").slice(0, 80);
     stmts.push(db.prepare("INSERT INTO blank_colors (blankId, color, imagesJson, sortOrder, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)")
@@ -3866,6 +3866,7 @@ async function writeBlankColors_(db, id, colors, mode, opts = {}) {
       const costCents = !old ? (typedCost || vendor || 0)
         : (baseCost !== null && typedCost === Math.max(0, toCents(baseCost))) ? Number(old.purchasePriceCents) || 0
         : (s.purchasePrice === undefined ? Number(old.purchasePriceCents) || 0 : typedCost);
+      if (old && costCents !== (Number(old.purchasePriceCents) || 0)) costChanged = true;
       stmts.push(db.prepare("INSERT INTO blank_sizes (blankId, color, size, purchasePriceCents, quantity, vendorPriceCents, vendorPriceAt, mapPriceCents, reorderPoint, weightOz) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(Number(id), color, size, costCents, qty, vendor, vendorAt, mapCents, reorderPoint, weightOz));
       const delta = qty - oldQty;
@@ -3879,6 +3880,15 @@ async function writeBlankColors_(db, id, colors, mode, opts = {}) {
     const q = Number(old.quantity) || 0;
     if (q) { const k = key.indexOf("|"); movements.push({ blankId: Number(id), color: key.slice(0, k), size: key.slice(k + 1), qtyDelta: -q, unitCostCents: old.purchasePriceCents, kind: "adjust", note: "Edited in blank form" }); }
   }
+  // opts.keepStock (a role with Edit on Blanks, not Full — permissions.js): the form may change everything but what's
+  // on hand and its average cost. Those are Count stock, Write off and Recompute (Full), so such a save is refused
+  // whole. opts.checkOnly: only that check, nothing written (updateBlank asks before it changes the blank itself).
+  if (opts.keepStock && mode === "update" && (movements.length || costChanged)) {
+    const e = new Error("Your role can't change stock counts or costs here. Use Count stock, or ask someone with Full access to Blanks.");
+    e.userFacing = true; e.code = "forbidden";
+    throw e;
+  }
+  if (opts.checkOnly) return [];
   if (movements.length) { const blankName = await blankName_(db, Number(id)); for (const m of movements) stmts.push(movementStmt_(db, { ...m, blankName })); }
   for (const c of priceChanges) stmts.push(vendorPriceStmt_(db, Number(id), c, now, opts.actor, opts.note || (mode === "update" ? "Blank form" : "New blank")));
   if (priceChanges.length) stmts.push(db.prepare("UPDATE blanks SET pricesCheckedAt=? WHERE id=?").bind(now, Number(id)));
@@ -4600,6 +4610,8 @@ export async function updateBlank(db, id, fields, sizes, opts = {}) {
   const hasColors = Array.isArray(fields.colors) || Array.isArray(sizes) || Array.isArray(fields.sizes);
   const colors = normalizeBlankColors_(fields, sizes);
   const legacyColor = String((fields.color != null ? fields.color : (colors[0] && colors[0].color)) || "").slice(0, 80);
+  // A save that may not change stock or cost (opts.keepStock) is checked before anything is written.
+  if (opts.keepStock && hasColors) await writeBlankColors_(db, Number(id), colors, "update", { ...opts, checkOnly: true });
   await db.prepare(
     `UPDATE blanks SET name=?, productType=?, vendor=?, brand=?, sku=?, color=?, notes=?, updatedAt=? WHERE id=?`
   ).bind(
@@ -13875,6 +13887,9 @@ export async function getSalesTaxRefunds(db, dateFrom, dateTo) {
 
 export async function insertAuditLog(db, { orgId, orderId, action, detail, actor, ip, actorUserId, targetUserId }) {
   const createdAt = new Date().toISOString();
+  // Only a real order ID is kept: many actions pass the request's orderId through unchecked, and the Audit log
+  // screen links each one. Anything else (a typo, a crafted string) is dropped rather than stored.
+  orderId = orderId != null && /^[A-Za-z0-9\-]{1,64}$/.test(String(orderId)) ? String(orderId) : null;
   const detailJson = detail != null ? JSON.stringify(detail) : null;
   // Security entries also say which user did it and to which (migrations/0053).
   if (actorUserId != null || targetUserId != null) {

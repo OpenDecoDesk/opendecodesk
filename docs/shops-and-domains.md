@@ -306,6 +306,30 @@ average cost that day, and adds it to the line's cost of goods sold. Because a u
 changes how many were on hand when later sheets came in, later uses whose average moved are re-costed too
 (not in a closed month, and not pieces made for stock). A line in a closed month can't be applied.
 
+**Counting stock.** **Blanks → Count stock…** and **Transfers → Count stock…** open one window for a
+shelf count. Each row is a blank color and size, or a transfer. It shows the stock on record (read
+only), a **Counted** box that starts at that number, and the difference. Type what you counted; a row
+that's off shows how to settle it:
+
+- **Past orders…** (when short): the Use blanks / transfers for past orders window, listing only that
+  item's made lines that never took it out of stock. Try this first. Stock an order used is cost of
+  goods, not a loss. A transfer line that also uses other transfers takes those out too.
+- **Write off…** (when short): damaged, lost, used for testing or other, up to the shortfall, at the
+  average cost.
+- **Correct count** (short or over): records the difference as a correction (an `adjust` entry at the
+  average cost, so the average doesn't move). It shows in History and under corrections in
+  Inventory & COGS.
+- **History**: the item's entries, where a use recorded by mistake can be voided. That's usually
+  why a count comes out over.
+
+**Correct all remaining differences** records a correction for every row still off, after listing
+them. Everything is dated **When was it counted?**, so a count dated in a closed month is refused.
+What you typed stays while the window is open. The numbers on record reload after each step, so a
+settled row's difference drops to 0. If an item's stock changed while you were counting (an order
+was made, a sheet received), its correction is refused and the row is marked: count that row again.
+Corrections are audited as "Blank / Transfer stock count corrected". Writing off and correcting need
+full access to Blanks or Transfers, like a plain write-off.
+
 ## Blanks from vendors, and their prices
 
 **Vendor prices** are kept apart from what your stock cost. On a blank's form each color and size has a

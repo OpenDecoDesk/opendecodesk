@@ -13722,6 +13722,8 @@ const AUDIT_ACTION_LABELS = {
   "inventory.movement_voided":   "Stock entry voided",
   "inventory.movement_restored": "Stock entry restored (void undone)",
   "transfer.movement_voided":    "Transfer entry voided",
+  "inventory.counted":           "Blank stock count corrected",
+  "transfer.counted":            "Transfer stock count corrected",
   "transfer.movement_restored":  "Transfer entry restored (void undone)",
   "settings.sales_tax_set":   "Sales tax rate set",
   "settings.accounting_set":  "Bookkeeping sale date set",
@@ -13829,6 +13831,10 @@ function auditDetailSummary(action, detail) {
       case "expense_category.updated": return escapeHtml((detail.from && detail.from.name) || "") + (detail.to && detail.from && detail.to.name !== detail.from.name ? " → " + escapeHtml(detail.to.name || "") : "");
       case "transfer.movement_voided":
       case "transfer.movement_restored": return escapeHtml(detail.transferName || (detail.before && detail.before.transferName) || "") + (detail.qtyDelta != null ? " · " + (Number(detail.qtyDelta) > 0 ? "+" : "") + Number(detail.qtyDelta) : detail.before && detail.before.qtyDelta != null ? " · " + Number(detail.before.qtyDelta) : "") + (detail.reason ? " · " + escapeHtml(detail.reason) : "");
+      case "inventory.counted":
+      case "transfer.counted": { const rs = Array.isArray(detail.rows) ? detail.rows : [];
+        return rs.length + " row" + (rs.length === 1 ? "" : "s") + " · net " + (rs.reduce((t, r) => t + Number(r.delta || 0), 0) > 0 ? "+" : "") + rs.reduce((t, r) => t + Number(r.delta || 0), 0) +
+          (rs.length === 1 ? " (" + Number(rs[0].onHand) + " → " + Number(rs[0].counted) + ")" : ""); }
       case "inventory.movement_voided":
       case "inventory.movement_restored": return escapeHtml(detail.blankName || "") + (detail.size ? " · " + escapeHtml(detail.size) : "") + (detail.qtyDelta != null ? " · " + (Number(detail.qtyDelta) > 0 ? "+" : "") + Number(detail.qtyDelta) : "") + (detail.reason ? " · " + escapeHtml(detail.reason) : "");
       case "inventory.received":
@@ -14216,7 +14222,8 @@ function missingCostHtml_(items){
       `custom lines can't be linked to a blank, so their blank cost isn't counted in COGS:`, custom) : "");
 }
 
-async function showBlankCatchUp_(onDone){
+// `filter` ({blankId, color, size}, from Count stock → Past orders…) lists only that blank size's lines.
+async function showBlankCatchUp_(onDone, filter){
   if (!adminKey) adminKey = (await adminLogin()) || "";
   if (!adminKey) return;
   const fmt = (n) => "$" + Number(n).toFixed(2);
@@ -14230,6 +14237,12 @@ async function showBlankCatchUp_(onDone){
   };
   let d;
   try { d = await call({ action: "previewBlankCatchUp" }); } catch (e) { body.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
+  if (filter) {
+    d.lines = d.lines.filter(l => Number(l.blankId) === Number(filter.blankId) && String(l.blankColor || "") === String(filter.color || "") && String(l.blankSize || "") === String(filter.size || ""));
+    d.shortLines = d.lines.filter(l => l.shortBy > 0).length;
+    if (!d.lines.length) { body.innerHTML = `<div style="font-size:14px;color:#333;">No made orders are missing this blank. Every made order line linked to it already took it out of stock.</div>
+      <div style="font-size:12px;color:#777;margin-top:8px;">Lines that aren't linked to a blank aren't listed — link them under Manage catalog → Products.</div>`; return; }
+  }
   if (!d.lines.length) {
     body.innerHTML = `<div style="font-size:14px;color:#333;">Nothing to catch up. Every made order line that's linked to a blank already has a real cost.</div>
       <div style="font-size:12px;color:#777;margin-top:8px;">Lines that aren't linked to a blank aren't listed — link them under Manage catalog → Products.</div>`;
@@ -14285,7 +14298,8 @@ async function showBlankCatchUp_(onDone){
 // A line whose saved options name its transfers is ticked; one worked out from what its product carries
 // today (it was placed before the product had a transfer) starts unticked, since it may have been made
 // without one — tick the shop, or the lines, you know used them.
-async function showTransferCatchUp_(onDone){
+// `filter` ({transferId}, from Count stock → Past orders…) lists only the lines that use that transfer.
+async function showTransferCatchUp_(onDone, filter){
   if (!adminKey) adminKey = (await adminLogin()) || "";
   if (!adminKey) return;
   const fmt = (n) => "$" + Number(n).toFixed(2);
@@ -14293,6 +14307,11 @@ async function showTransferCatchUp_(onDone){
   const body = ov.querySelector("#tcuBody");
   let d;
   try { d = await hoopApi_({ action: "previewTransferCatchUp" }); } catch (e) { body.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
+  if (filter) {
+    d.lines = d.lines.filter(l => (l.uses || []).some(u => Number(u.transferId) === Number(filter.transferId)));
+    d.shortLines = d.lines.filter(l => l.shortBy > 0).length;
+    if (!d.lines.length) { body.innerHTML = `<div style="font-size:14px;color:#333;">No made orders are missing this transfer. Every made order line that uses it already took it out of stock.</div>`; return; }
+  }
   if (!d.lines.length) {
     body.innerHTML = `<div style="font-size:14px;color:#333;">Nothing to catch up. Every made order line that uses a transfer has taken it out of stock.</div>`;
     return;
@@ -14312,14 +14331,14 @@ async function showTransferCatchUp_(onDone){
     </tr>`;
   body.innerHTML = `
     <div style="font-size:13px;color:#333;margin-bottom:10px;">These order lines are made (or shipped/delivered) but never took their transfers out of stock. Applying takes each one out dated the day the order was made, at the transfer's average cost <em>on that day</em>, and adds it to the line's cost of goods sold.
-      Lines marked <b>From the product today</b> were placed before their product carried a transfer (often the shop's reorder QR), so they start unticked — tick the ones you know were made with it.</div>
+      ${filter ? "Only the lines that use this transfer are listed; a line that also uses other transfers takes those out too. " : ""}Lines marked <b>From the product today</b> were placed before their product carried a transfer (often the shop's reorder QR), so they start unticked — tick the ones you know were made with it.</div>
     <div id="tcuSum" style="font-size:13px;font-weight:600;margin-bottom:8px;"></div>
     <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;">
       <thead><tr><th style="${th}"><input type="checkbox" id="tcuAll" title="Tick or untick every line"></th><th style="${th}">Made</th><th style="${th}">Order</th><th style="${th}">Item</th><th style="${th}">Transfers</th><th style="${th}text-align:right;">Cost</th><th style="${th}">Notes</th></tr></thead>
       <tbody>${shops.map(s => `<tr><td colspan="7" style="${td}background:#fafafa;font-weight:700;"><label style="cursor:pointer;"><input type="checkbox" data-tcu-shop="${escapeHtml(s)}"> ${escapeHtml(shopName(s))}</label></td></tr>` +
         d.lines.filter(l => l.orgId === s).map(row).join("")).join("")}</tbody></table></div>
     ${d.shortLines ? `<div style="margin-top:10px;padding:8px 12px;border:1px solid #fcd34d;background:#fffbeb;border-radius:6px;font-size:12px;color:#78350f;">${d.shortLines} line${d.shortLines === 1 ? "" : "s"} would take more transfers than were in stock on that day, so that transfer's stock goes negative until you receive the sheet they came from. If you already counted those transfers by hand AFTER those orders, applying them would count them twice; untick those lines.</div>` : ""}
-    <div style="margin-top:10px;font-size:12px;color:#666;">A use dated in the past changes how many were on hand when later sheets came in, so later uses whose average moved are re-costed too (except in a closed month, and pieces made for stock).${d.recostLines ? ` With every line ticked that's ${d.recostLines} order line${d.recostLines === 1 ? "" : "s"}, ${d.recostTotal >= 0 ? "+" : "−"}${fmt(Math.abs(d.recostTotal))}.` : ""}</div>
+    <div style="margin-top:10px;font-size:12px;color:#666;">A use dated in the past changes how many were on hand when later sheets came in, so later uses whose average moved are re-costed too (except in a closed month, and pieces made for stock).${d.recostLines && !filter ? ` With every line ticked that's ${d.recostLines} order line${d.recostLines === 1 ? "" : "s"}, ${d.recostTotal >= 0 ? "+" : "−"}${fmt(Math.abs(d.recostTotal))}.` : ""}</div>
     <div id="tcuErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
       <button type="button" class="admin-btn" id="tcuCancel" style="background:#fff;color:#232323;border:1px solid #999;">Cancel</button>
@@ -14398,6 +14417,233 @@ function showWriteOffModal_(blank, onDone){
       close(); showToast("Written off.", false); onDone && onDone();
     } catch (e) { err.textContent = "Could not reach the server."; }
   };
+}
+
+// ---- Count stock (Blanks / Transfers → Count stock…) -----------------------------------------------------------
+// One row per blank color + size (or per transfer): the stock on record (read only), a Counted box that starts at
+// that number, the difference, and the buttons that settle it —
+//   Past orders…   made orders that never took this item out of stock (the catch-up window, just this item) — a
+//                  missing use is cost of goods, not a loss, so it's the first thing to try when stock is short;
+//   Write off…     damaged, lost or used up (writeOffBlanks / writeOffTransfers), up to the shortfall;
+//   Correct count  records the difference as a correction (countBlankStock / countTransferStock → an `adjust`);
+//   History        the item's movements, where a use recorded by mistake can be voided.
+// Correct all remaining differences does the last for every row still off. Every step is dated "When counted".
+// What was typed is kept while the window is open; the numbers on record reload after each step (and whenever a
+// window opened from this one closes), so a settled row's difference goes to 0. kind: "blanks" | "transfers".
+function showStockCount_(kind, onDone){
+  const isB = kind === "blanks", perm = isB ? "inventory.blanks" : "inventory.transfers", noun = isB ? "blank" : "transfer";
+  const { ov, close } = inventoryModal_(isB ? "Count stock — blanks" : "Count stock — transfers", `
+    <div style="font-size:13px;color:#555;margin-bottom:6px;line-height:1.5;">Type what you counted in <b>Counted</b>. A row that's off shows how to settle it:
+      <b>Past orders…</b> takes out stock that made orders used but never recorded (try it first when you're short),
+      <b>Write off…</b> records damaged, lost or used-up stock, and <b>Correct count</b> records the difference as a correction.
+      <b>History</b> is where a use recorded by mistake can be voided.</div>
+    ${whenFieldHtml_("scWhen", "When was it counted?")}
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:2px 0 10px;">
+      <input type="search" id="scSearch" placeholder="Search ${isB ? "blanks, colors, sizes" : "transfers"}…" aria-label="Search" style="font-size:13px;padding:6px 10px;border:1px solid #ccc;border-radius:4px;min-width:220px;">
+      <label style="font-size:13px;cursor:pointer;"><input type="checkbox" id="scDiffOnly"> Only rows with a difference</label>
+    </div>
+    <div id="scTable" data-keep-scroll="stockcount" style="max-height:55vh;overflow:auto;border:1px solid #ddd;border-radius:6px;"><div style="padding:12px;color:#777;font-size:13px;">Loading…</div></div>
+    <div id="scErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;white-space:pre-line;"></div>
+    <div style="display:flex;gap:10px;justify-content:space-between;align-items:center;flex-wrap:wrap;margin-top:6px;">
+      <span id="scSum" style="font-size:13px;color:#555;"></span>
+      <span style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="admin-btn admin-btn-secondary" id="scClose">Close</button>
+        <button type="button" class="admin-btn" id="scAll" data-need="${perm}:full">Correct all remaining differences</button>
+      </span>
+    </div>`, 1000, { onClose: () => finish() });
+  let rows = [], blanks = [];
+  const counts = new Map(), failedMsg = new Map();
+  let closed = false;
+  function finish(){ if (closed) return; closed = true; watch.disconnect(); if (typeof onDone === "function") onDone(); }
+  ov.querySelector("#scClose").onclick = () => { close(); finish(); };
+  const err = ov.querySelector("#scErr");
+  const when = () => whenFrom_(ov, "scWhen");
+  const counted = (r) => counts.has(r.key) ? counts.get(r.key) : r.onHand;
+  const diffOf = (r) => counted(r) - r.onHand;
+  const signed = (n) => (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n);
+  const nameOf = (r) => (r.group ? r.group + " · " : "") + r.label;
+
+  async function load(){
+    try {
+      if (isB) {
+        const d = await hoopApi_({ action: "getBlanks" });
+        blanks = d.blanks || [];
+        const held = d.reserved || {};
+        rows = [];
+        const rank = (z) => { const i = SIZE_ORDER_ALL.indexOf(String(z || "").toUpperCase()); return i === -1 ? SIZE_ORDER_ALL.length : i; };
+        const byName = (x, y) => String(x.name || "").localeCompare(String(y.name || ""));
+        for (const b of blanks.slice().sort(byName)) {
+          const name = b.name || [b.brand, b.color].filter(Boolean).join(" ") || "Blank " + b.id;
+          const sizes = (b.sizes || []).slice().sort((x, y) => String(x.color || "").localeCompare(String(y.color || "")) || rank(x.size) - rank(y.size) || String(x.size || "").localeCompare(String(y.size || "")));
+          for (const z of sizes) {
+            const key = [b.id, z.color || "", z.size || ""].join("|");
+            rows.push({ key, blankId: b.id, color: z.color || "", size: z.size || "", group: name, label: [z.color, z.size].filter(Boolean).join(" · ") || "—",
+              onHand: Number(z.quantity) || 0, held: Number(held[key]) || 0, find: [name, b.brand, b.sku, z.color, z.size].join(" ").toLowerCase() });
+          }
+        }
+      } else {
+        const d = await hoopApi_({ action: "listTransfers" });
+        rows = (d.transfers || []).map(t => ({ key: String(t.id), transferId: t.id, group: "", label: t.name || "Transfer " + t.id, sub: t.description || "",
+          onHand: Number(t.quantity) || 0, held: 0, find: [t.name, t.description].join(" ").toLowerCase() }));
+      }
+      await keepView_(async () => draw());
+    } catch (e) { ov.querySelector("#scTable").innerHTML = `<div style="padding:12px;color:#b03a2e;font-size:13px;">${escapeHtml(e.message)}</div>`; }
+  }
+
+  const td = "padding:5px 8px;border-bottom:1px solid #eee;font-size:13px;vertical-align:middle;";
+  const btn = (act, key, label, need) => `<button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;white-space:nowrap;" data-sc-act="${act}" data-key="${escapeHtml(key)}"${need ? ` data-need="${need}"` : ""}>${label}</button>`;
+  function diffHtml(r){
+    const d = diffOf(r);
+    return `<span style="font-weight:${d ? 700 : 400};color:${d < 0 ? "#b03a2e" : d > 0 ? "#92400e" : "#999"};">${d ? signed(d) : "0"}</span>`;
+  }
+  function actHtml(r){
+    const d = diffOf(r);
+    return `<span style="display:inline-flex;flex-wrap:wrap;gap:4px;justify-content:flex-end;">` + (d < 0 ? btn("past", r.key, "Past orders…", perm + ":edit") + btn("writeoff", r.key, "Write off…", perm + ":full") : "") +
+      (d ? btn("correct", r.key, "Correct count", perm + ":full") : "") + btn("history", r.key, "History") + `</span>`;
+  }
+  function noteHtml(r){
+    const bits = [];
+    if (failedMsg.has(r.key)) bits.push(`<span style="color:#b03a2e;">${escapeHtml(failedMsg.get(r.key))}</span>`);
+    if (r.held && counted(r) < r.held) bits.push(`<span style="color:#92400e;">Below the ${r.held} set aside for orders.</span>`);
+    return bits.join(" ");
+  }
+  function rowHtml(r){
+    return `<tr data-sc="${escapeHtml(r.key)}">
+      <td style="${td}${isB ? "padding-left:20px;" : ""}"><div style="font-weight:${isB ? 400 : 600};">${escapeHtml(r.label)}</div>${r.sub ? `<div style="font-size:11px;color:#777;">${escapeHtml(r.sub)}</div>` : ""}<div class="sc-note" style="font-size:11px;">${noteHtml(r)}</div></td>
+      <td style="${td}text-align:right;">${r.onHand}${r.held ? `<div style="font-size:11px;color:#777;">${r.held} set aside</div>` : ""}</td>
+      <td style="${td}text-align:right;"><input type="number" min="0" step="1" class="sc-count" id="sc_${escapeHtml(r.key.replace(/[^A-Za-z0-9_-]/g, "_"))}" data-key="${escapeHtml(r.key)}" value="${counted(r)}" aria-label="Counted" style="width:72px;font-size:13px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;text-align:right;"></td>
+      <td class="sc-diff" style="${td}text-align:right;">${diffHtml(r)}</td>
+      <td class="sc-act" style="${td}text-align:right;">${actHtml(r)}</td></tr>`;
+  }
+  function shownRows(){
+    const q = (ov.querySelector("#scSearch").value || "").toLowerCase().trim(), only = ov.querySelector("#scDiffOnly").checked;
+    return rows.filter(r => (!q || r.find.includes(q)) && (!only || diffOf(r) !== 0));
+  }
+  function summary(){
+    const off = rows.filter(r => diffOf(r) !== 0), net = off.reduce((t, r) => t + diffOf(r), 0);
+    ov.querySelector("#scSum").textContent = `${rows.length} ${isB ? "sizes" : "transfers"} · ${off.length} differ${off.length ? ` · net ${signed(net)}` : ""}`;
+    ov.querySelector("#scAll").style.visibility = off.length ? "" : "hidden";
+  }
+  function draw(){
+    const list = shownRows(), box = ov.querySelector("#scTable");
+    if (!rows.length) { box.innerHTML = `<div style="padding:12px;color:#777;font-size:13px;">No ${noun}s on file yet.</div>`; summary(); return; }
+    if (!list.length) { box.innerHTML = `<div style="padding:12px;color:#777;font-size:13px;">Nothing matches.</div>`; summary(); return; }
+    const th = "padding:6px 8px;background:#f3f4f6;font-size:12px;font-weight:700;text-align:left;border-bottom:1px solid #ddd;position:sticky;top:0;z-index:1;";
+    let body = "", group = null;
+    for (const r of list) {
+      if (isB && r.group !== group) { group = r.group; body += `<tr><td colspan="5" style="${td}background:#fafafa;font-weight:700;">${escapeHtml(group)}</td></tr>`; }
+      body += rowHtml(r);
+    }
+    box.innerHTML = `<table class="stack-mobile" style="width:100%;border-collapse:collapse;">
+      <thead><tr><th style="${th}">${isB ? "Color / size" : "Transfer"}</th><th style="${th}text-align:right;">In system</th><th style="${th}text-align:right;">Counted</th><th style="${th}text-align:right;">Difference</th><th style="${th}"></th></tr></thead>
+      <tbody>${body}</tbody></table>`;
+    adminApplyPerms_(box);
+    summary();
+  }
+  // Typing updates just that row (the box keeps its focus); the list is redrawn only by search / the checkbox / a reload.
+  ov.querySelector("#scTable").addEventListener("input", (e) => {
+    const inp = e.target.closest(".sc-count"); if (!inp) return;
+    const r = rows.find(x => x.key === inp.dataset.key); if (!r) return;
+    const v = inp.value.trim();
+    if (v === "" || !(Number(v) >= 0)) counts.delete(r.key); else counts.set(r.key, Math.floor(Number(v)));
+    failedMsg.delete(r.key);
+    const tr = inp.closest("tr");
+    tr.querySelector(".sc-diff").innerHTML = diffHtml(r);
+    tr.querySelector(".sc-act").innerHTML = actHtml(r);
+    tr.querySelector(".sc-note").innerHTML = noteHtml(r);
+    adminApplyPerms_(tr);
+    summary();
+  });
+  ov.querySelector("#scSearch").addEventListener("input", draw);
+  ov.querySelector("#scDiffOnly").addEventListener("change", draw);
+
+  // Corrections for the given rows (one, or every row still off). Rows the server refuses — their stock changed
+  // since this window read it — are marked and the rest still apply.
+  async function correct(list){
+    const at = when(); if (!at) return;
+    err.textContent = "";
+    const payload = list.map(r => isB ? { blankId: r.blankId, color: r.color, size: r.size, counted: counted(r), onHand: r.onHand }
+      : { transferId: r.transferId, counted: counted(r), onHand: r.onHand });
+    try {
+      const d = await hoopApi_({ action: isB ? "countBlankStock" : "countTransferStock", rows: payload, at });
+      for (const f of (d.failed || [])) {
+        const r = list.find(x => isB ? x.blankId === f.blankId && x.color === f.color && x.size === f.size : x.transferId === f.transferId);
+        if (r) failedMsg.set(r.key, f.error);
+      }
+      const n = (d.corrected || []).length, bad = (d.failed || []).length;
+      showToast(bad ? `${n} corrected; ${bad} couldn't be — see the rows marked in red.` : `${n} ${n === 1 ? "count" : "counts"} corrected.`, !!bad);
+      await load();
+      flashRows_(list.filter(r => !failedMsg.has(r.key)).map(r => `#scTable tr[data-sc="${attrSel_(r.key)}"]`));
+    } catch (e) { err.textContent = e.message; }
+  }
+
+  async function writeOff(r){
+    const at = when(); if (!at) return;
+    const short = Math.max(0, -diffOf(r)), inp = "font:inherit;font-size:14px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;";
+    const got = await new Promise(resolve => {
+      const { ov: w, close: wc } = inventoryModal_("Write off — " + escapeHtml(nameOf(r)), `
+        <div style="font-size:13px;color:#555;">In system ${r.onHand} · counted ${counted(r)} · short ${short}. Written off at the ${noun}'s average cost, dated when it was counted.</div>
+        <label for="scwQty" style="display:block;font-size:13px;font-weight:600;margin:12px 0 4px;">How many</label>
+        <input type="number" id="scwQty" min="1" max="${Math.max(1, r.onHand)}" step="1" value="${short}" style="${inp}width:120px;">
+        <label for="scwReason" style="display:block;font-size:13px;font-weight:600;margin:12px 0 4px;">Reason</label>
+        <select id="scwReason" style="${inp}">${Object.entries(WRITEOFF_REASONS_).map(([k, v]) => `<option value="${k}"${k === "lost" ? " selected" : ""}>${escapeHtml(v)}</option>`).join("")}</select>
+        <label for="scwNote" style="display:block;font-size:13px;font-weight:600;margin:12px 0 4px;">Details (optional)</label>
+        <input type="text" id="scwNote" maxlength="200" style="${inp}width:100%;box-sizing:border-box;">
+        <div id="scwErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px;"><button type="button" class="admin-btn admin-btn-secondary" id="scwCancel">Cancel</button><button type="button" class="admin-btn admin-btn-danger admin-btn-danger-solid" id="scwOk">Write off</button></div>`, 440,
+        { onClose: () => resolve(null) });
+      w.querySelector("#scwCancel").onclick = () => { wc(); resolve(null); };
+      w.querySelector("#scwOk").onclick = () => {
+        const qty = parseInt(w.querySelector("#scwQty").value, 10);
+        if (!(qty > 0)) { w.querySelector("#scwErr").textContent = "Enter how many to write off."; return; }
+        if (qty > r.onHand) { w.querySelector("#scwErr").textContent = `Only ${r.onHand} on record — write off ${r.onHand} or fewer.`; return; }
+        const key = w.querySelector("#scwReason").value, extra = w.querySelector("#scwNote").value.trim();
+        wc(); resolve({ qty, reason: WRITEOFF_REASON_KEYS_[key] || "other", note: (key === "other" && extra ? extra : WRITEOFF_REASONS_[key] + (extra ? " — " + extra : "")) + " (stock count)" });
+      };
+    });
+    if (!got) return;
+    try {
+      if (isB) await hoopApi_({ action: "writeOffBlanks", blankId: r.blankId, color: r.color, size: r.size, qty: got.qty, note: got.note, reason: got.reason, occurredAt: new Date(at).toLocaleDateString("en-CA") });
+      else await hoopApi_({ action: "writeOffTransfers", transferId: r.transferId, qty: got.qty, note: got.note, occurredAt: at });
+      showToast("Written off.");
+      await load();
+      flashRows_([`#scTable tr[data-sc="${attrSel_(r.key)}"]`]);
+    } catch (e) { err.textContent = e.message; }
+  }
+
+  ov.querySelector("#scTable").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-sc-act]"); if (!b) return;
+    const r = rows.find(x => x.key === b.dataset.key); if (!r) return;
+    const act = b.dataset.scAct;
+    if (act === "past") { if (isB) showBlankCatchUp_(null, { blankId: r.blankId, color: r.color, size: r.size }); else showTransferCatchUp_(null, { transferId: r.transferId }); }
+    else if (act === "history") {
+      if (isB) { const bl = blanks.find(x => x.id === r.blankId); if (bl) showBlankHistoryModal(bl, load); }
+      else if (typeof window.transferHistory_ === "function") window.transferHistory_(r.transferId);
+    }
+    else if (act === "writeoff") await writeOff(r);
+    else if (act === "correct") {
+      const d = diffOf(r);
+      if (!await askConfirm_(`Record a correction of ${signed(d)} for ${nameOf(r)}?\n\nIts stock goes from ${r.onHand} to ${counted(r)}, at the ${noun}'s average cost. It shows in History and under corrections in Inventory & COGS.`)) return;
+      await correct([r]);
+    }
+  });
+  ov.querySelector("#scAll").onclick = async () => {
+    const off = rows.filter(r => diffOf(r) !== 0);
+    if (!off.length) return;
+    const lines = off.slice(0, 15).map(r => `${nameOf(r)}: ${r.onHand} → ${counted(r)} (${signed(diffOf(r))})`).join("\n");
+    if (!await askConfirm_(`Record corrections for ${off.length} ${off.length === 1 ? "row" : "rows"}?\n\n${lines}${off.length > 15 ? `\n…and ${off.length - 15} more` : ""}\n\nShort stock that orders used is better taken out with Past orders…, and damaged or lost stock with Write off…, so the reports show why.`)) return;
+    await correct(off);
+  };
+
+  // A window opened from this one (Past orders, History, a write-off) may change stock: when it closes and this
+  // window is on top again, the numbers on record reload. What was typed stays.
+  const watch = new MutationObserver(() => {
+    const open = document.querySelectorAll(".admin-modal");
+    if (ov.isConnected && open[open.length - 1] === ov && watch._others) { watch._others = false; load(); }
+    else if (open.length && open[open.length - 1] !== ov) watch._others = true;
+  });
+  watch.observe(document.body, { childList: true });
+  load();
 }
 
 // ---- Blanks: import a vendor order from a PDF (Blanks → Import from PDF) --------
@@ -18641,6 +18887,7 @@ async function renderAdminBlanks(app) {
           adminMenuItem_('id="blankDupPhotosBtn" title="Find the same photo more than once on a blank\'s color, and take the extra copies off"', "Find duplicate photos&hellip;"),
           adminMenuItem_('id="blankRepairThumbsBtn" title="Make the small preview copy for blank photos that don\'t have one (photos downloaded from a vendor before this was fixed)"', "Repair photo thumbnails&hellip;"),
         ].join(""))}
+        <button type="button" class="admin-btn" id="blankCountBtn" data-need="inventory.blanks:edit" title="Check the blanks on the shelf against what's on record, and settle each difference">Count stock…</button>
         <input type="file" id="blankImportPdfFile" accept="application/pdf" style="display:none;">
         <input type="file" id="blankImportCsvFile" accept=".csv,text/csv" style="display:none;">
       </div>
@@ -18653,6 +18900,7 @@ async function renderAdminBlanks(app) {
   const refresh = () => refreshBlanks_(app);
   document.getElementById("blankAddBtn").onclick = () => showBlankModal(null, refresh);
   document.getElementById("blankOrderBtn").onclick = () => showReceiveOrderModal(refresh);
+  document.getElementById("blankCountBtn").onclick = () => showStockCount_("blanks", refresh);
   document.getElementById("blankImportPdfBtn").onclick = () => document.getElementById("blankImportPdfFile").click();
   document.getElementById("blankImportPdfFile").onchange = async (e) => {
     const file = e.target.files[0]; e.target.value = "";
@@ -21858,6 +22106,7 @@ async function renderTransfers(app){
       <div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;">
         <button type="button" class="admin-btn" id="trNewBtn" data-need="inventory.transfers:edit">+ New transfer</button>
         <button type="button" class="admin-btn" id="trReceiveBtn" data-need="inventory.transfers:edit">Receive sheet</button>
+        <button type="button" class="admin-btn" id="trCountBtn" data-need="inventory.transfers:edit" title="Check the transfers on hand against what's on record, and settle each difference">Count stock…</button>
       </div>
       <div id="trBody" style="color:#888;font-size:14px;max-height:65vh;overflow-y:auto;">Loading…</div>
     </div>`;
@@ -21883,6 +22132,7 @@ async function renderTransfers(app){
   window._transfersCache = () => transfers;
   document.getElementById("trNewBtn").onclick = () => showTransferFormModal_(null, load);
   document.getElementById("trReceiveBtn").onclick = () => showReceiveTransferModal_(transfers, load);
+  document.getElementById("trCountBtn").onclick = () => showStockCount_("transfers", load);
   window.transferEdit_ = (id) => { const t = transfers.find(x => x.id === Number(id)); if (t) showTransferFormModal_(t, load); };
   window.transferWriteOff_ = async (id) => {
     const t = transfers.find(x => x.id === Number(id)); if (!t) return;
@@ -21915,7 +22165,10 @@ async function renderTransfers(app){
     catch (e) { showToast(e.message, true); }
   };
   window.transferHistory_ = async (id) => {
-    const t = transfers.find(x => x.id === Number(id)); if (!t) return;
+    // Count stock opens this too, for a transfer this page may not have loaded yet (made in another tab): reload once.
+    let t = transfers.find(x => x.id === Number(id));
+    if (!t) { await load(); t = transfers.find(x => x.id === Number(id)); }
+    if (!t) return;
     let moves = []; try { moves = (await hoopApi_({ action: "getTransferMovements", transferId: t.id })).movements || []; } catch (e) { showToast(e.message, true); return; }
     // Where each entry came from: a purchase names its sheet (vendor, invoice, % of the sheet) with Open sheet to
     // review or correct it; a use names its order. A sheet that was edited shows its old entries voided "Sheet edited".

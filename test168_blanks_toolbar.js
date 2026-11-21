@@ -50,7 +50,7 @@ const visibleLabels = (root) => [...root.children].filter(el => el.style.display
   let p = await blanksPage();
   const bar = p.doc.getElementById("blankAddBtn").parentNode;
   const shown = visibleLabels(bar).filter(t => t);
-  ok("with no vendor connected: + New blank, Receive order, then the Import and More menus — nothing else", JSON.stringify(shown) === JSON.stringify(["+ New blank", "Receive order", "Import ▾", "More ▾"]));
+  ok("with no vendor connected: + New blank, Receive order, the Import and More menus, then Count stock… — nothing else", JSON.stringify(shown) === JSON.stringify(["+ New blank", "Receive order", "Import ▾", "More ▾", "Count stock…"]));
   ok("…after the search box and the which-blanks filter", bar.firstElementChild.id === "blankSearch" && bar.querySelector("#blankGroup"));
   ok("…the Connected vendor menu is there but hidden", p.doc.getElementById("blankVendorMenu") && p.doc.getElementById("blankVendorMenu").style.display === "none");
   const items = (id) => [...p.doc.getElementById(id).closest(".admin-menu").querySelectorAll(".admin-menu-item")].map(b => b.textContent.trim());

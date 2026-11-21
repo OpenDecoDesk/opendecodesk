@@ -69,7 +69,7 @@ import {
   getTierPrices, setTierPrices, setOrgReorderQr, setOrgReorderQrTransfer,
   listTransfers, createTransfer, updateTransfer, deleteTransfer, receiveTransferSheet, transferSheetShares, SHEET_PCT_TOLERANCE,
   getTransferSheet, editTransferSheet, transferSheetLabel,
-  writeOffTransfers, getTransferMovements, voidTransferMovement, transferMovementVoidable, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferCogs,
+  writeOffTransfers, setTransferCount, getTransferMovements, voidTransferMovement, transferMovementVoidable, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferCogs,
   getTransferQueue, setTransferReceived, getGangSheet, makeTransferLine, setTransfersApplied, lineHasEmbroidery, refreshOrderLinesFromCatalog,
   listDesigns, getDesign, saveDesign, deleteDesign, listDesignVersions, addDesignVersion, updateDesignVersionThreads, setProductDesign,
   listProductDesigns, setProductDesigns, listOrderItemDesigns, addOrderItemDesign, getCatalogIssues, getBlankReadyByOrg,
@@ -111,7 +111,7 @@ import {
   RECURRING_FREQUENCIES, recurringDueDates, recurringIndexAfter, listRecurringExpenses, getRecurringExpense, saveRecurringExpense, stopRecurringExpense,
   deleteRecurringExpense, recordDueRecurringExpenses, getRecurringExpensesRecorded,
   getRefundedCents, getDepositPayments, linkPaymentsToCashout, cashoutNetCents_,
-  receiveBlanks, writeOffBlanks, getBlankMovements, markBlankPricesChecked, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection,
+  receiveBlanks, writeOffBlanks, setBlankCount, getBlankMovements, markBlankPricesChecked, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection,
   getSiteSetting, setSiteDomain,
   getPublishedOrg, setOrgReady, getShopWizard, saveShopWizard, deleteShopWizard, listShopWizards, setProductLinksFromBlank, publishShop, getPublishState, getDraftCatalogShop, signPreviewToken,
   planDiscardShopChanges, discardShopChanges, applyProductPrices,
@@ -228,11 +228,11 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "listAbortReasons", "saveAbortReason", "deleteAbortReason",
   "listActiveRuns", "startRun", "completeRun", "getRunStats", "abortRun", "markHoopingDone", "getRunReportByDesign",
   "setMachineStitchCount", "listMaintenanceTasks", "saveMaintenanceTask", "deleteMaintenanceTask", "recordMaintenance", "getMaintenanceLog", "setDesignVersionStitches", "fillDesignStitchCounts",
-  "receiveBlanks", "receiveBlankOrder", "addBlankSizes", "readInvoiceWithAi", "writeOffBlanks", "getBlankMovements", "voidInventoryMovement", "restoreInventoryMovement", "getInventoryReport", "previewBlankCatchUp", "applyBlankCatchUp", "previewTransferCatchUp", "applyTransferCatchUp",
+  "receiveBlanks", "receiveBlankOrder", "addBlankSizes", "readInvoiceWithAi", "writeOffBlanks", "countBlankStock", "getBlankMovements", "voidInventoryMovement", "restoreInventoryMovement", "getInventoryReport", "previewBlankCatchUp", "applyBlankCatchUp", "previewTransferCatchUp", "applyTransferCatchUp",
   "getBlankLinks", "setBlankLink", "saveBlankLinks", "deleteBlankLink",
   "getReadyToShip", "setReadyToShipQty", "makeForStock", "getFinishedGoodsMovements", "voidFinishedGoodsMovement",
   "listGraphics", "saveGraphic", "deleteGraphic", "setProductGraphicColorBlocked", "getTierPrices", "setTierPrices",
-  "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "getTransferSheet", "editTransferSheet",
+  "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "countTransferStock", "getTransferSheet", "editTransferSheet",
   "getTransferMovements", "voidTransferMovement", "restoreTransferMovement",
   "getTransferQueue", "setTransferReceived", "getGangSheet", "makeTransferLine", "setTransfersApplied", "refreshOrderFromCatalog",
 ]);
@@ -521,7 +521,7 @@ export async function onRequestPost(context) {
     if (["cancelLineItem", "bulkCancelLineItems", "markHoopingDone", "makeTransferLine"].includes(a) && b.at) { const t = actionTime(b); if (t && t.at) months.push(t.at.slice(0, 7)); }
     if (["addPayment", "recordRefund", "setPaymentDate"].includes(a) && /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || ""))) months.push(String(b.date).slice(0, 7));
     // A payment / Mark as paid / count correction / transfer write-off dated with a date and time (2026-10).
-    if (["addPayment", "recordRefund", "setPaymentDate", "markPaidManual", "setReadyToShipQty"].includes(a) && b.at) { const t = actionTime(b); if (t && t.at) months.push(t.at.slice(0, 7)); }
+    if (["addPayment", "recordRefund", "setPaymentDate", "markPaidManual", "setReadyToShipQty", "countBlankStock", "countTransferStock"].includes(a) && b.at) { const t = actionTime(b); if (t && t.at) months.push(t.at.slice(0, 7)); }
     if (a === "setPaymentDate" && b.paymentId) months.push(await paymentMonth(env.DB, b.paymentId));
     if (a === "saveExpense" && b.expense && /^\d{4}-\d{2}-\d{2}$/.test(String(b.expense.date || ""))) months.push(String(b.expense.date).slice(0, 7));
     if (["saveExpense", "deleteExpense"].includes(a) && (b.expenseId || (b.expense && b.expense.id))) months.push(await expenseMonth(env.DB, b.expenseId || b.expense.id));
@@ -4833,6 +4833,24 @@ export async function onRequestPost(context) {
       audit({ orgId: null, orderId: null, action: "transfer.writeoff", detail: { transferId: Number(body.transferId), qty: Number(body.qty), note: body.note || "" } });
       return jsonResponse({ status: "ok", transfers: await listTransfers(env.DB, body.org || null) });
     }
+    // Count stock (transfers): the same as countBlankStock (setTransferCount). rows: [{transferId, counted, onHand}].
+    if (body.action === "countTransferStock") {
+      const rows = Array.isArray(body.rows) ? body.rows.slice(0, 2000) : [];
+      if (!rows.length) return jsonResponse({ status: "error", message: "Nothing to correct" }, 400);
+      if (rows.some(r => !r || !Number(r.transferId) || !Number.isInteger(Number(r.counted)) || Number(r.counted) < 0))
+        return jsonResponse({ status: "error", message: "Enter a whole count of 0 or more on every row" }, 400);
+      const when = actionTime(body);
+      if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
+      { const locked = await periodGuard(body); if (locked) return locked; }
+      const note = String(body.note || "").trim().slice(0, 200), done = [], failed = [];
+      for (const r of rows) {
+        const row = { transferId: Number(r.transferId), counted: Number(r.counted), onHand: Number(r.onHand) };
+        try { const x = await setTransferCount(env.DB, { ...row, note, at: when ? when.at : null }); if (x.delta) done.push({ ...row, delta: x.delta }); }
+        catch (e) { if (!e.userFacing) throw e; failed.push({ ...row, error: e.message }); }
+      }
+      if (done.length) audit({ orgId: null, orderId: null, action: "transfer.counted", detail: { rows: done, ...(note ? { note } : {}), occurredAt: when ? when.at : null } });
+      return jsonResponse({ status: "ok", corrected: done, failed, transfers: await listTransfers(env.DB, body.org || null) });
+    }
     if (body.action === "getTransferMovements") {
       return jsonResponse({ status: "ok", movements: await getTransferMovements(env.DB, Number(body.transferId)) });
     }
@@ -5410,6 +5428,27 @@ export async function onRequestPost(context) {
       await writeOffBlanks(env.DB, { blankId, color, size, qty, note, occurredAt, reason });
       audit({ orgId: null, orderId: null, action: "inventory.written_off", detail: { blankId, color, size, qty, note, reason, occurredAt: occurredAt || null } });
       return jsonResponse({ status: "ok", blanks: await getAllBlanks(env.DB) });
+    }
+    // Count stock (blanks): each row's counted number, recorded as a correction for the difference
+    // (setBlankCount). rows: [{blankId, color, size, counted, onHand}] — one row from a row's Correct count,
+    // many from Correct all remaining differences. A row that fails (its stock changed since the window
+    // read it) comes back in `failed`; the rest still apply.
+    if (body.action === "countBlankStock") {
+      const rows = Array.isArray(body.rows) ? body.rows.slice(0, 2000) : [];
+      if (!rows.length) return jsonResponse({ status: "error", message: "Nothing to correct" }, 400);
+      if (rows.some(r => !r || !Number(r.blankId) || !Number.isInteger(Number(r.counted)) || Number(r.counted) < 0))
+        return jsonResponse({ status: "error", message: "Enter a whole count of 0 or more on every row" }, 400);
+      const when = actionTime(body);
+      if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
+      { const locked = await periodGuard(body); if (locked) return locked; }
+      const note = String(body.note || "").trim().slice(0, 200), done = [], failed = [];
+      for (const r of rows) {
+        const row = { blankId: Number(r.blankId), color: String(r.color ?? ""), size: String(r.size ?? ""), counted: Number(r.counted), onHand: Number(r.onHand) };
+        try { const x = await setBlankCount(env.DB, { ...row, note, at: when ? when.at : null }); if (x.delta) done.push({ ...row, delta: x.delta }); }
+        catch (e) { if (!e.userFacing) throw e; failed.push({ ...row, error: e.message }); }
+      }
+      if (done.length) audit({ orgId: null, orderId: null, action: "inventory.counted", detail: { rows: done, ...(note ? { note } : {}), occurredAt: when ? when.at : null } });
+      return jsonResponse({ status: "ok", corrected: done, failed, blanks: await getAllBlanks(env.DB) });
     }
     if (body.action === "getBlankMovements") {
       return jsonResponse({ status: "ok", movements: await getBlankMovements(env.DB, Number(body.blankId)) });

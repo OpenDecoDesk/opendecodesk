@@ -221,7 +221,16 @@ async function migratedDb(){
   console.log("(regression) the label lands in shipping_labels (the books) with tracking and the postage account:",
     !!lbl && lbl.orderId === "PRIME-1" && lbl.amountCents === 625 && lbl.carrier === "USPS" && lbl.service === "Ground Advantage" &&
     lbl.trackingNumber === "9400100000000000000001" && lbl.accountId === 2);
+  // A second Ship for the same order (a retry after a lost answer, another tab, another admin) buys nothing
+  // unless the admin confirms another label (replaceExisting).
+  fetchCalls.length = 0;
   res = await purchaseCall({});
+  body = await res.json();
+  console.log("a second purchase for an order that already has a label is refused (409, its tracking named) — Shippo isn't called:",
+    res.status === 409 && body.code === "label_exists" && /9400100000000000000001/.test(body.message) && !fetchCalls.some(c => String(c.url).includes("/transactions/")));
+  console.log("the admin screen asks before buying another, and only then sends replaceExisting:",
+    /purchaseData\.code === "label_exists"/.test(adminJs) && /buy\(true\)/.test(adminJs) && /replaceExisting: true/.test(adminJs));
+  res = await purchaseCall({ replaceExisting: true });
   console.log("buying the same transaction again doesn't double-book it (unique per Shippo transaction):",
     d1.q("SELECT count(*) n FROM shipping_labels")[0].n === 1);
 
@@ -229,7 +238,7 @@ async function migratedDb(){
   fetchCalls.length = 0;
   global.__shippoTxn = { status: "SUCCESS", object_id: "idrate1", tracking_number: "9400111", label_url: "https://x/l2.pdf", rate: "rateid123" };
   const fetchWas = fetchImpl.f; fetchImpl.f = async (url, opts) => { fetchCalls.push({ url }); if (String(url).includes("/rates/rateid123")) return { json: async () => ({ amount: "7.10", provider: "UPS", servicelevel: { name: "Ground Saver" } }) }; return fetchWas(url, opts); };
-  res = await purchaseCall({});
+  res = await purchaseCall({ replaceExisting: true });   // (the order has a label from above — another one on purpose)
   body = await res.json();
   console.log("rate given as an id string is still looked up for its price and service:",
     body.labelCost === 7.1 && body.carrier === "UPS" && body.service === "Ground Saver" && fetchCalls.some(c => String(c.url).includes("/rates/rateid123")));
@@ -237,7 +246,7 @@ async function migratedDb(){
 
   // Older API field name still accepted.
   global.__shippoTxn = { object_status: "SUCCESS", object_id: "legacy1", tracking_number: "94001", label_url: "https://x/l3.pdf" };
-  res = await purchaseCall({});
+  res = await purchaseCall({ replaceExisting: true });
   console.log("the older object_status field is still accepted as a fallback:", res.status === 200);
 
   // ---- Reprint: get the PDF link of a label that's already bought (no purchase) ----
@@ -297,7 +306,7 @@ async function migratedDb(){
   global.__shippoTxn = { status: "SUCCESS", object_id: "norec1", tracking_number: "94002", label_url: "https://x/l4.pdf",
     rate: { amount: "6.25", provider: "USPS", servicelevel_name: "Ground Advantage" } };
   errors.length = 0;
-  res = await purchaseCall({});
+  res = await purchaseCall({ replaceExisting: true });   // (the labels table is gone, so it can't be checked first)
   body = await res.json();
   console.log("label bought but recording fails: still a success for the label, with a loud warning naming the cost and tracking:",
     res.status === 200 && body.status === "ok" && /couldn't be recorded/.test(body.warning) && /6\.25/.test(body.warning) && /94002/.test(body.warning) &&

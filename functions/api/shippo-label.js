@@ -13,6 +13,9 @@
  *   action:"purchase" — purchase a label from Shippo and return the PDF URL +
  *                       tracking number. The admin's UI then calls /api/orders
  *                       (action:"recordTracking") to persist the tracking number.
+ *                       An order that already has a label is refused (409,
+ *                       code "label_exists") unless replaceExisting:true says
+ *                       the admin confirmed buying another.
  *
  * Rates and purchase read the order's shipping address and weight from D1
  * server-side — they never trust the browser to supply an address, which would
@@ -263,6 +266,22 @@ export async function onRequestPost(context){
     }
     if(!/^[a-z0-9_]{3,50}$/.test(serviceToken)){
       return jsonResponse({status:"error", message:"Invalid serviceToken format."}, 400);
+    }
+
+    // A label already bought for this order (a retry after a lost answer, a second tab, another admin) isn't
+    // bought — and paid for — again unless the admin confirms they want another one (replaceExisting).
+    if(body.replaceExisting !== true){
+      let existing;
+      try{ existing = await getOrderLabel(env.DB, orderId); }
+      catch(err){
+        console.error("getOrderLabel D1 error:", err);
+        return jsonResponse({status:"error", message:"Couldn't check whether this order already has a label — try again."}, 500);
+      }
+      if(existing){
+        return jsonResponse({status:"error", code:"label_exists",
+          message:"This order already has a label" + (existing.trackingNumber ? " (tracking " + existing.trackingNumber + ")" : "") + ".",
+          trackingNumber: existing.trackingNumber || "", carrier: existing.carrier || "", labelCost: (Number(existing.amountCents) || 0) / 100}, 409);
+      }
     }
 
     let txn;

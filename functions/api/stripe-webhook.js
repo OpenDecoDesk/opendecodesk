@@ -107,11 +107,11 @@
 
 import { jsonResponse } from "../_lib/http.js";
 import {
-  setOrderRefunded, setOrderDisputeStatus, addShippingPayment, addOrderPayment, reduceShippingPaidForRefund, recordStripePayout,
+  setOrderRefunded, setOrderDisputeStatus, addShippingPayment, addOrderPayment, isShippingPayment, recordStripePayout,
   getOrderCheckoutState, hasProcessedStripeEvent, recordStripeEvent, recordSystemIssue,
   setCardFeeByRef
 } from "../_lib/db.js";
-import { sendStripePaymentNotification, sendRefundNotification, sendDisputeNotification } from "../_lib/email.js";
+import { sendStripePaymentNotification, sendRefundNotification, sendDisputeNotification, sendPaymentProblemNotification } from "../_lib/email.js";
 import { deliverOrderDownloads } from "../_lib/digital.js";
 
 // Stripe's webhook signature verification — pure Web Crypto, no SDK needed.
@@ -289,9 +289,10 @@ export async function onRequestPost(context){
   // replays (no duplicate emails either), and (2) payment rows carry the
   // Stripe object id as a UNIQUE externalRef, so even a crash between the
   // payment insert and recording the event can't insert the payment twice.
-  // eventConfirmedNew gates the NON-idempotent notices (the dispute emails below): they're only sent
-  // once we've confirmed this delivery isn't a replay. Payment/refund notices are already guarded by
-  // their own "row was newly inserted" flags. If the lookup is unavailable (D1 hiccup) we can't
+  // eventConfirmedNew gates the NON-idempotent notices (a dispute event without a dispute id): they're only
+  // sent once we've confirmed this delivery isn't a replay. Payment/refund notices are already guarded by
+  // their own "row was newly inserted" flags, and dispute notices by the dispute's own row (migrations/0211)
+  // moving the order's status. If the lookup is unavailable (D1 hiccup) we can't
   // confirm, so we skip those notices and return 500 at the end — Stripe retries when D1 is healthy,
   // so each notice fires exactly once (no duplicate, no miss).
   const eventId = typeof event.id === "string" ? event.id : "";
@@ -346,22 +347,39 @@ export async function onRequestPost(context){
           // (checkout.js charges the balance — items + shipping − discount −
           // payments already received — not orders.totalCents). The money is
           // recorded either way (it WAS received), but the order is only
-          // marked fully paid when the ledger covers what's owed. On a retry
-          // the payment is already recorded, the balance is 0, and it matches.
+          // marked fully paid when the ledger covers what's owed. More than the
+          // balance (a second card page paid — another tab, the back button —
+          // or the total lowered after the page opened) and any payment on a
+          // voided order are mismatches too: the customer was charged for
+          // something not owed, so the owner is told urgently to refund it.
+          // (On a retry the payment is already recorded, so nothing is inserted
+          // and nothing is flagged again.)
           const due = await getOrderCheckoutState(env.DB, orderId);
           const expected = due ? due.total : null;
-          const amountMatches = expected !== null && amountPaid !== null &&
-            Math.round(amountPaid * 100) >= Math.round(expected * 100);
-          const note = amountMatches ? "Stripe"
+          const paidCents = amountPaid === null ? null : Math.round(amountPaid * 100);
+          const dueCents = expected === null ? null : Math.round(expected * 100);
+          const problem = !due ? "the order couldn't be found"
+            : due.voided ? "the order had been voided"
+            : paidCents === null ? "Stripe didn't say how much was paid"
+            : paidCents < dueCents ? "it is less than the $" + expected.toFixed(2) + " balance due"
+            : paidCents > dueCents ? (dueCents === 0 ? "the order was already paid in full" : "the balance due was only $" + expected.toFixed(2))
+            : "";
+          const note = !problem ? "Stripe"
+            : due && due.voided ? "Stripe — PAID AFTER THE ORDER WAS VOIDED"
             : "Stripe — AMOUNT MISMATCH (balance due " + (expected === null ? "unknown" : "$" + expected.toFixed(2)) + ")";
           // Recording the payment is what marks the order paid: addOrderPayment
           // refreshes orders.paid from the ledger, so a short payment leaves
           // the order unpaid on its own.
-          if(!amountMatches) console.error("Stripe amount mismatch for", orderId, "paid", amountPaid, "expected", expected);
+          if(problem) console.error("Stripe amount mismatch for", orderId, "paid", amountPaid, "expected", expected, "-", problem);
           const feeCents = await stripeFeeCents(env, paymentRef);
           const inserted = amountPaid ? await addOrderPayment(env.DB, orderId, amountPaid, note, paymentRef, { method: "card", feeCents, receivedAt: eventTime }) : 0;
-          // Only notify on the first delivery of this payment.
-          if(inserted) await sendStripePaymentNotification(env, orderId, orgId, amountPaid);
+          // Only notify on the first delivery of this payment. A short payment just leaves a balance (the
+          // order stays unpaid and shows it); more than owed, or on a voided order, needs the owner now.
+          const needsLook = problem && due && (due.voided || paidCents > dueCents);
+          if(inserted && needsLook){
+            await recordSystemIssue(env.DB, "payment_needs_review", "order " + orderId + ": $" + amountPaid.toFixed(2) + " — " + problem);
+            await sendPaymentProblemNotification(env, orderId, orgId, amountPaid, problem);
+          }else if(inserted) await sendStripePaymentNotification(env, orderId, orgId, amountPaid);
           // Digital products (migrations/0086): paid now, so the files are granted and emailed — after the response,
           // like the fee lookup; the download page the customer lands on grants them too if this hasn't run yet.
           if(inserted && typeof deliverOrderDownloads === "function"){
@@ -395,17 +413,19 @@ export async function onRequestPost(context){
         // event payload (newer API versions don't embed charge.refunds).
         const list = await stripeGet(env, "refunds?limit=100&charge=" + encodeURIComponent(charge.id));
         if(!list || !Array.isArray(list.data)) throw new Error("Could not list refunds for " + charge.id);
+        // A refund of a shipping payment (orders.js createShippingPaymentLink) is shipping: recorded as such
+        // (no sales tax backed out of it) and taken off what's been paid toward shipping — both in the same
+        // transaction as the refund row, so a retry can't lose or repeat the second part.
+        const piId = typeof charge.payment_intent === "string" ? charge.payment_intent : (charge.payment_intent && charge.payment_intent.id);
+        const shipping = (charge.metadata || {}).type === "shipping_payment" || await isShippingPayment(env.DB, orderId, piId);
         let newRefund = false;
         for(const re of list.data){
           if(re.status === "failed" || re.status === "canceled") continue;
           const id = await addOrderPayment(env.DB, orderId, -(re.amount / 100), "Stripe refund", re.id, {
             method: "card", kind: "refund", receivedAt: new Date(re.created * 1000).toISOString(),
+            ...(shipping ? { shippingCents: re.amount, reduceShippingPaid: true } : {}),
           });
-          if(id){
-            newRefund = true;
-            const piId = typeof charge.payment_intent === "string" ? charge.payment_intent : (charge.payment_intent && charge.payment_intent.id);
-            await reduceShippingPaidForRefund(env.DB, orderId, piId, re.amount);
-          }
+          if(id) newRefund = true;
         }
         await setOrderRefunded(env.DB, orderId, new Date().toISOString());
         if(newRefund) await sendRefundNotification(env, orderId, orgId, amountRefunded);
@@ -427,8 +447,10 @@ export async function onRequestPost(context){
     const amountDisputed = dispute.amount ? dispute.amount / 100 : null;
     if(orderId && orgId){
       try{
-        await setOrderDisputeStatus(env.DB, orderId, "warning_needs_response");
-        if(eventConfirmedNew) await sendDisputeNotification(env, orderId, orgId, "warning_needs_response", dispute.reason || "", amountDisputed);
+        // Only for a dispute not seen before (migrations/0211): a late or retried "created" never puts a
+        // dispute already won or lost back to "needs response", and the urgent notice goes out once.
+        const moved = await setOrderDisputeStatus(env.DB, orderId, "warning_needs_response", dispute.id || "", false);
+        if(moved && (dispute.id || eventConfirmedNew)) await sendDisputeNotification(env, orderId, orgId, "warning_needs_response", dispute.reason || "", amountDisputed);
       }catch(err){
         console.error("markDispute D1 error for", orderId, err);
         downstreamFailed = true;
@@ -452,12 +474,16 @@ export async function onRequestPost(context){
         // dispute fee): record it as a negative ledger row, keyed by dispute id.
         if(status === "lost" && dispute.amount){
           const feeCents = (dispute.balance_transactions || []).reduce((s, bt) => s + (Number(bt.fee) || 0), 0);
+          // A lost dispute of a shipping payment is shipping money taken back (as with a refund above).
+          const piId = typeof dispute.payment_intent === "string" ? dispute.payment_intent : (dispute.payment_intent && dispute.payment_intent.id);
+          const shipping = await isShippingPayment(env.DB, orderId, piId);
           await addOrderPayment(env.DB, orderId, -(dispute.amount / 100),
             "Stripe dispute lost" + (dispute.reason ? " (" + dispute.reason + ")" : ""), dispute.id,
-            { method: "card", kind: "dispute", feeCents, receivedAt: eventTime });
+            { method: "card", kind: "dispute", feeCents, receivedAt: eventTime,
+              ...(shipping ? { shippingCents: dispute.amount, reduceShippingPaid: true } : {}) });
         }
-        await setOrderDisputeStatus(env.DB, orderId, status);
-        if(eventConfirmedNew) await sendDisputeNotification(env, orderId, orgId, status, dispute.reason || "", amountDisputed);
+        const moved = await setOrderDisputeStatus(env.DB, orderId, status, dispute.id || "", true);
+        if(moved && (dispute.id || eventConfirmedNew)) await sendDisputeNotification(env, orderId, orgId, status, dispute.reason || "", amountDisputed);
       }catch(err){
         console.error("markDispute(closed) D1 error for", orderId, err);
         downstreamFailed = true;

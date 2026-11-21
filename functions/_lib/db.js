@@ -3535,14 +3535,26 @@ export async function addOrderPayment(db, orderId, amount, note, externalRef = "
   const kind = ["payment", "refund", "dispute"].includes(opts.kind) ? opts.kind : "payment";
   // Which account the money moved through: given, or the one the method implies.
   const accountId = opts.accountId ? Number(opts.accountId) : await accountIdForMethod(db, method);
+  // A manual entry has no external reference, so the admin form's own key for this Save (opts.requestKey,
+  // migrations/0212 — unique) is what makes a double click or a retried request insert nothing.
+  const requestKey = opts.requestKey ? String(opts.requestKey).slice(0, 100) : null;
+  // opts.expectReceivedCents (settleOrderBalance): insert only while the order's payments still add up to what the
+  // caller saw when it worked out the balance — two "Mark as paid"s, or one racing a card payment, can't both book it.
+  const expect = Number.isFinite(opts.expectReceivedCents);
   const insert = db.prepare(
-    `INSERT OR IGNORE INTO order_payments (orderId, amountCents, note, receivedAt, externalRef, method, reference, feeCents, kind, accountId)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT OR IGNORE INTO order_payments (orderId, amountCents, note, receivedAt, externalRef, method, reference, feeCents, kind, accountId${requestKey ? ", requestKey" : ""})
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${requestKey ? ", ?" : ""}` +
+    (expect ? " WHERE (SELECT COALESCE(SUM(amountCents), 0) FROM order_payments WHERE orderId = ? AND kind = 'payment' AND voidedAt IS NULL) = ?" : "")
   ).bind(orderId, toCents(amount), note || "", receivedAt, externalRef || "", method,
-    String(opts.reference || "").slice(0, 100), Math.max(0, Math.round(Number(opts.feeCents) || 0)), kind, accountId);
+    String(opts.reference || "").slice(0, 100), Math.max(0, Math.round(Number(opts.feeCents) || 0)), kind, accountId,
+    ...(requestKey ? [requestKey] : []), ...(expect ? [orderId, Math.round(opts.expectReceivedCents)] : []));
   const stmts = [insert];
   // How much of a refund was shipping (migrations/0035): set on the row just inserted, and only then.
   if (opts.shippingCents > 0) stmts.push(db.prepare("UPDATE order_payments SET shippingCents=? WHERE id = last_insert_rowid() AND changes() > 0").bind(Math.round(opts.shippingCents)));
+  // A Stripe refund of a shipping payment also lowers what's been paid toward shipping (orders.shippingPaidCents)
+  // — in this same transaction and only when the refund row was new (changes() chains from the row above), so a
+  // webhook retry can neither skip it nor take it twice.
+  if (opts.shippingCents > 0 && opts.reduceShippingPaid) stmts.push(db.prepare("UPDATE orders SET shippingPaidCents = MAX(0, shippingPaidCents - ?) WHERE orderId = ? AND changes() > 0").bind(Math.round(opts.shippingCents), orderId));
   stmts.push(await paidRefreshStmt_(db, orderId));
   const results = await db.batch(stmts);
   const meta = (results && results[0] && results[0].meta) || {};
@@ -3568,15 +3580,14 @@ export async function addShippingPayment(db, orderId, amount, note, externalRef,
   ]);
 }
 
-// A Stripe refund on a shipping payment also lowers orders.shippingPaidCents
-// (only when that refund row was newly recorded — callers pass its id).
-export async function reduceShippingPaidForRefund(db, orderId, paymentIntentId, refundCents) {
-  const ship = await db.prepare("SELECT 1 AS x FROM order_payments WHERE orderId = ? AND externalRef = ? AND note LIKE 'Shipping%'")
-    .bind(orderId, paymentIntentId || "").first();
-  if (!ship) return false;
-  await db.prepare("UPDATE orders SET shippingPaidCents = MAX(0, shippingPaidCents - ?) WHERE orderId = ?")
-    .bind(Math.max(0, Math.round(Number(refundCents) || 0)), orderId).run();
-  return true;
+// Whether a Stripe PaymentIntent was a shipping payment (createShippingPaymentLink → addShippingPayment), so a
+// refund or lost dispute of it is recorded as shipping: untaxed (migrations/0035) and taken off
+// orders.shippingPaidCents (addOrderPayment's reduceShippingPaid, in the same transaction as the refund row).
+export async function isShippingPayment(db, orderId, paymentIntentId) {
+  if (!paymentIntentId) return false;
+  const ship = await db.prepare("SELECT 1 AS x FROM order_payments WHERE orderId = ? AND externalRef = ? AND kind = 'payment' AND note LIKE 'Shipping%'")
+    .bind(orderId, paymentIntentId).first();
+  return !!ship;
 }
 
 // ---- Stripe webhook idempotency ----------------------------------------
@@ -3652,15 +3663,19 @@ export async function refreshPaidStatus(db, orderId) {
 // books show money received, not just a flag), then refreshes the paid cache.
 // For an order that owes $0 it just sets the flag. Returns the amount recorded.
 // `at`: when it was paid (the admin's chosen time, 2026-10) — the payment's date and the order's paid date.
-export async function settleOrderBalance(db, orderId, note, at = null) {
+// The balance is booked only while the payments still add up to what was read here (expectReceivedCents), so a
+// second "Mark as paid" — a double click, another admin, or one racing a card payment's webhook — records nothing
+// more; `requestKey` (the admin form's key for this Save, migrations/0212) stops a retried request too.
+export async function settleOrderBalance(db, orderId, note, at = null, requestKey = null) {
   const state = await refreshPaidStatus(db, orderId);
   if (!state) return 0;
   const balance = state.owedCents - state.receivedCents;
   if (balance > 0) {
     const o = await db.prepare("SELECT paymentMethod FROM orders WHERE orderId=?").bind(orderId).first();
-    await addOrderPayment(db, orderId, fromCents(balance), note || "Marked paid", "",
-      { method: methodFromPaymentMethod(o && o.paymentMethod), ...(at ? { receivedAt: at } : {}) });
-    return fromCents(balance);
+    const id = await addOrderPayment(db, orderId, fromCents(balance), note || "Marked paid", "",
+      { method: methodFromPaymentMethod(o && o.paymentMethod), ...(at ? { receivedAt: at } : {}),
+        expectReceivedCents: state.receivedCents, ...(requestKey ? { requestKey } : {}) });
+    return id ? fromCents(balance) : 0;
   }
   if (state.owedCents === 0) {
     await db.prepare("UPDATE orders SET paid = 1, paidForWork = 1, paidAt = COALESCE(paidAt, ?) WHERE orderId = ?")
@@ -7185,18 +7200,30 @@ export async function planBlankCatchUp(db) {
 
 // Writes the planned lines for the chosen items: a dated "consume" movement, stock down, real cost on the line.
 // Re-planned here (not trusted from the browser); already-done lines no longer qualify, so it's idempotent.
+// Each line's three writes (the movement, the stock, the line's cost) are one transaction, and each runs only while the
+// line still has no real cost — so two applies at once (a double click, two tabs) or a retry after a failure take a
+// line's blanks out of stock once, never twice. A line another apply got to first is left out of what's returned.
 export async function applyBlankCatchUp(db, itemIds) {
   const want = new Set((itemIds || []).map(Number));
   const plan = await planBlankCatchUp(db);
   const chosen = plan.lines.filter(l => want.has(l.itemId));
+  const applied = [];
+  const stillDue = "EXISTS (SELECT 1 FROM order_items WHERE id = ? AND (cogsCents IS NULL OR cogsSource = 'estimate'))";
   for (const l of chosen) {
-    await insertMovement_(db, { blankId: l.blankId, blankName: l.blankName, color: l.blankColor, size: l.blankSize, qtyDelta: -l.qty, unitCostCents: l.unitCostCents,
-      kind: "consume", orderId: l.orderId, itemId: l.itemId, note: "Used for order " + l.orderId + " (catch-up)", occurredAt: l.useDate });
-    await db.prepare("UPDATE blank_sizes SET quantity = quantity - ? WHERE blankId=? AND color=? AND size=?").bind(l.qty, l.blankId, l.blankColor || "", l.blankSize).run();
-    await db.prepare("UPDATE order_items SET cogsCents = ?, cogsSource = 'consumed' WHERE id = ? AND (cogsCents IS NULL OR cogsSource = 'estimate')")
-      .bind(l.costCents, l.itemId).run();
+    const now = new Date().toISOString();
+    const r = await db.batch([
+      db.prepare(
+        `INSERT INTO inventory_movements (blankId, blankName, color, size, qtyDelta, unitCostCents, kind, orderId, itemId, vendor, vendorRef, note, occurredAt, createdAt, vendorChargedTax, accountId, paidPersonally, receiptKey, receiptName)
+         SELECT ?, ?, ?, ?, ?, ?, 'consume', ?, ?, '', '', ?, ?, ?, 0, NULL, 0, '', '' WHERE ${stillDue}`
+      ).bind(Number(l.blankId), l.blankName || await blankName_(db, l.blankId), l.blankColor || "", l.blankSize || "", -Math.trunc(l.qty), Math.max(0, Math.round(Number(l.unitCostCents) || 0)),
+        l.orderId, l.itemId, ("Used for order " + l.orderId + " (catch-up)").slice(0, 300), l.useDate || now, now, l.itemId),
+      db.prepare(`UPDATE blank_sizes SET quantity = quantity - ? WHERE blankId=? AND color=? AND size=? AND ${stillDue}`).bind(l.qty, l.blankId, l.blankColor || "", l.blankSize, l.itemId),
+      // Last: claims the line (it no longer qualifies once this has run).
+      db.prepare("UPDATE order_items SET cogsCents = ?, cogsSource = 'consumed' WHERE id = ? AND (cogsCents IS NULL OR cogsSource = 'estimate')").bind(l.costCents, l.itemId),
+    ]);
+    if (Number(r && r[2] && r[2].meta && r[2].meta.changes) > 0) applied.push(l);
   }
-  return { applied: chosen, totalUnits: chosen.reduce((t, l) => t + l.qty, 0), totalCents: chosen.reduce((t, l) => t + l.costCents, 0) };
+  return { applied, totalUnits: applied.reduce((t, l) => t + l.qty, 0), totalCents: applied.reduce((t, l) => t + l.costCents, 0) };
 }
 
 // ---- Catch-up: use transfers for orders that never took them out of stock ----
@@ -7314,20 +7341,34 @@ export async function planTransferCatchUp(db, itemIds = null, pick = null) {
 // Writes a plan made for exactly the chosen lines (planTransferCatchUp(db, itemIds), re-planned here, never trusted from
 // the browser): a dated "consume" per transfer use, its cost added to the line, the later uses re-costed, and each
 // transfer's stock and average set from the replay. Lines already done no longer qualify, so it's idempotent.
+// It is one transaction, and every write in it runs only while what the plan saw still holds, so applying the same
+// plan twice (a double click, two tabs, a retry) changes nothing the second time:
+//   • a line's cost is added only while the line has no live use yet, and its k-th use is written only while it has
+//     exactly k — the first apply writes them all, a second finds them there and writes none;
+//   • a later use is re-costed (and its line's cost moved by the difference) only while it still has its old cost;
+//   • each transfer's stock is worked out from its history inside the transaction, not set to the figure the plan
+//     computed, so a sheet received or a use recorded between planning and applying isn't wiped out.
 export async function applyTransferCatchUp(db, plan) {
-  const now = new Date().toISOString(), stmts = [];
+  const now = new Date().toISOString(), stmts = [], claims = [];
+  const liveUses = "(SELECT COUNT(*) FROM transfer_movements WHERE itemId = ? AND kind = 'consume' AND voidedAt IS NULL)";
   for (const l of plan.lines) {
-    for (const u of l.uses) stmts.push(transferMovementStmt_(db, { transferId: u.transferId, transferName: u.name, qtyDelta: -u.qty, unitCostCents: u.unitCostCents,
-      kind: "consume", orderId: l.orderId, itemId: l.itemId, note: "Used for order " + l.orderId + " (catch-up)", occurredAt: l.useDate }));
-    stmts.push(db.prepare("UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ?, cogsSource = 'consumed' WHERE id = ?").bind(l.costCents, l.itemId));
+    claims.push(stmts.length);
+    stmts.push(db.prepare(`UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ?, cogsSource = 'consumed' WHERE id = ? AND ${liveUses} = 0`).bind(l.costCents, l.itemId, l.itemId));
+    l.uses.forEach((u, k) => stmts.push(transferMovementStmt_(db, { transferId: u.transferId, transferName: u.name, qtyDelta: -u.qty, unitCostCents: u.unitCostCents,
+      kind: "consume", orderId: l.orderId, itemId: l.itemId, note: "Used for order " + l.orderId + " (catch-up)", occurredAt: l.useDate },
+      { sql: `${liveUses} = ?`, binds: [l.itemId, k] })));
   }
   for (const c of plan.recost) {
-    stmts.push(db.prepare("UPDATE transfer_movements SET unitCostCents = ? WHERE id = ? AND voidedAt IS NULL").bind(c.newUnit, c.movementId));
-    if (c.kind === "consume" && c.itemId) stmts.push(db.prepare("UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ? WHERE id = ?").bind((c.newUnit - c.oldUnit) * c.qty, c.itemId));
+    if (c.kind === "consume" && c.itemId) stmts.push(db.prepare("UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ? WHERE id = ? AND EXISTS (SELECT 1 FROM transfer_movements WHERE id = ? AND unitCostCents = ? AND voidedAt IS NULL)")
+      .bind((c.newUnit - c.oldUnit) * c.qty, c.itemId, c.movementId, c.oldUnit));
+    stmts.push(db.prepare("UPDATE transfer_movements SET unitCostCents = ? WHERE id = ? AND voidedAt IS NULL AND unitCostCents = ?").bind(c.newUnit, c.movementId, c.oldUnit));
   }
-  for (const t of plan.transfers) stmts.push(db.prepare("UPDATE transfers SET quantity = ?, purchasePriceCents = ?, updatedAt = ? WHERE id = ?").bind(t.qtyAfter, t.avgCents, now, t.transferId));
-  if (stmts.length) await db.batch(stmts);
-  return { applied: plan.lines.length, totalUnits: plan.totalUnits, totalCents: plan.totalCents, recostLines: plan.recostLines, recostCents: plan.recostCents };
+  for (const t of plan.transfers) stmts.push(db.prepare("UPDATE transfers SET quantity = (SELECT COALESCE(SUM(qtyDelta), 0) FROM transfer_movements WHERE transferId = ? AND voidedAt IS NULL), purchasePriceCents = ?, updatedAt = ? WHERE id = ?")
+    .bind(t.transferId, t.avgCents, now, t.transferId));
+  const r = stmts.length ? await db.batch(stmts) : [];
+  const done = plan.lines.filter((l, i) => Number(r[claims[i]] && r[claims[i]].meta && r[claims[i]].meta.changes) > 0);
+  return { applied: done.length, totalUnits: done.reduce((a, l) => a + l.uses.reduce((b, u) => b + u.qty, 0), 0), totalCents: done.reduce((a, l) => a + l.costCents, 0),
+    recostLines: plan.recostLines, recostCents: plan.recostCents };
 }
 
 export async function getBlankMovements(db, blankId) {
@@ -7679,16 +7720,17 @@ async function transferName_(db, id) {
   return t ? (t.name || "") : "";
 }
 
-function transferMovementStmt_(db, m) {
+// `guard` ({ sql, binds }, optional): the row is written only while that condition holds (applyTransferCatchUp).
+function transferMovementStmt_(db, m, guard = null) {
   const now = new Date().toISOString();
   return db.prepare(
     `INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, orderId, itemId, vendor, vendorRef, note, pctOfSheet, occurredAt, createdAt, accountId, paidPersonally, receiptKey, receiptName, receiptGroup)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     ${guard ? "SELECT" : "VALUES ("} ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${guard ? " WHERE " + guard.sql : ")"}`
   ).bind(Number(m.transferId), m.transferName || "", Math.trunc(m.qtyDelta), Math.max(0, Math.round(Number(m.unitCostCents) || 0)),
     m.kind, m.orderId || null, m.itemId || null, String(m.vendor || "").slice(0, 100), String(m.vendorRef || "").slice(0, 100),
     String(m.note || "").slice(0, 300), m.pctOfSheet == null ? null : Number(m.pctOfSheet), m.occurredAt || now, now,
     m.accountId ? Number(m.accountId) : null, m.paidPersonally ? 1 : 0, String(m.receiptKey || "").slice(0, 300), String(m.receiptName || "").slice(0, 200),
-    m.receiptGroup ? String(m.receiptGroup).slice(0, 64) : null);
+    m.receiptGroup ? String(m.receiptGroup).slice(0, 64) : null, ...(guard ? guard.binds : []));
 }
 
 // How a transfer sheet's cost divides: each row gets its own percentage of the sheet, and the two parts
@@ -9983,9 +10025,27 @@ export async function setOrderRefunded(db, orderId, refundedAt) {
     .bind(refundedAt || new Date().toISOString(), orderId).run();
 }
 
-export async function setOrderDisputeStatus(db, orderId, status) {
-  await db.prepare("UPDATE orders SET disputeStatus=? WHERE orderId=?")
-    .bind(status, orderId).run();
+// The order's dispute status from a Stripe dispute event. Stripe doesn't promise the order of its events and
+// retries a failed one for days, so with the dispute's id (migrations/0211) a status only moves forward: an
+// opening event ("created", final=false) is recorded only for a dispute not seen before — never over one already
+// won or lost — and a closing one (final=true) only when it changes the outcome. The dispute row and the order's
+// status are one transaction. Returns true when the order's status changed (so the owner is told once), false
+// for a repeated or out-of-date event. Without an id it just sets the status, as before.
+export async function setOrderDisputeStatus(db, orderId, status, disputeId = "", final = false) {
+  if (!disputeId) {
+    await db.prepare("UPDATE orders SET disputeStatus=? WHERE orderId=?").bind(status, orderId).run();
+    return true;
+  }
+  const now = new Date().toISOString();
+  const record = final
+    ? db.prepare(`INSERT INTO order_disputes (disputeId, orderId, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(disputeId) DO UPDATE SET status = excluded.status, updatedAt = excluded.updatedAt WHERE order_disputes.status <> excluded.status`)
+    : db.prepare("INSERT OR IGNORE INTO order_disputes (disputeId, orderId, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)");
+  const r = await db.batch([
+    record.bind(String(disputeId), orderId, status, now, now),
+    db.prepare("UPDATE orders SET disputeStatus = ? WHERE orderId = ? AND changes() > 0").bind(status, orderId),
+  ]);
+  return Number(r && r[1] && r[1].meta && r[1].meta.changes) > 0;
 }
 
 export async function setOrderEmailTimestamp(db, orderId, field, ts) {
@@ -10352,17 +10412,20 @@ export async function cancelLineItem(db, itemId) {
   return { lateCancel };
 }
 
+// Cancels a line once: one already cancelled (a double click, a retry, a second admin) is left as it was — its
+// date, reason and month untouched — and `changed: false` tells the caller to send no second email.
 export async function cancelLineItemWithReason(db, itemId, reason, at = null) {
   const now = at || new Date().toISOString();
   const item = await db.prepare("SELECT orderId FROM order_items WHERE id=?").bind(itemId).first();
-  if (!item) return { lateCancel: false };
+  if (!item) return { lateCancel: false, changed: false };
   const order = await db.prepare("SELECT blankOrderedAt FROM orders WHERE orderId=?").bind(item.orderId).first();
   const lateCancel = !!(order && order.blankOrderedAt);
-  await db.prepare("UPDATE order_items SET cancelDate=?, cancelReason=?, lateCancel=? WHERE id=?")
+  const res = await db.prepare("UPDATE order_items SET cancelDate=?, cancelReason=?, lateCancel=? WHERE id=? AND COALESCE(cancelDate, '') = ''")
     .bind(now, reason || "", lateCancel ? 1 : 0, itemId).run();
+  if (!(res && res.meta && res.meta.changes > 0)) return { lateCancel: false, changed: false };
   await returnFinishedStock_(db, item.orderId, itemId, at);   // a piece already pulled from stock goes back (0060)
   await refreshPaidStatus(db, item.orderId);
-  return { lateCancel };
+  return { lateCancel, changed: true };
 }
 
 export async function setLineItemRefund(db, itemId, refundAmount, at = null) {
@@ -10551,6 +10614,61 @@ export async function getOrderCheckoutState(db, orderId) {
     // A rush fee still to follow (migrations/0082) doesn't stop paying the rest — it's collected afterwards.
     rushFeePending: !!row.rushFeePending,
   };
+}
+
+// ---- The Stripe card page open for an order (migrations/0210) ----------------
+// checkout.js remembers the Checkout Session it made for an order, so a second "Pay by card" (another tab,
+// the back button) reuses that page or closes it before making a new one — one order can't be paid twice
+// from two open pages — and voiding the order closes it.
+export async function getCheckoutSession(db, orderId) {
+  try {
+    const r = await db.prepare("SELECT sessionId, amountCents, expiresAt FROM checkout_sessions WHERE orderId=?").bind(orderId).first();
+    return r ? { sessionId: r.sessionId, amountCents: Number(r.amountCents) || 0, expiresAt: r.expiresAt || "" } : null;
+  } catch (e) { console.error("Could not read the card page for", orderId, e); return null; }
+}
+export async function saveCheckoutSession(db, orderId, sessionId, amountCents, expiresAt) {
+  await db.prepare(
+    `INSERT INTO checkout_sessions (orderId, sessionId, amountCents, createdAt, expiresAt) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(orderId) DO UPDATE SET sessionId = excluded.sessionId, amountCents = excluded.amountCents,
+       createdAt = excluded.createdAt, expiresAt = excluded.expiresAt`
+  ).bind(orderId, String(sessionId), Math.max(0, Math.round(Number(amountCents) || 0)), new Date().toISOString(), String(expiresAt || "")).run();
+}
+async function stripeCheckoutCall_(env, path, post) {
+  const res = await fetch("https://api.stripe.com/v1/checkout/sessions/" + path, post
+    ? { method: "POST", headers: { Authorization: "Bearer " + env.STRIPE_SECRET_KEY, "Content-Type": "application/x-www-form-urlencoded" }, body: "" }
+    : { headers: { Authorization: "Bearer " + env.STRIPE_SECRET_KEY } });
+  return res.json();
+}
+// The order's last card page as Stripe sees it now: { state: "none" (never made, or it has closed by itself),
+// "open" (still payable — with its url, amountCents, successUrl), "closed", "paid" (paid; the webhook may not
+// have landed yet) or "unknown" (Stripe couldn't be asked) }.
+export async function checkoutSessionState(env, orderId) {
+  const s = env && env.DB ? await getCheckoutSession(env.DB, orderId) : null;
+  if (!s || !s.sessionId || !(Date.parse(s.expiresAt) > Date.now())) return { state: "none" };
+  if (!env.STRIPE_SECRET_KEY) return { state: "unknown", sessionId: s.sessionId };
+  try {
+    const cs = await stripeCheckoutCall_(env, encodeURIComponent(s.sessionId), false);
+    if (cs && cs.status === "open") return { state: "open", sessionId: s.sessionId, url: cs.url || "", amountCents: Number(cs.amount_total) || 0, successUrl: cs.success_url || "" };
+    if (cs && cs.status === "complete") return { state: "paid", sessionId: s.sessionId };
+    if (cs && cs.status === "expired") return { state: "closed", sessionId: s.sessionId };
+    if (cs && cs.error && cs.error.code === "resource_missing") return { state: "none" };
+    return { state: "unknown", sessionId: s.sessionId };
+  } catch (e) { console.error("Could not read the card page for", orderId, e); return { state: "unknown", sessionId: s.sessionId }; }
+}
+// Closes the order's card page so it can't be paid any more. Returns "closed" (nothing left open — or there
+// was none), "paid" (too late: it was just paid) or "unknown" (Stripe couldn't be asked; it may still be open).
+export async function expireCheckoutSession(env, orderId) {
+  const now = await checkoutSessionState(env, orderId);
+  if (now.state === "none" || now.state === "closed") return "closed";
+  if (now.state !== "open") return now.state;
+  try {
+    const cs = await stripeCheckoutCall_(env, encodeURIComponent(now.sessionId) + "/expire", true);
+    if (cs && cs.status === "expired") return "closed";
+    if (cs && cs.status === "complete") return "paid";
+    // Refused (it may have just been paid or closed): ask what it is now.
+    const after = await checkoutSessionState(env, orderId);
+    return after.state === "none" || after.state === "closed" ? "closed" : after.state === "paid" ? "paid" : "unknown";
+  } catch (e) { console.error("Could not close the card page for", orderId, e); return "unknown"; }
 }
 
 export async function getOrderTotal(db, orderId) {
@@ -12580,6 +12698,7 @@ export async function clearFailedAdminLogins(db) {
 export const SYSTEM_ISSUE_LABELS = {
   email_failed: "Emails that couldn't be sent at all",
   webhook_failed: "Stripe webhook updates that failed (Stripe retries these)",
+  payment_needs_review: "Card payments that need a look — more than the order owed, or on a voided order (refund in Stripe if needed)",
   digest_failed: "Daily roll-ups that did not complete (the scheduled run will try again tomorrow)",
   recurring_expense_skipped: "Recurring expenses that couldn't be recorded (fix the rule on Expenses — it's recorded once fixed)",
 };

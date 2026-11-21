@@ -104,6 +104,31 @@ function copyState(dataDir, dest) {
 }
 const stamp = () => new Date().toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
 
+// The copies made before an update are whole copies of the data (database and every stored file), one per
+// update, so only the newest KEEP_UPDATE_COPIES are kept: older ones are deleted after a start that
+// updated the database without trouble. Only folders named before-update-<stamp> directly inside
+// backups/ are ever touched — never the data itself (state/), the owner's own backups, or the copies
+// made before a restore (before-restore-…), which are the only copy of what was there.
+const KEEP_UPDATE_COPIES = 3;
+const UPDATE_COPY_RE = /^before-update-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
+function pruneUpdateCopies(dataDir, { keep = KEEP_UPDATE_COPIES, log = () => {} } = {}) {
+  const backups = path.join(dataDir, "backups");
+  let names;
+  try { names = fs.readdirSync(backups, { withFileTypes: true }).filter((d) => d.isDirectory() && UPDATE_COPY_RE.test(d.name)).map((d) => d.name); }
+  catch (e) { return []; }   // no backups folder yet
+  const old = names.sort().reverse().slice(Math.max(1, keep));   // the stamps sort by time; the newest is always kept
+  const state = path.resolve(statePaths(dataDir).state);
+  const removed = [];
+  for (const name of old) {
+    const dir = path.resolve(backups, name);
+    if (path.dirname(dir) !== path.resolve(backups) || dir === state) continue;
+    try { fs.rmSync(dir, { recursive: true, force: true }); removed.push(dir); }
+    catch (e) { log("Couldn't delete an old copy made before an update (" + dir + "): " + ((e && e.message) || e)); }
+  }
+  if (removed.length) log("Deleted " + removed.length + " older cop" + (removed.length === 1 ? "y" : "ies") + " made before an update (the newest " + Math.max(1, keep) + " are kept).");
+  return removed;
+}
+
 // Starts the server. Returns { url, port, mf, migrations, stop() }.
 //   dataDir       the data folder (made if missing)
 //   port          the port to try first (0 or missing: any free one); the one used is remembered
@@ -204,6 +229,8 @@ async function startServer({ dataDir, port, protect, unprotect, log = () => {}, 
   const result = await migrate(db, src);
   cfg = { ...cfg, port: used, lastMigration: latest, createdAt: cfg.createdAt || new Date().toISOString() };
   saveConfig(dataDir, cfg, secrets, { protect });
+  // The update went through: older copies made before updates can go (the newest few stay).
+  pruneUpdateCopies(dataDir, { log });
   const url = "http://localhost:" + used + "/";
   return {
     url, port: used, mf, migrations: result, fresh,
@@ -369,7 +396,7 @@ function restoreState(dataDir, from) {
   return { aside };
 }
 
-module.exports = { startServer, adminHasUsablePassword, copyState, restoreState, resetSignIn, setShippoKey, setSupplierConnections, setSmtp, setEmailOn, savedSmtpPassword, recordBackup, stamp, statePaths, IMAGES_HOST, IMAGES_BASE, desktopCsp };
+module.exports = { startServer, adminHasUsablePassword, copyState, restoreState, pruneUpdateCopies, resetSignIn, setShippoKey, setSupplierConnections, setSmtp, setEmailOn, savedSmtpPassword, recordBackup, stamp, statePaths, IMAGES_HOST, IMAGES_BASE, desktopCsp };
 
 if (require.main === module) {
   const dataDir = path.resolve(process.argv[2] || path.join(process.cwd(), "desktop-data"));

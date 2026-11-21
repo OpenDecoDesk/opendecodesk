@@ -9,8 +9,9 @@
  *     /api/* (run_worker_first), so page views cost no Worker invocation.
  *   - fetch(): /api/<name> → functions/api/<name>.js, calling onRequest<Method>(context) with the
  *     context shape Pages Functions use ({request, env, params, waitUntil, next, data}).
- *   - scheduled(): the daily roll-up, at the configured local hour (functions/_lib/schedule.js),
- *     after deleting customers' design uploads no order used (functions/api/customer-design.js).
+ *   - scheduled(): the daily roll-up, at the configured local hour (functions/_lib/schedule.js), and an
+ *     hour before it the daily housekeeping: Stripe fees still to fill in, old vendor web-service logs,
+ *     and customers' design uploads no order used (functions/api/customer-design.js).
  */
 
 import * as adminTwoFa from "../functions/api/admin-2fa.js";
@@ -36,7 +37,8 @@ import * as uploadVerify from "../functions/api/upload-verify.js";
 import * as upload from "../functions/api/upload.js";
 import * as verify from "../functions/api/verify.js";
 import { recordSystemIssue, resolveTimeZone, getDigestRun, ensureSigningSecret } from "../functions/_lib/db.js";
-import { isDigestHour, localHour, digestHour } from "../functions/_lib/schedule.js";
+import { isDigestHour, isHousekeepingHour, localHour, digestHour } from "../functions/_lib/schedule.js";
+import { pendingMigrations } from "../functions/_lib/migrationCheck.js";
 import { isDesktopEdition, desktopSuppliersOn, desktopEmailOn } from "../functions/_lib/hostConfig.js";
 import { ensureDesktopReady } from "../functions/_lib/desktop.js";
 import { fillMissingCardFees } from "../functions/_lib/stripeFees.js";
@@ -139,8 +141,35 @@ async function desktopRollUpDue_(env, when) {
   return day(new Date(last.at)) !== day(when);
 }
 
+// The daily housekeeping (the tick an hour before the roll-up's — functions/_lib/schedule.js). Each job is
+// on its own: one failing never stops the others. A failed clean-up is recorded, so the roll-up an hour
+// later reports it.
+async function runHousekeeping_(env) {
+  const out = {};
+  // Safety net: fill in Stripe fees the webhook couldn't read yet (see functions/_lib/stripeFees.js).
+  try {
+    const f = await fillMissingCardFees(env);
+    out.cardFees = f;
+    if (f.filled) console.log("Filled Stripe fees on", f.filled, "of", f.checked, "card payments");
+  } catch (e) { console.error("Filling missing Stripe fees failed:", e); out.cardFees = { error: String(e && e.message) }; }
+  // Vendor web-service logs (vendorLog.js) older than 30 days: their payloads and rows go.
+  try {
+    const v = await cleanUpVendorApiLog(env);
+    out.vendorLog = v;
+    if (v.deleted) console.log("Deleted", v.deleted, "vendor API log entr" + (v.deleted === 1 ? "y" : "ies"), "older than 30 days");
+  } catch (e) { console.error("Cleaning up the vendor API log failed:", e); out.vendorLog = { error: String(e && e.message) }; await recordSystemIssue(env.DB, "cleanup_failed", "Vendor API log: " + (e && e.message)); }
+  // Customers' design uploads that never made it onto an order are deleted after 48 hours (a capped number a run).
+  try {
+    const c = await customerDesign.cleanUpCustomerDesigns(env);
+    out.customerDesigns = c;
+    if (c.deleted) console.log("Deleted", c.deleted, "customer design upload(s) no order used");
+  } catch (e) { console.error("Cleaning up customer design uploads failed:", e); out.customerDesigns = { error: String(e && e.message) }; await recordSystemIssue(env.DB, "cleanup_failed", "Customer design uploads: " + (e && e.message)); }
+  return out;
+}
+
 // The scheduled roll-up. The cron wakes the Worker every hour (UTC); only the tick that lands on the
-// configured local hour runs it, so it goes out once a day at the same local time all year. The
+// configured local hour runs it, so it goes out once a day at the same local time all year (and the
+// tick an hour before runs the housekeeping above). The
 // time zone is the install's one zone: Global settings → Region, else TIMEZONE, else UTC.
 export async function handleScheduled(event, env) {
   env = await withSigningSecret(env);
@@ -183,22 +212,17 @@ export async function handleScheduled(event, env) {
     return out;
   }
   const when = new Date(event && event.scheduledTime ? event.scheduledTime : Date.now());
-  if (!isDigestHour(env, when, await resolveTimeZone(env))) return { ran: false, reason: "not the digest hour" };
-  // Safety net: fill in Stripe fees the webhook couldn't read yet (see functions/_lib/stripeFees.js).
+  const timeZone = await resolveTimeZone(env);
+  // An hour before the roll-up: the housekeeping, on its own tick, so its requests (up to 20 to Stripe, the
+  // clean-ups' storage and database calls) never come out of the roll-up's per-run allowance.
+  if (isHousekeepingHour(env, when, timeZone)) return { ran: true, housekeeping: await runHousekeeping_(env) };
+  if (!isDigestHour(env, when, timeZone)) return { ran: false, reason: "not the digest hour" };
+  // Database updates this code needs that the database hasn't had (code deployed without its migrations, or one
+  // that failed partway — functions/_lib/migrationCheck.js): reported in this roll-up, every day until applied.
   try {
-    const f = await fillMissingCardFees(env);
-    if (f.filled) console.log("Filled Stripe fees on", f.filled, "of", f.checked, "card payments");
-  } catch (e) { console.error("Filling missing Stripe fees failed (continuing with the roll-up):", e); }
-  // Vendor web-service logs (vendorLog.js) older than 30 days: their payloads and rows go.
-  try {
-    const v = await cleanUpVendorApiLog(env);
-    if (v.deleted) console.log("Deleted", v.deleted, "vendor API log entr" + (v.deleted === 1 ? "y" : "ies"), "older than 30 days");
-  } catch (e) { console.error("Cleaning up the vendor API log failed (continuing with the roll-up):", e); await recordSystemIssue(env.DB, "cleanup_failed", "Vendor API log: " + (e && e.message)); }
-  // Customers' design uploads that never made it onto an order are deleted after 48 hours.
-  try {
-    const c = await customerDesign.cleanUpCustomerDesigns(env);
-    if (c.deleted) console.log("Deleted", c.deleted, "customer design upload(s) no order used");
-  } catch (e) { console.error("Cleaning up customer design uploads failed (continuing with the roll-up):", e); }
+    const pending = await pendingMigrations(env.DB);
+    if (pending && pending.length) await recordSystemIssue(env.DB, "migrations_pending", pending.length + " not applied, starting with " + pending[0]);
+  } catch (e) { console.error("Checking for database updates failed (continuing with the roll-up):", e); }
   try {
     const res = await dailyDigest.runDailyDigest(env, "scheduled");
     const body = await res.clone().json().catch(() => ({}));

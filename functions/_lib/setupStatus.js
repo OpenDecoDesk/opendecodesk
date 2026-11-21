@@ -7,7 +7,8 @@
  * id leaves this function, and the provider names it mentions ("Resend") are not secrets.
  *
  * setupStatus(env, settings) is pure: `env` is the Worker's environment, `settings` is what the
- * caller read from the database ({ business, salesTax, locale }). Each item is
+ * caller read from the database ({ business, salesTax, locale, …, migrations: the database updates it hasn't
+ * had, from migrationCheck.js }). Each item is
  *   { key, label, ready, level, affects, note }
  *     level:   "required" (the site doesn't work without it), "recommended" (something visible is
  *              missing), or "optional" (a service you may not want)
@@ -24,14 +25,19 @@ const MIN_AGENT_TOKEN = 32;
 
 export function setupStatus(env, settings) {
   env = env || {};
-  const { business = {}, salesTax = {}, locale = {}, payments = null, mailbox = null } = settings || {};
+  const { business = {}, salesTax = {}, locale = {}, payments = null, mailbox = null, migrations = null } = settings || {};
   const items = [];
   const add = (key, label, level, ready, affects, note) => items.push({ key, label, level, ready: !!ready, affects, note: note || "" });
+  // The database: bound, and (when the caller could tell — migrationCheck.js) with every migration this code needs.
+  // `migrations` is { pending: [names], note } or null.
+  const pending = (migrations && Array.isArray(migrations.pending)) ? migrations.pending : [];
+  const addDatabase = () => add("database", "Database", "required", !!(env.DB && typeof env.DB.prepare === "function") && !pending.length,
+    "Everything: orders, shops, products, settings.", pending.length ? (migrations.note || pending.length + " database updates haven't been applied.") : "");
   // The desktop edition (hostConfig.js isDesktopEdition, repeated so this file keeps no imports): no
   // domain, email, buckets or online services to set up — the desktop program provides the
   // database, the files and the secrets itself — so only what the person running it must fill in.
   if (String(env.EDITION || "").trim().toLowerCase() === "desktop") {
-    add("database", "Database", "required", !!(env.DB && typeof env.DB.prepare === "function"), "Everything: orders, shops, products, settings.");
+    addDatabase();
     addBusiness_(add, business, env);
     addPaymentDetails_(add, business, payments);
     addSalesTax_(add, salesTax);
@@ -44,7 +50,7 @@ export function setupStatus(env, settings) {
     "Which addresses are the admin and the shops, and the links in emails. Without it only the placeholder example.com is recognised.",
     set(root) ? "" : "ROOT_DOMAIN is not set. On a site installed with the Deploy to Cloudflare button, connect your domain under Your domain, above.");
 
-  add("database", "Database", "required", !!(env.DB && typeof env.DB.prepare === "function"), "Everything: orders, shops, products, settings.");
+  addDatabase();
 
   const signing = set(env.SIGNING_SECRET), signingFallback = set(env.LINK_SIGNING_SECRET) || set(env.QUOTE_SIGNING_SECRET) || set(env.STRIPE_SECRET_KEY);
   add("signingSecret", "Signing secret", "required", signing || signingFallback,

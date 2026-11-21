@@ -8,25 +8,33 @@ email a day.
 **How it runs.** The Worker has a cron trigger that wakes it **every hour** (`wrangler.toml`,
 `crons = ["0 * * * *"]`). Cron runs on UTC, so each hour the Worker checks whether it is now the
 roll-up's hour in **your** time zone — `DIGEST_HOUR` (default 6) in the zone set under Global
-settings → Region (else the `TIMEZONE` variable, else UTC). Only that one tick does anything; the
-other 23 do one small database read and stop. This keeps the roll-up at the same local hour through
-daylight-saving changes.
+settings → Region (else the `TIMEZONE` variable, else UTC). Two ticks a day do something: the
+roll-up's, and the daily housekeeping an hour before it; the other 22 do one small database read and
+stop. This keeps the roll-up at the same local hour through daylight-saving changes.
 
-**What that tick does**, in order:
+**The housekeeping tick** (an hour before the roll-up) runs on its own, so its requests never come out
+of the roll-up's allowance (Cloudflare limits how many outside requests one run can make: 50 on the
+Free plan). A clean-up that fails is recorded and reported in the roll-up an hour later.
 
-1. Deletes customers' design uploads (see [shops-and-domains.md](shops-and-domains.md#customers-own-designs))
-   that are older than 48 hours and on no order — up to 1,000 a day.
-2. Fills in Stripe fees that weren't available when a card payment was first recorded.
-3. With the Shipping feature on: checks tracking on labels waiting for pickup and orders in transit
-   (a limited number of lookups per run, oldest first; the rest wait for tomorrow). An order whose
-   label has been scanned is marked shipped and its customer is emailed; one that was delivered is
-   marked delivered. It also checks shipments of blanks you're waiting on.
-4. Collects what is new since the last roll-up: orders (not test or voided ones), payments, refunds
+- Fills in Stripe fees that weren't available when a card payment was first recorded.
+- Deletes vendor web-service logs older than 30 days.
+- Deletes customers' design uploads (see [shops-and-domains.md](shops-and-domains.md#customers-own-designs))
+  that are older than 48 hours and on no order — up to 200 a day, in one go; any more wait for the next day.
+
+**What the roll-up's tick does**, in order:
+
+1. With the Shipping feature on: checks tracking on labels waiting for pickup and orders in transit,
+   oldest first. An order whose label has been scanned is marked shipped and its customer is emailed;
+   one that was delivered is marked delivered. It also checks suppliers' shipment notices and
+   shipments of blanks you're waiting on. All of these share one limit of 40 outside requests a run
+   (each lookup, each "your order has shipped" email and each supplier call counts, with room kept
+   for the roll-up email itself); the rest wait for tomorrow.
+2. Collects what is new since the last roll-up: orders (not test or voided ones), payments, refunds
    and disputes, customers' answers to design proofs, deliveries and pickups, failed admin sign-ins,
    and problems (an email that couldn't be sent, a Stripe webhook that failed, a roll-up that
-   failed). Vendor web-service logs older than 30 days are deleted. With the Production feature on, it also lists machine maintenance that's due (never a
+   failed). With the Production feature on, it also lists machine maintenance that's due (never a
    reason to send on its own).
-5. Sends one email. If there is **nothing new**, the scheduled run sends a short "nothing new"
+3. Sends one email. If there is **nothing new**, the scheduled run sends a short "nothing new"
    email instead, so a quiet morning can't be mistaken for "it didn't run".
 
 Progress is only saved after the email is sent, so a failed send is retried the next day. If the
@@ -132,7 +140,10 @@ npm run db:migrate    # apply them
   must already exist). It is built from `schema.sql`, with every migration recorded as already
   applied — `npm run setup` does this. See [setup.md](setup.md).
 - `schema.sql` always equals "every migration applied"; a test fails if they drift apart.
-- Apply migrations **before** deploying code that needs them.
+- Apply migrations **before** deploying code that needs them. If code runs without them (a bare
+  `wrangler deploy`, or a migration that failed partway), some pages can show $0 or empty lists. The
+  app checks for this: Global settings → Setup status marks the **Database** line as not ready and
+  names the updates it hasn't had, and the morning roll-up reports it until they are applied.
 - According to `wrangler`'s own help, a migration that fails is rolled back and the ones before it
   stay applied. Back up first anyway.
 

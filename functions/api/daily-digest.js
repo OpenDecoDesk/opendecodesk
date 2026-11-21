@@ -19,6 +19,10 @@ import { checkShippedDeliveries, checkBlankShipments } from "../_lib/deliveryChe
 import { checkSupplierShipments } from "../_lib/supplierOrders.js";
 
 const SECURITY_ALERT_THRESHOLD = 5;
+// Outside requests one roll-up run may make (see runDailyDigestInner_): under the Free plan's 50 a run,
+// with room to spare for anything not counted. Of these, DIGEST_EMAIL_RESERVE are kept for the email.
+const DIGEST_REQUEST_BUDGET = 40;
+const DIGEST_EMAIL_RESERVE = 2;
 
 export async function onRequestPost({ request, env }) {
   const rl = await rateLimited(env, "daily_digest", request, 10);
@@ -60,18 +64,19 @@ async function runDailyDigestInner_(env, trigger) {
   // they'll be checked again tomorrow). Never lets a Shippo hiccup stop the
   // roll-up — anything missed is checked again tomorrow.
   //
-  // The customer-shipment and blank-shipment checks SHARE one Shippo-lookup budget
-  // (`TRACKING_LOOKUP_BUDGET`) so their combined per-invocation subrequest count (each lookup is a
-  // fetch, and each hit then does several D1 writes + maybe an email) stays well under the Workers
-  // limit — capping each independently (say 40 + 20) could sum past the Free
-  // plan's 50. Customer deliveries go first; blanks get whatever lookups are left. Both are
-  // oldest-first and idempotent, so anything skipped today is simply picked up tomorrow.
+  // Every outside request this run makes comes out of ONE budget (`TRACKING_LOOKUP_BUDGET`), so the run
+  // stays under the Workers limit on requests per invocation (50 on the Free plan): each Shippo
+  // lookup, each "your order has shipped" email a pickup sends, and each supplier call. Room for the
+  // roll-up email itself is kept back (`DIGEST_EMAIL_RESERVE`), so a busy morning can't use it up and
+  // leave the roll-up unsent. Stripe fees and the clean-ups don't run here: they have their own tick,
+  // an hour earlier (src/worker.js). Customer deliveries go first; supplier calls and then blanks get
+  // whatever is left. All are oldest-first and idempotent, so anything skipped today is picked up tomorrow.
   //
   // Features (Global settings → Features): with Shipping switched off both checks return at once
   // without a single lookup (deliveryCheck.js), so the picked-up / in-transit / awaiting-pickup
   // sections below are simply empty; with Design approval off no approval notices are ever queued.
-  const TRACKING_LOOKUP_BUDGET = 60;
-  let deliveries = { delivered: [], inTransit: [], pickedUp: [], awaitingPickup: [], checked: 0 };
+  const TRACKING_LOOKUP_BUDGET = DIGEST_REQUEST_BUDGET - DIGEST_EMAIL_RESERVE;
+  let deliveries = { delivered: [], inTransit: [], pickedUp: [], awaitingPickup: [], checked: 0, requests: null };
   try { deliveries = await checkShippedDeliveries(env, { limit: TRACKING_LOOKUP_BUDGET }); }
   catch (e) { console.error("Delivery check failed — sending the roll-up without it:", e); }
   // Poll blank (garment) shipments with the remaining budget (migrations/0039): stores scan history
@@ -80,13 +85,15 @@ async function runDailyDigestInner_(env, trigger) {
   // First, orders placed with a supplier from Blanks to Order (migrations/0072): its shipment notices turn into
   // blank shipments (one supplier call per order, from the same budget, at most 10), so the Shippo check below
   // follows them the same morning.
-  let afterDeliveries = Math.max(0, TRACKING_LOOKUP_BUDGET - (deliveries.checked || 0));
+  // (A failed check spent an unknown share: whatever it may have used, nothing is left for the others.)
+  let afterDeliveries = Math.max(0, TRACKING_LOOKUP_BUDGET - (deliveries.requests != null ? deliveries.requests : TRACKING_LOOKUP_BUDGET));
   // (Not in the desktop program while supplier connections are off there: nothing goes to suppliers —
   // hostConfig.js desktopSuppliersOn, repeated so this file needs no other import.)
   const suppliersOff = String(env.EDITION || "").trim().toLowerCase() === "desktop" && String(env.DESKTOP_SUPPLIERS || "") !== "on";
   if (afterDeliveries > 0 && !suppliersOff) {
-    try { const r = await checkSupplierShipments(env, { limit: Math.min(10, afterDeliveries) }); afterDeliveries -= (r.checked || 0) + (r.errors || []).length; }
-    catch (e) { console.error("Supplier-shipment check failed — sending the roll-up without it:", e); }
+    const supplierLimit = Math.min(10, afterDeliveries);
+    try { const r = await checkSupplierShipments(env, { limit: supplierLimit }); afterDeliveries -= (r.checked || 0) + (r.errors || []).length; }
+    catch (e) { afterDeliveries -= supplierLimit; console.error("Supplier-shipment check failed — sending the roll-up without it:", e); }
   }
   const blankBudget = Math.max(0, afterDeliveries);
   if (blankBudget > 0) {

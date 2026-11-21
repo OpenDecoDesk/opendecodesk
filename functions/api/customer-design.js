@@ -127,24 +127,27 @@ export async function onRequestGet() {
   return fail("Use POST for this endpoint.", 405);
 }
 
-// The daily clean-up (src/worker.js): uploads older than 48 hours that no order line points to are
-// deleted — the file and the row. Only keys under order-files/pending/, at most 1,000 a run.
-export async function cleanUpCustomerDesigns(env, now = Date.now()) {
+// The daily clean-up (src/worker.js, on the hour before the roll-up): uploads older than 48 hours that no
+// order line points to are deleted — the file and the row. Only keys under order-files/pending/, at most
+// CUSTOMER_DESIGN_CLEANUP_LIMIT a run, in bulk: one storage call for the files and one query for the rows,
+// so a backlog (or a flood of abandoned uploads) can't use up the run's request allowance. Anything left
+// over goes on the next day's run.
+export const CUSTOMER_DESIGN_CLEANUP_LIMIT = 200;
+export async function cleanUpCustomerDesigns(env, now = Date.now(), { limit = CUSTOMER_DESIGN_CLEANUP_LIMIT } = {}) {
   if (!env.DB) return { deleted: 0 };
   const before = new Date(now - CUSTOMER_DESIGN_KEEP_HOURS * 3600 * 1000).toISOString();
   let results;
   try {
     ({ results } = await env.DB.prepare(
       `SELECT u.id, u.fileKey FROM customer_design_uploads u
-       WHERE u.createdAt < ? AND NOT EXISTS (SELECT 1 FROM order_item_files f WHERE f.fileKey = u.fileKey)
-       ORDER BY u.createdAt LIMIT 1000`).bind(before).all());
+       WHERE u.createdAt < ? AND u.fileKey LIKE 'order-files/pending/%'
+         AND NOT EXISTS (SELECT 1 FROM order_item_files f WHERE f.fileKey = u.fileKey)
+       ORDER BY u.createdAt LIMIT ?`).bind(before, Math.max(1, Math.min(1000, Number(limit) || CUSTOMER_DESIGN_CLEANUP_LIMIT))).all());
   } catch (e) { if (/no such table/i.test(String(e && e.message))) return { deleted: 0 }; throw e; }   // before migrations/0054
-  let deleted = 0;
-  for (const r of results) {
-    if (!/^order-files\/pending\/[a-f0-9]{32}\.(png|jpg|webp)$/.test(String(r.fileKey))) continue;
-    if (env.DESIGNS) await env.DESIGNS.delete(r.fileKey);
-    await env.DB.prepare("DELETE FROM customer_design_uploads WHERE id=?").bind(r.id).run();
-    deleted++;
-  }
-  return { deleted };
+  const stale = (results || []).filter(r => /^order-files\/pending\/[a-f0-9]{32}\.(png|jpg|webp)$/.test(String(r.fileKey)));
+  if (!stale.length) return { deleted: 0 };
+  // Files first (R2 takes up to 1,000 keys in one call): if that fails, the rows stay and the next run tries again.
+  if (env.DESIGNS) await env.DESIGNS.delete(stale.map(r => r.fileKey));
+  await env.DB.prepare("DELETE FROM customer_design_uploads WHERE id IN (SELECT value FROM json_each(?))").bind(JSON.stringify(stale.map(r => r.id))).run();
+  return { deleted: stale.length };
 }

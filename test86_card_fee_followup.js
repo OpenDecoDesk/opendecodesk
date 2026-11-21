@@ -59,6 +59,7 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
   const hook = read("functions/api/stripe-webhook.js"), w = read("src/worker.js");
   console.log("the webhook retries the fee after responding (waitUntil):", /context\.waitUntil\(fillFeeLater_\(env, paymentRef\)\)/.test(hook) && /setCardFeeByRef\(env\.DB, paymentIntentId, fee\)/.test(hook));
   console.log("it only retries when the first read gave 0:", /inserted && feeCents === 0/.test(hook));
-  // (The cloud path's roll-up is the last call in handleScheduled; the desktop program's, earlier, has no Stripe.)
-  console.log("the scheduled run fills missing fees before the roll-up:", w.indexOf("fillMissingCardFees(env)") > 0 && w.indexOf("fillMissingCardFees(env)") < w.lastIndexOf("runDailyDigest(env"));
+  // (The daily housekeeping, an hour before the roll-up on its own tick — test84 runs it; the desktop program has no Stripe.)
+  const hk = w.slice(w.indexOf("async function runHousekeeping_("), w.indexOf("export async function handleScheduled("));
+  console.log("the scheduled housekeeping fills missing fees, an hour before the roll-up:", /fillMissingCardFees\(env\)/.test(hk) && /isHousekeepingHour\(env, when, timeZone\)\) return \{ ran: true, housekeeping: await runHousekeeping_\(env\) \}/.test(w));
 })().catch((e) => { console.log("test86 crashed:", false); console.error(e); process.exit(1); });

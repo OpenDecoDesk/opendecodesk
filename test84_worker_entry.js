@@ -106,4 +106,24 @@ const path = require("path");
     const notNy = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T10:00:00Z") }, { DB, TIMEZONE: "America/New_York" });
     console.log("a time zone saved in Region beats TIMEZONE:", tky.ran === true && notNy.ran === false);
   }
+
+  console.log("\n=== scheduled(): the housekeeping runs on its own tick, an hour before the roll-up ===");
+  {
+    console.log("the housekeeping hour is the one before the roll-up's, wrapping past midnight:",
+      sch.isHousekeepingHour({}, new Date("2026-07-15T05:00:00Z")) === true && sch.isHousekeepingHour({}, new Date("2026-07-15T06:00:00Z")) === false
+      && sch.isHousekeepingHour({ DIGEST_HOUR: "0" }, new Date("2026-07-15T23:00:00Z")) === true
+      && sch.isHousekeepingHour({ TIMEZONE: "America/New_York" }, new Date("2026-07-15T09:00:00Z")) === true);
+    const { makePlatformDb } = require("./testlib/platform-db");
+    const DB = await makePlatformDb();
+    const hk = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T05:00:00Z") }, { DB });
+    const digestRun = DB.q("SELECT count(*) AS value FROM system_issues WHERE kind = 'digest_failed'");
+    console.log("that tick runs the housekeeping and not the roll-up:", hk.ran === true && !!hk.housekeeping && "customerDesigns" in hk.housekeeping
+      && "cardFees" in hk.housekeeping && "vendorLog" in hk.housekeeping && digestRun[0].value === 0);
+    const src = fs.readFileSync(path.join(__dirname, "src/worker.js"), "utf8");
+    const hkFn = src.slice(src.indexOf("async function runHousekeeping_("), src.indexOf("export async function handleScheduled("));
+    const cloudTick = src.slice(src.indexOf("const when = new Date(event"));
+    console.log("Stripe fees and the clean-ups are in the housekeeping, not the roll-up's tick:",
+      /fillMissingCardFees\(env\)/.test(hkFn) && /cleanUpCustomerDesigns\(env\)/.test(hkFn) && /cleanUpVendorApiLog\(env\)/.test(hkFn)
+      && !/fillMissingCardFees|cleanUpCustomerDesigns/.test(cloudTick));
+  }
 })().catch((e) => { console.log("test84 crashed:", false); console.error(e); process.exit(1); });

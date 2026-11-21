@@ -161,6 +161,28 @@ const iso = (daysAgo, h = 12) => { const d = new Date(Date.now() - daysAgo * 864
     console.log("manufactured needs both the design approved and the blank received:",
       /design isn't approved/.test(L.stagePrereqError({ blankReceivedAt: "x" }, "manufactured")) && /blank hasn't been received/.test(L.stagePrereqError({ designApprovedAt: "x" }, "manufactured")));
 
+    console.log("\n=== The request budget: lookups AND shipped emails count ===");
+    {
+      for (let i = 1; i <= 6; i++) {
+        await order("BUD" + i, { contact: "bud" + i + "@example.com" });
+        await L.recordShippingLabel(d1, { orderId: "BUD" + i, shippoTransactionId: "txb" + i, carrier: "USPS", service: "Ground Advantage", amount: 6.25, trackingNumber: "94009" + i, labelUrl: "" });
+        tracks["94009" + i] = { tracking_status: { status: "TRANSIT", status_date: iso(1) }, tracking_history: [{ status: "TRANSIT", status_date: iso(1) }] };
+      }
+      const calls = () => lookups.length + mail.length;
+      const before = calls();
+      r = await L.checkShippedDeliveries(env(d1), { limit: 7 });
+      const used = calls() - before;
+      console.log("a run never makes more outside requests than its limit, counting each shipped email:", used <= 7 && r.requests === used && r.pickedUp.length === 3);
+      const left = ["BUD1", "BUD2", "BUD3", "BUD4", "BUD5", "BUD6"].filter(id => shippedAt(id) === null).length;
+      console.log("…the rest wait for the next run:", left === 3);
+      r = await L.checkShippedDeliveries(env(d1), { limit: 7 });
+      console.log("…which picks them up:", ["BUD1", "BUD2", "BUD3", "BUD4", "BUD5", "BUD6"].every(id => shippedAt(id) !== null));
+      const dg = read("functions/api/daily-digest.js");
+      const budget = Number((dg.match(/const DIGEST_REQUEST_BUDGET = (\d+);/) || [])[1]), reserve = Number((dg.match(/const DIGEST_EMAIL_RESERVE = (\d+);/) || [])[1]);
+      console.log("the roll-up's budget stays under the Free plan's 50 a run and keeps room for its own email:", budget > 0 && budget < 50 && reserve >= 1
+        && /TRACKING_LOOKUP_BUDGET = DIGEST_REQUEST_BUDGET - DIGEST_EMAIL_RESERVE/.test(dg) && /deliveries\.requests/.test(dg));
+    }
+
     console.log("\n=== The roll-up ===");
     mail.length = 0;
     const pu = [{ orderId: "A1", orgId: "prime", customerName: "Ann", carrier: "USPS", tracking: "9400111", shippedAtLabel: "Oct 1", customerEmailed: true }];

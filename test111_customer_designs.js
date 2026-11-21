@@ -64,7 +64,9 @@ const webpLossless = (w, h) => { const v = (w - 1) | ((h - 1) << 14); return rif
 const webpExtended = (w, h) => riff("VP8X", [0x10, 0, 0, 0, ...le24(w - 1), ...le24(h - 1), ...pad(10)]);
 
 // A fake R2 bucket.
-const bucket = () => { const m = new Map(); return { m, put: async (k, b, o) => { m.set(k, { b, o }); }, get: async (k) => m.get(k) || null, delete: async (k) => { m.delete(k); } }; };
+// delete() takes one key or a list of them, as R2's does; `deletes` counts the calls.
+const bucket = () => { const m = new Map(); const o = { m, deletes: 0, put: async (k, b, opt) => { m.set(k, { b, o: opt }); }, get: async (k) => m.get(k) || null,
+  delete: async (k) => { o.deletes++; for (const x of Array.isArray(k) ? k : [k]) m.delete(x); } }; return o; };
 
 (async () => {
   console.log("=== Reading the size from the header ===");
@@ -369,6 +371,19 @@ const bucket = () => { const m = new Map(); return { m, put: async (k, b, o) => 
   const left = d1.q("SELECT id FROM customer_design_uploads").map(x => x.id);
   ok("it deletes only stale uploads no order points to (the file and the row)", c.deleted === 1 && !left.includes(up2) && !R2.m.has(key2) && R2.m.has(keyOf(up1)) && R2.m.size === before - 1);
   ok("…keeping a stale one an order uses, recent ones, and anything outside order-files/pending/", left.includes(up1) && left.includes(upHat) && left.includes(upCap) && left.includes("e".repeat(32)));
+  {
+    // A backlog: deleted in bulk (one storage call, one query), at most `limit` a run; the rest go next run.
+    const ins = (id, key) => d1._raw.run("INSERT INTO customer_design_uploads (id, orgId, productId, fileKey, fileName, fileExt, contentType, bytes, width, height, createdAt) VALUES (?, 'league', 'x', ?, 'x', 'png', 'image/png', 1, 1, 1, ?)", [id, key, stale]);
+    const ids = Array.from({ length: 5 }, (_, i) => String(i + 1).padStart(32, "f"));
+    for (const id of ids) { const k = "order-files/pending/" + id + ".png"; ins(id, k); R2.m.set(k, { b: new Uint8Array(1) }); }
+    const calls0 = R2.deletes;
+    const c1 = await upload.cleanUp(env, Date.now(), { limit: 3 });
+    const left1 = ids.filter(id => d1.q("SELECT id FROM customer_design_uploads WHERE id=?", id).length);
+    ok("a backlog is deleted in bulk — one storage call a run — and capped per run", c1.deleted === 3 && R2.deletes === calls0 + 1 && left1.length === 2);
+    const c2 = await upload.cleanUp(env, Date.now(), { limit: 3 });
+    ok("…the rest go on the next run", c2.deleted === 2 && ids.every(id => !d1.q("SELECT id FROM customer_design_uploads WHERE id=?", id).length && !R2.m.has("order-files/pending/" + id + ".png")));
+    ok("…and the stale file outside order-files/pending/ never takes a slot or gets deleted", d1.q("SELECT id FROM customer_design_uploads WHERE id=?", "e".repeat(32)).length === 1);
+  }
 
   // ---- The shop page (jsdom) ----
   console.log("\n=== The shop page ===");

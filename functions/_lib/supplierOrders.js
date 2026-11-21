@@ -87,7 +87,7 @@ export async function planSupplierOrder(env, conn, rawLines) {
     if (!b) bad("blank", "This blank no longer exists.");
     else if (!z) bad("blank", "The blank has no such color and size.");
     else if (!out.style) bad("blank", "The blank has no style # (its SKU), so the supplier can't be asked for it.");
-    else if (!sameCompany.has(Number(b.vendorConnectionId))) bad("blank", `This blank isn't linked to ${conn.name} — link it under Tools → Vendor integrations.`);
+    else if (!sameCompany.has(Number(b.vendorConnectionId))) bad("blank", `This blank isn't linked to ${conn.name} — link it under Settings → Vendor integrations.`);
     if (!out.problem && !unitCents) out.note = "No price on file — the supplier charges its own price.";
     return out;
   });

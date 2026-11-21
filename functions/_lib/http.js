@@ -76,7 +76,7 @@ export function jsonResponse(obj, status){
 // The answer every handler gives for something that belongs to a switched-off feature.
 export function featureOffResponse(key, label){
   return jsonResponse({ status: "error", feature: key,
-    message: `${label || key} is turned off. Turn it on under Tools → Global settings → Features.` }, 403);
+    message: `${label || key} is turned off. Turn it on under Settings → Global settings → Features.` }, 403);
 }
 // For handlers that don't already hold the cached catalog: is this feature switched off? One small
 // read. Anything unexpected (no database, nothing saved, a read error) counts as ON — the default.

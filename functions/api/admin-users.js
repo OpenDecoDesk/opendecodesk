@@ -31,7 +31,7 @@
  *   - There is always at least one active admin: the statement that changes a role or a status
  *     refuses to remove the last one (functions/_lib/db.js setUserRoleAndStatus).
  *   - You can't change your own role or status, or reset your own password or two-step here
- *     (that is Security → Change password, and Security (2FA), which ask for proof it is you).
+ *     (that is Settings → Change password, and Security (2FA), which ask for proof it is you).
  *   - Changing someone's role or status, or resetting their password or two-step, signs them out
  *     everywhere. A disabled user can't sign in and their sessions are gone at once.
  *   - A temporary password is made here, returned once, never logged; whoever gets it must
@@ -271,7 +271,7 @@ export async function onRequestPost(context){
     }
 
     if(action === "resetPassword"){
-      if(isMe) return bad("Change your own password under Security → Change password.", 409);
+      if(isMe) return bad("Change your own password under Settings → Change password.", 409);
       const auditErr = await audit("security.user_password_reset", target, who(target));
       if(auditErr) return auditErr;
       const temporaryPassword = generateTempPassword();

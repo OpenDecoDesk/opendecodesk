@@ -122,11 +122,11 @@ expected, not confirmed):
 1. **Sign in** at `https://admin.<your domain>`: leave the email empty and type the passphrase.
    A new hostname can take a few minutes to get its certificate. The first screen asks for your
    name, your email and a password of your own; once you have saved it you sign in again with
-   that email and password. You are the first admin. Add other people under Security → Users
+   that email and password. You are the first admin. Add other people under Settings → Users
    ([operations.md](operations.md#users-and-roles)), and change your password under
-   Security → Change password.
-2. **Turn on two-step sign-in**: Security → Security (2FA).
-3. **Tools → Global settings.** The **Setup status** list at the top shows what's still missing.
+   Settings → Change password.
+2. **Turn on two-step sign-in**: Settings → Security (2FA).
+3. **Settings → Global settings.** The **Setup status** list at the top shows what's still missing.
    While something required or recommended is missing, signing in opens this page first.
    Fill in the Business profile, Region and Sales tax.
 4. **Make the images bucket public.** In the Cloudflare dashboard, give the bucket
@@ -205,7 +205,7 @@ Add the secrets and settings for any optional service from
 [configuration.md](configuration.md) the same way (secrets with `wrangler secret put`, plain
 settings in `[vars]` followed by `npm run deploy`).
 
-**8.** Sign in and fill in Tools → Global settings → Business profile.
+**8.** Sign in and fill in Settings → Global settings → Business profile.
 
 The differences from the installer: it deploys once, with the secrets, so the Worker is never live
 without its passphrase (by hand there is a moment when it is — sign-in is simply refused until the

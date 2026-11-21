@@ -2,7 +2,7 @@ const fs = require("fs");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 
-// Setup status (Tools → Global settings, top of the page; action getSetupStatus;
+// Setup status (Settings → Global settings, top of the page; action getSetupStatus;
 // functions/_lib/setupStatus.js): which parts of the install are configured, so a fresh install
 // that is missing something says so instead of failing quietly. It reports only set / not set —
 // never a value. Real SQL (sql.js), real db.js / orders.js, and the real admin page in jsdom.

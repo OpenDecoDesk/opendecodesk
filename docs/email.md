@@ -150,7 +150,7 @@ To you:
 
 ## Checking it works
 
-The quickest check is Tools → **Communications** → **Send a test email** (admins only). It sends
+The quickest check is Settings → **Communications** → **Send a test email** (admins only). It sends
 one short message the same way order emails go, and shows what happened:
 
 - which provider was used (or your own mailbox), and the From, Reply-to and BCC addresses;
@@ -166,6 +166,6 @@ A test send is not recorded as a failed email. Up to 10 a minute.
 
 Or place a test order on a shop with your own email address. If nothing arrives:
 
-1. Tools → Global settings → **Setup status**: is Email "Ready", and which provider does it name?
-2. Tools → **Communications**: is there a problem listed for that email?
+1. Settings → Global settings → **Setup status**: is Email "Ready", and which provider does it name?
+2. Settings → **Communications**: is there a problem listed for that email?
 3. In your provider's dashboard: is the domain verified, and does it show the send?

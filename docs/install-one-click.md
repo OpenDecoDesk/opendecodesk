@@ -71,7 +71,7 @@ Open the `workers.dev` address.
    password stops working.
 3. Sign in again with your email and password. Global settings opens, listing what is still to set up.
 
-**Forgot your password later?** Another admin can give you a new one under Security → Users. If you
+**Forgot your password later?** Another admin can give you a new one under Settings → Users. If you
 are the only admin, give the site a new setup password: in Cloudflare open the Worker, then
 **Settings → Variables and Secrets**, and change `PROXY_ADMIN_PASSPHRASE` (12 characters or more).
 Then sign in with the email empty and that setup password, and set your email and password again.

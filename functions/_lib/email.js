@@ -241,7 +241,7 @@ async function sendViaCloudflare_(env, { to, subject, html, text, attachments },
   }
 }
 
-// ---- The test send (Tools → Communications → Send a test email) ---------------------------------
+// ---- The test send (Settings → Communications → Send a test email) ---------------------------------
 // One short message to `to`, through exactly the path every other email takes, and a report of what
 // happened that someone can act on: which provider, from which address, what it answered, and — for
 // the usual mistakes — what to do. Never records an email_failed issue (it's a deliberate test).
@@ -268,8 +268,8 @@ export async function sendTestEmail(env, to) {
   const tag = report.subjectTag;
   const where = desktop ? "the OpenDecoDesk program" : report.rootDomain;
   const msg = { to: report.to, subject: (tag ? tag + " " : "") + "Test email from " + id.name,
-    html: `<div style="font-family:sans-serif"><p>This is a test email from <strong>${escHtml(id.name)}</strong> (${escHtml(where)}), sent from Tools → Communications.</p><p>If you can read this, email is working.</p></div>`,
-    text: `This is a test email from ${id.name} (${where}), sent from Tools → Communications.\n\nIf you can read this, email is working.` };
+    html: `<div style="font-family:sans-serif"><p>This is a test email from <strong>${escHtml(id.name)}</strong> (${escHtml(where)}), sent from Settings → Communications.</p><p>If you can read this, email is working.</p></div>`,
+    text: `This is a test email from ${id.name} (${where}), sent from Settings → Communications.\n\nIf you can read this, email is working.` };
   const r = provider === "mailbox" ? await sendViaMailer_(env, msg, id, report) : provider === "smtp" ? await sendViaSmtp_(env, msg, id, report, mailbox) : provider === "resend" ? await sendViaResend_(env, msg, id, report) : await sendViaCloudflare_(env, msg, id, report);
   report.ok = r === true;
   if (r === "bounced") hint("That address permanently bounced — try another one.");
@@ -809,7 +809,7 @@ export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit
     watching.length ? `Still being watched: ${watching.join(", ")}.` : "",
     maintenanceDue.length ? `Machine maintenance due: ${maintenanceText_(maintenanceDue).join("; ")}.` : "",
     (recurringRecorded || []).length ? `Recurring expenses recorded: ${recurringText_(recurringRecorded).join("; ")}.` : "",
-    adminUrl ? `Details: ${adminUrl}/#comms` : "Details: Tools → Communications in the program.",
+    adminUrl ? `Details: ${adminUrl}/#comms` : "Details: Settings → Communications in the program.",
   ].filter(Boolean);
   const html = `<div style="font-family:system-ui,sans-serif;font-size:14px;color:#222;line-height:1.5;">` +
     lines.slice(0, -1).map(l => `<p style="margin:0 0 8px;">${escHtml(l)}</p>`).join("") +

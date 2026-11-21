@@ -62,7 +62,7 @@ There are no numbered releases yet. Fixes are made on the main branch.
 
 ## For people running an install
 
-- Turn on two-step sign-in (Security → Security (2FA)) — the passphrase alone is one shared secret.
+- Turn on two-step sign-in (Settings → Security (2FA)) — the passphrase alone is one shared secret.
 - Keep `wrangler.toml` with your ids out of public repositories, and never commit a secret.
 - Keep the receipts, designs and database-backup buckets private.
 - Give each Cloudflare API token only the permissions it needs.

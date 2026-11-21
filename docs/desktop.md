@@ -146,7 +146,7 @@ invoices, design proofs, and your morning roll-up. It needs the internet.
    outgoing (SMTP) server, port and security from its help pages.
 2. **Save global settings**. The program signs in to the server first: a wrong password or server
    is reported then, and nothing is saved.
-3. **Send a test email** in the Email panel (or Tools → Communications) shows what your mail server
+3. **Send a test email** in the Email panel (or Settings → Communications) shows what your mail server
    answered.
 
 The password is kept with the program's other secrets in `desktop.json` (encrypted where the system
@@ -311,7 +311,7 @@ your own backups, are never deleted by the program.
 
 **Help → Locked out? Reset sign-in…** makes a new secret. Every password and two-step sign-in stops
 working, and the program asks for your name, email and a new password again, as on the first start.
-Other people then get a new password from you under Security → Users. Orders, books and settings
+Other people then get a new password from you under Settings → Users. Orders, books and settings
 are not touched. This is the desktop version of `npm run setup -- --new-passphrase`
 ([operations.md](operations.md)). Anyone who can use your computer account can also do it, so it is
 not a barrier against them. The computer's own sign-in is.

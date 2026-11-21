@@ -1,4 +1,4 @@
-// Tools → Communications → Send a test email: one message through the same path as every other email,
+// Settings → Communications → Send a test email: one message through the same path as every other email,
 const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 // and a report of what happened — the provider, the From address, the provider's own status and
 // message, and what to do about the usual Resend mistakes (an unverified domain, a bad key, a key

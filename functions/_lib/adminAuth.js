@@ -208,6 +208,13 @@ export async function revokeUserSessionsFor(env, token){
   return sess.user.id;
 }
 
+// The user behind a session token, or null (no session, an expired one, or storage unreachable).
+export async function sessionUserId(env, token){
+  if(!token || !env.DB) return null;
+  const sess = await readSession_(env, token);
+  return sess && sess !== "unavailable" && sess.user ? sess.user.id : null;
+}
+
 // Returns the active TOTP secret: the one stored in D1 (set via the admin panel) takes
 // precedence over the TOTP_SECRET env var (backward compat for installs that set the secret
 // manually). Returns "" if neither is configured.

@@ -178,7 +178,7 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
 - **Steps that come first.** A session can be *pending*: the user must finish setting up their
   account, replace a temporary password, or enrol in two-step sign-in. Until they have, the
   server answers nothing but the request that finishes that step.
-- **Two-step sign-in (TOTP)** is each user's own, set up from Security → Security (2FA), with ten
+- **Two-step sign-in (TOTP)** is each user's own, set up from Settings → Security (2FA), with ten
   single-use recovery codes shown once. A code can't be used twice. While it is on it can't be
   replaced — it has to be turned off first, which needs a current code. An admin can require it
   for everyone (Users → Require two-step sign-in): nobody is signed out, and anyone without it

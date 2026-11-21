@@ -210,7 +210,7 @@ Do this once `https://admin.<your domain>` opens in a browser.
 
 ### Check it works
 
-1. In the admin, **Tools → Global settings**: the Setup status line for card payments should be
+1. In the admin, **Settings → Global settings**: the Setup status line for card payments should be
    complete. Make sure Card is on under Payment methods, then **Manage catalog → Publish**.
 2. On the Orders screen pick a shop and use **Create test transaction**.
 3. On Stripe's page pay with the test card `4242 4242 4242 4242`, any future expiry date and any
@@ -265,9 +265,9 @@ labels are created but marked as samples that can't be mailed. Their tracking ne
 
 ### On the OpenDecoDesk side
 
-In the admin, under **Tools → Global settings**: set the Region's country to US, leave the
+In the admin, under **Settings → Global settings**: set the Region's country to US, leave the
 Shipping feature on, and fill in the **Ship-from address** (rate quotes work with just the ZIP; a
-label can't be bought without street, city, state, ZIP and phone). Then check **Tools → Package
+label can't be bought without street, city, state, ZIP and phone). Then check **Catalog → Package
 sizes**, give every product a weight, and add the Shipping option to each shop that ships
 (**Manage catalog → the shop → Edit → Delivery & pickup**). Add that option only after the token
 is in, or customers see an error where the rates should be.
@@ -316,7 +316,7 @@ Then the key (`RESEND_API_KEY`):
 
 The admin will say email is ready as soon as a key exists; it can't tell whether the domain is
 verified. Test with a real order to your own address. If nothing arrives, look at
-**Tools → Communications** in the admin, then at Resend's own list of sent emails.
+**Settings → Communications** in the admin, then at Resend's own list of sent emails.
 
 ### Cloudflare Email Service (instead of Resend)
 
@@ -453,7 +453,7 @@ adds the Access email beside it when the two differ.
 
 ### Vendor connections (PromoStandards)
 
-Tools → **Vendor integrations** fetches product data, your prices and images straight from suppliers
+Settings → **Vendor integrations** fetches product data, your prices and images straight from suppliers
 that offer PromoStandards web services (S&S Activewear, SanMar, OTTO Cap and many more). Each vendor
 gives you a login for them (ask their web services or EDI team). The logins are stored encrypted, under
 a key only your site has. Make it once:

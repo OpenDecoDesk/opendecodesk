@@ -40,7 +40,7 @@ Free plan). A clean-up that fails is recorded and reported in the roll-up an hou
 Progress is only saved after the email is sent, so a failed send is retried the next day. If the
 run itself fails, that is recorded and reported in the next one.
 
-**In the admin:** Tools → **Communications** shows what the next roll-up will contain, when the
+**In the admin:** Settings → **Communications** shows what the next roll-up will contain, when the
 last one ran and what it found, and has a **Check now** button for the tracking checks.
 
 **By hand:** `POST https://admin.<your domain>/api/daily-digest` with the JSON body
@@ -208,12 +208,12 @@ aren't here: copy them to your pictures bucket and point the products at them.
    `npx wrangler deploy` on an installed site: it detaches any shop hostname that isn't listed in
    `wrangler.toml` ([shops-and-domains.md](shops-and-domains.md#by-hand)), and code deployed
    before its migration has run refuses sign-in until the migration is applied.
-5. Open the admin, look at Tools → Global settings → Setup status, and check a shop's page loads.
+5. Open the admin, look at Settings → Global settings → Setup status, and check a shop's page loads.
 
 **Coming from a version with one shared admin password:** nothing is lost. Everyone is signed
 out once. Sign in with the password you had and any email (or none); with two-step sign-in on,
 it asks for your code as before. You are then asked once for your name and email, and from then
-on you sign in with that email. You are the first admin; add the others under Security → Users.
+on you sign in with that email. You are the first admin; add the others under Settings → Users.
 
 `npm run setup` is also safe to run again at any time: it changes nothing you don't re-enter.
 
@@ -223,7 +223,7 @@ been done by anyone. Treat the first upgrade with care.
 ## Users and roles
 
 People sign in with their own email and password. An admin manages them under
-**Security → Users**.
+**Settings → Users**.
 
 | Role | Shown as | Can use |
 |---|---|---|
@@ -245,7 +245,7 @@ What a role can't use isn't shown: no menu entry, link or button for it.
 - **Require two-step sign-in** (the checkbox under the list): nobody is signed out. At their
   next sign-in, anyone without an authenticator app must set one up before anything else opens,
   and is given ten recovery codes. Turn your own on first.
-- **A lost or shared computer:** Security → **Sign out everywhere** ends every session you have, on
+- **A lost or shared computer:** Settings → **Sign out everywhere** ends every session you have, on
   every device, this one included. Turning your two-step sign-in on or off also signs your other
   devices out.
 - **Failed sign-ins are limited:** 10 a minute from one address (an IPv6 address counts by its /64),
@@ -268,7 +268,7 @@ npm run setup -- --new-passphrase
 
 It prints a new passphrase. Sign in with it (any email, or none): you are the first admin again,
 your two-step sign-in is cleared, and you choose a new password. **Every other user's password
-stops working too** — the list under Security → Users marks them "password needs a reset", and
+stops working too** — the list under Settings → Users marks them "password needs a reset", and
 you reset each one. That is the price of passwords that a stolen database backup can't be used
 to guess.
 
@@ -283,10 +283,10 @@ own settings, so reset it key by key, not as a whole table.
 
 ## Keeping an eye on it
 
-- **Tools → Communications** — problems since the last roll-up (emails that failed, webhooks that
+- **Settings → Communications** — problems since the last roll-up (emails that failed, webhooks that
   failed), and when the roll-up last ran.
 - **Reports → Audit Log** — who changed what: prices, settings, voids, refunds, sign-in changes.
-- **Tools → Global settings → Setup status** — anything not configured.
+- **Settings → Global settings → Setup status** — anything not configured.
 - **The Worker's logs in the Cloudflare dashboard** — errors the code logged (`wrangler.toml` turns
   on `[observability]`).
 
@@ -307,7 +307,7 @@ on the design version, and a run stopped
 part-way can say how many stitches it got through. On **Machines**, type a reading from the
 machine's own counter to set it straight.
 
-Tools → **Machine maintenance** keeps a list of jobs per machine — oil the hook every 8 run hours,
+Production → **Machine maintenance** keeps a list of jobs per machine — oil the hook every 8 run hours,
 change the needles every 2 million stitches — and a log of when each was done. Run Order warns when
 a job on the machine is due, the morning roll-up and Communications list what's due, and the Run
 Times report shows stitches per run. It's part of the Production feature.
@@ -318,7 +318,7 @@ Times report shows stitches per run. It's part of the Production feature.
   (the same address, the same file, or one that looks the same) and lets you remove the extras. A
   garment's front and back are never called duplicates, and a color always keeps at least one photo.
   **More → Repair photo thumbnails** remakes missing small copies.
-- **Tools → Orphaned images** (admins) lists files in the image store that nothing points to any more —
+- **Settings → Orphaned images** (admins) lists files in the image store that nothing points to any more —
   a photo replaced or removed, an upload whose form was never saved. **Scan the image store**, then
   **Download selected (.zip)** to keep a copy and **Remove selected from storage**. Anything uploaded in
   the last day is left alone, and each file is checked again just before it's removed.

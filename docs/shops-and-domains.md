@@ -178,7 +178,7 @@ Manage catalog → the shop → **Edit**:
 
 ## Product categories
 
-A product's category (Tools → **Product categories**) decides which section of the shop's page it is
+A product's category (Catalog → **Product categories**) decides which section of the shop's page it is
 listed under, in the order set there, and what it packs like when a box is chosen for shipping (a
 shirt, a sweatshirt, a cap, or "other" — no automatic box, the shipping is quoted by hand). The list
 starts with Shirt, Sweatshirt, Cap, T Shirt, Hoodie, Patch and Other, and is yours to change. A category
@@ -355,7 +355,7 @@ photos (from a folder of the vendor's images on your computer, or downloaded fro
 nothing changes until **Create / apply**. An update only takes what you tick, and never touches stock
 or average cost. On a product, **Copy from blank** brings in the blank's description and features.
 
-**Live from a vendor (PromoStandards):** Tools → **Vendor integrations** (admins) connects suppliers
+**Live from a vendor (PromoStandards):** Settings → **Vendor integrations** (admins) connects suppliers
 that offer PromoStandards web services, with a login the vendor gives you, stored encrypted (it needs
 the `VENDOR_CREDENTIALS_KEY` secret — see [accounts-and-keys.md](accounts-and-keys.md)). Then Blanks →
 **Connected vendor → Refresh prices and colors…** and **Look up a style → new blank…** bring live data
@@ -381,7 +381,7 @@ cancelled…** records an order you cancelled with the supplier (it doesn't cont
 haven't shipped or arrived go back on Blanks to Order, and its shipments stop being checked.
 
 **Brand rules:** some brands may only be resold on the supplier's terms — most only decorated, and a
-large order (100 pieces of one style by default) only after the supplier approves the logo. Tools →
+large order (100 pieces of one style by default) only after the supplier approves the logo. Catalog →
 **Brand rules** (managers read it, admins change it) starts with the brands SanMar and S&S publish as
 restricted — verify each with the supplier you buy it from — and per brand sets the large quantity,
 whether it must be decorated (with categories that may be sold plain), whether a large order needs

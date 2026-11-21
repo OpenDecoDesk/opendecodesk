@@ -218,7 +218,7 @@ const URLS = { product: "https://ws.sanmar.com:8080/promostandards/ProductDataSe
   const wait = async (fn) => { for (let i = 0; i < 300 && !fn(); i++) await new Promise(res => setTimeout(res, 10)); return fn(); };
   await w.renderBrandRules(d.getElementById("app"));
   await wait(() => d.querySelector(".br-row"));
-  ok("Tools → Brand rules lists the brands with their large quantity, and is in the Tools menu", d.querySelectorAll(".br-row").length === 20 && w.eval("ADMIN_NAV_TOOLS").some(x => x[0] === "brandrules") &&
+  ok("Catalog → Brand rules lists the brands with their large quantity, and is in the Catalog menu", d.querySelectorAll(".br-row").length === 20 && w.eval("ADMIN_NAV_TOOLS").some(x => x[0] === "brandrules") &&
     [...d.querySelectorAll(".br-row")].find(tr => tr.querySelector(".br-brand").value === "The North Face").querySelector(".br-qty").value === "24");
   d.getElementById("brQty").value = "120";
   d.getElementById("brSave").click();

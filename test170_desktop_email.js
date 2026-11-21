@@ -291,7 +291,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); };
   out = await worker.handleScheduled(at(today, "11:10"), { ...on });
   ok("later runs that day send no second one", !out.rollUp && mail.length === 1);
   out = await worker.handleScheduled(at(tomorrow, "07:00"), { ...on });
-  ok("the next morning's first run sends again (a quiet day gets the short 'nothing new' note)", out.rollUp && mail.length === 2 && /nothing new/.test(mail[1].subject) && /Tools → Communications in the program/.test(mail[1].text));
+  ok("the next morning's first run sends again (a quiet day gets the short 'nothing new' note)", out.rollUp && mail.length === 2 && /nothing new/.test(mail[1].subject) && /Settings → Communications in the program/.test(mail[1].text));
   ok("…and nothing went to a supplier or anywhere else (supplier connections are off)", looked.length === 0);
   out = await worker.handleScheduled(at(tomorrow, "08:00"), { ...off });
   ok("without email set up the desktop's scheduled run sends nothing", out.ran === false && mail.length === 2);

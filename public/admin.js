@@ -1104,6 +1104,7 @@ async function loadOpenOrdersDashboard_(){
     const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
     if (!r.ok || d.status === "error") { el.textContent = (d && d.message) || "Could not load open orders."; return; }
     window._dashOrders = d.orders || [];
+    window._dashMore = d.more ? (d.orders || []).length : 0;
     drawOpenOrdersDashboard_();
   } catch (e) { el.textContent = "Could not reach the server."; }
 }
@@ -1135,7 +1136,7 @@ function drawOpenOrdersDashboard_(){
     const days = o.placedAt ? Math.floor((now - new Date(o.placedAt).getTime()) / 86400000) : null;
     const status = dashOrderStatus_(o);
     const due = Number(o.balanceDue) || 0;
-    return `<tr class="dash-row" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" style="cursor:pointer;">
+    return `<tr class="dash-row" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" data-placed="${escapeHtml(o.placedAt || "")}" style="cursor:pointer;">
       <td style="${td}white-space:nowrap;">${o.placedAt ? escapeHtml(new Date(o.placedAt).toLocaleDateString()) : ""}${days !== null ? `<br><span style="${sub}${days >= 21 ? "color:#b45309;font-weight:600;" : ""}">${days} day${days === 1 ? "" : "s"} ago</span>` : ""}</td>
       <td style="${td}white-space:nowrap;font-family:monospace;font-size:12px;">${escapeHtml(o.orderId)}</td>
       <td style="${td}">${escapeHtml(o.orgName)}</td>
@@ -1153,25 +1154,38 @@ function drawOpenOrdersDashboard_(){
     <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
       <thead><tr><th style="${th}">Placed</th><th style="${th}">Order</th><th style="${th}">Shop</th><th style="${th}">Customer</th><th style="${th}">Items</th><th style="${th}text-align:right;">Total</th><th style="${th}text-align:right;">Balance due</th><th style="${th}">Status</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-    <div style="${sub}margin-top:6px;">Oldest first. Click an order to open it in its shop's orders list.</div>`;
+    <div style="${sub}margin-top:6px;">Oldest first${window._dashMore ? ` — only the oldest ${window._dashMore} open orders were loaded` : ""}. Click an order to open it in its shop's orders list.</div>`;
   el.querySelectorAll(".dash-chip").forEach(b => b.onclick = () => { window._dashFilter = b.dataset.status; drawOpenOrdersDashboard_(); });
-  el.querySelectorAll(".dash-row").forEach(tr => tr.onclick = () => openOrderFromDashboard_(tr.dataset.org, tr.dataset.order));
+  el.querySelectorAll(".dash-row").forEach(tr => tr.onclick = () => openOrderFromDashboard_(tr.dataset.org, tr.dataset.order, tr.dataset.placed));
 }
 
 // Opens the order's shop, then scrolls to and briefly highlights that order's row once it renders.
-async function openOrderFromDashboard_(orgId, orderId){
+// placedAt (when known): the Orders list shows only its date range (the last 30 days at first), so the range is
+// widened back to the day the order was placed — an old order flagged on Home is then there to open. An order
+// still not shown (completed, cancelled, or no date to go on) gets a message saying what hides it.
+async function openOrderFromDashboard_(orgId, orderId, placedAt){
+  const f = window._ordersFilter = window._ordersFilter || ordersDefaultDates_();
+  const t = placedAt ? new Date(placedAt) : null;
+  const day = t && !isNaN(t) ? ordersLocalDay_(t) : "";
+  if (day && f.from && day < f.from) f.from = day;
+  if (day && f.to && day > f.to) f.to = day;
+  window._ordersFocus = orderId;   // drawn even when it's past the first lot of rows (ordersRenderSlice_)
   selectAdminOrg(orgId);
   for (let i = 0; i < 80; i++) {
-    const row = [...document.querySelectorAll("#adminPanel tr[data-order]")].find(tr => tr.dataset.order === orderId && !tr.classList.contains("dash-row"));
+    const row = [...document.querySelectorAll("#adminPanel tr[data-order], #adminPanel .order-card[data-order-card]")]
+      .find(el => (el.dataset.order || el.dataset.orderCard) === orderId && !el.classList.contains("dash-row"));
     if (row) {
+      window._ordersFocus = null;
       if (row.scrollIntoView) row.scrollIntoView({ block: "center", behavior: "smooth" });
-      const cells = [...row.querySelectorAll("td")];
+      const cells = row.tagName === "TR" ? [...row.querySelectorAll("td")] : [row];
       cells.forEach(c => { c.dataset.prevBg = c.style.background; c.style.background = "#fef3c7"; });
       setTimeout(() => cells.forEach(c => { c.style.background = c.dataset.prevBg || ""; }), 2500);
       return;
     }
     await new Promise(res => setTimeout(res, 100));
   }
+  window._ordersFocus = null;
+  showToast(`Order ${orderId} isn't in this list. Widen the date range, or tick "Include completed" or "Include cancelled".`, true);
 }
 
 // ---- Home (2026-11): the page the admin opens on ---------------------------------------------------
@@ -1547,11 +1561,13 @@ async function renderHomeStage(app, key){
       <div id="homeStageBody" class="admin-summary">Loading&hellip;</div>
     </div>`;
   const el = document.getElementById("homeStageBody");
-  let orders;
-  // Live, not the hour-old counts: this is the list to work from (getOpenOrders gives each order its homeStage).
-  try { orders = ((await hoopApi_({ action: "getOpenOrders" })).orders || []).filter(o => o.homeStage === key); }
+  let orders, data;
+  // Live, not the hour-old counts: this is the list to work from. The server picks this step's orders (`count` of
+  // them in all) and sends the oldest of them, up to its limit (`more`).
+  try { data = await hoopApi_({ action: "getOpenOrders", stage: key }); orders = (data.orders || []).filter(o => o.homeStage === key); }
   catch (e) { el.textContent = "Couldn't load the orders: " + (e.message || "unknown error"); return; }
-  document.getElementById("homeStageCount").textContent = "(" + orders.length + ")";
+  const total = data.count != null ? Number(data.count) : orders.length;
+  document.getElementById("homeStageCount").textContent = "(" + total + ")";
   if (!orders.length) { el.innerHTML = `<div style="color:#555;">No orders are waiting on this step.</div>`; return; }
   const money = (n) => "$" + Number(n || 0).toFixed(2);
   const th = "padding:7px 10px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;white-space:nowrap;";
@@ -1564,7 +1580,7 @@ async function renderHomeStage(app, key){
       + (active.length > 3 ? `<br><span style="${sub}">+${active.length - 3} more</span>` : "");
     const days = o.placedAt ? Math.floor((now - new Date(o.placedAt).getTime()) / 86400000) : null;
     const due = Number(o.balanceDue) || 0;
-    return `<tr class="dash-row" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" style="cursor:pointer;">
+    return `<tr class="dash-row" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" data-placed="${escapeHtml(o.placedAt || "")}" style="cursor:pointer;">
       <td style="${td}white-space:nowrap;">${o.placedAt ? escapeHtml(new Date(o.placedAt).toLocaleDateString()) : ""}${days !== null ? `<br><span style="${sub}${days >= 21 ? "color:#b45309;font-weight:600;" : ""}">${days} day${days === 1 ? "" : "s"} ago</span>` : ""}</td>
       <td style="${td}white-space:nowrap;font-family:monospace;font-size:12px;">${escapeHtml(o.orderId)}${o.dueDate ? `<br><span style="${sub}">due ${escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString())}</span>` : ""}</td>
       <td style="${td}">${escapeHtml(o.orgName)}</td>
@@ -1577,8 +1593,8 @@ async function renderHomeStage(app, key){
   el.innerHTML = `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
       <thead><tr><th style="${th}">Placed</th><th style="${th}">Order</th><th style="${th}">Shop</th><th style="${th}">Customer</th><th style="${th}">Items</th><th style="${th}text-align:right;">Total</th><th style="${th}text-align:right;">Balance due</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-    <div style="${sub}margin-top:6px;">Click an order to open it in its shop's orders list.</div>`;
-  el.querySelectorAll(".dash-row").forEach(tr => tr.onclick = () => openOrderFromDashboard_(tr.dataset.org, tr.dataset.order));
+    <div style="${sub}margin-top:6px;">${data.more ? `Showing the oldest ${orders.length} of ${total}. ` : ""}Click an order to open it in its shop's orders list.</div>`;
+  el.querySelectorAll(".dash-row").forEach(tr => tr.onclick = () => openOrderFromDashboard_(tr.dataset.org, tr.dataset.order, tr.dataset.placed));
 }
 
 // Persistent admin header, shown on every admin page once signed in. One line: Orders, then a
@@ -2402,22 +2418,19 @@ function canCompleteOrder(o){
 async function completeOrders(orgId, orderIds, completed, at){
   if(!adminKey) adminKey = (await adminLogin()) || "";
   if(!adminKey) return false;
-  try{
-    const res = await fetch("/api/orders", { method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ action: "setOrderCompleted", org: orgId, orderIds, completed, ...(at ? { at } : {}), key: adminKey }) });
-    const d = await res.json();
-    if(!res.ok || d.status === "error"){
-      if(d && d.message === "Unauthorized") clearAdminAuth();
-      showToast("Could not update: " + ((d && d.message) || "unknown error"), true);
-      return false;
-    }
-    const word = completed ? "Completed" : "Reopened";
-    const skipped = (d.skipped || []).map(x => x.orderId + " (" + x.reason + ")");
-    showToast(`${word} ${d.updated} order${d.updated === 1 ? "" : "s"}` + (skipped.length ? ` — skipped ${skipped.join(", ")}` : "") + ".", !d.updated && skipped.length > 0);
-    const orgObj = (adminOrgs || []).find(x => x.orgId === orgId);
-    if(orgObj) refreshOrdersInPlace_(orgObj);
-    return true;
-  }catch(e){ showToast("Could not reach the server.", true); return false; }
+  const r = await postOrdersInGroups_({ action: "setOrderCompleted", org: orgId, completed, ...(at ? { at } : {}) }, orderIds, BULK_ORDERS_GROUP_);
+  if(!r.done){
+    showToast(r.unreachable ? r.error : "Could not update: " + r.error, true);
+    return false;
+  }
+  const updated = r.replies.reduce((n, d) => n + (Number(d.updated) || 0), 0);
+  const word = completed ? "Completed" : "Reopened";
+  const skipped = r.replies.flatMap(d => d.skipped || []).map(x => x.orderId + " (" + x.reason + ")");
+  showToast(`${word} ${updated} order${updated === 1 ? "" : "s"}` + (skipped.length ? ` — skipped ${skipped.join(", ")}` : "") + "." + (r.error ? bulkStoppedNote_(r, orderIds.length) : ""),
+    !!r.error || (!updated && skipped.length > 0));
+  const orgObj = (adminOrgs || []).find(x => x.orgId === orgId);
+  if(orgObj) refreshOrdersInPlace_(orgObj);
+  return true;
 }
 // The order row's Mark completed: asks when (default now), then completes.
 async function completeOrdersAsk_(orgId, orderIds){
@@ -2486,6 +2499,39 @@ function clearBulkSelection(){
   if(bar) bar.style.display = "none";
 }
 
+// A big selection goes to the server in groups: one request may run only so many database queries, so the server
+// takes at most 20 orders a request for a step change and 100 for the lighter changes (functions/api/orders.js
+// BULK_STAGE_MAX, BULK_ORDERS_MAX). The groups go one after another and the first that fails stops the rest.
+// Returns { replies: each group's answer, done: how many orders those groups held, error: why it stopped ("" =
+// it didn't), unreachable: the server couldn't be reached }.
+const BULK_STAGE_GROUP_ = 20, BULK_ORDERS_GROUP_ = 100;
+async function postOrdersInGroups_(payload, orderIds, size){
+  const replies = [];
+  let done = 0;
+  for(let i = 0; i < orderIds.length; i += size){
+    const ids = orderIds.slice(i, i + size);
+    let res, data;
+    try{
+      res = await fetch("/api/orders", { method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ ...payload, orderIds: ids, key: adminKey }) });
+      data = await res.json().catch(() => null);
+    }catch(e){ return { replies, done, error: "Could not reach the server.", unreachable: true }; }
+    if(!res.ok || !data || data.status === "error"){
+      // Signed out only when the server says so (401, or "Unauthorized"), never because a role was refused.
+      if(res.status === 401) clearAdminAuth();
+      else if(data && data.message === "Unauthorized") clearAdminAuth();
+      return { replies, done, error: (data && data.message) || "unknown error" };
+    }
+    replies.push(data);
+    done += ids.length;
+  }
+  return { replies, done, error: "" };
+}
+// Added to the message when a bulk change stopped partway: how far it got, and that the rest weren't changed.
+function bulkStoppedNote_(r, total){
+  return ` It stopped after ${r.done} of ${total} orders (${r.error}) — the other ${total - r.done} were not changed. Select them and try again.`;
+}
+
 async function bulkSetFulfillmentStage(orgId, stage){
   const checked = Array.from(document.querySelectorAll(".order-select:checked"));
   if(!checked.length){ showToast("No orders selected.", true); return; }
@@ -2523,26 +2569,24 @@ async function bulkSetFulfillmentStage(orgId, stage){
   if(!adminKey) adminKey = (await adminLogin()) || "";
   if(!adminKey) return;
   try{
-    const res = await fetch("/api/orders", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({action: "bulkSetFulfillmentStage", org: orgId, orderIds, stage, ...extraFields, key: adminKey})
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      if(data && data.message === "Unauthorized") clearAdminAuth();
-      showToast("Bulk update failed: " + ((data && data.message) || "unknown error"), true);
+    // In groups of BULK_STAGE_GROUP_ (the server's limit for one request); a group that fails stops the rest.
+    const r = await postOrdersInGroups_({action: "bulkSetFulfillmentStage", org: orgId, stage, ...extraFields}, orderIds, BULK_STAGE_GROUP_);
+    if(!r.done){
+      showToast(r.unreachable ? r.error : "Bulk update failed: " + r.error, true);
       return;
     }
+    const data = { updated: 0, skipped: 0, errors: [] };
+    r.replies.forEach(d => { data.updated += Number(d.updated) || 0; data.skipped += Number(d.skipped) || 0; data.errors.push(...(d.errors || [])); if(d.timestamp) data.timestamp = d.timestamp; });
     let msg = "Updated " + data.updated;
     const errs = data.errors || [];
     if(data.skipped && !errs.length) msg += ", " + data.skipped + " already set";
     if(errs.length) msg += " — skipped " + errs.length + ": " + errs.slice(0, 3).join("; ") + (errs.length > 3 ? "; …" : "");
-    showToast(msg + ".", !data.updated && errs.length > 0);
+    showToast(msg + "." + (r.error ? bulkStoppedNote_(r, orderIds.length) : ""), !!r.error || (!data.updated && errs.length > 0));
     const orgObj = (adminOrgs || []).find(x => x.orgId === orgId);
     // Blank stages are per-line-item now (migrations/0039) + roll up to order summaries, so re-fetch
-    // rather than patching cells in place (a partial receive mustn't flip the whole-order cell).
-    if(/^blank/.test(stage)){ if(orgObj) refreshOrdersInPlace_(orgObj); return; }
+    // rather than patching cells in place (a partial receive mustn't flip the whole-order cell). Stopped partway:
+    // re-fetch too, so the list shows exactly which orders changed.
+    if(/^blank/.test(stage) || r.error){ if(orgObj) refreshOrdersInPlace_(orgObj); return; }
     if(orgObj){
       // Errors read "<orderId>: why".
       const errorIds = new Set((data.errors || []).map(e => String(e.orderId || e).split(":")[0].trim()));
@@ -3868,19 +3912,12 @@ async function bulkSetDueDate(orgId){
   if(!result) return;
   if(!adminKey) adminKey = (await adminLogin()) || "";
   if(!adminKey) return;
-  try{
-    const res = await fetch("/api/orders", { method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ action: "bulkSetDueDate", org: orgId, orderIds, dueDate: result.dueDate, key: adminKey }) });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      if(data && data.message === "Unauthorized") clearAdminAuth();
-      showToast("Could not set due date: " + ((data && data.message) || "unknown error"), true);
-      return;
-    }
-    showToast((result.dueDate ? "Due date set for " : "Due date cleared on ") + (data.updated || 0) + " order" + ((data.updated || 0) === 1 ? "" : "s") + ".");
-    const org = (adminOrgs || []).find(o => o.orgId === orgId);
-    if(org) refreshOrdersInPlace_(org);
-  }catch(e){ showToast("Could not reach the server.", true); }
+  const r = await postOrdersInGroups_({ action: "bulkSetDueDate", org: orgId, dueDate: result.dueDate }, orderIds, BULK_ORDERS_GROUP_);
+  if(!r.done){ showToast(r.unreachable ? r.error : "Could not set due date: " + r.error, true); return; }
+  const updated = r.replies.reduce((n, d) => n + (Number(d.updated) || 0), 0);
+  showToast((result.dueDate ? "Due date set for " : "Due date cleared on ") + updated + " order" + (updated === 1 ? "" : "s") + "." + (r.error ? bulkStoppedNote_(r, orderIds.length) : ""), !!r.error);
+  const org = (adminOrgs || []).find(o => o.orgId === orgId);
+  if(org) refreshOrdersInPlace_(org);
 }
 
 // Cancel a single line item. sheetRow is the line item's id (as returned
@@ -4959,13 +4996,59 @@ function refundCell(it, o, orgId){
 // a date range (last 30 days by default) and the two include-toggles drive it. "All shops" merges
 // every org into one table with per-row actions; picking a single shop shows that shop's full view
 // (bulk bar, blank-order breakdown, labels, export) via renderAdminOrders. Both share the filter bar.
+// A date as the admin's own calendar day, YYYY-MM-DD.
+function ordersLocalDay_(d){ return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
 function ordersDefaultDates_(){
   const to = new Date(), from = new Date();
   from.setDate(from.getDate() - 30);
-  const fmt = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
-  return { from: fmt(from), to: fmt(to) };
+  return { from: ordersLocalDay_(from), to: ordersLocalDay_(to) };
 }
 window._ordersFilter = window._ordersFilter || ordersDefaultDates_();
+// The default range keeps following the calendar: a page left open overnight shows the new day's orders on the next
+// load or Refresh. `to` moves while it's still the day it was set to automatically, and `from` too while the whole
+// range is the default one; an end the admin changed stays put. _ordersFilterAuto_ holds the value each end was last
+// given automatically (null: the admin set it). Returns true when it moved the range.
+window._ordersFilterAuto_ = window._ordersFilterAuto_ || Object.assign({}, window._ordersFilter);
+function ordersRollDates_(){
+  const f = window._ordersFilter, auto = window._ordersFilterAuto_ || {};
+  if(!f) return false;
+  const d = ordersDefaultDates_();
+  const toAuto = !!f.to && f.to === auto.to, fromAuto = toAuto && !!f.from && f.from === auto.from;
+  let moved = false;
+  if(toAuto && f.to !== d.to){ f.to = d.to; moved = true; }
+  if(fromAuto && f.from !== d.from){ f.from = d.from; moved = true; }
+  window._ordersFilterAuto_ = { from: fromAuto ? f.from : null, to: toAuto ? f.to : null };
+  if(moved){
+    const a = document.getElementById("ordFilterFrom"), b = document.getElementById("ordFilterTo");
+    if(a) a.value = f.from || "";
+    if(b) b.value = f.to || "";
+  }
+  return moved;
+}
+
+// ---- How much of the list is drawn (2026-11) ----
+// Past a few hundred orders the table's DOM build stalls the tab (each line is a 33-cell row), so a list draws the
+// newest ORDERS_RENDER_STEP_ matching orders and "Show more" adds the next lot. The counts, totals and breakdown
+// always cover every matching order. An order being opened from Home (window._ordersFocus) is always drawn.
+const ORDERS_RENDER_STEP_ = 300;
+window._ordersRenderLimit = window._ordersRenderLimit || ORDERS_RENDER_STEP_;
+function ordersRenderSlice_(shown){
+  let n = Math.max(ORDERS_RENDER_STEP_, Number(window._ordersRenderLimit) || 0);
+  const fi = window._ordersFocus ? shown.findIndex(o => o.orderId === window._ordersFocus) : -1;
+  if(fi >= n) n = Math.ceil((fi + 1) / ORDERS_RENDER_STEP_) * ORDERS_RENDER_STEP_;
+  window._ordersRenderLimit = n;
+  return shown.length > n ? shown.slice(0, n) : shown;
+}
+// The note above a list that wasn't drawn in full. single: one shop's list (it has the bulk bar).
+function ordersCapNote_(drawn, total, single){
+  if(drawn >= total) return "";
+  return `<div class="admin-note" style="margin-bottom:10px;color:#b45309;">Showing the ${drawn} most recent of ${total} matching orders — narrow the date range${single ? "" : " or pick a shop"} to see the rest.
+    <button type="button" class="admin-btn" style="padding:1px 8px;font-size:12px;margin-left:4px;" onclick="ordersShowMore_()">Show ${Math.min(ORDERS_RENDER_STEP_, total - drawn)} more</button>${single ? `<br>"Select all" ticks only the orders shown.` : ""}</div>`;
+}
+function ordersShowMore_(){
+  window._ordersRenderLimit = Math.max(ORDERS_RENDER_STEP_, Number(window._ordersRenderLimit) || 0) + ORDERS_RENDER_STEP_;
+  return redrawOrdersView_();
+}
 
 // The server returns at most its newest N orders per shop (functions/api/orders.js ORDERS_LIST_MAX); when it
 // left some out, say so above the list. orgIds: the shops on screen.
@@ -5015,12 +5098,28 @@ function onOrdersOrgChange(v){
 function onOrdersDateChange(){
   const from = document.getElementById("ordFilterFrom"), to = document.getElementById("ordFilterTo");
   window._ordersFilter = { from: from ? from.value : "", to: to ? to.value : "" };
+  window._ordersRenderLimit = ORDERS_RENDER_STEP_;
   rerenderOrdersView();
 }
+// The include boxes only filter the orders already loaded: redrawn from them, no reload.
 function ordersSetInclude(which, on){
   if(which === "completed") window._orderView.includeCompleted = !!on;
   else window._orderView.includeCancelled = !!on;
-  rerenderOrdersView();
+  redrawOrdersView_();
+}
+// Redraws the Orders list from the orders already loaded, for a change that only filters or lays out what's loaded:
+// the include boxes, Show more, the phone/desktop switch. Loads them afresh (rerenderOrdersView) when this view's
+// orders aren't loaded yet, or the default dates moved on to a new day (ordersRollDates_).
+function redrawOrdersView_(){
+  const v = window._ordersShown_;
+  const m = location.hash.replace(/^#\/?/, "").match(/^orders\/([^/]+)$/);
+  if(v && m && document.getElementById("adminPanel") && !ordersRollDates_()){
+    if(m[1] === "all" && v.all) return keepView_(() => drawAllShopsOrders_());
+    const org = (adminOrgs || []).find(o => o.orgId === decodeURIComponent(m[1]));
+    if(org && v.orgId === org.orgId && (window._ordersCache || {})[org.orgId])
+      return keepView_(() => drawShopOrders_(org)).then(() => { if(document.getElementById("bulkBar")) updateBulkBar(org.orgId); });
+  }
+  return rerenderOrdersView();
 }
 // Re-render whichever orders view is currently showing (single shop or All), preserving filters.
 function rerenderOrdersView(){
@@ -5037,7 +5136,9 @@ async function refreshOrdersInPlace_(org){
   const onAll = location.hash.replace(/^#\/?/, "") === "orders/all";
   const onOrders = /^#?\/?orders(\/|$)/.test(location.hash) && document.getElementById("adminPanel");
   if(!onOrders){ if(org) return renderAdminOrders(app, org); return renderOrdersPage(app); }
-  const snap = () => { const m = new Map(); Object.values(window._ordersCache || {}).forEach(list => (list || []).forEach(o => m.set(o.orderId, JSON.stringify(Object.assign({}, o, { _org: undefined }))))); return m; };
+  // What changed, to highlight it: the orders of the shops on screen, before and after (not every shop's cache).
+  const lists = () => onAll || !org ? Object.values(window._ordersCache || {}) : [(window._ordersCache || {})[org.orgId]];
+  const snap = () => { const m = new Map(); lists().forEach(list => (list || []).forEach(o => m.set(o.orderId, JSON.stringify(Object.assign({}, o, { _org: undefined }))))); return m; };
   const before = snap();
   await keepView_(() => onAll || !org ? renderOrdersPage(app, { soft: true }) : renderAdminOrders(app, org, { soft: true }));
   if(!onAll && org && document.getElementById("bulkBar")) updateBulkBar(org.orgId);
@@ -5113,7 +5214,7 @@ function adminIsMobile_(){ return !!(window.matchMedia && window.matchMedia(ADMI
 if(window.matchMedia && !window._ordersMqInstalled){
   window._ordersMqInstalled = true;
   const mq = window.matchMedia(ADMIN_MOBILE_MQ_);
-  const onChange = () => { if(/^#?\/?(orders(\/[^/]+)?|picker)?$/.test(location.hash) && adminOrgs && document.getElementById("adminPanel")) rerenderOrdersView(); };
+  const onChange = () => { if(/^#?\/?(orders(\/[^/]+)?|picker)?$/.test(location.hash) && adminOrgs && document.getElementById("adminPanel")) redrawOrdersView_(); };
   if(mq.addEventListener) mq.addEventListener("change", onChange); else if(mq.addListener) mq.addListener(onChange);
 }
 // [date field, label, fulfillmentBadge stage] in the order the work happens.
@@ -5233,10 +5334,13 @@ function refreshOrderCard_(orgId, orderId){
 async function renderOrdersPage(app, opts){
   adminSetHash("orders/all");
   document.title = adminTitle_("Orders — All shops");
-  if(!(opts && opts.soft && document.getElementById("adminPanel")))
+  ordersRollDates_();
+  window._ordersShown_ = null;
+  if(!(opts && opts.soft && document.getElementById("adminPanel"))){
     app.innerHTML = `${ordersFilterBar_("")}<div class="admin-panel orders-panel" style="--org-accent:var(--accent);" id="adminPanel"><div class="admin-summary">Loading orders&hellip;</div></div>`;
+    window._ordersRenderLimit = ORDERS_RENDER_STEP_;
+  }
   if(!adminKey) adminKey = (await adminLogin()) || "";
-  const orgs = adminOrgs || [];
   const panel = document.getElementById("adminPanel");
   try{
     // One server-merged request instead of 2×N per-org fetches. The server returns each
@@ -5249,7 +5353,6 @@ async function renderOrdersPage(app, opts){
     window._ordersCache = window._ordersCache || {};
     window._verifCache = window._verifCache || {};
     const verifByOrder = {};
-    let merged = [];
     window._ordersMore = window._ordersMore || {};
     for(const shop of (data.shops || [])){
       const org = (adminOrgs || []).find(x => x.orgId === shop.orgId) || { orgId: shop.orgId, name: shop.name };
@@ -5260,29 +5363,37 @@ async function renderOrdersPage(app, opts){
       (shop.verifications || []).forEach(v => { vm[v.orderId] = v; });
       window._verifCache[shop.orgId] = vm;
       orders.forEach(o => { o._org = org; verifByOrder[shop.orgId + "|" + o.orderId] = vm[o.orderId]; });
-      merged = merged.concat(orders);
     }
-    merged.sort((a, b) => new Date(b.placedAt) - new Date(a.placedAt));
-    const shown = orderViewFilter_(ordersDateFilter_(merged));
-    if(!merged.length){ panel.innerHTML = `<div class="admin-empty">No orders yet.</div>`; return; }
-    if(!shown.length){ panel.innerHTML = `<div class="admin-empty">No orders match the current filter. Widen the date range or tick "Include completed/cancelled".</div>`; return; }
-    const activeOrders = shown.filter(o => !o.voidedAt && o.items.some(it => !it.cancelDate));
-    const grandTotal = activeOrders.reduce((s, o) => s + orderActiveTotal_(o), 0);
-    const balanceDue = activeOrders.reduce((s, o) => s + (o.balanceDue || 0), 0);
-    // Render cap: the "All shops" table isn't virtualized, so beyond a few hundred rows the DOM build
-    // stalls. Cap what's rendered and tell the admin to narrow the window or pick a shop (totals above
-    // still cover every matching order).
-    const RENDER_CAP = 300;
-    const capped = shown.length > RENDER_CAP;
-    const toRender = capped ? shown.slice(0, RENDER_CAP) : shown;
-    panel.innerHTML = `
-      <div class="admin-summary"><strong>${activeOrders.length}</strong> order${activeOrders.length===1?"":"s"} across ${orgs.length} shop${orgs.length===1?"":"s"} &middot; <strong>$${grandTotal.toFixed(2)}</strong> active total &middot; <strong style="color:${balanceDue>0.005?"#b03a2e":"var(--ink-soft)"};">$${balanceDue.toFixed(2)}</strong> balance due</div>
-      <div class="admin-note" style="margin-bottom:10px;">Pick a single shop above to enable bulk actions, packing/mailing labels, the spreadsheet export, and the blank-order breakdown.</div>
-      ${ordersMoreNote_((data.shops || []).map(x => x.orgId))}
-      ${capped ? `<div class="admin-note" style="margin-bottom:10px;color:#b45309;">Showing the ${RENDER_CAP} most recent of ${shown.length} matching orders — narrow the date range or pick a shop to see the rest.</div>` : ""}
-      ${ordersListHtml_(toRender, (o) => o._org, (o) => verifByOrder[o._org.orgId + "|" + o.orderId], true)}`;
-    window._refreshOrderFinancials = null;
+    // What's drawn comes from these, so a filter box or Show more redraws without loading again (redrawOrdersView_).
+    // more: the server's one limit over every shop cut the list (getOrdersAllShops).
+    window._ordersShown_ = { all: true, orgIds: (data.shops || []).map(x => x.orgId), verifByOrder, more: data.more ? (Number(data.max) || 0) : 0 };
+    drawAllShopsOrders_();
   }catch(e){ panel.innerHTML = `<div class="admin-empty">Could not load orders.</div>`; }
+}
+// Draws the All-shops list from the orders loaded for it (renderOrdersPage).
+function drawAllShopsOrders_(){
+  const v = window._ordersShown_, panel = document.getElementById("adminPanel");
+  if(!v || !v.all || !panel) return;
+  const orgs = adminOrgs || [];
+  let merged = [];
+  v.orgIds.forEach(id => { merged = merged.concat((window._ordersCache || {})[id] || []); });
+  merged.sort((a, b) => new Date(b.placedAt) - new Date(a.placedAt));
+  const shown = orderViewFilter_(ordersDateFilter_(merged));
+  if(!merged.length){ panel.innerHTML = `<div class="admin-empty">No orders yet.</div>`; return; }
+  if(!shown.length){ panel.innerHTML = `<div class="admin-empty">No orders match the current filter. Widen the date range or tick "Include completed/cancelled".</div>`; return; }
+  const activeOrders = shown.filter(o => !o.voidedAt && o.items.some(it => !it.cancelDate));
+  const grandTotal = activeOrders.reduce((s, o) => s + orderActiveTotal_(o), 0);
+  const balanceDue = activeOrders.reduce((s, o) => s + (o.balanceDue || 0), 0);
+  // Render cap: the table isn't virtualized, so only the newest few hundred are drawn (ordersRenderSlice_); the
+  // totals above still cover every matching order.
+  const toRender = ordersRenderSlice_(shown);
+  panel.innerHTML = `
+    <div class="admin-summary"><strong>${activeOrders.length}</strong> order${activeOrders.length===1?"":"s"} across ${orgs.length} shop${orgs.length===1?"":"s"} &middot; <strong>$${grandTotal.toFixed(2)}</strong> active total &middot; <strong style="color:${balanceDue>0.005?"#b03a2e":"var(--ink-soft)"};">$${balanceDue.toFixed(2)}</strong> balance due</div>
+    <div class="admin-note" style="margin-bottom:10px;">Pick a single shop above to enable bulk actions, packing/mailing labels, the spreadsheet export, and the blank-order breakdown.</div>
+    ${v.more ? `<div class="admin-note" style="margin-bottom:10px;color:#b45309;">Only the newest ${v.more.toLocaleString()} orders across all shops were loaded for these dates. Narrow the date range or pick a shop to see older ones.</div>` : ordersMoreNote_(v.orgIds)}
+    ${ordersCapNote_(toRender.length, shown.length, false)}
+    ${ordersListHtml_(toRender, (o) => o._org, (o) => v.verifByOrder[o._org.orgId + "|" + o.orderId], true)}`;
+  window._refreshOrderFinancials = null;
 }
 
 // opts.soft: refill the list in place (refreshOrdersInPlace_) — the filter bar, scroll and ticks stay. Returns a
@@ -5291,12 +5402,17 @@ function renderAdminOrders(app, org, opts){
   adminSetHash("orders/" + encodeURIComponent(org.orgId));
   adminNoteShop_(org.orgId);
   document.title = adminTitle_("Orders — " + org.name);
-  if(!(opts && opts.soft && document.getElementById("adminPanel"))) app.innerHTML = `
+  ordersRollDates_();
+  window._ordersShown_ = null;
+  if(!(opts && opts.soft && document.getElementById("adminPanel"))){
+    app.innerHTML = `
     ${ordersFilterBar_(org.orgId)}
     <div class="admin-panel orders-panel" style="--org-accent:var(--accent);" id="adminPanel">
       <div class="admin-summary">Loading orders&hellip;</div>
     </div>
   `;
+    window._ordersRenderLimit = ORDERS_RENDER_STEP_;
+  }
   return Promise.all([
     fetchOrders(org.orgId),
     !adminFeatureOn_("designVerification") ? Promise.resolve({status:"error"}) : fetch("/api/orders", {
@@ -5308,9 +5424,10 @@ function renderAdminOrders(app, org, opts){
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({action:"getBlankLinks", org:org.orgId, key:adminKey})
     }).then(r => r.ok ? r.json() : {status:"error"}).catch(() => ({status:"error"})),
+    // Only what the breakdown reads: each blank's stock on hand (stockOnly), not the whole Blanks screen.
     fetch("/api/orders", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({action:"getBlanks", key:adminKey})
+      body: JSON.stringify({action:"getBlanks", stockOnly:true, key:adminKey})
     }).then(r => r.ok ? r.json() : {status:"error"}).catch(() => ({status:"error"})),
   ]).then(([orders, verifData, blankLinksData, blanksData]) => {
     // Build a map of orderId → latest verification record
@@ -5341,6 +5458,17 @@ function renderAdminOrders(app, org, opts){
     // every order so updates to any of them still work.
     window._ordersCache = window._ordersCache || {};
     window._ordersCache[org.orgId] = orders;
+    // What's drawn comes from these, so a filter box or Show more redraws without loading again (redrawOrdersView_).
+    window._ordersShown_ = { orgId: org.orgId, verifMap, blankLinks, blanks };
+    drawShopOrders_(org);
+  });
+}
+// Draws one shop's list from the orders loaded for it (renderAdminOrders).
+function drawShopOrders_(org){
+  const v = window._ordersShown_, panel = document.getElementById("adminPanel");
+  if(!v || v.orgId !== org.orgId || !panel) return;
+  const { verifMap, blankLinks, blanks } = v;
+  const orders = (window._ordersCache || {})[org.orgId] || [];
     const shownOrders = orderViewFilter_(ordersDateFilter_(orders));
     if(shownOrders.length === 0){
       panel.innerHTML = `<div class="admin-empty">No orders match the current filter for ${escapeHtml(org.name)}. Widen the date range, or tick "Include completed/cancelled" above.</div>`;
@@ -5349,6 +5477,8 @@ function renderAdminOrders(app, org, opts){
     // Exclude orders where every item is cancelled from counts and totals.
     const activeOrders = shownOrders.filter(o => !o.voidedAt && o.items.some(it => !it.cancelDate));
     const grandTotal = activeOrders.reduce((s, o) => s + orderActiveTotal_(o), 0);
+    // The newest few hundred are drawn (ordersRenderSlice_); the counts, totals and breakdown cover them all.
+    const toDraw = ordersRenderSlice_(shownOrders);
 
     panel.innerHTML = `
       <div id="ordSummaryBar" class="admin-summary"><strong>${activeOrders.length}</strong> order${activeOrders.length===1?"":"s"} &middot; <strong>$${grandTotal.toFixed(2)}</strong> active total &middot; <strong style="color:${activeOrders.reduce((s,o)=>s+(o.balanceDue||0),0)>0.005?"#b03a2e":"var(--ink-soft)"};">$${activeOrders.reduce((s,o)=>s+(o.balanceDue||0),0).toFixed(2)}</strong> balance due</div>
@@ -5371,7 +5501,8 @@ function renderAdminOrders(app, org, opts){
         ${adminCan_("orders.details", "full") ? `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" style="color:#fff;" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:full" onclick="bulkCancelLineItems(this.dataset.org)">→ Cancel selected</button>` : ""}
         <button class="admin-btn" onclick="clearBulkSelection()">Clear</button>
       </div>
-      ${ordersListHtml_(shownOrders, () => org, (o) => verifMap[o.orderId], false)}
+      ${ordersCapNote_(toDraw.length, shownOrders.length, true)}
+      ${ordersListHtml_(toDraw, () => org, (o) => verifMap[o.orderId], false)}
       <div class="admin-actions">
         <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="exportCsv(this.dataset.org)">Copy as spreadsheet text</button>
         <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="renderPackingLabels(this.dataset.org, getSelectedOrderIds())">Packing labels</button>
@@ -5394,7 +5525,6 @@ function renderAdminOrders(app, org, opts){
       const breakdownEl = document.getElementById("ordBreakdownSection");
       if(breakdownEl) breakdownEl.innerHTML = renderOrderBreakdown(freshOrders, blankLinks, blanks);
     };
-  });
 }
 
 function renderOrderBreakdown(orders, blankLinks, blanks){
@@ -6226,23 +6356,11 @@ async function bulkEditCustomerInfo(orgId){
   const updates = await showEditCustomerModal(orders);
   if(!updates) return;
 
-  try{
-    const res = await fetch("/api/orders", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({action:"updateCustomerInfo", key:adminKey, org:orgId, orderIds, ...updates})
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      if(res.status === 401) clearAdminAuth();
-      showToast("Could not update customer info: " + ((data && data.message) || "unknown error"), true);
-      return;
-    }
-    showToast("Customer info updated for " + orderIds.length + " order" + (orderIds.length === 1 ? "" : "s") + ".");
-    const org = (adminOrgs || []).find(o => o.orgId === orgId);
-    if(org) refreshOrdersInPlace_(org);
-  }catch(e){
-    showToast("Could not reach the server.", true);
-  }
+  const r = await postOrdersInGroups_({action:"updateCustomerInfo", org:orgId, ...updates}, orderIds, BULK_ORDERS_GROUP_);
+  if(!r.done){ showToast(r.unreachable ? r.error : "Could not update customer info: " + r.error, true); return; }
+  showToast("Customer info updated for " + r.done + " order" + (r.done === 1 ? "" : "s") + "." + (r.error ? bulkStoppedNote_(r, orderIds.length) : ""), !!r.error);
+  const org = (adminOrgs || []).find(o => o.orgId === orgId);
+  if(org) refreshOrdersInPlace_(org);
 }
 
 function showEditCustomerModal(orders){

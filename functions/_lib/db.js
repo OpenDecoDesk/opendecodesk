@@ -9887,6 +9887,7 @@ export async function getOrderSource(db, orderId) {
 // Padded a day each side — the dates are the admin's local calendar days and placedAt
 // is UTC — and the browser still applies the exact range (ordersDateFilter_), so nothing shown changes.
 // opts.limit: at most that many orders, the newest (the handler's cap on a window with no dates).
+// orgId may be a list of shops: their orders together, the newest `limit` of them all (the "All shops" page).
 export async function getOrdersByOrg(db, orgId, range = {}, opts = {}) {
   const { where, params } = orgOrdersWindow_(orgId, range);
   return loadOrders_(db, where, params, "placedAt DESC", opts.limit);
@@ -9895,7 +9896,8 @@ export async function getOrdersByOrg(db, orgId, range = {}, opts = {}) {
 function orgOrdersWindow_(orgId, range = {}) {
   const day = (s, add) => { const d = new Date(String(s) + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + add); return d.toISOString(); };
   const valid = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || "")) && !isNaN(Date.parse(s));
-  const where = ["o.orgId = ?"], params = [orgId];
+  const many = Array.isArray(orgId);
+  const where = [many ? "o.orgId IN (SELECT value FROM json_each(?))" : "o.orgId = ?"], params = [many ? JSON.stringify(orgId.map(String)) : orgId];
   if (valid(range && range.from)) { where.push("o.placedAt >= ?"); params.push(day(range.from, -1)); }
   if (valid(range && range.to))   { where.push("o.placedAt < ?");  params.push(day(range.to, 2)); }
   return { where: where.join(" AND "), params };
@@ -9903,11 +9905,39 @@ function orgOrdersWindow_(orgId, range = {}) {
 
 // Every open order across all orgs: not completed, not voided, not a test, and at least one
 // item that isn't cancelled (an order whose items are all cancelled is a cancelled order).
-export async function getOpenOrders(db) {
-  return loadOrders_(db,
-    `o.completedAt IS NULL AND o.voidedAt IS NULL AND o.isTest = 0
-     AND EXISTS (SELECT 1 FROM order_items ai WHERE ai.orderId = o.orderId AND ai.cancelDate IS NULL)`,
-    [], "placedAt ASC");
+// opts.limit: at most that many, the oldest. Nothing closes an order on its own, so the open set only grows
+// while orders are left open: Home's lists ask for a limit (and one step's orders, getOpenOrderStages) rather
+// than every open order in full.
+const OPEN_ORDERS_SQL_ = `o.completedAt IS NULL AND o.voidedAt IS NULL AND o.isTest = 0
+     AND EXISTS (SELECT 1 FROM order_items ai WHERE ai.orderId = o.orderId AND ai.cancelDate IS NULL)`;
+export async function getOpenOrders(db, opts = {}) {
+  return loadOrders_(db, OPEN_ORDERS_SQL_, [], "placedAt ASC", opts.limit);
+}
+
+// The Home step every open order is waiting on (homeOrderStage), oldest first, read from the order's own
+// columns and counts of its lines — no lines, payments or labels loaded — for Home's counts and to pick the
+// orders of one step. [{orderId, orgId, placedAt, stage}].
+export async function getOpenOrderStages(db) {
+  const nb = await noBlankLine_(db), dg = await digitalLine_(db);
+  const { results } = await db.prepare(
+    `SELECT o.orderId, o.orgId, o.placedAt, o.paid, o.paidForWork, o.blankOrderedAt, o.blankReceivedAt, o.manufacturedAt,
+            o.qaPackedAt, o.shippedAt, o.deliveredAt,
+            (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND NOT ${nb("i")}) AS blankLines,
+            (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND NOT ${dg("i")}) AS madeLines
+       FROM orders o WHERE ${OPEN_ORDERS_SQL_} ORDER BY o.placedAt ASC`).all();
+  // The same fields parseOrder_ gives homeOrderStage (every open order has an active line).
+  return results.map(r => ({ orderId: r.orderId, orgId: r.orgId, placedAt: r.placedAt, stage: homeOrderStage({
+    paid: !!r.paid, paidForWork: !!r.paid || !!r.paidForWork, digitalOnly: !Number(r.madeLines), needsBlanks: Number(r.blankLines) > 0,
+    blankOrderedAt: r.blankOrderedAt, blankReceivedAt: r.blankReceivedAt, manufacturedAt: r.manufacturedAt,
+    qaPackedAt: r.qaPackedAt, shippedAt: r.shippedAt, deliveredAt: r.deliveredAt }) }));
+}
+
+// These orders in full (as loadOrders_ gives them), in no set order; ids not found are left out. One search
+// and one read of each child table for the whole list, however many there are.
+export async function getOrdersByIds(db, orderIds) {
+  const ids = [...new Set((orderIds || []).map(String))];
+  if (!ids.length) return [];
+  return loadOrders_(db, "o.orderId IN (SELECT value FROM json_each(?))", [JSON.stringify(ids)], "o.placedAt ASC");
 }
 
 // How many active lines with typed-in (free-form) personalization — or the customer's own design to
@@ -10472,27 +10502,37 @@ export function whyNotCompletable_(o) {
 
 // completed=true closes each order that qualifies; completed=false reopens.
 // Returns {updated, skipped:[{orderId, reason}]} — never throws for one bad order.
+// The orders are read in one query and changed in batches, so the number of queries doesn't grow with the
+// number of orders (D1 caps the queries one request may run).
 export async function setOrdersCompleted(db, orderIds, completed, at = null) {
   const out = { updated: [], skipped: [] };
   const now = at || new Date().toISOString();
   const dg = await digitalLine_(db);
-  for (const orderId of orderIds) {
-    const o = await db.prepare(
+  const ids = [...new Set((orderIds || []).map(String))];
+  const rows = byId_();
+  if (ids.length) {
+    const { results } = await db.prepare(
       `SELECT o.orderId, o.orgId, o.voidedAt, o.completedAt, o.deliveredAt, o.paid,
               (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL) AS activeItems,
               (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND NOT ${dg("i")}) AS physicalItems
-         FROM orders o WHERE o.orderId = ?`).bind(orderId).first();
+         FROM orders o WHERE o.orderId IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(ids)).all();
+    for (const r of results) rows[r.orderId] = r;
+  }
+  const stmts = [];
+  for (const orderId of ids) {
+    const o = rows[orderId];
     if (!o) { out.skipped.push({ orderId, reason: "order not found" }); continue; }
     if (completed) {
       const why = whyNotCompletable_(o) || (at && o.deliveredAt && new Date(at) < timeFloor_(o.deliveredAt) ? `completed can't be before it was delivered (${shopTime_(o.deliveredAt)})` : "");
       if (why) { out.skipped.push({ orderId, reason: why }); continue; }
-      await db.prepare("UPDATE orders SET completedAt = ? WHERE orderId = ? AND completedAt IS NULL").bind(now, orderId).run();
+      stmts.push(db.prepare("UPDATE orders SET completedAt = ? WHERE orderId = ? AND completedAt IS NULL").bind(now, orderId));
     } else {
       if (!o.completedAt) { out.skipped.push({ orderId, reason: "not completed" }); continue; }
-      await db.prepare("UPDATE orders SET completedAt = NULL WHERE orderId = ?").bind(orderId).run();
+      stmts.push(db.prepare("UPDATE orders SET completedAt = NULL WHERE orderId = ?").bind(orderId));
     }
     out.updated.push({ orderId, orgId: o.orgId });
   }
+  for (let i = 0; i < stmts.length; i += 50) await db.batch(stmts.slice(i, i + 50));
   return out;
 }
 
@@ -13904,7 +13944,7 @@ export function homeOrderStage(o){
 
 // Home's figures, worked out only for the blocks the page shows (HOME_BLOCKS; a user hides the rest, admin-users
 // savePrefs) and each kept up to an hour in global_settings 'dashboardCache', part by part with when it was made:
-//   orders    order counts by step (getOpenOrders)              ← the Orders block
+//   orders    order counts by step (getOpenOrderStages)         ← the Orders block
 //   money     the year's and month's money (getDashboardMoney) ← Business totals, Product sales, the pies;
 //             with the expenses by category (`cats`) only when the pies are shown
 //   inOut     money in and out by month (getMoneyInOutByMonth) ← Money in and out
@@ -13931,10 +13971,11 @@ export async function getDashboard(db, { today, fresh = false, now = Date.now(),
     work.push(make().then(data => { parts[k] = { at: now, data, ...(k === "money" ? { cats: want.cats } : {}) }; }));
   };
   if (want.orders) take("orders", true, async () => {
-    const open = await getOpenOrders(db);
+    // Counted from the orders' own columns (getOpenOrderStages): no order is loaded in full to be counted.
+    const open = await getOpenOrderStages(db);
     const stages = Object.fromEntries(HOME_STAGES.map(k => [k, 0]));
     let onTheWay = 0;
-    for (const o of open) { const k = homeOrderStage(o); if (k) stages[k]++; else onTheWay++; }
+    for (const o of open) { if (o.stage) stages[o.stage]++; else onTheWay++; }
     return { stages, open: open.length, onTheWay };
   });
   // Kept money without the categories won't do once the pies are shown; kept with them does for anything.

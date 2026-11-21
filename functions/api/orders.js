@@ -82,7 +82,7 @@ import {
   listAbortReasons, createAbortReason, updateAbortReason, deleteAbortReason,
   listActiveRuns, startProductionRun, startHooping, markHoopingDone, completeProductionRun, getRunStats, RUN_ISSUE_KINDS, abortProductionRun, getRunReportByDesign,
   getBlankLinks, setBlankLink, deleteBlankLink,
-  getOrdersByOrg, getOpenOrders, getOrderById, insertOrder,
+  getOrdersByOrg, getOpenOrders, getOpenOrderStages, getOrdersByIds, HOME_STAGES, getOrderById, insertOrder,
   settleOrderBalance, getOrderItemById, setOrderEmailTimestamp, setRefundShipping,
   setFulfillmentStage, setTrackingNumbers,
   cancelLineItemWithReason, setLineItemRefund,
@@ -141,8 +141,16 @@ import { verifyTurnstile } from "../_lib/turnstile.js";
 import { expireCheckoutSession } from "../_lib/db.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9\-]{1,64}$/;
-// The most orders one shop's list returns (getOrders, getOrdersAllShops): the newest that many.
+// The most orders one shop's list returns (getOrders), and the All shops page in all (getOrdersAllShops): the newest that many.
 const ORDERS_LIST_MAX = 2000;
+// The most open orders Home's lists return (getOpenOrders): the oldest that many.
+const OPEN_ORDERS_MAX = 1000;
+// The most orders one bulk request changes. D1 caps the queries one Worker request may run (1,000 on Workers Paid),
+// and a step change runs several per order (its lines, the blank roll-up, the blanks it uses up, the shipped email),
+// so the admin page sends a bigger selection in groups of this size (postOrdersInGroups_ in admin.js).
+const BULK_STAGE_MAX = 20;
+// The same for the lighter bulk changes — complete, due date, customer info — a query or two per order.
+const BULK_ORDERS_MAX = 100;
 // "Quote pending" is a note for the shop, not a carrier: wherever a shipping method is printed for
 // a customer (the shipped email, a shipping payment link) it reads as no method.
 const shownMethod_ = (m) => (m === SHIPPING_QUOTE_PENDING ? "" : String(m || ""));
@@ -761,33 +769,47 @@ export async function onRequestPost(context) {
   }
 
   // ---- getOrdersAllShops — the "All shops" Orders page in ONE request ----
-  // Does the per-org reads (orders + design verifications) server-side in one invocation and returns
-  // them merged, instead of the page firing 2×N requests. The date window + the rest of the
-  // filtering stay client-side.
+  // Does the reads (orders + design verifications) server-side in one invocation and returns them by shop,
+  // instead of the page firing 2×N requests. One search over every shop: at most ORDERS_LIST_MAX orders IN ALL,
+  // the newest, however many shops there are (`more: true` says some were left out). The date window + the rest
+  // of the filtering stay client-side.
   if (body.action === "getOrdersAllShops") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const orgs = await getAllOrgs(env.DB);
     const range = { from: body.dateFrom, to: body.dateTo };
+    const all = orgs.length ? await getOrdersByOrg(env.DB, orgs.map(o => o.orgId), range, { limit: ORDERS_LIST_MAX + 1 }) : [];
+    const more = all.length > ORDERS_LIST_MAX;
+    const byOrg = byId_();
+    for (const o of (more ? all.slice(0, ORDERS_LIST_MAX) : all)) (byOrg[o.orgId] = byOrg[o.orgId] || []).push(o);
     const shops = await Promise.all(orgs.map(async (o) => {
-      const [orders, verifications] = await Promise.all([
-        getOrdersByOrg(env.DB, o.orgId, range, { limit: ORDERS_LIST_MAX + 1 }),
-        getLatestVerificationsByOrg(env.DB, o.orgId, range, { limit: ORDERS_LIST_MAX + 1 }).catch(() => []),
-      ]);
-      const more = orders.length > ORDERS_LIST_MAX;
-      return { orgId: o.orgId, name: o.name || o.orgId, orders: orderCostsFor_(more ? orders.slice(0, ORDERS_LIST_MAX) : orders), more, verifications };
+      const orders = byOrg[o.orgId] || [];
+      // The latest proof of each order loaded: the shop's newest that many in the window, the same orders.
+      const verifications = orders.length ? await getLatestVerificationsByOrg(env.DB, o.orgId, range, { limit: orders.length }).catch(() => []) : [];
+      return { orgId: o.orgId, name: o.name || o.orgId, orders: orderCostsFor_(orders), more: false, verifications };
     }));
-    return jsonResponse({ status: "ok", shops, max: ORDERS_LIST_MAX });
+    return jsonResponse({ status: "ok", shops, more, max: ORDERS_LIST_MAX });
   }
 
-  // ---- getOpenOrders — admin home dashboard: every open order across all orgs ----
+  // ---- getOpenOrders — admin home dashboard: the open orders across all orgs ----
+  // body.stage (one of HOME_STAGES, or "" for shipped and waiting to be closed out): only the orders waiting on
+  // that step, picked before any is loaded in full. At most OPEN_ORDERS_MAX, the oldest; `count` is how many
+  // match in all and `more: true` says some were left out.
   if (body.action === "getOpenOrders") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
-    const [orders, orgs] = await Promise.all([getOpenOrders(env.DB), getAllOrgs(env.DB)]);
+    const stage = body.stage == null ? null : String(body.stage);
+    if (stage != null && stage !== "" && !HOME_STAGES.includes(stage)) return jsonResponse({ status: "error", message: "Unknown step" }, 400);
+    const pick = stage == null ? null : (await getOpenOrderStages(env.DB)).filter(s => s.stage === stage).map(s => s.orderId);
+    const [loaded, orgs] = await Promise.all([
+      pick ? getOrdersByIds(env.DB, pick.slice(0, OPEN_ORDERS_MAX)) : getOpenOrders(env.DB, { limit: OPEN_ORDERS_MAX + 1 }),
+      getAllOrgs(env.DB)]);
+    const orders = pick ? loaded.sort((a, b) => String(a.placedAt).localeCompare(String(b.placedAt))) : loaded.slice(0, OPEN_ORDERS_MAX);
+    const more = pick ? pick.length > OPEN_ORDERS_MAX : loaded.length > OPEN_ORDERS_MAX;
     const names = Object.fromEntries(orgs.map(o => [o.orgId, o.name]));
     // homeStage: the step it's waiting on (Home's tiles, db.js homeOrderStage).
-    return jsonResponse({ status: "ok", orders: orderCostsFor_(orders.map(o => ({ ...o, orgName: names[o.orgId] || o.orgId, homeStage: homeOrderStage(o) }))) });
+    return jsonResponse({ status: "ok", orders: orderCostsFor_(orders.map(o => ({ ...o, orgName: names[o.orgId] || o.orgId, homeStage: homeOrderStage(o) }))),
+      more, max: OPEN_ORDERS_MAX, ...(pick ? { count: pick.length } : {}) });
   }
 
   // ---- getAuditLog — admin fetches the audit log with optional filters --------
@@ -1748,7 +1770,7 @@ export async function onRequestPost(context) {
     if (denied) return denied;
     const ids = Array.isArray(body.orderIds) ? body.orderIds : (body.orderId ? [body.orderId] : []);
     if (!ids.length) return jsonResponse({ status: "error", message: "No orders given" }, 400);
-    if (ids.length > 500) return jsonResponse({ status: "error", message: "Too many orders (max 500)" }, 400);
+    if (ids.length > BULK_ORDERS_MAX) return jsonResponse({ status: "error", message: `Too many orders at once (max ${BULK_ORDERS_MAX})` }, 400);
     if (!ids.every((id) => typeof id === "string" && ORDER_ID_RE.test(id))) return jsonResponse({ status: "error", message: "Invalid order ID in list" }, 400);
     const completed = body.completed !== false;
     const when = completed ? actionTime(body) : null;
@@ -2282,6 +2304,7 @@ export async function onRequestPost(context) {
     if (!body.org) return jsonResponse({ status: "error", message: "Missing org" }, 400);
     const orderIds = Array.isArray(body.orderIds) ? body.orderIds.filter(id => ORDER_ID_RE.test(id)) : [];
     if (!orderIds.length) return jsonResponse({ status: "error", message: "No valid order IDs" }, 400);
+    if (orderIds.length > BULK_ORDERS_MAX) return jsonResponse({ status: "error", message: `Too many orders at once (max ${BULK_ORDERS_MAX})` }, 400);
 
     // Only apply fields that were explicitly supplied (null = clear, undefined = skip).
     const updates = {};
@@ -2625,8 +2648,8 @@ export async function onRequestPost(context) {
     if (!Array.isArray(body.orderIds) || !body.stage) {
       return jsonResponse({ status: "error", message: "Missing orderIds or stage" }, 400);
     }
-    if (body.orderIds.length > 500) {
-      return jsonResponse({ status: "error", message: "Too many order IDs (max 500)" }, 400);
+    if (body.orderIds.length > BULK_STAGE_MAX) {
+      return jsonResponse({ status: "error", message: `Too many orders at once (max ${BULK_STAGE_MAX})` }, 400);
     }
     if (!body.orderIds.every((id) => typeof id === "string" && ORDER_ID_RE.test(id))) {
       return jsonResponse({ status: "error", message: "Invalid order ID in list" }, 400);
@@ -2671,9 +2694,12 @@ export async function onRequestPost(context) {
     if (when) extras.at = when.at;
     let updated = 0, skipped = 0;
     const errors = [];
-    for (const orderId of body.orderIds) {
+    // Every order read at once (one search, one read of each child table), not one full read per order.
+    const loaded = byId_();
+    for (const o of await getOrdersByIds(env.DB, body.orderIds)) loaded[o.orderId] = o;
+    for (const orderId of [...new Set(body.orderIds)]) {
       try {
-        const ord = await getOrderById(env.DB, orderId);
+        const ord = loaded[orderId] || null;
         const why = stagePrereqError(ord, body.stage) || (when ? stageTimeError(ord, body.stage, when.at) : "");
         if (why) { errors.push(`${orderId}: can't mark ${body.stage} — ${why}`); skipped++; continue; }
         const perOrderExtras = itemsByOrder[orderId] ? { ...extras, itemIds: itemsByOrder[orderId] } : extras;
@@ -4138,15 +4164,24 @@ export async function onRequestPost(context) {
     }
 
     if (body.action === "getBlanks") {
-      const blanks = await getAllBlanks(env.DB);
-      // Pieces set aside per "<blankId>|<color>|<size>" — still on the shelf, promised to orders.
-      const reserved = await getBlankReservations(env.DB).catch((e) => { console.error("getBlankReservations failed:", e); return {}; });
-      // Blanks for sale on visible products whose vendor prices haven't been checked in 30 days (migrations/0062).
-      const needsPriceCheck = (await getBlanksNeedingPriceCheck(env.DB).catch(() => [])).map(b => b.id);
-      // The products each blank is used by (a blank not in the map isn't linked to any).
-      const products = await getBlankProductUses(env.DB).catch((e) => { console.error("getBlankProductUses failed:", e); return {}; });
-      // Sizes below their reorder point (migrations/0074).
-      const lowStock = await getBlankLowStock(env.DB).catch((e) => { console.error("getBlankLowStock failed:", e); return {}; });
+      // stockOnly (the Orders page's blank breakdown): each blank's sizes and how many are on hand, nothing else —
+      // not the reservations, price checks, product uses and low-stock scans the Blanks screen needs.
+      if (body.stockOnly) {
+        const blanks = await getAllBlanks(env.DB);
+        return jsonResponse({ status: "ok", blanks: blanks.map(b => ({ id: b.id, sizes: (b.sizes || []).map(z => ({ size: z.size, quantity: z.quantity })) })) });
+      }
+      // The five reads don't depend on each other, so they run together.
+      const [blanks, reserved, needsPriceCheck, products, lowStock] = await Promise.all([
+        getAllBlanks(env.DB),
+        // Pieces set aside per "<blankId>|<color>|<size>" — still on the shelf, promised to orders.
+        getBlankReservations(env.DB).catch((e) => { console.error("getBlankReservations failed:", e); return {}; }),
+        // Blanks for sale on visible products whose vendor prices haven't been checked in 30 days (migrations/0062).
+        getBlanksNeedingPriceCheck(env.DB).then(list => list.map(b => b.id), () => []),
+        // The products each blank is used by (a blank not in the map isn't linked to any).
+        getBlankProductUses(env.DB).catch((e) => { console.error("getBlankProductUses failed:", e); return {}; }),
+        // Sizes below their reorder point (migrations/0074).
+        getBlankLowStock(env.DB).catch((e) => { console.error("getBlankLowStock failed:", e); return {}; }),
+      ]);
       return jsonResponse({ status: "ok", blanks: blankCostsFor_(blanks), reserved, needsPriceCheck, products, lowStock });
     }
 
@@ -6475,11 +6510,17 @@ export async function onRequestPost(context) {
     if (denied) return denied;
     const raw = body.dueDate == null ? "" : String(body.dueDate).trim();
     if (raw && !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return jsonResponse({ status: "error", message: "Invalid date — expected YYYY-MM-DD" }, 400);
-    const orderIds = Array.isArray(body.orderIds) ? body.orderIds.map(String).filter(id => ORDER_ID_RE.test(id)) : [];
+    const orderIds = Array.isArray(body.orderIds) ? [...new Set(body.orderIds.map(String).filter(id => ORDER_ID_RE.test(id)))] : [];
     if (!orderIds.length) return jsonResponse({ status: "error", message: "No valid orders selected" }, 400);
+    if (orderIds.length > BULK_ORDERS_MAX) return jsonResponse({ status: "error", message: `Too many orders at once (max ${BULK_ORDERS_MAX})` }, 400);
+    // The due dates before, for the audit: one read for the lot, not a full order read each.
+    const { results: prevRows } = await env.DB.prepare("SELECT orderId, orgId, dueDate FROM orders WHERE orderId IN (SELECT value FROM json_each(?))")
+      .bind(JSON.stringify(orderIds)).all();
+    const prevById = byId_();
+    for (const r of prevRows) prevById[r.orderId] = r;
     let updated = 0;
     for (const orderId of orderIds) {
-      const prev = await getOrderById(env.DB, orderId);
+      const prev = prevById[orderId];
       if (!prev) continue;
       const dueDate = await setOrderDueDate(env.DB, orderId, raw || null);
       audit({ orgId: prev.orgId, orderId, action: "order.due_date_set", detail: { from: prev.dueDate || "", to: dueDate || "" } });

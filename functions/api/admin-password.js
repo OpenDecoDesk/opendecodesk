@@ -8,7 +8,8 @@
  *   { action: "account", name, email, next? }
  *     The first thing after signing in with the installer's passphrase, and what the owner of an
  *     install from before there were users sees once: a name, an email and — unless they already
- *     have a password of their own — a password (`next`).
+ *     have a password of their own — a password (`next`). Only a session pending "account" may use
+ *     it, and replacing a password that already works needs it as `current`.
  *   { action: "change", current: "<password now>", next: "<new password>" }
  *     Security → Change password, and the step after signing in with a temporary password.
  *
@@ -85,6 +86,9 @@ export async function onRequestPost(context){
   }
 
   if(action === "account"){
+    // Only the set-up step itself: a session that is already set up can't change its sign-in email or
+    // password from here without the current password (that is "change", below).
+    if(me.pending !== "account") return jsonResponse({status:"error", code:"already_set_up", message:"Your account is already set up. To change your password, use Security → Change password."}, 403);
     const name  = typeof body.name === "string" ? body.name.trim() : "";
     const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
     const next  = typeof body.next === "string" ? body.next : "";
@@ -97,6 +101,17 @@ export async function onRequestPost(context){
       if(taken && taken.id !== user.id) return jsonResponse({status:"error", message:"Another user already has that email."}, 409);
     }catch(e){ return unavailable(); }
     const setPassword = !hasPassword || !!next;
+    // Replacing a password that works needs that password, as "change" does.
+    if(hasPassword && next){
+      const current = typeof body.current === "string" ? body.current : "";
+      let good;
+      try{ good = await verifyUserPassword(env, user, current); }
+      catch(e){ console.error("admin-password: could not check the password:", e); return unavailable(); }
+      if(!good){
+        await rateLimitHit(env, "admin_auth", request);
+        return jsonResponse({status:"error", message:"The current password is not right."}, 401);
+      }
+    }
     if(setPassword){
       const problem = passwordProblem(env, next, null);
       if(problem) return jsonResponse({status:"error", message: problem}, 400);

@@ -33,7 +33,7 @@ const uploadHandler = onRequestPost;
 function makeEnv(overrides){
   const puts = [];
   const env = Object.assign({
-    PROXY_ADMIN_PASSPHRASE: "proxy-pass",
+    PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests",
     R2_PUBLIC_BASE: "https://images.example.com",
     IMAGES: { put: async (key, body, opts) => { puts.push({key, body, opts}); } }
   }, overrides || {});
@@ -81,7 +81,7 @@ if(!global.crypto.randomUUID) global.crypto.randomUUID = () => "11111111-2222-33
 (async () => {
   console.log("=== upload.js: happy path — admin subdomain + right passphrase + valid image → stored in R2, public URL + uploadId returned ===");
   let env = makeEnv();
-  let res = await uploadHandler(ctx({key:"proxy-pass", org:"league-101", contentType:"image/png", body:validBuf("image/png",1234)}, env));
+  let res = await uploadHandler(ctx({key:"proxy-pass-for-tests", org:"league-101", contentType:"image/png", body:validBuf("image/png",1234)}, env));
   let data = JSON.parse(await res.text());
   console.log("Returns ok:", data.status === "ok");
   console.log("Returns a public URL under R2_PUBLIC_BASE:", data.url && data.url.indexOf("https://images.example.com/") === 0);
@@ -96,7 +96,7 @@ if(!global.crypto.randomUUID) global.crypto.randomUUID = () => "11111111-2222-33
   env = makeEnv();
   const mainId = "a".repeat(32); // simulate the uploadId from a prior main upload
   // Pass full URL without a separate org field to avoid ctx() double-appending ?org=
-  res = await uploadHandler(ctx({key:"proxy-pass", contentType:"image/jpeg", body:validBuf("image/jpeg",400),
+  res = await uploadHandler(ctx({key:"proxy-pass-for-tests", contentType:"image/jpeg", body:validBuf("image/jpeg",400),
     url:"https://admin.example.com/api/upload?org=league-101&thumbFor=" + mainId}, env));
   data = JSON.parse(await res.text());
   console.log("Thumb upload returns ok:", data.status === "ok");
@@ -106,7 +106,7 @@ if(!global.crypto.randomUUID) global.crypto.randomUUID = () => "11111111-2222-33
 
   console.log("\n=== Thumb upload: invalid thumbFor value → 400, nothing written ===");
   env = makeEnv();
-  res = await uploadHandler(ctx({key:"proxy-pass", contentType:"image/png", body:validBuf("image/png",10),
+  res = await uploadHandler(ctx({key:"proxy-pass-for-tests", contentType:"image/png", body:validBuf("image/png",10),
     url:"https://admin.example.com/api/upload?org=x&thumbFor=../../etc/passwd"}, env));
   data = JSON.parse(await res.text());
   console.log("Bad thumbFor → 400:", res.status === 400 && /Invalid/.test(data.message));
@@ -114,13 +114,13 @@ if(!global.crypto.randomUUID) global.crypto.randomUUID = () => "11111111-2222-33
 
   console.log("\n=== Extension is derived from content type, not filename (jpeg → jpg); charset param on the header is tolerated ===");
   env = makeEnv();
-  res = await uploadHandler(ctx({key:"proxy-pass", org:"rec", contentType:"image/jpeg; charset=binary", body:validBuf("image/jpeg",500)}, env));
+  res = await uploadHandler(ctx({key:"proxy-pass-for-tests", org:"rec", contentType:"image/jpeg; charset=binary", body:validBuf("image/jpeg",500)}, env));
   data = JSON.parse(await res.text());
   console.log("jpeg stored as .jpg:", /\.jpg$/.test(data.url));
 
   console.log("\n=== Rejected from a non-admin (storefront) subdomain, even with the right passphrase — never writes to R2 ===");
   env = makeEnv();
-  res = await uploadHandler(ctx({key:"proxy-pass", org:"x", contentType:"image/png", size:10, url:"https://league101.example.com/api/upload"}, env));
+  res = await uploadHandler(ctx({key:"proxy-pass-for-tests", org:"x", contentType:"image/png", size:10, url:"https://league101.example.com/api/upload"}, env));
   data = JSON.parse(await res.text());
   console.log("Refused with 403:", res.status === 403 && data.status === "error");
   console.log("Nothing written to R2:", env.__puts.length === 0);
@@ -134,40 +134,40 @@ if(!global.crypto.randomUUID) global.crypto.randomUUID = () => "11111111-2222-33
 
   console.log("\n=== Disallowed content type (e.g. SVG/PDF) is rejected, nothing written ===");
   env = makeEnv();
-  res = await uploadHandler(ctx({key:"proxy-pass", org:"x", contentType:"image/svg+xml", size:10}, env));
+  res = await uploadHandler(ctx({key:"proxy-pass-for-tests", org:"x", contentType:"image/svg+xml", size:10}, env));
   data = JSON.parse(await res.text());
   console.log("SVG rejected:", res.status === 400 && /Unsupported/.test(data.message));
   console.log("Nothing written to R2:", env.__puts.length === 0);
 
   console.log("\n=== Oversized body is rejected on the ACTUAL bytes, before writing to R2 ===");
   env = makeEnv();
-  res = await uploadHandler(ctx({key:"proxy-pass", org:"x", contentType:"image/png", size:6 * 1024 * 1024}, env));
+  res = await uploadHandler(ctx({key:"proxy-pass-for-tests", org:"x", contentType:"image/png", size:6 * 1024 * 1024}, env));
   data = JSON.parse(await res.text());
   console.log("Too-large rejected:", res.status === 400 && /too large/i.test(data.message));
   console.log("Nothing written to R2:", env.__puts.length === 0);
 
   console.log("\n=== Empty body → clean 400 'No file' ===");
   env = makeEnv();
-  res = await uploadHandler(ctx({key:"proxy-pass", org:"x", contentType:"image/png", size:0}, env));
+  res = await uploadHandler(ctx({key:"proxy-pass-for-tests", org:"x", contentType:"image/png", size:0}, env));
   data = JSON.parse(await res.text());
   console.log("Empty upload rejected:", res.status === 400 && /No file/.test(data.message));
 
   console.log("\n=== Wrong magic bytes → 415, nothing written (Content-Type says PNG but bytes are zeros) ===");
   env = makeEnv();
-  res = await uploadHandler(ctx({key:"proxy-pass", org:"x", contentType:"image/png", size:100}, env)); // size:100 → all-zero buffer, no magic
+  res = await uploadHandler(ctx({key:"proxy-pass-for-tests", org:"x", contentType:"image/png", size:100}, env)); // size:100 → all-zero buffer, no magic
   data = JSON.parse(await res.text());
   console.log("Mismatched bytes rejected with 415:", res.status === 415);
   console.log("Nothing written to R2:", env.__puts.length === 0);
 
   console.log("\n=== Not configured (no R2 binding / no public base) → 500, nothing attempted ===");
-  res = await uploadHandler(ctx({key:"proxy-pass", org:"x", contentType:"image/png", size:10}, makeEnv({IMAGES: undefined})));
+  res = await uploadHandler(ctx({key:"proxy-pass-for-tests", org:"x", contentType:"image/png", size:10}, makeEnv({IMAGES: undefined})));
   console.log("Missing IMAGES binding → 500:", res.status === 500);
-  res = await uploadHandler(ctx({key:"proxy-pass", org:"x", contentType:"image/png", size:10}, makeEnv({R2_PUBLIC_BASE: undefined})));
+  res = await uploadHandler(ctx({key:"proxy-pass-for-tests", org:"x", contentType:"image/png", size:10}, makeEnv({R2_PUBLIC_BASE: undefined})));
   console.log("Missing R2_PUBLIC_BASE → 500:", res.status === 500);
 
   console.log("\n=== A weird org value can't escape the uploads/ prefix (sanitized to safe chars) ===");
   env = makeEnv();
-  res = await uploadHandler(ctx({key:"proxy-pass", org:"../../etc/passwd", contentType:"image/png", body:validBuf("image/png",10)}, env));
+  res = await uploadHandler(ctx({key:"proxy-pass-for-tests", org:"../../etc/passwd", contentType:"image/png", body:validBuf("image/png",10)}, env));
   data = JSON.parse(await res.text());
   console.log("Key still under uploads/ with a sanitized folder, no path traversal:",
     /^https:\/\/images\.example\.com\/uploads\/[a-z0-9-]*\/[a-z0-9]+\.png$/i.test(data.url) && data.url.indexOf("..") === -1);
@@ -220,7 +220,7 @@ if(!global.crypto.randomUUID) global.crypto.randomUUID = () => "11111111-2222-33
   console.log("\n=== Content-Length alone rejects an oversized claim WITHOUT ever touching the body stream ===");
   let bodyTouched = false;
   env = makeEnv();
-  const clOnlyReq = ctxStream({key:"proxy-pass", org:"x", contentType:"image/png", contentLength: 50 * 1024 * 1024}, env);
+  const clOnlyReq = ctxStream({key:"proxy-pass-for-tests", org:"x", contentType:"image/png", contentLength: 50 * 1024 * 1024}, env);
   Object.defineProperty(clOnlyReq.request, "body", { get(){ bodyTouched = true; return null; } });
   res = await uploadHandler(clOnlyReq);
   data = JSON.parse(await res.text());
@@ -231,7 +231,7 @@ if(!global.crypto.randomUUID) global.crypto.randomUUID = () => "11111111-2222-33
   console.log("\n=== A body that WOULD be 1000MB if fully consumed gets cut off after crossing the 5MB cap, not after reading it all ===");
   env = makeEnv();
   const bigBody = makeStreamBody(1000, 1024 * 1024); // 1000 chunks x 1MB = 1000MB if fully drained
-  res = await uploadHandler(ctxStream({key:"proxy-pass", org:"x", contentType:"image/png", body: bigBody}, env));
+  res = await uploadHandler(ctxStream({key:"proxy-pass-for-tests", org:"x", contentType:"image/png", body: bigBody}, env));
   data = JSON.parse(await res.text());
   const stats = bigBody._stats();
   console.log("Rejected as too large:", res.status === 400 && /too large/i.test(data.message));
@@ -242,7 +242,7 @@ if(!global.crypto.randomUUID) global.crypto.randomUUID = () => "11111111-2222-33
   console.log("\n=== A body within the limit, delivered as a stream, still uploads successfully ===");
   env = makeEnv();
   const smallBody = makeStreamBody(3, 100 * 1024, new Uint8Array(validBuf("image/png", 100 * 1024))); // 3 x 100KB, first chunk has valid PNG magic
-  res = await uploadHandler(ctxStream({key:"proxy-pass", org:"league-101", contentType:"image/png", body: smallBody}, env));
+  res = await uploadHandler(ctxStream({key:"proxy-pass-for-tests", org:"league-101", contentType:"image/png", body: smallBody}, env));
   data = JSON.parse(await res.text());
   console.log("Uploads successfully:", data.status === "ok");
   console.log("Stream was NOT cancelled (fully consumed normally):", smallBody._stats().cancelled === false);

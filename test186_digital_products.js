@@ -122,7 +122,10 @@ function fakeR2() {
   ok("…counted, and logged", (await lib.listDownloadGrants(d1, "D-1"))[0].downloads === 1 && d1.q("SELECT count(*) n FROM download_log")[0].n === 1);
   g = await get(fileUrl, { headers: { Range: "bytes=5-" } });
   ok("a resumed download isn't counted again", (await lib.listDownloadGrants(d1, "D-1"))[0].downloads === 1);
-  await get(fileUrl);
+  g = await get(fileUrl, { headers: { Range: "bytes=1-", "CF-Connecting-IP": "198.51.100.7" } });
+  ok("…but \"the rest of the file\" asked for from a network that never downloaded it is counted", g.status !== 410 && (await lib.listDownloadGrants(d1, "D-1"))[0].downloads === 2);
+  g = await get(fileUrl, { headers: { Range: "bytes=-4", "CF-Connecting-IP": "203.0.113.40" } });
+  ok("…and once the limit is used, a Range gets nothing either", g.status === 410 && (await lib.listDownloadGrants(d1, "D-1"))[0].downloads === 2);
   g = await get(fileUrl);
   ok("after the limit: refused, and the page says so", g.status === 410 && /All downloads used/.test(g.text) && /All downloads used/.test((await get(link)).text));
   g = await get(link + "&f=999999");

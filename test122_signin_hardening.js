@@ -1,7 +1,7 @@
 // Sign-in hardening, for per-user accounts:
 //   * failed sign-ins are counted per IPv6 /64 (one machine can't get a fresh budget by moving within
 //     its own block) and against one install-wide budget (ADMIN_AUTH_GLOBAL_LIMIT, default 100 per
-//     15 minutes, 0 = off);
+//     15 minutes, 0 = off), of which one address may use only a fifth before it is refused on its own;
 //   * a signed-in user is let through before any failure budget is looked at, so junk from their own
 //     address can't lock them out;
 //   * the sign-in endpoint refuses a post from another site before counting it;
@@ -99,8 +99,30 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("…and a passphrase sent without a session is refused while it lasts", (await gate("", "anything", "192.0.2.50")).status === 429);
   A.env.ADMIN_AUTH_GLOBAL_LIMIT = "0";
   ok("with the limit at 0 it's off", (await signInFrom("192.0.2.100", "olive@myshop.com", "correct horse battery")).status === 200);
-  delete A.env.ADMIN_AUTH_GLOBAL_LIMIT;
   clearLimits();
+
+  delete A.env.ADMIN_AUTH_GLOBAL_LIMIT;
+
+  console.log("\n=== One address can't use up everyone's budget ===");
+  // A site of its own: the limiter remembers a used-up window in memory, as it does on a real site.
+  const B = await makeAuth({ realLimits: true });
+  await B.firstAdmin();
+  B.d1._raw.run("DELETE FROM rate_limits");
+  B.env.ADMIN_AUTH_GLOBAL_LIMIT = "10";   // each address's share is a fifth: 2
+  const signInB = async (ip, key) => answer(await B.raw["/api/admin-session"].POST({ env: B.env,
+    request: request("/api/admin-session", { email: "olive@myshop.com", key }, { headers: { "cf-connecting-ip": ip } }) }));
+  const gateB = (key, ip) => B.lib.requireAdmin(B.env, { kind: "admin" }, key, request("/api/orders", {}, { headers: { "cf-connecting-ip": ip } }), "no", "staff");
+  const allCount = () => { const row = B.d1.q("SELECT sum(count) n FROM rate_limits WHERE key LIKE 'rl:admin_auth_all:%'")[0]; return Number(row && row.n) || 0; };
+  const tries = [];
+  for (let i = 0; i < 6; i++) tries.push((await signInB("198.51.100.66", "wrong password")).status);
+  ok("one address gets its share of failures, then is refused on its own", tries.slice(0, 2).every(s => s === 401) && tries.slice(2).every(s => s === 429));
+  ok("…even with the right password, for the rest of the window", (await signInB("198.51.100.66", "correct horse battery")).status === 429);
+  ok("…while everyone else still signs in", (await signInB("198.51.100.67", "correct horse battery")).status === 200);
+  ok("only its share counted toward everyone's budget", allCount() === 2);
+  for (let i = 0; i < 6; i++) await gateB("a wrong key " + i, "198.51.100.68");
+  ok("a wrong key sent to the API without a session is held to the same share", allCount() === 4 && (await gateB("another wrong key", "198.51.100.68")).status === 429);
+  for (let i = 1; i <= 3; i++){ await signInB("192.0.2.1" + i, "wrong password"); await signInB("192.0.2.1" + i, "wrong password"); }
+  ok("five addresses together can still use the budget up", allCount() === 10 && (await signInB("192.0.2.30", "correct horse battery")).status === 429);
 
   console.log("\n=== Spreadsheet export ===");
   const adminJs = read("public/admin.js");

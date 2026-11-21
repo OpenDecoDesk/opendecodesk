@@ -99,7 +99,7 @@ function createWindow() {
     width: 1280, height: 860, title: "OpenDecoDesk " + VERSION,
     // Windows and Linux show this in the title bar and taskbar; a Mac uses the app's icon.icns.
     ...(process.platform === "darwin" ? {} : { icon: path.join(__dirname, "icons", "icon.png") }),
-    webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, sandbox: true, nodeIntegration: false },
+    webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, sandbox: true, nodeIntegration: false, devTools: !app.isPackaged },
   });
   // Links to anywhere else open in the person's browser, not in this window.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -231,7 +231,10 @@ function buildMenu() {
       mac ? { role: "close" } : { role: "quit" },
     ] },
     { role: "editMenu" },
-    { label: "View", submenu: [{ role: "reload" }, { role: "togglefullscreen" }, { type: "separator" }, { role: "resetZoom" }, { role: "zoomIn" }, { role: "zoomOut" }, { type: "separator" }, { role: "toggleDevTools" }] },
+    { label: "View", submenu: [{ role: "reload" }, { role: "togglefullscreen" }, { type: "separator" }, { role: "resetZoom" }, { role: "zoomIn" }, { role: "zoomOut" },
+      // The developer tools only when run from the source: in the installed program they would let anyone
+      // at the computer call the program's own functions from the page.
+      ...(app.isPackaged ? [] : [{ type: "separator" }, { role: "toggleDevTools" }])] },
     { role: "windowMenu" },
     { label: "Settings", submenu: [
       // Global settings has the Email and Carrier shipping (Shippo) sections near the top in the desktop version.
@@ -253,13 +256,50 @@ ipcMain.handle("odd:has-shippo-key", async (e) => !!(isOurs(e.senderFrame && e.s
 ipcMain.handle("odd:suppliers-on", async (e) => !!(isOurs(e.senderFrame && e.senderFrame.url) && server && server.suppliersOn()));
 ipcMain.handle("odd:email-settings", async (e) => (isOurs(e.senderFrame && e.senderFrame.url) && server ? server.emailSettings() : null));
 
+// Whether whoever is signed in on the window may change Global settings (settings.global at edit, as
+// the server asks of the page's own Save): asked of the server itself with the window's session
+// cookie, so the program's settings follow the same roles as everything else.
+const NOT_YOURS = { ok: false, message: "Your role can't change Global settings. Ask an admin." };
+async function signedInMayEditSettings() {
+  if (!server) return false;
+  try {
+    // By domain, not URL: the session cookie is a Secure one, and the page's address is plain http on localhost.
+    const cookies = await session.defaultSession.cookies.get({ domain: "localhost" });
+    if (!cookies.length) return false;
+    const origin = new URL(server.url).origin, body = JSON.stringify({ action: "me" });
+    const answer = await new Promise((resolve, reject) => {
+      // To 127.0.0.1, where the server listens (server.js), under the page's own name and origin.
+      const req = require("http").request({ host: "127.0.0.1", port: server.port, path: "/api/admin-users", method: "POST", headers: {
+        Host: "localhost:" + server.port, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), Origin: origin,
+        Cookie: cookies.map(c => c.name + "=" + c.value).join("; ") } }, (res) => {
+        let text = "";
+        res.setEncoding("utf8");
+        res.on("data", (d) => { text += d; if (text.length > 1e6) req.destroy(new Error("too long")); });
+        res.on("end", () => { try { resolve({ status: res.statusCode, body: JSON.parse(text) }); } catch (err) { reject(err); } });
+      });
+      req.on("error", reject);
+      req.setTimeout(10000, () => req.destroy(new Error("timed out")));
+      req.end(body);
+    });
+    const level = answer.body && answer.body.permissions && answer.body.permissions["settings.global"];
+    return answer.status === 200 && answer.body.status === "ok" && !answer.body.pending && (level === "edit" || level === "full");
+  } catch (err) {
+    log("Couldn't check who is signed in: " + ((err && err.message) || err));
+    return false;
+  }
+}
+
 // A mailbox's settings, tried before Global settings saves anything: signs in to the server, sends
-// nothing, saves nothing. An empty password tries the saved one. { ok, message }.
+// nothing, saves nothing. An empty password tries the saved one, and only on the server and username
+// it was saved for. { ok, message }.
 ipcMain.handle("odd:check-email", async (e, settings, password) => {
   if (!isOurs(e.senderFrame && e.senderFrame.url)) return { ok: false, message: "Not allowed." };
-  let clean;
-  try { clean = cleanSmtpSettings(settings); } catch (err) { return { ok: false, message: err.message }; }
-  const pass = String(password || "") || savedSmtpPassword(dataDir, crypt());
+  if (!(await signedInMayEditSettings())) return NOT_YOURS;
+  let clean, pass;
+  try {
+    clean = cleanSmtpSettings(settings);
+    pass = String(password || "") || savedSmtpPassword(dataDir, crypt(), clean);
+  } catch (err) { return { ok: false, message: err.message }; }
   if (!pass) return { ok: false, message: "Enter the mailbox's password (or app password)." };
   const tried = await new Mailer(clean, pass).verify();
   if (!tried.ok) log("Email settings not saved: " + tried.message);
@@ -275,6 +315,7 @@ ipcMain.handle("odd:check-email", async (e, settings, password) => {
 // The page has checked the mailbox first (odd:check-email). { ok, message }.
 ipcMain.handle("odd:apply-settings", async (e, s) => {
   if (!isOurs(e.senderFrame && e.senderFrame.url)) return { ok: false, message: "Not allowed." };
+  if (!(await signedInMayEditSettings())) return NOT_YOURS;
   s = s && typeof s === "object" ? s : {};
   let key;
   if (s.shippoKey !== undefined) {
@@ -284,9 +325,10 @@ ipcMain.handle("odd:apply-settings", async (e, s) => {
   let mail = null;
   if (s.email && typeof s.email === "object") {
     if (s.email.on) {
-      try { mail = { on: true, settings: cleanSmtpSettings(s.email.settings), password: String(s.email.password || "") }; }
-      catch (err) { return { ok: false, message: err.message }; }
-      if (!mail.password && !savedSmtpPassword(dataDir, crypt())) return { ok: false, message: "Enter the mailbox's password (or app password)." };
+      try {
+        mail = { on: true, settings: cleanSmtpSettings(s.email.settings), password: String(s.email.password || "") };
+        if (!mail.password && !savedSmtpPassword(dataDir, crypt(), mail.settings)) return { ok: false, message: "Enter the mailbox's password (or app password)." };
+      } catch (err) { return { ok: false, message: err.message }; }
     } else mail = { on: false };
   }
   const suppliers = typeof s.suppliers === "boolean" ? s.suppliers : undefined;

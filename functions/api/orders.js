@@ -389,6 +389,14 @@ async function emailSendingView_(env) {
     credentialsReady: vendorCredentialsReady(env),
   };
 }
+// The saved mailbox password is only ever sent to the server it was saved for, as the same username.
+// Another server or username needs the password typed again, so whoever may edit this setting can't
+// point the saved password at a server of their own. (A new port or security on the same server is
+// fine: smtp.js only ever sends the password over TLS, checked against that server's name.)
+const SAVED_PASSWORD_OTHER_SERVER = "The mail server or username changed: enter the mailbox's password again.";
+function savedMailboxPasswordFits_(saved, settings) {
+  return !!(saved && saved.password) && saved.host === settings.host && saved.user === settings.user;
+}
 // What to save from Global settings → Email: { mailbox, passwordChanged } or { error }. A hosted service
 // keeps the mailbox's settings and password, so switching back needs nothing typed again. A mailbox
 // must be complete, have a password (typed now or saved before) and sign in.
@@ -401,6 +409,7 @@ async function mailboxToSave_(env, m) {
   if (typed.length > 300) return { error: "That password is too long." };
   if (!vendorCredentialsReady(env)) return { error: "Set the VENDOR_CREDENTIALS_KEY variable (a long random string) in Cloudflare first: the mailbox's password is stored encrypted with it (docs/email.md)." };
   let password = typed;
+  if (!password && saved.password && !savedMailboxPasswordFits_(saved, settings)) return { error: SAVED_PASSWORD_OTHER_SERVER };
   if (!password && saved.password) {
     try { password = ((await decryptVendorCredentials(env, saved.password)) || {}).password || ""; }
     catch (e) { return { error: "The saved password can't be read (was VENDOR_CREDENTIALS_KEY changed?). Enter it again." }; }
@@ -3678,7 +3687,8 @@ export async function onRequestPost(context) {
       let password = String(m.password || "");
       if (!password) {
         const saved = await getEmailMailbox(env.DB);
-        try { password = saved.password ? ((await decryptVendorCredentials(env, saved.password)) || {}).password || "" : ""; } catch (e) { password = ""; }
+        if (saved.password && !savedMailboxPasswordFits_(saved, settings)) return jsonResponse({ status: "ok", ok: false, message: SAVED_PASSWORD_OTHER_SERVER });
+        try { password = saved.password ?((await decryptVendorCredentials(env, saved.password)) || {}).password || "" : ""; } catch (e) { password = ""; }
       }
       if (!password) return jsonResponse({ status: "ok", ok: false, message: "Enter the mailbox's password or app password." });
       const r = await smtpVerify(settings, password, { connect: env.__SMTP_CONNECT_FOR_TESTS });
@@ -4104,7 +4114,19 @@ export async function onRequestPost(context) {
         if (!vendorCredentialsReady(env)) return jsonResponse({ status: "error", message: "Set the VENDOR_CREDENTIALS_KEY variable (a long random string) in Cloudflare first — the vendor login is stored encrypted with it." }, 400);
         credentialsEnc = await encryptVendorCredentials(env, { id: String(body.credentials.id || "").slice(0, 200), password: String(body.credentials.password || "").slice(0, 500) });
       }
-      if (body.id && !(await getVendorConnectionRow(env.DB, body.id))) return jsonResponse({ status: "error", message: "Connection not found" }, 404);
+      const existingRow = body.id ? await getVendorConnectionRow(env.DB, body.id) : null;
+      if (body.id && !existingRow) return jsonResponse({ status: "error", message: "Connection not found" }, 404);
+      // A saved login is only ever sent to the servers it was saved for: a service address on any other
+      // server needs the login typed again, so whoever may edit this can't send it somewhere of their own.
+      if (existingRow && credentialsEnc === undefined && existingRow.credentialsEnc) {
+        const origin = (u) => { try { return new URL(u).origin.toLowerCase(); } catch (e) { return ""; } };
+        let was = {};
+        try { was = JSON.parse(existingRow.endpointsJson || "{}") || {}; } catch (e) { was = {}; }
+        const known = new Set(EP_KEYS.map(k => origin(was[k])).filter(Boolean));
+        if (EP_KEYS.some(k => endpoints[k] && !known.has(origin(endpoints[k])))) {
+          return jsonResponse({ status: "error", message: "A service address now points to a different server: enter the vendor login again to save it." }, 400);
+        }
+      }
       const id = await saveVendorConnection(env.DB, { id: body.id ? Number(body.id) : null, companyCode: code, name, endpoints, overrides, credentialsEnc });
       audit({ orgId: null, orderId: null, action: body.id ? "vendor.connection_updated" : "vendor.connection_created",
         detail: { id, companyCode: code || undefined, name, endpoints, overrides, credentials: credentialsEnc === undefined ? "unchanged" : (credentialsEnc ? "set" : "cleared") } });

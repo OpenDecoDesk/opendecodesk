@@ -98,8 +98,17 @@ const ok = (d, c) => { console.log(d + ":", !!c); };
   let cfg = cfgOf();
   ok("the server settings are kept beside the port, the password with the secrets", cfg.smtp.host === "smtp.gmail.com" && cfg.smtp.from === "pat@example.com" && !("password" in cfg.smtp) &&
     cfg.secrets.SMTP_PASSWORD === "secret app pw" && server.savedSmtpPassword(tmp) === "secret app pw");
-  server.setSmtp(tmp, { ...gmail, host: "smtp.mail.me.com" }, "");
-  ok("saving without a password keeps the saved one", cfgOf().smtp.host === "smtp.mail.me.com" && cfgOf().secrets.SMTP_PASSWORD === "secret app pw");
+  server.setSmtp(tmp, { ...gmail, port: 465, security: "tls" }, "");
+  ok("saving a new port without a password keeps the saved one", cfgOf().smtp.port === 465 && cfgOf().secrets.SMTP_PASSWORD === "secret app pw");
+  thrown = null;
+  try { server.setSmtp(tmp, { ...gmail, host: "smtp.elsewhere.test" }, ""); } catch (e) { thrown = e; }
+  let thrown2 = null;
+  try { server.savedSmtpPassword(tmp, {}, { ...gmail, user: "someone-else@example.com" }); } catch (e) { thrown2 = e; }
+  ok("…but another server or username needs the password typed again: the saved one is never used there", thrown && /enter the mailbox's password again/.test(thrown.message) &&
+    thrown2 && /enter the mailbox's password again/.test(thrown2.message) && cfgOf().smtp.host === "smtp.gmail.com" &&
+    server.savedSmtpPassword(tmp, {}, { ...gmail, port: 465, security: "tls" }) === "secret app pw");
+  server.setSmtp(tmp, { ...gmail, host: "smtp.mail.me.com" }, "a new app pw");
+  ok("…and saves with it", cfgOf().smtp.host === "smtp.mail.me.com" && cfgOf().secrets.SMTP_PASSWORD === "a new app pw");
   const protect = (t) => "P:" + Buffer.from(t).toString("base64"), unprotect = (t) => Buffer.from(t.slice(2), "base64").toString();
   server.setSmtp(tmp, gmail, "secret app pw", { protect, unprotect });
   ok("where the system has a keychain the password is encrypted with the other secrets", !JSON.stringify(cfgOf()).includes("secret app pw") && server.savedSmtpPassword(tmp, { unprotect }) === "secret app pw");
@@ -118,6 +127,14 @@ const ok = (d, c) => { console.log(d + ":", !!c); };
   ok("the program tries a mailbox before Global settings saves anything (signs in, saves nothing)", /ipcMain\.handle\("odd:check-email"[\s\S]{0,600}const tried = await new Mailer\(clean, pass\)\.verify\(\);/.test(mainSrc));
   ok("…and takes its part of a save — key, mailbox, supplier switch — in one call, with one restart and no reload", /ipcMain\.handle\("odd:apply-settings"/.test(mainSrc) &&
     /if \(key !== undefined\) setShippoKey[\s\S]{0,300}if \(mail\) setEmailOn[\s\S]{0,200}setSupplierConnections[\s\S]{0,40}\}, null, \{ reload: false \}\)/.test(mainSrc) && !/odd:set-email|odd:set-shippo-key|odd:set-suppliers-on/.test(mainSrc));
+  ok("both first ask the server whether the person signed in may change Global settings (their role, with the window's own session)",
+    /ipcMain\.handle\("odd:check-email"[\s\S]{0,200}if \(!\(await signedInMayEditSettings\(\)\)\) return NOT_YOURS;/.test(mainSrc) &&
+    /ipcMain\.handle\("odd:apply-settings"[\s\S]{0,200}if \(!\(await signedInMayEditSettings\(\)\)\) return NOT_YOURS;/.test(mainSrc) &&
+    /path: "\/api\/admin-users"/.test(mainSrc) && /permissions\["settings\.global"\]/.test(mainSrc) && /\(level === "edit" \|\| level === "full"\)/.test(mainSrc));
+  ok("…and the saved mailbox password is only tried on the server it was saved for", /savedSmtpPassword\(dataDir, crypt\(\), clean\)/.test(mainSrc) && /savedSmtpPassword\(dataDir, crypt\(\), mail\.settings\)/.test(mainSrc) &&
+    !/savedSmtpPassword\(dataDir, crypt\(\)\)/.test(mainSrc));
+  ok("the developer tools are there only when the program is run from the source, not in the installed program", /devTools: !app\.isPackaged/.test(mainSrc) &&
+    /\.\.\.\(app\.isPackaged \? \[\] : \[\{ type: "separator" \}, \{ role: "toggleDevTools" \}\]\)/.test(mainSrc));
   const preload = read("desktop/preload.js");
   ok("its preload gives the page those calls and the reads, never a key or password", /checkEmail: \(settings, password\) => ipcRenderer\.invoke\("odd:check-email", settings, password\)/.test(preload) &&
     /applySettings: \(s\) => ipcRenderer\.invoke\("odd:apply-settings", s\)/.test(preload) && /emailSettings: \(\) => ipcRenderer\.invoke\("odd:email-settings"\)/.test(preload) && !/setEmail|setShippoKey|setSuppliersOn/.test(preload));

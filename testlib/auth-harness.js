@@ -23,7 +23,7 @@ const ORIGIN = "https://admin.example.com";
 // instead of stand-ins that attach nothing.
 const prelude = (realLimits, realDomains) => strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/db.js")) + "\n" + strip(read("functions/_lib/totp.js")) + "\n" +
   (realLimits ? strip(read("functions/_lib/rateLimit.js")) + "\n" :
-  "const rateLimitCheck = async () => ({ blocked: false }), rateLimited = async () => ({ blocked: false }), rateLimitResponse = () => null, rateLimitHit = async (env, bucket) => { __hits.push(bucket); };\n" +
+  "const rateLimitCheck = async () => ({ blocked: false }), rateLimited = async () => ({ blocked: false }), rateLimitResponse = () => null, rateLimitHit = async (env, bucket, request, windowSeconds) => { if (!windowSeconds) __hits.push(bucket); return 0; };\n" +
   "const rateLimitCheckGlobal = async () => ({ blocked: false }), rateLimitHitGlobal = async () => {};\n") +
   "const accessEnabled = () => false, verifyAccess = async () => ({ ok: true }); const getCatalogData = async () => ({ subdomainMap: {}, business: {} });\n" +
   strip(read("functions/_lib/permissions.js")) + "\n" + strip(read("functions/_lib/adminAuth.js")) + "\n" + strip(read("functions/_lib/cloudflareSetup.js")) + "\n" +

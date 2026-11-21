@@ -6,8 +6,9 @@
 //                   also makes sure the files are granted and emailed (digital.js deliverOrderDownloads), in case a
 //                   webhook was missed.
 //   GET ?o&t&f=<id> one file: counted (db.js recordDownload, atomically), then served from the private DESIGNS bucket
-//                   as an attachment. Refused once revoked, expired or used up. A HEAD, and a resumed download (a Range
-//                   that doesn't start at 0), isn't counted again.
+//                   as an attachment. Refused once revoked, expired or used up. A HEAD isn't counted, nor is a resumed
+//                   download (a Range that doesn't start at 0, from a network that counted one of this file in the
+//                   last day); any other Range is counted like a full download.
 // Nothing here is cached or indexed. Rate-limited per network, like checkout.
 
 import { verifyDownloadToken, featureIsOff } from "../_lib/http.js";
@@ -41,6 +42,8 @@ td,th{padding:10px;border-bottom:1px solid #eee;text-align:left;font-size:14px}a
 }
 const notFound = () => page("Link not found", `<h1>This download link doesn't work</h1><p>Check you used the whole link from your email. If it still doesn't work, reply to that email and the shop will send a new one.</p>`, { status: 404 });
 
+// How long after a counted download the same network may resume it (a Range past byte 0) without counting again.
+const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
 function networkOf_(request) {
   const ip = String((request.headers && request.headers.get && request.headers.get("CF-Connecting-IP")) || "");
   if (ip.includes(".")) return ip.split(".").slice(0, 3).join(".") + ".0/24";
@@ -88,8 +91,16 @@ export async function onRequestGet(context) {
   if (blocked) return page("Not available", `<h1>${blocked === "expired" ? "This link has expired" : blocked === "used" ? "All downloads used" : "No longer available"}</h1><p>Reply to your order email and ${esc(shop)} can send a new link.</p>`, { status: 410 });
   if (!env.DESIGNS || typeof env.DESIGNS.get !== "function") return page("Not available", `<h1>The file can't be reached right now</h1><p>Try again later.</p>`, { status: 503 });
   const range = request.headers && request.headers.get && request.headers.get("Range");
-  const resumed = !!(range && !/^bytes=0-/.test(range));
   const head = request.method === "HEAD";
+  // A Range that doesn't start at 0 is free only as a resume: this network counted a download of this file in the
+  // last day. Otherwise it is counted like any other, so asking for "the rest" can't get around the limit.
+  let resumed = false;
+  if (range && !head && !/^bytes=0-/.test(range)) {
+    const since = new Date(Date.now() - RESUME_WINDOW_MS).toISOString();
+    const recent = await env.DB.prepare("SELECT 1 AS hit FROM download_log WHERE grantId = ? AND network = ? AND at > ? LIMIT 1")
+      .bind(Number(g.id), networkOf_(request), since).first().catch(() => null);
+    resumed = !!recent;
+  }
   const obj = await env.DESIGNS.get(g.fileKey, range && !head ? { range: request.headers } : undefined).catch(() => null);
   if (!obj) return page("Not available", `<h1>This file is missing</h1><p>Reply to your order email and ${esc(shop)} will sort it out.</p>`, { status: 404 });
   if (!head && !resumed) {

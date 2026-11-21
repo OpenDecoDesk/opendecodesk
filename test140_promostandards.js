@@ -234,6 +234,12 @@ const conn = { name: "SanMar", companyCode: "SanMar", endpoints: { product: "htt
   ok("…a connection that doesn't exist links nothing", (await lib.getAllBlanks(d1)).find(b => b.sku === "K540FAKE").vendorConnectionId === null);
   r = await call({ action: "saveVendorConnection", id: cid, name: "SanMar (main)", endpoints: { product: conn.endpoints.product, ppc: conn.endpoints.ppc, media: "" } });
   ok("editing without retyping the login keeps it", r.status === 200 && d1.q("SELECT credentialsEnc FROM vendor_connections WHERE id=?", cid)[0].credentialsEnc === row.credentialsEnc);
+  const endpointsBefore = d1.q("SELECT endpointsJson FROM vendor_connections WHERE id=?", cid)[0].endpointsJson;
+  r = await call({ action: "saveVendorConnection", id: cid, name: "SanMar (main)", endpoints: { product: "https://collector.example.test/product", ppc: conn.endpoints.ppc } });
+  ok("pointing a service at another server without retyping the login is refused, and nothing changes", r.status === 400 && /enter the vendor login again/.test(r.body.message) &&
+    d1.q("SELECT endpointsJson FROM vendor_connections WHERE id=?", cid)[0].endpointsJson === endpointsBefore);
+  r = await call({ action: "saveVendorConnection", id: cid, name: "SanMar (main)", endpoints: { product: "https://collector.example.test/product", ppc: conn.endpoints.ppc }, credentials: { id: "pcw_user", password: "s3cret" } });
+  ok("…with the login typed again it saves", r.status === 200 && JSON.parse(d1.q("SELECT endpointsJson FROM vendor_connections WHERE id=?", cid)[0].endpointsJson).product === "https://collector.example.test/product");
   r = await call({ action: "deleteVendorConnection", id: cid });
   ok("Disconnect deletes the connection and its login, and unlinks its blanks (they stay)", r.status === 200 && !d1.q("SELECT 1 FROM vendor_connections").length &&
     (await lib.getAllBlanks(d1)).find(b => b.id === k540).vendorConnectionId === null);

@@ -44,7 +44,7 @@ global.rateLimitCheckGlobal = async () => ({ blocked: false, retryAfter: 0 }); g
       "Origin": "https://admin.example.com",
       "Cookie": cookieToken ? "__Host-odd_admin=" + cookieToken : null,
     })[h] ?? null } });
-    const broken = { DB: brokenDb("D1 daily read limit exceeded"), PROXY_ADMIN_PASSPHRASE: "pw" };
+    const broken = { DB: brokenDb("D1 daily read limit exceeded"), PROXY_ADMIN_PASSPHRASE: "pw-long-enough-pass" };
 
     console.log("\n=== adminAuth: storage outage + session cookie → 503, NOT admitted (was: fail open) ===");
     let r = await ns.requireAdmin(broken, ADMIN, "cookie", req(validToken));
@@ -53,13 +53,13 @@ global.rateLimitCheckGlobal = async () => ({ blocked: false, retryAfter: 0 }); g
     console.log("Malformed session cookie refused (401):", r !== null && r.status === 401);
 
     console.log("\n=== adminAuth: storage outage on the passphrase path → 503, NOT a silent 2FA downgrade ===");
-    r = await ns.requireAdmin(broken, ADMIN, "pw", req(null));
+    r = await ns.requireAdmin(broken, ADMIN, "pw-long-enough-pass", req(null));
     console.log("Correct passphrase still refused with 503 while TOTP state is unknown:", r !== null && r.status === 503);
 
     console.log("\n=== adminAuth: healthy storage still works normally ===");
     const DB = await makePlatformDb();
     await seedSession(DB, validToken, new Date(Date.now() + 3600e3).toISOString());
-    const okEnv = { DB, PROXY_ADMIN_PASSPHRASE: "pw" };
+    const okEnv = { DB, PROXY_ADMIN_PASSPHRASE: "pw-long-enough-pass" };
     r = await ns.requireAdmin(okEnv, ADMIN, "cookie", req(validToken));
     console.log("Valid session cookie admitted:", r === null);
     r = await ns.requireAdmin(okEnv, ADMIN, "cookie", req("sess_" + "b".repeat(48)));
@@ -69,11 +69,11 @@ global.rateLimitCheckGlobal = async () => ({ blocked: false, retryAfter: 0 }); g
     r = await ns.requireAdmin(okEnv, ADMIN, "cookie", req(expiredTok));
     console.log("Expired session → 401:", r !== null && r.status === 401);
     console.log("The raw token is never stored (only its hash):", DB.q("SELECT tokenHash FROM admin_sessions").every(x => x.tokenHash !== validToken && /^[0-9a-f]{64}$/.test(x.tokenHash)));
-    r = await ns.requireAdmin(okEnv, ADMIN, "pw", req(null));
+    r = await ns.requireAdmin(okEnv, ADMIN, "pw-long-enough-pass", req(null));
     console.log("Passphrase accepted when TOTP is genuinely off:", r === null);
     // Two-step sign-in belongs to the admin the passphrase would sign in as.
     await DB.prepare("UPDATE users SET totpSecret = ? WHERE role = 'admin'").bind("JBSWY3DPEHPK3PXP").run();
-    r = await ns.requireAdmin(okEnv, ADMIN, "pw", req(null));
+    r = await ns.requireAdmin(okEnv, ADMIN, "pw-long-enough-pass", req(null));
     console.log("Bare passphrase refused when TOTP is on (403):", r !== null && r.status === 403);
   }
 
@@ -88,7 +88,7 @@ global.rateLimitCheckGlobal = async () => ({ blocked: false, retryAfter: 0 }); g
     global.getCatalogData = async () => ({ subdomainMap: {} });
     new Function("ns", strip(read("functions/_lib/http.js")) + "\n" + strip(src) + "\nns.get = onRequestGet;")(ns);
     const res = await ns.get({ request: { url: "https://admin.example.com/api/admin-session?key=pw" },
-      env: { PROXY_ADMIN_PASSPHRASE: "pw", TOTP_SECRET: "JBSWY3DPEHPK3PXP" } });
+      env: { PROXY_ADMIN_PASSPHRASE: "pw-long-enough-pass", TOTP_SECRET: "JBSWY3DPEHPK3PXP" } });
     const text = await res.text();
     console.log("GET → 405:", res.status === 405);
     console.log("Response contains no otpauth URI / secret:", !text.includes("otpauth") && !text.includes("JBSWY3DPEHPK3PXP"));

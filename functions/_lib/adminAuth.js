@@ -61,6 +61,33 @@ export function adminAuthGlobalLimit(env){
   const n = Number(env && env.ADMIN_AUTH_GLOBAL_LIMIT);
   return Number.isFinite(n) && String(env.ADMIN_AUTH_GLOBAL_LIMIT).trim() !== "" ? Math.max(0, Math.floor(n)) : 100;
 }
+// No ONE address may spend more than a fifth of that budget: past its share it is refused on its own
+// (for the rest of the window) and its failures stop counting toward everyone's budget. So locking
+// every new sign-in out takes at least five addresses (IPv6 counted by /64), not one.
+const ADMIN_AUTH_IP_SHARE_BUCKET = "admin_auth_ip15";
+export function adminAuthIpShare(env){
+  const all = adminAuthGlobalLimit(env);
+  return all > 0 ? Math.max(1, Math.floor(all / 5)) : 0;
+}
+// Before checking a credential sent without a session: this address's share, then the whole budget.
+// Returns null, or the 429 to send back.
+export async function signInBudgetBlocked(env, request){
+  const share = adminAuthIpShare(env);
+  if(!(share > 0)) return null;
+  const mine = await rateLimitCheck(env, ADMIN_AUTH_IP_SHARE_BUCKET, request, share, ADMIN_AUTH_GLOBAL_WINDOW);
+  if(mine.blocked) return rateLimitResponse(mine.retryAfter);
+  const all = await rateLimitCheckGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, adminAuthGlobalLimit(env), ADMIN_AUTH_GLOBAL_WINDOW);
+  if(all.blocked) return rateLimitResponse(all.retryAfter);
+  return null;
+}
+// After a refused credential sent without a session: counts against this address's share and,
+// while the address is still within it, against the whole budget.
+export async function countSignInFailure(env, request){
+  const share = adminAuthIpShare(env);
+  if(!(share > 0)) return;
+  const mine = await rateLimitHit(env, ADMIN_AUTH_IP_SHARE_BUCKET, request, ADMIN_AUTH_GLOBAL_WINDOW);
+  if(mine <= share) await rateLimitHitGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, ADMIN_AUTH_GLOBAL_WINDOW);
+}
 
 const SESSION_PREFIX  = "sess_";
 export const SESSION_TTL_SEC = 24 * 60 * 60; // 24 hours
@@ -496,8 +523,8 @@ export async function requireAdmin(env, host, providedKey, request, notAdminMess
   const rl = await rateLimitCheck(env, ADMIN_AUTH_BUCKET, request, ADMIN_AUTH_LIMIT);
   if(rl.blocked) return rateLimitResponse(rl.retryAfter);
   if(!hasCookie){
-    const all = await rateLimitCheckGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, adminAuthGlobalLimit(env), ADMIN_AUTH_GLOBAL_WINDOW);
-    if(all.blocked) return rateLimitResponse(all.retryAfter);
+    const spent = await signInBudgetBlocked(env, request);
+    if(spent) return spent;
   }
 
   if(!result) result = await checkCredential(env, providedKey, request, need, options || {});
@@ -508,7 +535,7 @@ export async function requireAdmin(env, host, providedKey, request, notAdminMess
     await rateLimitHit(env, ADMIN_AUTH_BUCKET, request);
     // A wrong key with no session counts toward the install-wide budget too. A stale session cookie
     // doesn't: that's an open tab whose session ran out, not a guess.
-    if(!hasCookie) await rateLimitHitGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, ADMIN_AUTH_GLOBAL_WINDOW);
+    if(!hasCookie) await countSignInFailure(env, request);
   }
   return denied;
 }
@@ -566,7 +593,9 @@ async function checkCredential(env, providedKey, request, need, options){
   if(boot.totp){
     return wrong("Two-factor authentication is required. Please log in through the admin panel.", 403);
   }
-  if(!env.PROXY_ADMIN_PASSPHRASE || !boot.open || !timingSafeEqual(key, env.PROXY_ADMIN_PASSPHRASE)){
+  // A setup password that is the example's placeholder or too short opens nothing here either (the
+  // sign-in page says why; here it is just a wrong key, so this answer tells a guesser nothing).
+  if(!env.PROXY_ADMIN_PASSPHRASE || !boot.open || weakSetupPassword(env) || !timingSafeEqual(key, env.PROXY_ADMIN_PASSPHRASE)){
     return wrong("Unauthorized", 401);
   }
   _actors.set(request, accessEmail || "passphrase");

@@ -34,7 +34,7 @@ async function makePlatformDb(){
   // The real definitions, cut out of schema.sql, so this can't drift from them.
   const schema = fs.readFileSync(__dirname + "/../schema.sql", "utf8");
   const table = (name) => { const m = new RegExp("CREATE TABLE IF NOT EXISTS " + name + " \\([\\s\\S]*?\\n\\);").exec(schema); if (!m) throw new Error("schema.sql has no table " + name); return m[0]; };
-  db.execFile(["global_settings", "admin_sessions", "users", "audit_log"].map(table).join("\n"));
+  db.execFile(["global_settings", "admin_sessions", "users", "audit_log", "system_issues", "failed_admin_logins"].map(table).join("\n"));
   return db;
 }
 

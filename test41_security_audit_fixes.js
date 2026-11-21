@@ -92,12 +92,13 @@ const httpSrc = strip(read("functions/_lib/http.js"));
   await login({ key: "guess1" });
   await login({ key: "guess2" }, "203.0.113.9");
   res = await login({ key: "correct horse", totpCode: "000000" });
-  const f = d1.q("SELECT value FROM global_settings WHERE key='failedAdminLogins'")[0];
-  const fv = JSON.parse(f.value);
-  console.log("wrong passphrase ×2 and wrong 2FA code counted with IPs:", res.status === 401 && fv.count === 3 && fv.passphrase === 2 && fv.code === 1 && fv.ips.length === 2);
+  // One failed_admin_logins row per failure (migrations/0215).
+  const failed = () => d1.q(`SELECT COALESCE(SUM(n), 0) AS count, COALESCE(SUM(CASE WHEN reason = 'passphrase' THEN n END), 0) AS passphrase,
+    COALESCE(SUM(CASE WHEN reason = 'code' THEN n END), 0) AS code, COUNT(DISTINCT NULLIF(ip, '')) AS ips FROM failed_admin_logins`)[0];
+  const fv = failed();
+  console.log("wrong passphrase ×2 and wrong 2FA code counted with IPs:", res.status === 401 && fv.count === 3 && fv.passphrase === 2 && fv.code === 1 && fv.ips === 2);
   res = await login({ key: "correct horse" });
-  console.log("correct passphrase (asked for code) isn't counted:", JSON.parse(await res.text()).status === "totp_required" &&
-    JSON.parse(d1.q("SELECT value FROM global_settings WHERE key='failedAdminLogins'")[0].value).count === 3);
+  console.log("correct passphrase (asked for code) isn't counted:", JSON.parse(await res.text()).status === "totp_required" && failed().count === 3);
 
   emails = [];
   let dg = await runDigest();
@@ -108,7 +109,7 @@ const httpSrc = strip(read("functions/_lib/http.js"));
   console.log("5 failures send a roll-up on their own, flagged in the subject:", dg.sent === true && /🔒 5 failed admin sign-ins/.test(e.subject));
   console.log("…with the breakdown and the 'password was right' warning for wrong 2FA codes:",
     /4 wrong password, 1 wrong 2FA code/.test(e.htmlBody) && /198\.51\.100\.7/.test(e.htmlBody) && /password was right/.test(e.htmlBody));
-  console.log("counter cleared after it's reported:", d1.q("SELECT count(*) n FROM global_settings WHERE key='failedAdminLogins'")[0].n === 0);
+  console.log("counter cleared after it's reported:", d1.q("SELECT count(*) n FROM failed_admin_logins")[0].n === 0);
 
   console.log("\n=== #7 Internal pricing errors aren't echoed to customers ===");
   const lib = new Function(dbSrc + "\nreturn { priceItem };")();

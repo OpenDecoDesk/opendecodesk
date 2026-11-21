@@ -121,6 +121,23 @@ const ENDPOINTS = { product: "https://ws.vendor.example/ProductData", ppc: "http
   const c = await vl.cleanUpVendorApiLog({ DB: d1, RECEIPTS: R2 });
   ok("the daily clean-up removes entries older than 30 days and their stored payloads", c.deleted === 1 && d1.q("SELECT COUNT(*) AS n FROM vendor_api_log")[0].n === before - 1 && !R2.m.has(mine[0].payloadKey) && R2.m.has(mine[1].payloadKey));
   ok("…an entry that's gone says so", (await call({ action: "getVendorApiLogEntry", id: mine[0].id })).status === 404);
+  {
+    // A month of busy connections: 620 expired entries, against D1's 100-bound-parameter cap.
+    const capped = { ...d1, prepare(sql) { const st = d1.prepare(sql); return { ...st, bind: (...p) => { if (p.length > 100) throw new Error("too many SQL variables (" + p.length + ")"); return st.bind(...p); } }; } };
+    for (let i = 0; i < 620; i++) {
+      d1._raw.run("INSERT INTO vendor_api_log (connectionId, at, context, action, url, subject, httpStatus, ok, error, durationMs, requestBytes, responseBytes, actor, payload, payloadKey) VALUES (99, '2026-01-02T00:00:00.000Z', 'x', 'getProduct', '', '', 200, 1, '', 1, 1, 1, 'me', '', ?)", ["vendor-logs/99/old-" + i]);
+      R2.m.set("vendor-logs/99/old-" + i, "{}");
+    }
+    const big = await vl.cleanUpVendorApiLog({ DB: capped, RECEIPTS: R2 });
+    ok("more than 100 expired entries: all go, 90 ids a statement (D1's 100-parameter cap), with their payloads", big.deleted === 620 &&
+      d1.q("SELECT COUNT(*) AS n FROM vendor_api_log WHERE connectionId=99")[0].n === 0 && ![...R2.m.keys()].some(k => k.startsWith("vendor-logs/99/")) && R2.m.has(mine[1].payloadKey));
+    const failing = { ...d1, prepare(sql) { if (/^DELETE/.test(sql)) throw new Error("D1 unavailable"); return d1.prepare(sql); } };
+    d1._raw.run("INSERT INTO vendor_api_log (connectionId, at, context, action, url, subject, httpStatus, ok, error, durationMs, requestBytes, responseBytes, actor, payload, payloadKey) VALUES (99, '2026-01-02T00:00:00.000Z', 'x', 'getProduct', '', '', 200, 1, '', 1, 1, 1, 'me', '', 'vendor-logs/99/kept')");
+    R2.m.set("vendor-logs/99/kept", "{}");
+    const threw = await vl.cleanUpVendorApiLog({ DB: failing, RECEIPTS: R2 }).then(() => false, () => true);
+    ok("…a row delete that fails keeps the payload (it goes with its row on a later run)", threw && R2.m.has("vendor-logs/99/kept"));
+    await vl.cleanUpVendorApiLog({ DB: d1, RECEIPTS: R2 });
+  }
   ok("the Worker's daily run calls it", /cleanUpVendorApiLog\(env\)/.test(read("src/worker.js")));
 
   console.log("\n=== The Logs viewer ===");

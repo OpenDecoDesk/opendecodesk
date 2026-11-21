@@ -95,7 +95,7 @@ const path = require("path");
     const { makePlatformDb, platformGlobals } = require("./testlib/platform-db");
     const DB = await makePlatformDb();
     const res = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T10:00:00Z") }, { DB, TIMEZONE: "America/New_York" }); // no secrets/orgs table → the roll-up can't complete
-    const issue = DB.q("SELECT value FROM global_settings WHERE key='systemIssues'");
+    const issue = DB.q("SELECT group_concat(kind) AS value FROM system_issues");
     console.log("an on-hour tick runs the roll-up:", res.ran === true);
     console.log("a roll-up that fails is recorded for the owner (digest_failed):", res.ok === false && issue.length === 1 && /digest_failed/.test(issue[0].value));
     const utc = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T10:00:00Z") }, { DB });

@@ -117,6 +117,22 @@ const ok = (label, cond) => { if (!cond) failed++; console.log(label + ": " + !!
   const shop = (id) => r.body.shops.find(s => s.orgId === id);
   ok("All shops: capped per shop, each saying whether it was cut", shop("prime").orders.length === 4 && shop("prime").more === true && shop("rec").orders.length === 3 && shop("rec").more === false);
 
+  console.log("\n=== Design verifications: only for the orders the page shows ===");
+  const verif = (token, orderId, days, status) => d1._raw.run(`INSERT INTO design_verifications (token, orgId, orderId, customerEmail, message, imagesJson, status, sentAt)
+    VALUES (?, 'prime', ?, 'cust@example.com', 'A long proof message', '["https://images.example.com/uploads/verify/p.png"]', ?, ?)`, [token, orderId, status, daysAgo(days)]);
+  verif("v-p3-old", "P3", 6, "pending"); verif("v-p3-new", "P3", 5, "revision"); verif("v-p1", "P1", 8, "approved");
+  r = await call({ action: "listDesignVerifications", org: "prime", dateFrom: "", dateTo: "" });
+  const vs = r.body.verifications;
+  ok("the latest per order, for the newest-4 orders only (P1 is past the cap)", r.status === 200 && vs.length === 1 && vs[0].orderId === "P3" && vs[0].token === "v-p3-new" && vs[0].status === "revision");
+  ok("…without the proof's pictures and message (the list shows status and dates)", !("imagesJson" in vs[0]) && !("message" in vs[0]) && !!vs[0].sentAt && "respondedAt" in vs[0]);
+  r = await call({ action: "getOrdersAllShops", dateFrom: "", dateTo: "" });
+  ok("All shops reads the same", JSON.stringify(shop("prime").verifications) === JSON.stringify(vs) && shop("rec").verifications.length === 0);
+  const from = daysAgo(3).slice(0, 10);
+  r = await call({ action: "listDesignVerifications", org: "prime", dateFrom: from, dateTo: "" });
+  ok("a date window that leaves P3 out leaves its verification out too", r.body.verifications.length === 0);
+  ok("the Orders page sends its dates with the request", /action:"listDesignVerifications", org:org\.orgId, key:adminKey,\s*dateFrom:/.test(read("public/admin.js")));
+  ok("the lookup by shop and order is indexed (migrations/0216)", /idx_verif_org_order_sent|idx_verif_order/.test(plan(`SELECT token FROM design_verifications v WHERE v.orgId = 'prime' AND v.orderId IN (SELECT o.orderId FROM orders o WHERE o.orgId = 'prime' ORDER BY o.placedAt DESC LIMIT 5)`)));
+
   console.log("\n=== The Orders page says when orders were left out (jsdom) ===");
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }

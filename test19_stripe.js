@@ -48,7 +48,7 @@ global.getOrderCheckoutState = async (db, orderId) => {
   return total === null ? null : { total, paid: global.__checkoutPaid, orgId: global.__checkoutOrg,
     voided: global.__checkoutVoided, ...row };
 };
-// The card page already open for an order (migrations/0210). By default there is none; the section
+// The card page already open for an order (migrations/0093). By default there is none; the section
 // "a second Pay by card" below swaps in states to check checkout.js's reuse / close / refuse.
 global.__cardPage = { state: "none" };
 global.__expireResult = "closed";

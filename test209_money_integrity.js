@@ -2,7 +2,7 @@ const fs = require("fs");
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Payments, refunds and money integrity — real SQL (sql.js), real db.js, real orders.js admin API.
-//   • the Stripe card page open for an order (migrations/0210): read, reused, closed; voiding closes it
+//   • the Stripe card page open for an order (migrations/0093): read, reused, closed; voiding closes it
 // (Stripe itself is a fake fetch below; test19 covers checkout.js and the webhook with mocks.)
 
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
@@ -64,7 +64,7 @@ global.fetch = async (url, opts = {}) => {
   };
   const inHour = () => new Date(Date.now() + 3600e3).toISOString();
 
-  console.log("=== The card page open for an order (migrations/0210) ===");
+  console.log("=== The card page open for an order (migrations/0093) ===");
   await mk("CS-1");
   ok("no page yet → none (and Stripe isn't asked)", (await lib.checkoutSessionState(env, "CS-1")).state === "none" && stripe.calls.length === 0);
   stripe.sessions.cs_a = { id: "cs_a", status: "open", url: "https://checkout.stripe.com/a", amount_total: 2000, success_url: "https://club.example.com/ok" };
@@ -136,7 +136,7 @@ global.fetch = async (url, opts = {}) => {
   rows = refundRows("SH-2");
   ok("a lost dispute of a shipping payment is shipping too", rows.length === 1 && rows[0].shippingCents === 600 && shipPaid("SH-2") === 0);
 
-  console.log("\n=== Dispute events out of order or repeated (migrations/0211) ===");
+  console.log("\n=== Dispute events out of order or repeated (migrations/0094) ===");
   const disputeStatus = (id) => d1.q("SELECT disputeStatus s FROM orders WHERE orderId=?", id)[0].s;
   const notices = () => (globalThis.__disputeNotices || []).slice();
   const dispute = (id, type, dp, order, status) => hook({ id, type, created: Math.floor(Date.now() / 1000),
@@ -160,7 +160,7 @@ global.fetch = async (url, opts = {}) => {
   await dispute("evt_d5", "charge.dispute.created", "dp_3", "DP-2", "needs_response");
   ok("a second, different dispute on the same order is still flagged", disputeStatus("DP-2") === "warning_needs_response" && notices().slice(-1)[0] === "DP-2:warning_needs_response");
 
-  console.log("\n=== Manual payments are booked once per Save (migrations/0212) ===");
+  console.log("\n=== Manual payments are booked once per Save (migrations/0095) ===");
   const pays = (id) => d1.q("SELECT amountCents, kind, requestKey FROM order_payments WHERE orderId=? AND voidedAt IS NULL ORDER BY id", id);
   const auditCount = (action, id) => d1.q("SELECT count(*) n FROM audit_log WHERE action=? AND orderId=?", action, id)[0].n;
   await mk("MP-1", 120);

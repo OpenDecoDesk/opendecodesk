@@ -138,7 +138,7 @@ const ok = (label, cond) => { if (!cond) failed++; console.log(label + ": " + !!
   r = await call({ action: "listDesignVerifications", org: "prime", dateFrom: from, dateTo: "" });
   ok("a date window that leaves P3 out leaves its verification out too", r.body.verifications.length === 0);
   ok("the Orders page sends its dates with the request", /action:"listDesignVerifications", org:org\.orgId, key:adminKey,\s*dateFrom:/.test(read("public/admin.js")));
-  ok("the lookup by shop and order is indexed (migrations/0216)", /idx_verif_org_order_sent|idx_verif_order/.test(plan(`SELECT token FROM design_verifications v WHERE v.orgId = 'prime' AND v.orderId IN (SELECT o.orderId FROM orders o WHERE o.orgId = 'prime' ORDER BY o.placedAt DESC LIMIT 5)`)));
+  ok("the lookup by shop and order is indexed (migrations/0097)", /idx_verif_org_order_sent|idx_verif_order/.test(plan(`SELECT token FROM design_verifications v WHERE v.orgId = 'prime' AND v.orderId IN (SELECT o.orderId FROM orders o WHERE o.orgId = 'prime' ORDER BY o.placedAt DESC LIMIT 5)`)));
 
   console.log("\n=== The Orders page says when orders were left out (jsdom) ===");
   const adminJs = read("public/admin.js");

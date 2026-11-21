@@ -164,7 +164,7 @@ export async function onRequestPost(context){
   // Stripe uses integer minor units (cents)
   const amountCents = Math.round(total * 100);
 
-  // The card page already made for this order (migrations/0210). Still open for this same amount and return
+  // The card page already made for this order (migrations/0093). Still open for this same amount and return
   // page: hand it back rather than open a second one that could be paid as well. Open for a different amount
   // (the order changed): close it first. Just paid (its webhook not in yet): refuse, so it isn't paid twice.
   const prior = await checkoutSessionState(env, String(orderId));

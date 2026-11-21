@@ -291,7 +291,7 @@ export async function onRequestPost(context){
   // payment insert and recording the event can't insert the payment twice.
   // eventConfirmedNew gates the NON-idempotent notices (a dispute event without a dispute id): they're only
   // sent once we've confirmed this delivery isn't a replay. Payment/refund notices are already guarded by
-  // their own "row was newly inserted" flags, and dispute notices by the dispute's own row (migrations/0211)
+  // their own "row was newly inserted" flags, and dispute notices by the dispute's own row (migrations/0094)
   // moving the order's status. If the lookup is unavailable (D1 hiccup) we can't
   // confirm, so we skip those notices and return 500 at the end — Stripe retries when D1 is healthy,
   // so each notice fires exactly once (no duplicate, no miss).
@@ -447,7 +447,7 @@ export async function onRequestPost(context){
     const amountDisputed = dispute.amount ? dispute.amount / 100 : null;
     if(orderId && orgId){
       try{
-        // Only for a dispute not seen before (migrations/0211): a late or retried "created" never puts a
+        // Only for a dispute not seen before (migrations/0094): a late or retried "created" never puts a
         // dispute already won or lost back to "needs response", and the urgent notice goes out once.
         const moved = await setOrderDisputeStatus(env.DB, orderId, "warning_needs_response", dispute.id || "", false);
         if(moved && (dispute.id || eventConfirmedNew)) await sendDisputeNotification(env, orderId, orgId, "warning_needs_response", dispute.reason || "", amountDisputed);

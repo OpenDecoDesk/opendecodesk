@@ -112,9 +112,9 @@ CREATE TABLE IF NOT EXISTS global_settings (
   value TEXT NOT NULL
 );
 
--- System problems and failed admin sign-ins for the daily roll-up (migrations/0215): one row per failure, so
+-- System problems and failed admin sign-ins for the daily roll-up (migrations/0096): one row per failure, so
 -- failures at the same moment are each counted; the roll-up deletes only the rows it reported (id <= the highest
--- it read). n: how many failures the row stands for (1; totals carried over from before 0215; 0 = a sample only).
+-- it read). n: how many failures the row stands for (1; totals carried over from before 0096; 0 = a sample only).
 CREATE TABLE IF NOT EXISTS system_issues (
   id      INTEGER PRIMARY KEY AUTOINCREMENT,
   kind    TEXT    NOT NULL,
@@ -870,11 +870,11 @@ CREATE TABLE IF NOT EXISTS order_payments (
   cashoutTransferId INTEGER REFERENCES account_transfers(id),
   -- (0035) how much of a refund / lost dispute was shipping — untaxed, so no sales tax is backed out of it.
   shippingCents INTEGER NOT NULL DEFAULT 0 CHECK (shippingCents >= 0),
-  -- (0212) one key per Save in the admin's payment forms, so a double click or retry can't record it twice.
+  -- (0095) one key per Save in the admin's payment forms, so a double click or retry can't record it twice.
   requestKey  TEXT,
-  -- (0217) when "Sync Stripe fees & dates" last compared this Stripe card payment's date with Stripe's; NULL = not yet.
+  -- (0098) when "Sync Stripe fees & dates" last compared this Stripe card payment's date with Stripe's; NULL = not yet.
   stripeCheckedAt TEXT,
-  -- (0218) 1 = not yet fully cashed out and not matched to a bank line (the deposit picker's candidates); kept by
+  -- (0099) 1 = not yet fully cashed out and not matched to a bank line (the deposit picker's candidates); kept by
   -- the payments_/cashouts_/transfers_/matches_deposit_open triggers below.
   depositOpen INTEGER NOT NULL DEFAULT 1 CHECK (depositOpen IN (0, 1))
 );
@@ -891,7 +891,7 @@ CREATE TABLE IF NOT EXISTS payment_cashouts (
 CREATE INDEX IF NOT EXISTS idx_payment_cashouts_payment  ON payment_cashouts(paymentId);
 CREATE INDEX IF NOT EXISTS idx_payment_cashouts_transfer ON payment_cashouts(transferId);
 
--- The Stripe card page last opened for each order (migrations/0210): reused while it still charges the
+-- The Stripe card page last opened for each order (migrations/0093): reused while it still charges the
 -- balance, closed (expired) before a new one is made and when the order is voided — so one order can't
 -- be paid twice by card from two open pages.
 CREATE TABLE IF NOT EXISTS checkout_sessions (
@@ -902,7 +902,7 @@ CREATE TABLE IF NOT EXISTS checkout_sessions (
   expiresAt   TEXT NOT NULL
 );
 
--- Each Stripe dispute an order has had and its latest status (migrations/0211), so an out-of-order or
+-- Each Stripe dispute an order has had and its latest status (migrations/0094), so an out-of-order or
 -- retried dispute event can't move orders.disputeStatus backwards. No foreign key (see the migration).
 CREATE TABLE IF NOT EXISTS order_disputes (
   disputeId TEXT PRIMARY KEY,
@@ -968,11 +968,11 @@ CREATE INDEX IF NOT EXISTS idx_items_org             ON order_items(orgId);
 CREATE INDEX IF NOT EXISTS idx_payments_order        ON order_payments(orderId);
 CREATE INDEX IF NOT EXISTS idx_payments_received     ON order_payments(receivedAt);
 CREATE INDEX IF NOT EXISTS idx_payments_cashout      ON order_payments(cashoutTransferId);
-CREATE INDEX IF NOT EXISTS idx_payments_deposit_open ON order_payments(depositOpen, kind) WHERE depositOpen = 1;   -- migrations/0218
+CREATE INDEX IF NOT EXISTS idx_payments_deposit_open ON order_payments(depositOpen, kind) WHERE depositOpen = 1;   -- migrations/0099
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_external_ref ON order_payments(externalRef) WHERE externalRef <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_request_key ON order_payments(requestKey) WHERE requestKey IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_verif_order           ON design_verifications(orderId);
-CREATE INDEX IF NOT EXISTS idx_verif_org_order_sent  ON design_verifications(orgId, orderId, sentAt);   -- migrations/0216
+CREATE INDEX IF NOT EXISTS idx_verif_org_order_sent  ON design_verifications(orgId, orderId, sentAt);   -- migrations/0097
 CREATE INDEX IF NOT EXISTS idx_products_org          ON products(orgId, visible, sortOrder);
 CREATE INDEX IF NOT EXISTS idx_blank_sizes           ON blank_sizes(blankId);
 CREATE INDEX IF NOT EXISTS idx_blank_colors          ON blank_colors(blankId);
@@ -1304,7 +1304,7 @@ CREATE TABLE IF NOT EXISTS statement_matches (
 );
 CREATE INDEX IF NOT EXISTS idx_statement_matches_line ON statement_matches(lineId);
 
--- order_payments.depositOpen (migrations/0218): worked out again whenever a cash-out, a transfer's deletion, a
+-- order_payments.depositOpen (migrations/0099): worked out again whenever a cash-out, a transfer's deletion, a
 -- statement match or the payment's amount changes, so the deposit picker reads only the open payments.
 CREATE TRIGGER IF NOT EXISTS payments_deposit_open_insert AFTER INSERT ON order_payments
 BEGIN
@@ -1416,7 +1416,7 @@ CREATE INDEX IF NOT EXISTS idx_transfer_movements_occurred ON transfer_movements
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_order    ON transfer_movements(orderId);
 
 -- One account's money movements between two dates, from each source in db.js MONEY_MOVE_SOURCES (an account's
--- register and reconciliation), by account and the day the source is dated on (migrations/0219).
+-- register and reconciliation), by account and the day the source is dated on (migrations/0100).
 CREATE INDEX IF NOT EXISTS idx_payments_account_day     ON order_payments(accountId, substr(receivedAt, 1, 10));
 CREATE INDEX IF NOT EXISTS idx_expenses_account_date    ON expenses(accountId, expenseDate);
 CREATE INDEX IF NOT EXISTS idx_movements_account_day    ON inventory_movements(accountId, substr(occurredAt, 1, 10)) WHERE kind = 'purchase';
@@ -1589,7 +1589,7 @@ CREATE TABLE IF NOT EXISTS catalog_snapshots (
   publishedAt  TEXT    NOT NULL,
   publishedBy  TEXT    NOT NULL DEFAULT ''
 );
--- …and, for a shop published since migrations/0225, its products rows in parts of up to about 1 MB (D1 limits one value).
+-- …and, for a shop published since migrations/0101, its products rows in parts of up to about 1 MB (D1 limits one value).
 CREATE TABLE IF NOT EXISTS catalog_snapshot_parts (
   orgId  TEXT    NOT NULL,
   part   INTEGER NOT NULL,

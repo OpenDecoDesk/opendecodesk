@@ -1,9 +1,9 @@
 const fs = require("fs");
 const { createD1 } = require("./testlib/d1-shim.js");
 
-// A shop's published catalog in parts (migrations/0225) and one read of it per order (priceLookups).
+// A shop's published catalog in parts (migrations/0101) and one read of it per order (priceLookups).
 // Publish keeps the shop's row in catalog_snapshots and its products rows in catalog_snapshot_parts, each part
-// under about 1 MB, so a large catalog never passes D1's limit for one value; a snapshot published before 0225
+// under about 1 MB, so a large catalog never passes D1's limit for one value; a snapshot published before 0101
 // (one value with every product) is still read as it is. Pricing a cart reads the published shop once, not once
 // per line — and the same cart is charged exactly the same, whichever way the snapshot is stored and read.
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
@@ -93,7 +93,7 @@ const counting = (d1) => {
     JSON.parse(d1.q("SELECT json FROM catalog_snapshots WHERE orgId='maple'")[0].json).parts === 1);
   ok("…and still charges the same", sameAsExpected(await priceCart(lib)));
 
-  console.log("\n=== A snapshot published before 0225 is read as it is ===");
+  console.log("\n=== A snapshot published before 0101 is read as it is ===");
   const legacy = JSON.stringify({ org: d1.q("SELECT * FROM orgs WHERE orgId='maple'")[0], products: liveRows });
   await d1.prepare("UPDATE catalog_snapshots SET json=? WHERE orgId='maple'").bind(legacy).run();
   d1._raw.exec(`DELETE FROM catalog_snapshot_parts`);
@@ -111,7 +111,7 @@ const counting = (d1) => {
   ok("the order checks see no shop rather than the draft", (await lib.getPublishedOrg(d1, "maple")) === null);
   await lib.publishShop(d1, "maple");
 
-  console.log("\n=== A database before 0225 publishes as before ===");
+  console.log("\n=== A database before 0101 publishes as before ===");
   const d0 = await freshDb();
   d0._raw.exec(`DROP TABLE catalog_snapshot_parts; INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt, ready) VALUES ('maple','maple','Maple Club','t','t',1);`);
   await lib.createProduct(d0, "maple", { productId: "tee", type: "shirt", name: "Club Tee", pricingMode: "flat", flatPrice: 20, visible: true, noDesignNeeded: true, reorderQr: "none" });

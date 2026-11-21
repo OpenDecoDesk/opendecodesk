@@ -43,8 +43,8 @@ const ok = (d, c) => console.log(d + ":", !!c);
   console.log("\n=== Setup status ===");
   const env = { DB: { prepare() {} }, ROOT_DOMAIN: "myshop.example", SIGNING_SECRET: "s" };
   const dbLine = (e, migrations) => status.setupStatus(e, { migrations }).find(i => i.key === "database");
-  const missing = { pending: ["0218_x.sql"], note: check.pendingMigrationsNote(["0218_x.sql"]) };
-  ok("updates missing: the Database line is not ready, and says which", dbLine(env, missing).ready === false && /0218_x\.sql/.test(dbLine(env, missing).note) && dbLine(env, missing).level === "required");
+  const missing = { pending: ["0099_x.sql"], note: check.pendingMigrationsNote(["0099_x.sql"]) };
+  ok("updates missing: the Database line is not ready, and says which", dbLine(env, missing).ready === false && /0099_x\.sql/.test(dbLine(env, missing).note) && dbLine(env, missing).level === "required");
   ok("…which counts as a required thing to set up (so the admin opens Global settings after signing in)",
     status.setupSummary(status.setupStatus(env, { migrations: missing })).required > status.setupSummary(status.setupStatus(env, { migrations: { pending: [] } })).required);
   ok("up to date, or it can't tell: the Database line is as before", dbLine(env, { pending: [] }).ready === true && dbLine(env, null).ready === true && dbLine(env, null).note === "");

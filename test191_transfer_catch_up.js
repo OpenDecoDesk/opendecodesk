@@ -12,7 +12,7 @@ const strip = (src) => src
   .replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "")
   .replace(/export (async function|function|const)/g, "$1");
 const dbSrc = strip(read("functions/_lib/db.js"));
-const lib = new Function(dbSrc + `\nreturn { createTransfer, transfersInHand_, consumeLineTransfersOnce_ };`)();
+const lib = new Function(dbSrc + `\nreturn { createTransfer, createGraphic, transfersInHand_, consumeLineTransfersOnce_ };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
   "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
@@ -22,6 +22,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   dbSrc + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")();
 
 let failed = 0;
+const admin_ = () => { const a = read("public/admin.js"); const i = a.indexOf("async function showTransferCatchUp_("); return a.slice(i, a.indexOf("\nconst WRITEOFF_REASONS_", i)); };
 const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) failed++; };
 
 (async () => {
@@ -111,6 +112,61 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   ok("a use that made finished stock can't be voided here", r.status === 400 && /finished stock/.test(r.body.message));
   d1._raw.run("DELETE FROM transfer_movements WHERE id = ?", [fin]);
   ok("History offers Void on an order's use", /m\.kind === "consume" && m\.itemId && m\.reason !== "finished"/.test(read("public/admin.js")));
+
+  console.log("\n=== Printed transfers the product has now but the order didn't save ===");
+  // A tee placed when it carried only the shop QR; its front and back prints were set up on the product afterwards.
+  const FRONT = await lib.createTransfer(d1, { name: "Front print" }), BACK = await lib.createTransfer(d1, { name: "Back print" });
+  const gF = await lib.createGraphic(d1, "ac", { name: "Front", kind: "transfer", transferId: FRONT });
+  const gB = await lib.createGraphic(d1, "ac", { name: "Back", kind: "transfer", transferId: BACK });
+  d1._raw.run(`INSERT INTO products (productId, orgId, type, name, createdAt, updatedAt, fixedTransfersJson) VALUES ('tee','ac','tee','Tee','t','t',?)`,
+    [JSON.stringify([{ locationId: 1, graphicId: gF, ink: "" }, { locationId: 2, graphicId: gB, ink: "" }])]);
+  d1._raw.run(`INSERT INTO orders (orderId, orgId, customerName, contact, paymentMethod, paid, subtotalCents, totalCents, placedAt, manufacturedAt) VALUES ('O8', 'ac', 'Cust O8', 'c@x', 'Card', 1, 6000, 6000, '2026-11-01T00:00:00Z', '2026-11-05T15:00:00Z')`);
+  d1._raw.run(`INSERT INTO order_items (orderId, orgId, productId, name, type, qty, unitPriceCents, lineTotalCents, cancelDate, configJson, cogsCents, cogsSource) VALUES ('O8', 'ac', 'tee', 'Tee', 'tee', 3, 2000, 6000, '', ?, 900, 'consumed')`, [qrCfg]);
+  r = await call({ action: "receiveTransferSheet", receivedAt: "2026-11-01", vendor: "DTF Co", vendorRef: "C", total: 20, rows: [{ transferId: FRONT, count: 10, pctOfSheet: 50 }, { transferId: BACK, count: 10, pctOfSheet: 50 }] });
+  ok("front and back sheet received", r.status === 200);
+  r = await call({ action: "previewTransferCatchUp" });
+  const o8 = (r.body.lines || []).find(l => l.orderId === "O8");
+  ok("the line offers its saved QR and the product's front and back, those two marked added", o8 && o8.source === "order" && o8.uses.length === 3 &&
+    o8.uses.map(u => [u.transferId, u.added].join()).join("|") === [QR + ",false", FRONT + ",true", BACK + ",true"].join("|") && o8.uses.every(u => u.qty === 3));
+  ok("each use carries its own shortfall (none here)", o8.uses.find(u => u.transferId === FRONT).shortBy === 0 && o8.uses.find(u => u.transferId === QR).shortBy === 0);
+  const qrBefore = t().quantity;
+  r = await call({ action: "applyTransferCatchUp", uses: { [item("O8")]: [FRONT, BACK] } });
+  ok("applying only the ticked front and back", r.status === 200 && r.body.applied === 1 && r.body.totalUnits === 6 && r.body.total === 6);
+  const used = d1.q("SELECT transferId, qtyDelta, unitCostCents, occurredAt FROM transfer_movements WHERE itemId = ? AND kind = 'consume' ORDER BY transferId", item("O8"));
+  ok("took 3 fronts and 3 backs at $1.00 dated when it was made, and no QR", used.length === 2 && used.every(m => m.qtyDelta === -3 && m.unitCostCents === 100 && m.occurredAt === "2026-11-05T15:00:00Z") &&
+    used.map(m => m.transferId).join() === [FRONT, BACK].join() && t().quantity === qrBefore);
+  ok("stock and the line's cost follow", d1.q("SELECT quantity FROM transfers WHERE id IN (?, ?)", FRONT, BACK).every(x => x.quantity === 7) && cogs(item("O8")) === 1500);
+  ok("the audit names the added transfers", /"added":true/.test(d1.q("SELECT detail FROM audit_log WHERE action = 'transfer.catch_up' ORDER BY id DESC LIMIT 1")[0].detail));
+  r = await call({ action: "previewTransferCatchUp" });
+  ok("the line is done", !(r.body.lines || []).some(l => l.orderId === "O8"));
+  r = await call({ action: "applyTransferCatchUp", uses: { [item("O1", 1)]: ["x"] } });
+  ok("a pick with no transfer is refused", r.status === 400);
+  r = await call({ action: "applyTransferCatchUp", uses: { [item("O1", 1)]: [FRONT] } });
+  ok("a pick of a transfer the line doesn't use applies nothing", r.status === 400 && /no longer qualify/.test(r.body.message));
+  const win = admin_();
+  ok("the window ticks each transfer, starts added ones unticked, and sends the ticked ones", /data-tcu-use=/.test(win) && /data-tcu-tid=/.test(win) && /!u\.added \|\|/.test(win) && /action: "applyTransferCatchUp", uses \}/.test(win));
+
+  console.log("\n=== Update from catalog first: add the prints, drop the QR it was made without ===");
+  d1._raw.run(`INSERT INTO orders (orderId, orgId, customerName, contact, paymentMethod, paid, subtotalCents, totalCents, placedAt, manufacturedAt, completedAt) VALUES ('O9', 'ac', 'Cust O9', 'c@x', 'Card', 1, 4000, 4000, '2026-11-01T00:00:00Z', '2026-11-06T15:00:00Z', '2026-11-07T00:00:00Z')`);
+  d1._raw.run(`INSERT INTO order_items (orderId, orgId, productId, name, type, qty, unitPriceCents, lineTotalCents, cancelDate, configJson, manufacturedQty, cogsCents, cogsSource) VALUES ('O9', 'ac', 'tee', 'Tee', 'tee', 2, 2000, 4000, '', ?, 2, 600, 'consumed')`, [qrCfg]);
+  r = await call({ action: "refreshOrderFromCatalog", orderId: "O9", org: "ac", preview: true });
+  const o9 = r.body.lines && r.body.lines[0];
+  ok("a completed order's made line offers the two prints (ticked) and removing its QR (unticked)", r.status === 200 && o9 && o9.made === true && o9.usedStock === false &&
+    o9.options.map(o => o.key + "=" + o.on).join() === "fixed:fixed1=true,fixed:fixed2=true,drop:qr=false");
+  r = await call({ action: "refreshOrderFromCatalog", orderId: "O9", org: "ac", pick: { [item("O9")]: ["fixed:fixed1", "fixed:fixed2", "drop:qr"] } });
+  const o9cfg = JSON.parse(d1.q("SELECT configJson FROM order_items WHERE id = ?", item("O9"))[0].configJson);
+  ok("applied: the line now names the front and back prints and no QR", r.status === 200 && r.body.lines.length === 1 &&
+    o9cfg.locations.map(l => l.transferId).join() === [FRONT, BACK].join() && o9cfg.locations.every(l => l.fixed) && !o9cfg.locations.some(l => l.auto));
+  r = await call({ action: "previewTransferCatchUp" });
+  const o9cu = (r.body.lines || []).find(l => l.orderId === "O9");
+  ok("Use transfers for past orders then offers just those, from the order (ticked)", o9cu && o9cu.source === "order" && o9cu.uses.map(u => u.transferId).join() === [FRONT, BACK].join() && o9cu.uses.every(u => !u.added));
+  r = await call({ action: "applyTransferCatchUp", itemIds: [item("O9")] });
+  ok("and applying takes 2 fronts and 2 backs", r.status === 200 && r.body.totalUnits === 4 && d1.q("SELECT quantity FROM transfers WHERE id IN (?, ?)", FRONT, BACK).every(x => x.quantity === 5));
+  r = await call({ action: "refreshOrderFromCatalog", orderId: "O9", org: "ac", preview: true });
+  ok("afterwards the line says it already took its transfers out of stock, and every change starts off (even the catalog's QR)", r.body.lines.length === 0 &&
+    r.body.optional.length === 1 && r.body.optional[0].usedStock === true && r.body.optional[0].options.some(o => o.key === "qr") && r.body.optional[0].options.every(o => !o.on));
+  r = await call({ action: "refreshOrderFromCatalog", orderId: "O9", org: "ac" });
+  ok("so an update without ticks leaves it alone", r.status === 200 && r.body.lines.length === 0 && !JSON.parse(d1.q("SELECT configJson FROM order_items WHERE id = ?", item("O9"))[0].configJson).locations.some(l => l.auto));
 
   console.log("\n=== Closed month, roles ===");
   d1._raw.run("INSERT INTO closed_periods (month, closedAt, closedBy) VALUES ('2026-10','t','test')");

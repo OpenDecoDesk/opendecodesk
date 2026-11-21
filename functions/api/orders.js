@@ -4924,15 +4924,26 @@ export async function onRequestPost(context) {
       audit({ orgId: body.org || null, orderId: body.orderId, action: body.applied !== false ? "order.transfers_applied" : "order.transfers_unapplied", detail: { itemId: Number(body.itemId) } });
       return jsonResponse({ status: "ok", applied: body.applied !== false });
     }
-    // Bring an open order's lines up to date with the catalog (graphics fixed after it was placed,
-    // a reorder QR turned on). `preview` only reports what would change.
+    // Bring an order's lines up to date with the catalog (graphics fixed after it was placed, a reorder QR
+    // turned on, a Printed transfer added) — a made or completed one too. `preview` only reports what would
+    // change; `pick` ({itemId: [option key, …]}) applies exactly the ticked options, else every change that's on.
     if (body.action === "refreshOrderFromCatalog") {
       if (!body.orderId) return jsonResponse({ status: "error", message: "orderId required" }, 400);
+      let pick = null;
+      if (!body.preview && body.pick && typeof body.pick === "object" && !Array.isArray(body.pick)) {
+        pick = new Map();
+        for (const [k, v] of Object.entries(body.pick).slice(0, 500)) {
+          const keys = Array.isArray(v) ? v.map(String).filter(x => /^(drop:)?(qr|refresh|fixed:[\w-]{1,60}|graphic:[\w-]{1,60})$/.test(x)).slice(0, 50) : [];
+          if (Number.isInteger(Number(k)) && Number(k) > 0 && keys.length) pick.set(Number(k), new Set(keys));
+        }
+        if (!pick.size) return jsonResponse({ status: "error", message: "Tick at least one change" }, 400);
+      }
       let res;
-      try { res = await refreshOrderLinesFromCatalog(env.DB, String(body.orderId), !body.preview); }
+      try { res = await refreshOrderLinesFromCatalog(env.DB, String(body.orderId), !body.preview, pick); }
       catch (e) { return jsonResponse({ status: "error", message: e.message || "Could not update the order" }, 400); }
-      if (!body.preview && res.lines.length) audit({ orgId: body.org || null, orderId: String(body.orderId), action: "order.lines_refreshed", detail: { lines: res.lines } });
-      return jsonResponse({ status: "ok", lines: res.lines, applied: !body.preview });
+      if (!body.preview && res.lines.length) audit({ orgId: body.org || null, orderId: String(body.orderId), action: "order.lines_refreshed",
+        detail: { lines: res.lines.map(l => ({ itemId: l.itemId, name: l.name, size: l.size, made: l.made, changes: l.changes })) } });
+      return jsonResponse({ status: "ok", lines: res.lines, optional: res.optional, applied: !body.preview });
     }
     if (body.action === "makeTransferLine") {
       if (!body.orderId || !body.itemId) return jsonResponse({ status: "error", message: "orderId and itemId required" }, 400);
@@ -5516,14 +5527,23 @@ export async function onRequestPost(context) {
     }
     // Use transfers for past orders: made lines that never took their transfers out of stock (planTransferCatchUp).
     // The preview plans every line; the apply re-plans exactly the ticked ones, so the later uses it re-costs match them.
+    // `uses` ({itemId: [transferId, …]}) names the ticked transfers of each line; `itemIds` alone takes all of a line's.
     if (body.action === "previewTransferCatchUp" || body.action === "applyTransferCatchUp") {
       const preview = body.action === "previewTransferCatchUp";
-      let ids = null;
+      let ids = null, pick = null;
+      const posInt = (n) => Number.isInteger(n) && n > 0;
       if (!preview) {
-        ids = Array.isArray(body.itemIds) ? body.itemIds.map(Number).filter(n => Number.isInteger(n) && n > 0).slice(0, 1000) : [];
+        if (body.uses && typeof body.uses === "object" && !Array.isArray(body.uses)) {
+          pick = new Map();
+          for (const [k, v] of Object.entries(body.uses).slice(0, 1000)) {
+            const tids = Array.isArray(v) ? v.map(Number).filter(posInt).slice(0, 50) : [];
+            if (posInt(Number(k)) && tids.length) pick.set(Number(k), new Set(tids));
+          }
+          ids = [...pick.keys()];
+        } else ids = Array.isArray(body.itemIds) ? body.itemIds.map(Number).filter(posInt).slice(0, 1000) : [];
         if (!ids.length) return jsonResponse({ status: "error", message: "Tick at least one order line" }, 400);
       }
-      const plan = await planTransferCatchUp(env.DB, ids);
+      const plan = await planTransferCatchUp(env.DB, ids, pick);
       const money = (c) => c / 100;
       if (preview) return jsonResponse({ status: "ok",
         lines: plan.lines.map(l => ({ ...l, cost: money(l.costCents), uses: l.uses.map(u => ({ ...u, unitCost: money(u.unitCostCents) })) })),
@@ -5537,7 +5557,7 @@ export async function onRequestPost(context) {
       }
       const auditErr = await auditStrict({ orgId: null, orderId: null, action: "transfer.catch_up",
         detail: { lines: plan.lines.map(l => ({ itemId: l.itemId, orderId: l.orderId, source: l.source, useDate: l.useDate,
-          uses: l.uses.map(u => ({ transferId: u.transferId, qty: u.qty, unitCostCents: u.unitCostCents })) })),
+          uses: l.uses.map(u => ({ transferId: u.transferId, qty: u.qty, unitCostCents: u.unitCostCents, added: u.added })) })),
           recost: plan.recost.map(c => ({ movementId: c.movementId, itemId: c.itemId, oldUnit: c.oldUnit, newUnit: c.newUnit, qty: c.qty })) } });
       if (auditErr) return auditErr;
       const r = await applyTransferCatchUp(env.DB, plan);

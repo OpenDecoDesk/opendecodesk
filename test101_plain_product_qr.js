@@ -162,10 +162,20 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   r = await call({ action: "refreshOrderFromCatalog", orderId: "F1", org: "league", preview: true });
   ok("a second pass finds nothing to do", r.body.lines.length === 0);
   r = await call({ action: "refreshOrderFromCatalog", orderId: "P1", org: "league", preview: true });
-  ok("lines that are already made are left alone", r.body.lines.length === 0);
+  ok("a made line that matches the catalog has nothing to change, only its QR to remove (off), and says it's made", r.body.lines.length === 0 && r.body.optional.length === 1 &&
+    r.body.optional[0].made === true && r.body.optional[0].options.length === 1 && r.body.optional[0].options[0].key === "drop:qr" && r.body.optional[0].options[0].on === false);
   d1._raw.run("UPDATE orders SET completedAt='2026-10-09' WHERE orderId='P6'");
   r = await call({ action: "refreshOrderFromCatalog", orderId: "P6", org: "league" });
-  ok("a completed order is refused", r.status === 400 && /completed/.test(r.body.message));
+  ok("a completed order isn't refused, and without a pick nothing that's off is applied", r.status === 200 && r.body.lines.length === 0 && (await lib.getOrderById(d1, "P6")).items[0].config.locations[0].auto === true);
+  const p6 = (await lib.getOrderById(d1, "P6")).items[0].id;
+  r = await call({ action: "refreshOrderFromCatalog", orderId: "P6", org: "league", pick: { [p6]: ["drop:qr"] } });
+  const p6cfg = (await lib.getOrderById(d1, "P6")).items[0].config;
+  ok("ticking the removal takes the QR off that line (made without it)", r.status === 200 && r.body.lines.length === 1 && r.body.lines[0].made === true &&
+    /Remove the reorder QR/.test(r.body.lines[0].changes[0]) && !p6cfg);
+  r = await call({ action: "refreshOrderFromCatalog", orderId: "P6", org: "league", preview: true });
+  ok("…after which the catalog's QR is offered back as a change", r.body.lines.length === 1 && r.body.lines[0].options.some(o => o.key === "qr" && o.on && /Reorder QR added/.test(o.text)));
+  r = await call({ action: "refreshOrderFromCatalog", orderId: "P6", org: "league", pick: { [p6]: ["nonsense"] } });
+  ok("a pick with no known change is refused", r.status === 400);
   await d1.prepare("UPDATE graphics SET kind='transfer', designId=NULL, transferId=? WHERE id=?").bind(tArt, gArt).run();
   d1._raw.run("UPDATE order_items SET cancelDate='2026-10-09' WHERE orderId='F1'");
 
@@ -214,10 +224,15 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("Edit items has an 'Update from catalog…' button that previews, asks, then applies", /id="editOrderRefresh"/.test(adminJs) && /preview: true/.test(adminJs) && typeof w.refreshOrderFromCatalog_ === "function");
   await call({ orderId: "F2", orgId: "league", customerName: "Fix", contact: "c@x.com", paymentMethod: "Venmo", items: [{ productId: "polo-none", size: "L", qty: 1 }] }, "league");
   await d1.prepare("UPDATE products SET reorderQr='none' WHERE orgId='league' AND productId='polo-none'").run();
-  let asked = ""; autoConfirm(w, (m) => { asked = m; return true; });
-  const did = await w.refreshOrderFromCatalog_({ orderId: "F2", orgId: "league" });
-  ok("the button's prompt names the line and the change, and Yes applies it", did === true && /polo-none \(L\): Reorder QR removed/.test(asked) && !(await lib.getOrderById(d1, "F2")).items[0].config);
-  ok("with nothing to change it says so and asks nothing", (asked = "", await w.refreshOrderFromCatalog_({ orderId: "F2", orgId: "league" })) === false && asked === "");
+  const pending = w.refreshOrderFromCatalog_({ orderId: "F2", orgId: "league" });
+  await until(() => d.querySelector("#rfcApply"));
+  const win = d.querySelector("#rfcApply").closest(".admin-modal");
+  const rfcBoxes = [...win.querySelectorAll("input[data-rfc-key]")];
+  ok("the window names the line and ticks the change", /polo-none \(L\)/.test(text(win)) && rfcBoxes.length === 1 && rfcBoxes[0].checked && /Reorder QR removed/.test(rfcBoxes[0].parentElement.textContent));
+  win.querySelector("#rfcApply").click();
+  const did = await pending;
+  ok("Apply ticked changes applies it", did === true && !(await lib.getOrderById(d1, "F2")).items[0].config && !d.querySelector("#rfcApply"));
+  ok("with nothing to change it says so and opens nothing", (await w.refreshOrderFromCatalog_({ orderId: "F2", orgId: "league" })) === false && !d.querySelector("#rfcApply"));
   ok("the Run Order card notes the transfer: still to press, then pressed", /Also needs a transfer pressed: League QR DTF/.test(w.runTransfersNoteHtml_({ transfers: [{ graphicName: "League QR DTF", auto: true }], transfersApplied: false })) &&
     /✓ Transfers pressed: League QR DTF/.test(w.runTransfersNoteHtml_({ transfers: [{ graphicName: "League QR DTF", auto: true }], transfersApplied: true })) && w.runTransfersNoteHtml_({ transfers: [] }) === "");
   ok("Edit items treats a plain line's QR-only snapshot as a plain line (no color/graphic pickers)", /it\.config && Array\.isArray\(it\.config\.locations\) && !it\.config\.plain/.test(adminJs));

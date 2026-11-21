@@ -1,7 +1,7 @@
 const fs = require("fs");
 const { createD1 } = require("./testlib/d1-shim.js");
 
-// System problems and failed admin sign-ins for the daily roll-up are one row each (migrations/0215), not one
+// System problems and failed admin sign-ins for the daily roll-up are one row each (migrations/0096), not one
 // JSON value read, changed and written back: failures at the same moment are each counted, and the roll-up
 // deletes only what it reported, never one recorded while it was sending. The old JSON values carry over.
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
@@ -15,13 +15,13 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   {
     const d1 = await createD1();
     d1._raw.exec(read("testlib/schema-pre-0006.sql"));
-    for (const f of migrations.filter(f => f < "0215")) d1.execFile(read("migrations/" + f));
+    for (const f of migrations.filter(f => f < "0096")) d1.execFile(read("migrations/" + f));
     d1.q("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('systemIssues', ?)", JSON.stringify({ kinds: {
       email_failed: { count: 3, first: "2026-10-01T08:00:00.000Z", last: "2026-10-02T09:00:00.000Z", samples: ["Order received — SAMPLE-1", "Order confirmed — SAMPLE-2"] },
       webhook_failed: { count: 1, first: "2026-10-03T10:00:00.000Z", last: "2026-10-03T10:00:00.000Z", samples: [] } } }));
     d1.q("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('failedAdminLogins', ?)", JSON.stringify({
       count: 7, passphrase: 5, code: 2, ips: ["198.51.100.7", "203.0.113.9"], first: "2026-10-01T01:00:00.000Z", last: "2026-10-04T02:00:00.000Z" }));
-    for (const f of migrations.filter(f => f >= "0215")) d1.execFile(read("migrations/" + f));
+    for (const f of migrations.filter(f => f >= "0096")) d1.execFile(read("migrations/" + f));
     const issues = await L.getSystemIssues(d1);
     const em = issues.find(x => x.kind === "email_failed"), wh = issues.find(x => x.kind === "webhook_failed");
     ok("problems: the same counts, times and samples as before", issues.length === 2 && em.count === 3 && em.first === "2026-10-01T08:00:00.000Z" && em.last === "2026-10-02T09:00:00.000Z" &&

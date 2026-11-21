@@ -82,7 +82,7 @@ global.getOrderCheckoutState = async (db, orderId) => {
   const total = await global.getOrderTotal(db, orderId);
   return total === null ? null : { total, paid: global.__checkoutPaid, orgId: global.__checkoutOrg };
 };
-// No card page already open for an order (migrations/0210).
+// No card page already open for an order (migrations/0093).
 global.checkoutSessionState = async () => ({ state: "none" });
 global.expireCheckoutSession = async () => "closed";
 global.saveCheckoutSession = async () => {};

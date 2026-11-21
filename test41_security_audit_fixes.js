@@ -92,7 +92,7 @@ const httpSrc = strip(read("functions/_lib/http.js"));
   await login({ key: "guess1" });
   await login({ key: "guess2" }, "203.0.113.9");
   res = await login({ key: "correct horse", totpCode: "000000" });
-  // One failed_admin_logins row per failure (migrations/0215).
+  // One failed_admin_logins row per failure (migrations/0096).
   const failed = () => d1.q(`SELECT COALESCE(SUM(n), 0) AS count, COALESCE(SUM(CASE WHEN reason = 'passphrase' THEN n END), 0) AS passphrase,
     COALESCE(SUM(CASE WHEN reason = 'code' THEN n END), 0) AS code, COUNT(DISTINCT NULLIF(ip, '')) AS ips FROM failed_admin_logins`)[0];
   const fv = failed();

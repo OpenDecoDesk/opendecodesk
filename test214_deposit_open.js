@@ -1,7 +1,7 @@
 const fs = require("fs");
 const { createD1 } = require("./testlib/d1-shim.js");
 
-// The Reconcile deposit picker (db.js getDepositPayments) reads only payments marked depositOpen (migrations/0218),
+// The Reconcile deposit picker (db.js getDepositPayments) reads only payments marked depositOpen (migrations/0099),
 // kept by triggers on cash-outs, transfers, statement matches and amounts, instead of working out every payment ever
 // recorded. It must list exactly what the old whole-history query listed, before and after every kind of change.
 // Real SQL (sql.js), the real migrations and db.js; invented data.
@@ -11,7 +11,7 @@ const lib = new Function(strip(read("functions/_lib/db.js")) + "\nreturn { getDe
 const ok = (d, c) => console.log(d + ":", !!c);
 const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort();
 
-// The query as it was before 0218: every payment's cash-outs and matches worked out, then filtered.
+// The query as it was before 0099: every payment's cash-outs and matches worked out, then filtered.
 async function oldDepositPayments(d1) {
   const { results } = await d1.prepare(`SELECT * FROM (
        SELECT p.id, p.amountCents, p.receivedAt,
@@ -29,7 +29,7 @@ const newDepositPayments = async (d1) => (await lib.getDepositPayments(d1)).map(
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt) VALUES ('shop','shop','Example Shop','t','t');`);
-  for (const f of migrations.filter(f => f < "0218")) d1.execFile(read("migrations/" + f));
+  for (const f of migrations.filter(f => f < "0099")) d1.execFile(read("migrations/" + f));
   const accts = d1.q("SELECT id FROM accounts ORDER BY id").map(r => r.id);
   const [BANK, OTHER] = [accts[0], accts[accts.length - 1]];
   // Payments of every kind before the migration: open, part cashed out, fully cashed out, cashed out on a deleted
@@ -52,7 +52,7 @@ const newDepositPayments = async (d1) => (await lib.getDepositPayments(d1)).map(
   cashout(part, t1, 1000); cashout(full, t1, 1500); cashout(onDeleted, tDel, 1200);
   const matchedLine = match(matched, 900);
   const before = await oldDepositPayments(d1);
-  for (const f of migrations.filter(f => f >= "0218")) d1.execFile(read("migrations/" + f));
+  for (const f of migrations.filter(f => f >= "0099")) d1.execFile(read("migrations/" + f));
   ok("after the migration: the same payments, with the same amounts left, as the old query", (await newDepositPayments(d1)) === before && before.split(",").length === 3);
   ok("…the fully cashed out and the matched ones are marked not open", d1.q("SELECT depositOpen FROM order_payments WHERE id IN (?, ?)", full, matched).every(r => r.depositOpen === 0) &&
     d1.q("SELECT depositOpen FROM order_payments WHERE id = ?", open)[0].depositOpen === 1);

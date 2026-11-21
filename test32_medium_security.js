@@ -182,7 +182,7 @@ const SAME = { Origin: ADMIN, "CF-Connecting-IP": "203.0.113.7" };
         placedAt: "2026-09-01T00:00:00Z", paid: false, paidAt: "", netReceived: 0, voidedAt: "",
         items: [{ id: 1, name: "Polo", lineTotal: 60 }], payments: [] }),
       voidOrder: async () => { deleted.order++; },
-      expireCheckoutSession: async () => "closed",   // no card page open for the order (migrations/0210)
+      expireCheckoutSession: async () => "closed",   // no card page open for the order (migrations/0093)
       setOrderDiscount: async () => {}, updateOrderPlacedAt: async () => {},
       getSettingRaw: async () => null, // these envs carry a stub DB; no 2FA secret stored
       getBootstrapState: async () => ({ userCount: 0, admins: [] }),   // …and no users yet: the passphrase is the way in
@@ -266,7 +266,7 @@ const SAME = { Origin: ADMIN, "CF-Connecting-IP": "203.0.113.7" };
     console.log("\n=== checkout: refuses already-paid orders; uses the order's real org ===");
     let state = { total: 45, paid: false, orgId: "league-101" };
     global.getOrderCheckoutState = async () => state;
-    // No card page already open for the order (migrations/0210 — test19 covers reuse and closing).
+    // No card page already open for the order (migrations/0093 — test19 covers reuse and closing).
     Object.assign(global, { checkoutSessionState: async () => ({ state: "none" }), expireCheckoutSession: async () => "closed", saveCheckoutSession: async () => {} });
     let stripeParams = null;
     const realFetch = global.fetch;

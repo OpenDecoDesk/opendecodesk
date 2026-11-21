@@ -4,7 +4,7 @@ const { createD1 } = require("./testlib/d1-shim.js");
 // An account's register and its reconciliation no longer read every movement since the account opened
 // (db.js getAccountRegister / getReconciliationData): the balance before the dates asked for is one sum per source,
 // and reconciliation reads only the unmatched movements and the ones this month's lines are matched to
-// (migrations/0219 indexes each source by account and day). The numbers must be what reading everything gives.
+// (migrations/0100 indexes each source by account and day). The numbers must be what reading everything gives.
 // Real SQL (sql.js), the real migrations and db.js; invented data.
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1");
@@ -112,7 +112,7 @@ const addDays = (ymd, n) => new Date(Date.parse(ymd + "T00:00:00Z") + n * 864000
     (!junePay || june.lines.some(l => l.status === "broken")));
   ok("…and some moves that never cleared are listed as earlier uncleared", june.unclearedEarlier.length > 0);
 
-  console.log("\n=== Indexed by account and day (migrations/0219) ===");
+  console.log("\n=== Indexed by account and day (migrations/0100) ===");
   const src = read("functions/_lib/db.js");
   const sources = eval("(" + /export const MONEY_MOVE_SOURCES = (\[[\s\S]*?\n\]);/.exec(src)[1].replace(/^\s*\/\/.*$/gm, "") + ")");
   const plans = sources.map(sql => d1._raw.exec(`EXPLAIN QUERY PLAN SELECT * FROM (${sql}) m WHERE m.accountId = 1 AND m.d >= '2026-01-01' AND m.d <= '2026-01-31'`)[0].values.map(r => r[r.length - 1]).join(" ; "));

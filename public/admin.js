@@ -5747,7 +5747,7 @@ async function markOrderPaidOnce_(orgId, orderId){
     const res = await fetch("/api/orders", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      // requestId: the server books the balance once for it (migrations/0212), even if this is sent again.
+      // requestId: the server books the balance once for it (migrations/0095), even if this is sent again.
       body: JSON.stringify({action: "markPaidManual", org: orgId, orderId: orderId, at, key: adminKey, requestId: newRequestId_()})
     });
     const data = await res.json();
@@ -5908,7 +5908,7 @@ async function showPaymentsModal(orgId, orderId) {
       // due stops at $0, so an overpayment (paid twice, a total lowered afterwards) is shown as a credit instead.
       const keptCents = (o.payments || []).filter(p => !p.voidedAt).reduce((s, p) => s + Math.round(Number(p.amount) * 100), 0);
       const credit = o.payments ? Math.round(keptCents - effectiveTotal * 100) / 100 : 0;
-      // One key per Save of each form, made when the dialog draws (migrations/0212): a double click or a
+      // One key per Save of each form, made when the dialog draws (migrations/0095): a double click or a
       // retry after a dropped answer sends the same key, and the server books the money once.
       const payRequestId = newRequestId_(), refundRequestId = newRequestId_();
       const defaultMethod  = (String(o.paymentMethod || "").toLowerCase() in METHOD_LABEL) ? String(o.paymentMethod).toLowerCase() : "other";
@@ -6249,7 +6249,7 @@ async function showPaymentsModal(orgId, orderId) {
 }
 
 // A key for one Save of a money form, sent as `requestId`: the server books the money once per key
-// (migrations/0212), so a double click, a retry after a dropped connection or a second tab can't record it twice.
+// (migrations/0095), so a double click, a retry after a dropped connection or a second tab can't record it twice.
 function newRequestId_() {
   try { if (crypto.randomUUID) return crypto.randomUUID().replace(/-/g, ""); } catch (_) {}
   const a = new Uint32Array(4); crypto.getRandomValues(a);

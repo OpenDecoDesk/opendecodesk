@@ -399,10 +399,10 @@ async function liveShopRows_(db, orgId) {
   const { results: products } = await db.prepare("SELECT * FROM products WHERE orgId=? ORDER BY productId").bind(orgId).all();
   return { org, products };
 }
-// The products rows of a shop published since migrations/0225 are kept in parts (catalog_snapshot_parts) of up to
+// The products rows of a shop published since migrations/0101 are kept in parts (catalog_snapshot_parts) of up to
 // this many bytes of JSON each, so no one value comes near D1's limit of about 2 MB however large the catalog grows.
 const SNAPSHOT_PART_BYTES_ = 1000000;
-// {org, products} from a catalog_snapshots row's json. One published before 0225 holds its products itself and is read
+// {org, products} from a catalog_snapshots row's json. One published before 0101 holds its products itself and is read
 // as it is; a newer one says how many parts hold them — `partRows` ({part, json}, in order) when the caller has them.
 // null = not a snapshot. Parts missing (never expected: Publish writes them in one batch) is an error, not "never
 // published", so a shop is never served its unpublished draft by mistake.
@@ -439,7 +439,7 @@ export async function publishShop(db, orgId, by = "") {
   const at = new Date().toISOString();
   const head = (json) => db.prepare("INSERT INTO catalog_snapshots (orgId, json, publishedAt, publishedBy) VALUES (?, ?, ?, ?) ON CONFLICT(orgId) DO UPDATE SET json=excluded.json, publishedAt=excluded.publishedAt, publishedBy=excluded.publishedBy")
     .bind(orgId, json, at, String(by || "").slice(0, 200));
-  // The products rows in parts of up to SNAPSHOT_PART_BYTES_ (migrations/0225), in order; the shop's row, the old
+  // The products rows in parts of up to SNAPSHOT_PART_BYTES_ (migrations/0101), in order; the shop's row, the old
   // parts' removal and the new parts in one batch, so shoppers see the old snapshot or the new one, never a mix.
   const enc = new TextEncoder(), parts = [];
   let cur = [], bytes = 2;
@@ -457,7 +457,7 @@ export async function publishShop(db, orgId, by = "") {
     ]);
   } catch (e) {
     if (!/no such table/i.test(String(e && e.message))) throw e;
-    await head(JSON.stringify(rows)).run();   // a database before 0225: the whole shop in one value, as before
+    await head(JSON.stringify(rows)).run();   // a database before 0101: the whole shop in one value, as before
   }
   return { publishedAt: at, products: rows.products.length };
 }
@@ -3623,7 +3623,7 @@ export async function addOrderPayment(db, orderId, amount, note, externalRef = "
   // Which account the money moved through: given, or the one the method implies.
   const accountId = opts.accountId ? Number(opts.accountId) : await accountIdForMethod(db, method);
   // A manual entry has no external reference, so the admin form's own key for this Save (opts.requestKey,
-  // migrations/0212 — unique) is what makes a double click or a retried request insert nothing.
+  // migrations/0095 — unique) is what makes a double click or a retried request insert nothing.
   const requestKey = opts.requestKey ? String(opts.requestKey).slice(0, 100) : null;
   // opts.expectReceivedCents (settleOrderBalance): insert only while the order's payments still add up to what the
   // caller saw when it worked out the balance — two "Mark as paid"s, or one racing a card payment, can't both book it.
@@ -3752,7 +3752,7 @@ export async function refreshPaidStatus(db, orderId) {
 // `at`: when it was paid (the admin's chosen time, 2026-10) — the payment's date and the order's paid date.
 // The balance is booked only while the payments still add up to what was read here (expectReceivedCents), so a
 // second "Mark as paid" — a double click, another admin, or one racing a card payment's webhook — records nothing
-// more; `requestKey` (the admin form's key for this Save, migrations/0212) stops a retried request too.
+// more; `requestKey` (the admin form's key for this Save, migrations/0095) stops a retried request too.
 export async function settleOrderBalance(db, orderId, note, at = null, requestKey = null) {
   const state = await refreshPaidStatus(db, orderId);
   if (!state) return 0;
@@ -10221,7 +10221,7 @@ export async function setOrderRefunded(db, orderId, refundedAt) {
 }
 
 // The order's dispute status from a Stripe dispute event. Stripe doesn't promise the order of its events and
-// retries a failed one for days, so with the dispute's id (migrations/0211) a status only moves forward: an
+// retries a failed one for days, so with the dispute's id (migrations/0094) a status only moves forward: an
 // opening event ("created", final=false) is recorded only for a dispute not seen before — never over one already
 // won or lost — and a closing one (final=true) only when it changes the outcome. The dispute row and the order's
 // status are one transaction. Returns true when the order's status changed (so the owner is told once), false
@@ -10821,7 +10821,7 @@ export async function getOrderCheckoutState(db, orderId) {
   };
 }
 
-// ---- The Stripe card page open for an order (migrations/0210) ----------------
+// ---- The Stripe card page open for an order (migrations/0093) ----------------
 // checkout.js remembers the Checkout Session it made for an order, so a second "Pay by card" (another tab,
 // the back button) reuses that page or closes it before making a new one — one order can't be paid twice
 // from two open pages — and voiding the order closes it.
@@ -10929,7 +10929,7 @@ async function catalogPrefetch_(db) {
   const [orgRows, snapRows, partRows] = await Promise.all([
     all("SELECT * FROM orgs ORDER BY orgId"),
     orElse(all("SELECT orgId, json, publishedAt, publishedBy FROM catalog_snapshots"), []),   // before 0076: none
-    orElse(all("SELECT orgId, part, json FROM catalog_snapshot_parts ORDER BY orgId, part"), []),   // before 0225: none
+    orElse(all("SELECT orgId, part, json FROM catalog_snapshot_parts ORDER BY orgId, part"), []),   // before 0101: none
   ]);
   const snapOf = new Map(snapRows.map(r => [r.orgId, r])), partsOf = byOrg(partRows);
   const shopRows = [], unpublished = [];
@@ -11302,7 +11302,7 @@ export async function getVerificationsByOrder(db, orderId) {
 
 // The latest design verification of each order the Orders page shows: the same date window and newest-`limit`
 // orders as getOrdersByOrg (range, opts.limit), not the shop's whole history. Without the proof pictures and message
-// (the list shows status and dates, and links the customer's page by token). Index: idx_verif_org_order_sent (migrations/0216).
+// (the list shows status and dates, and links the customer's page by token). Index: idx_verif_org_order_sent (migrations/0097).
 export async function getLatestVerificationsByOrg(db, orgId, range = {}, opts = {}) {
   const w = orgOrdersWindow_(orgId, range);
   const lim = Number.isInteger(opts.limit) && opts.limit > 0 ? opts.limit : 0;
@@ -11872,7 +11872,7 @@ export async function getRecurringExpensesRecorded(db, sinceIso) {
 // payment already recorded IN the bank account (checks default there) is matched to the deposit whole.
 // One that's already matched to a statement line is left out. With `ids`, only those — used to
 // re-validate what the browser sent.
-// Only payments marked depositOpen (migrations/0218, kept by triggers) are worked through, so the cost follows the
+// Only payments marked depositOpen (migrations/0099, kept by triggers) are worked through, so the cost follows the
 // few still open, not every payment ever recorded; the two conditions are still checked here. `ids` go as one
 // JSON list (D1 binds at most 100 parameters).
 export async function getDepositPayments(db, ids = null) {
@@ -12976,7 +12976,7 @@ export async function saveCsvMapping(db, accountId, mapping) {
 
 // ---- Failed admin sign-ins (reported in the daily roll-up) --------------------
 // Counted at /api/admin-session (wrong passphrase / wrong 2FA code): one failed_admin_logins row each
-// (migrations/0215), so sign-ins failing at the same moment are each counted. Read as {count, passphrase,
+// (migrations/0096), so sign-ins failing at the same moment are each counted. Read as {count, passphrase,
 // code, ips[<=10], first, last, upToId}; once a roll-up reporting them is sent, the rows up to upToId go
 // (any recorded while it was sending stay for the next one).
 export async function recordFailedAdminLogin(db, reason, ip) {
@@ -13000,7 +13000,7 @@ export async function clearFailedAdminLogins(db, seen) {
 // ---- System problems for the 6 AM roll-up ---------------------------------------------------
 // Failures that would otherwise show up only in the Worker's log: an email that couldn't be sent,
 // a Stripe webhook whose update failed (Stripe retries it), a roll-up run that didn't complete.
-// One system_issues row each (migrations/0215), reported in the next roll-up (a reason to send one);
+// One system_issues row each (migrations/0096), reported in the next roll-up (a reason to send one);
 // the roll-up then deletes the rows it reported, never ones recorded while it was sending.
 // Read as [{kind, label, count, first, last, samples[<=5], upToId}].
 export const SYSTEM_ISSUE_LABELS = {
@@ -13167,7 +13167,7 @@ export async function setPaymentDate(db, id, receivedAt) {
 }
 
 // Card payments linked to a Stripe PaymentIntent whose date hasn't been compared with Stripe's yet
-// (stripeCheckedAt, migrations/0217), oldest first, at most `limit` (for syncing their dates a few at a time).
+// (stripeCheckedAt, migrations/0098), oldest first, at most `limit` (for syncing their dates a few at a time).
 export async function getStripeLinkedPayments(db, { limit = 40 } = {}) {
   const { results } = await db.prepare(
     `SELECT id, orderId, receivedAt, externalRef, feeCents FROM order_payments

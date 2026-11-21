@@ -546,7 +546,7 @@ export async function onRequestPost(context) {
     if (d < "2020-01-01") return { error: "That date is too far back" };
     return { receivedAt: d === today ? new Date().toISOString() : d + "T12:00:00.000Z" };
   };
-  // The admin form's key for one Save (`b.requestId`, made when the form opens — migrations/0212), as stored on the
+  // The admin form's key for one Save (`b.requestId`, made when the form opens — migrations/0095), as stored on the
   // payment row: a double click, a retried request or a second tab sends the same key, so the money is booked once.
   // Null when the request has none (older pages; scripts).
   const requestKeyOf = (b, kind) => /^[A-Za-z0-9_-]{8,64}$/.test(String((b && b.requestId) || "")) ? kind + ":" + b.requestId : null;
@@ -2035,7 +2035,7 @@ export async function onRequestPost(context) {
   // charge's balance transaction, and stores the fee + PaymentIntent id.
   // Idempotent: only touches card payments whose fee is still 0.
   // Bounded: at most STRIPE_SYNC_CALLS Stripe requests a click (the Worker's subrequest limit is 50 on the
-  // free plan). Dates are compared once per payment (stripeCheckedAt, migrations/0217); `more` says there's
+  // free plan). Dates are compared once per payment (stripeCheckedAt, migrations/0098); `more` says there's
   // more to look up, and the next click carries on where this one stopped.
   if (body.action === "backfillStripeFees") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
@@ -2277,7 +2277,7 @@ export async function onRequestPost(context) {
     if (Math.round(existing.netReceived * 100) > 0) {
       return jsonResponse({ status: "error", message: `$${existing.netReceived.toFixed(2)} was received on this order. If that payment was entered by mistake, open 💰 Payments and click Void on it, then void the order. If the customer really paid, record the refund (or refund it in Stripe) first.` }, 400);
     }
-    // A card page still open for this order (migrations/0210) is closed first, so the customer can't pay a
+    // A card page still open for this order (migrations/0093) is closed first, so the customer can't pay a
     // cancelled order. One paid moments ago (its webhook not in yet) stops the void: refund it first.
     // Stripe unreachable: the void goes ahead — a payment that still arrives is flagged for the owner.
     if (await expireCheckoutSession(env, orderId) === "paid") {

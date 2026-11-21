@@ -41,12 +41,15 @@
   .mono{font-family:'IBM Plex Mono', monospace;}
   a{color:inherit;}
   button{font-family:inherit; cursor:pointer;}
-  :focus-visible{outline:2px solid #fff; outline-offset:3px;}
+  /* Buttons, links, checkboxes: a white ring with a dark band between it and the control, so the
+     ring shows on the dark page and order panel (the white) and on the cream and white panels and
+     boxes (the dark band) alike. A white ring alone hardly showed on the light panels. */
+  :focus-visible{outline:2px solid #fff; outline-offset:3px; box-shadow:0 0 0 3px #1B1D22;}
   /* Text boxes and pick lists: the focus ring is drawn just inside the box, in the shop's (or the
      admin's) color, so it never covers a label written right above the box — a ring outside it did —
      and it shows on the light panels, where a white ring hardly did. The dark order panel keeps white. */
   input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]):focus-visible,
-  select:focus-visible, textarea:focus-visible{outline:2px solid var(--org-accent, var(--accent)); outline-offset:-2px;}
+  select:focus-visible, textarea:focus-visible{outline:2px solid var(--org-accent, var(--accent)); outline-offset:-2px; box-shadow:none;}
   .ticket input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]):focus-visible,
   .ticket select:focus-visible, .ticket textarea:focus-visible{outline-color:#fff;}
 
@@ -415,7 +418,7 @@
   .admin-menu.open .admin-menu-list{display:flex;}
   .admin-menu-item{display:block; width:100%; text-align:left; font-size:13px; padding:6px 10px; border:0; border-radius:4px; background:#fff; color:#111; cursor:pointer; white-space:nowrap;}
   .admin-menu-item:hover{background:var(--accent-soft);}
-  .admin-menu-item:focus-visible{background:var(--accent-soft); outline:2px solid var(--accent); outline-offset:-2px;}
+  .admin-menu-item:focus-visible{background:var(--accent-soft); outline:2px solid var(--accent); outline-offset:-2px; box-shadow:none;}
   .admin-menu-item.danger{color:#b03a2e;}
   .admin-menu-sep{border-top:1px solid var(--card-line); margin:4px 2px;}
   .admin-summary{font-family:'IBM Plex Mono',monospace; font-size:13px; margin-bottom:14px; color:var(--ink-soft);}
@@ -869,11 +872,46 @@
   .inv-btn{display:inline-block; padding:12px 22px; border-radius:6px; border:none; background:var(--inv-accent,#1d4ed8); color:var(--inv-accent-ink,#fff); font-size:15px; font-weight:700; cursor:pointer; text-decoration:none;}
   .inv-btn.second{background:#fff; color:#1a1a1a; border:1px solid #999; font-weight:600;}
   .inv-btn[disabled]{opacity:.5; cursor:not-allowed;}
-  .inv-btn:focus-visible,.inv-opt input:focus-visible{outline:2px solid #111; outline-offset:2px;}
+  .inv-btn:focus-visible,.inv-opt input:focus-visible{outline:2px solid #111; outline-offset:2px; box-shadow:none;}
   .inv-pay{display:flex; flex-direction:column; gap:12px; align-items:flex-start;}
   .inv-how{border:1px solid #e5e7eb; border-radius:6px; padding:10px 14px; font-size:14px; width:100%; box-sizing:border-box;}
   .inv-how b.t{display:block; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:#666; margin-bottom:2px;}
   @media (max-width:520px){ .inv{padding:20px 14px 32px; border-radius:0;} .inv-grid{grid-template-columns:1fr;} .inv-ship{margin-left:0;} }
+
+  /* Design approval page (/?verify=<token>): a white card like the invoice page, since the site's page
+     background is dark. Colours checked for WCAG AA on white: text #1a1a1a / #555 / #b03a2e, and the
+     button and box borders (#8a8a8a) at least 3:1. */
+  .dv{max-width:620px; margin:24px auto 40px; padding:32px 20px; background:#fff; color:#1a1a1a; border-radius:8px; font-family:system-ui,sans-serif;}
+  .dv-msg{padding:8px 0; text-align:center; color:#555;}
+  .dv-msg.err, .dv-err, .dv-req, .dv-up-status.err{color:#b03a2e;}
+  .dv-org{font-size:22px; font-weight:700; color:var(--dv-accent-text,#1a1a1a); margin-bottom:4px;}
+  .dv-sub{font-size:13px; color:#555; margin-bottom:24px;}
+  .dv-soft{color:#555;}
+  .dv-banner{border-radius:6px; padding:14px 18px; margin-bottom:24px; font-size:14px; color:#1a1a1a;}
+  .dv-banner.ok{background:#dcfce7; border:1px solid #86efac;}
+  .dv-banner.wait{background:#fef3c7; border:1px solid #fcd34d;}
+  .dv-message{font-size:15px; line-height:1.6; white-space:pre-wrap; margin-bottom:20px;}
+  .dv-img{margin:12px 0;}
+  .dv-img img{max-width:100%; border-radius:6px; border:1px solid #e5e7eb;}
+  .dv-form{margin-top:28px; border-top:1px solid #e5e7eb; padding-top:24px;}
+  .dv-h{font-size:16px; font-weight:700; margin-bottom:16px;}
+  .dv-choices{display:flex; gap:12px; margin-bottom:20px; flex-wrap:wrap;}
+  .dv-choice{flex:1; min-width:140px; padding:14px 20px; border-radius:6px; border:2px solid #8a8a8a; background:#fff; color:#1a1a1a; font-size:15px; font-weight:600; cursor:pointer; transition:all .15s;}
+  .dv-choice[aria-pressed="true"]{border-color:var(--dv-accent,#1d4ed8); background:var(--dv-accent,#1d4ed8); color:var(--dv-accent-ink,#fff);}
+  .dv-label{display:block; font-size:13px; font-weight:600; margin-bottom:4px;}
+  .dv-field{border:1px solid #8a8a8a; border-radius:4px; font-family:inherit; background:#fff; color:#1a1a1a;}
+  textarea.dv-field{width:100%; box-sizing:border-box; padding:8px; font-size:14px; resize:vertical;}
+  .dv-img-row{display:flex; align-items:center; gap:6px; margin-bottom:6px; flex-wrap:wrap;}
+  .dv-img-row input[type=text]{flex:1; min-width:160px; padding:6px 8px; font-size:13px;}
+  .dv-upload{position:relative; cursor:pointer;}
+  .dv-upload span{display:inline-block; font-size:12px; padding:5px 10px; background:#e5e7eb; color:#1a1a1a; border-radius:4px; white-space:nowrap;}
+  /* The file box itself is hidden but still takes keyboard focus; the "Upload" button shows the ring. */
+  .dv-upload input:focus-visible + span{outline:2px solid #1a1a1a; outline-offset:2px;}
+  .dv-up-status{font-size:12px; color:#555; min-width:50px;}
+  .dv-err{font-size:13px; min-height:18px; margin-bottom:8px;}
+  .dv-submit{width:100%; padding:12px 28px; background:var(--dv-accent,#1d4ed8); color:var(--dv-accent-ink,#fff); border:none; border-radius:5px; font-size:15px; font-weight:600; cursor:pointer;}
+  .dv-submit[disabled]{opacity:.6; cursor:not-allowed;}
+  @media (max-width:520px){ .dv{margin-top:0; border-radius:0; padding:24px 16px 32px;} }
 
   /* Image viewer (storefront "zoom"): near-full-screen, arrows through every picture on the product. */
   .lb-overlay{position:fixed; inset:0; z-index:10000; background:rgba(0,0,0,.88); display:flex; align-items:center; justify-content:center;}
@@ -1355,7 +1393,13 @@ async function resolveCurrentOrg(){
     // On a site with no domain yet it opens on the admin's workers.dev address and names its shop (?shop=).
     const qs = new URLSearchParams(window.location.search), pv = qs.get("preview"), pvShop = qs.get("shop");
     const res = await fetch("/api/catalog" + (pv ? "?preview=" + encodeURIComponent(pv) + (pvShop ? "&shop=" + encodeURIComponent(pvShop) : "") : ""));
-    if(!res.ok){ try{ const d = await res.json(); applyBusiness_(d.business); applyCountry_(d.country); applyFeatures_(d.features); }catch(e){} return null; }
+    if(!res.ok){
+      try{ const d = await res.json(); applyBusiness_(d.business); applyCountry_(d.country); applyFeatures_(d.features); }catch(e){}
+      // 404 is the server's real "no shop at this address" answer. Anything else (a 5xx, a rate limit)
+      // is a passing failure: say so and offer a retry, rather than telling the visitor (or the owner on
+      // the admin address) that their link is probably mistyped.
+      return res.status === 404 ? null : {error:true};
+    }
     const data = await res.json();
     applyBusiness_(data.business);
     applyCountry_(data.country);
@@ -1367,8 +1411,9 @@ async function resolveCurrentOrg(){
     if(data.status !== "ok") return null;
     return Object.assign({orgId: data.orgId, preview: data.preview === true}, data.catalog);
   }catch(e){
+    // No answer at all (offline, dropped connection) or a reply that wasn't the catalog: a passing failure too.
     console.error("Could not resolve current org:", e);
-    return null;
+    return {error:true};
   }
 }
 
@@ -1415,6 +1460,12 @@ let activeCatalog = null; // currentOrg's own products/pricing — never contain
 // null shippingQuote = "Local delivery" (free, default). A non-null value is
 // one of the objects returned by /api/shipping and selected by the customer.
 let shippingZip = "";
+// The ZIP the current carrier rates were priced for (each rate's signed quote is tied to it). The order
+// must ship to this ZIP, so the address box checks it before sending.
+let shippingQuotedZip = "";
+// The last address typed in the shipping-address box (in this page only), so reopening it after a
+// Cancel or a refused order doesn't make the customer type the street address again.
+let lastShipAddr_ = null;
 let shippingRates = [];    // rates fetched from /api/shipping (up to 3)
 let shippingQuote = null;  // null = local delivery; {provider,service,amount,estimatedDays} = carrier
 let shippingManual = false; // true when order doesn't fit a known box — no rates shown, admin follows up
@@ -1497,6 +1548,9 @@ function render(){
   // Storefront switched off: the same short page on every shop address and the main one.
   if(route.view === "closed"){ currentOrgId = null; renderStorefrontOff(app, route); return; }
 
+  // The server couldn't be reached (or had a passing error): not the same as an unknown address.
+  if(route.view === "load-error"){ currentOrgId = null; renderLoadError(app); return; }
+
   // No org resolved (root/generic domain, or an unrecognized host) —
   // or route.org somehow doesn't match the one org this session knows
   // about. Either way, show the generic page; there's nothing else to show.
@@ -1546,11 +1600,11 @@ function renderStripeSuccess(app, orgId, org, orderId){
 // what's owed, lets the customer choose how they'll get it — the shop's delivery & pickup options,
 // with carrier rates for an address — and pay the balance. Everything comes from /api/invoice; a
 // delivery choice is saved there (the fee is the server's) and the page is redrawn from its answer.
-const _inv = { token: "", data: null, pick: "", rates: [], rateIdx: -1, manual: false, addr: {}, busy: "", err: "", paidNote: false };
+const _inv = { token: "", data: null, pick: "", rates: [], ratesZip: "", rateIdx: -1, manual: false, addr: {}, busy: "", err: "", paidNote: false };
 const invMoney_ = (n) => "$" + Number(n || 0).toFixed(2);
 async function renderInvoice(app, token, justPaid){
   document.title = "Invoice";
-  Object.assign(_inv, { token, data: null, pick: "", rates: [], rateIdx: -1, manual: false, addr: {}, busy: "", err: "", paidNote: !!justPaid });
+  Object.assign(_inv, { token, data: null, pick: "", rates: [], ratesZip: "", rateIdx: -1, manual: false, addr: {}, busy: "", err: "", paidNote: !!justPaid });
   app.innerHTML = `<div class="inv" role="status">Loading your invoice…</div>`;
   let res, data;
   try { res = await fetch("/api/invoice?token=" + encodeURIComponent(token)); data = await res.json(); }
@@ -1588,6 +1642,7 @@ function invNeedsChoice_(){
 function invDraw_(){
   const app = document.getElementById("app"), v = _inv.data, d = v.delivery || {};
   if (!app || !v) return;
+  const restoreFocus = keepFocus_(app);
   const acc = /^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(String(v.orgAccent || "")) ? v.orgAccent : "#1d4ed8";
   const itemRows = v.items.map(it => `<tr>
       <td>${escapeHtml(it.name)}${it.size ? ` <span class="inv-detail">· ${escapeHtml(it.size)}</span>` : ""}${it.detail ? `<div class="inv-detail">${escapeHtml(it.detail)}</div>` : ""}</td>
@@ -1703,6 +1758,7 @@ function invDraw_(){
       ${payHtml}
     </div>`;
   invWire_();
+  restoreFocus();
 }
 function invReadAddr_(){
   const g = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
@@ -1716,6 +1772,17 @@ function invWire_(){
   }));
   document.querySelectorAll('input[name="invRate"]').forEach(r => r.addEventListener("change", () => { _inv.rateIdx = r.value === "manual" ? -2 : Number(r.value); }));
   const ratesBtn = document.getElementById("invRatesBtn"); if (ratesBtn) ratesBtn.onclick = invGetRates_;
+  // The rates are priced for the ZIP they were asked for: changing the ZIP drops them (in place, so the
+  // customer keeps typing in the box) and asks for new ones, instead of the save being refused later.
+  const zipBox = document.getElementById("invAZip");
+  if (zipBox) zipBox.addEventListener("input", () => {
+    if (!_inv.rates.length || zipBox.value.trim() === _inv.ratesZip) return;
+    _inv.rates = []; _inv.rateIdx = -1; _inv.manual = false;
+    _inv.err = "The ZIP changed — tap “Show shipping options” for rates to the new ZIP.";
+    const list = document.getElementById("invRates"); if (list) list.innerHTML = "";
+    if (ratesBtn) ratesBtn.textContent = "Show shipping options";
+    const e = document.getElementById("invDelErr"); if (e) e.textContent = _inv.err;
+  });
   const save = document.getElementById("invSaveDelivery"); if (save) save.onclick = invSaveDelivery_;
   const card = document.getElementById("invPayCard"); if (card) card.onclick = invPayCard_;
 }
@@ -1731,7 +1798,7 @@ async function invGetRates_(){
     const res = await fetch("/api/shipping", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ zip: a.zip, org: v.orgId, invoiceToken: _inv.token, items: v.items.map(it => ({ productId: it.productId, qty: it.qty })) }) });
     const data = await res.json();
-    if (data.status === "ok") { _inv.rates = (data.rates || []).filter(r => r.quoteToken); _inv.manual = !!data.manualShipping || !_inv.rates.length; if (_inv.manual && !_inv.rates.length) _inv.rateIdx = -2; }
+    if (data.status === "ok") { _inv.rates = (data.rates || []).filter(r => r.quoteToken); _inv.ratesZip = a.zip; _inv.manual = !!data.manualShipping || !_inv.rates.length; if (_inv.manual && !_inv.rates.length) _inv.rateIdx = -2; }
     else _inv.err = "We couldn't get shipping rates — check the ZIP and try again.";
   } catch (e) { _inv.err = "We couldn't reach the shipping service — try again."; }
   _inv.busy = ""; invDraw_();
@@ -1742,7 +1809,10 @@ async function invSaveDelivery_(){
   if (_inv.pick === "ship") {
     if (!a.line1 || !a.city || !/^\d{5}$/.test(a.zip || "")) { _inv.err = "Enter the street address, city and ZIP to ship to."; invDraw_(); return; }
     if (_inv.rateIdx === -2) body.manualShipping = true;
-    else if (_inv.rateIdx >= 0 && _inv.rates[_inv.rateIdx]) body.quoteToken = _inv.rates[_inv.rateIdx].quoteToken;
+    else if (_inv.rateIdx >= 0 && _inv.rates[_inv.rateIdx]) {
+      if (_inv.ratesZip && a.zip !== _inv.ratesZip) { _inv.err = "The ZIP changed — tap “Show shipping options” for rates to the new ZIP."; invDraw_(); return; }
+      body.quoteToken = _inv.rates[_inv.rateIdx].quoteToken;
+    }
     else { _inv.err = _inv.rates.length || _inv.manual ? "Choose one of the shipping options." : "Tap “Show shipping options”, then choose one."; invDraw_(); return; }
     body.shippingAddress = a;
   } else if (_inv.pick.startsWith("o:") && _inv.pick.length > 2) body.deliveryOptionId = _inv.pick.slice(2);
@@ -1770,73 +1840,80 @@ async function invPayCard_(){
 
 async function renderDesignVerify(app, token){
   document.title = "Design Verification";
-  app.innerHTML = `<div style="padding:40px;text-align:center;font-family:system-ui,sans-serif;color:#555;">Loading your design…</div>`;
+  // The page sits on a white card (like the invoice page): the site's page background is dark.
+  const msg = (text, err) => `<div class="dv"><div class="dv-msg${err ? " err" : ""}"${err ? ' role="alert"' : ""}>${text}</div></div>`;
+  app.innerHTML = msg("Loading your design…");
   let data;
   try{
     const res = await fetch("/api/verify?token=" + encodeURIComponent(token));
     data = await res.json();
   }catch{
-    app.innerHTML = `<div style="padding:40px;text-align:center;font-family:system-ui,sans-serif;color:#b03a2e;">Could not load design verification. Please check your link or contact us.</div>`;
+    app.innerHTML = msg("Could not load design verification. Please check your link or contact us.", true);
     return;
   }
   if(data && data.status === "unavailable"){
     // Design approval is switched off for this site: say so plainly (it isn't a broken link).
-    app.innerHTML = `<div style="padding:40px;text-align:center;font-family:system-ui,sans-serif;color:#555;">${escapeHtml(data.message || "Design approval isn't available right now. Please contact us about your order.")}</div>`;
+    app.innerHTML = msg(escapeHtml(data.message || "Design approval isn't available right now. Please contact us about your order."));
     return;
   }
   if(!data || data.status !== "ok"){
-    app.innerHTML = `<div style="padding:40px;text-align:center;font-family:system-ui,sans-serif;color:#b03a2e;">This verification link is invalid or has expired.</div>`;
+    app.innerHTML = msg("This verification link is invalid or has expired.", true);
     return;
   }
 
   document.title = "Design Verification — " + data.orderId;
-  const accent = data.orgAccent || "#1d4ed8";
+  const accent = String(data.orgAccent || "#1d4ed8").trim();
+  // A text colour readable on the shop colour, for the filled buttons; and the shop name in the shop
+  // colour only when that colour is dark enough to read on white.
+  const accentInk = readableInkOn(accent);
+  const accentText = accentInk === "#fff" ? accent : "#1a1a1a";
   const alreadyResponded = data.verificationStatus !== "pending";
 
   const imagesHtml = (data.imageUrls || []).filter(Boolean).map(
-    u => `<div style="margin:12px 0;"><img src="${escapeHtml(u)}" alt="Design image" style="max-width:100%;border-radius:6px;border:1px solid #e5e7eb;"></div>`
+    u => `<div class="dv-img"><img src="${escapeHtml(u)}" alt="Design image"></div>`
   ).join("");
 
   const respondedBanner = alreadyResponded ? `
-    <div style="background:${data.verificationStatus==='approved'?'#dcfce7':'#fef3c7'};border:1px solid ${data.verificationStatus==='approved'?'#86efac':'#fcd34d'};border-radius:6px;padding:14px 18px;margin-bottom:24px;font-size:14px;color:#1a1a1a;">
+    <div class="dv-banner ${data.verificationStatus==='approved'?'ok':'wait'}">
       <strong>${data.verificationStatus === 'approved' ? '✓ You approved this design' : '⚠ You requested revisions'}</strong>
       ${data.respondedAt ? ` on ${new Date(data.respondedAt).toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})}` : ""}
-      ${data.customerNote ? `<br><span style="color:#555">Your note: ${escapeHtml(data.customerNote)}</span>` : ""}
+      ${data.customerNote ? `<br><span class="dv-soft">Your note: ${escapeHtml(data.customerNote)}</span>` : ""}
     </div>` : "";
 
   app.innerHTML = `
-    <div style="max-width:620px;margin:0 auto;padding:32px 20px;font-family:system-ui,sans-serif;color:#1a1a1a;">
-      <div style="font-size:22px;font-weight:700;color:${escapeHtml(accent)};margin-bottom:4px;">${escapeHtml(data.orgName)}</div>
-      <div style="font-size:13px;color:#555;margin-bottom:24px;">Design verification for order <strong>${escapeHtml(data.orderId)}</strong></div>
+    <div class="dv" style="--dv-accent:${escapeHtml(accent)};--dv-accent-ink:${accentInk};--dv-accent-text:${escapeHtml(accentText)};">
+      <div class="dv-org">${escapeHtml(data.orgName)}</div>
+      <div class="dv-sub">Design verification for order <strong>${escapeHtml(data.orderId)}</strong></div>
       ${respondedBanner}
-      <div style="font-size:15px;line-height:1.6;white-space:pre-wrap;margin-bottom:20px;">${escapeHtml(data.message)}</div>
+      <div class="dv-message">${escapeHtml(data.message)}</div>
       ${imagesHtml}
       ${alreadyResponded ? "" : `
-        <div id="dvFormArea" style="margin-top:28px;border-top:1px solid #e5e7eb;padding-top:24px;">
-          <div style="font-size:16px;font-weight:700;margin-bottom:16px;">Your response</div>
-          <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;">
-            <button id="dvApproveBtn" onclick="dvSelectAction('approved')" style="flex:1;min-width:140px;padding:14px 20px;border-radius:6px;border:2px solid #e5e7eb;background:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:all .15s;">
+        <div id="dvFormArea" class="dv-form">
+          <div class="dv-h" id="dvChoiceLabel">Your response</div>
+          <div class="dv-choices" role="group" aria-labelledby="dvChoiceLabel">
+            <button type="button" id="dvApproveBtn" class="dv-choice" aria-pressed="false" onclick="dvSelectAction('approved')">
               ✓ Approve design
             </button>
-            <button id="dvRevisionBtn" onclick="dvSelectAction('revision')" style="flex:1;min-width:140px;padding:14px 20px;border-radius:6px;border:2px solid #e5e7eb;background:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:all .15s;">
+            <button type="button" id="dvRevisionBtn" class="dv-choice" aria-pressed="false" onclick="dvSelectAction('revision')">
               ✏ Request changes
             </button>
           </div>
           <div id="dvRevisionArea" style="display:none;margin-bottom:16px;">
-            <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">Describe the changes needed <span style="color:#b03a2e">*</span></label>
-            <textarea id="dvNote" rows="4" placeholder="Please be as specific as possible about what needs to change." style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;font-family:inherit;resize:vertical;"></textarea>
-            <div style="margin-top:12px;font-size:13px;font-weight:600;margin-bottom:6px;">Supporting images (optional)</div>
+            <label for="dvNote" class="dv-label">Describe the changes needed <span class="dv-req" aria-hidden="true">*</span></label>
+            <textarea id="dvNote" class="dv-field" rows="4" required placeholder="Please be as specific as possible about what needs to change."></textarea>
+            <div class="dv-label" style="margin-top:12px;">Supporting images (optional)</div>
             ${[1,2].map(i => `
-              <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
-                <input type="text" id="dvCustImg${i}" placeholder="https://... or upload below" style="flex:1;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">
-                <label style="cursor:pointer;font-size:12px;padding:5px 10px;background:#e5e7eb;border-radius:4px;white-space:nowrap;">
-                  Upload <input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif" style="display:none;" data-target="dvCustImg${i}" data-token="${escapeHtml(token)}" onchange="handleCustVerifyUpload(this)">
+              <div class="dv-img-row">
+                <input type="text" id="dvCustImg${i}" class="dv-field" aria-label="Supporting image ${i} link" placeholder="https://... or upload below">
+                <label class="dv-upload">
+                  <input type="file" class="sr-only" aria-label="Upload supporting image ${i}" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif" data-target="dvCustImg${i}" data-token="${escapeHtml(token)}" onchange="handleCustVerifyUpload(this)">
+                  <span aria-hidden="true">Upload</span>
                 </label>
-                <span id="dvCustImg${i}Status" style="font-size:11px;color:#555;min-width:50px;"></span>
+                <span id="dvCustImg${i}Status" class="dv-up-status" aria-live="polite"></span>
               </div>`).join("")}
           </div>
-          <div id="dvError" style="color:#b03a2e;font-size:13px;min-height:18px;margin-bottom:8px;"></div>
-          <button id="dvSubmit" onclick="dvSubmitResponse('${escapeHtml(token)}')" style="display:none;padding:12px 28px;background:${escapeHtml(accent)};color:#fff;border:none;border-radius:5px;font-size:15px;font-weight:600;cursor:pointer;width:100%;">Submit response</button>
+          <div id="dvError" class="dv-err" role="alert"></div>
+          <button type="button" id="dvSubmit" class="dv-submit" onclick="dvSubmitResponse('${escapeHtml(token)}')" style="display:none;">Submit response</button>
         </div>
       `}
     </div>`;
@@ -1849,17 +1926,10 @@ async function renderDesignVerify(app, token){
     const revisionBtn = document.getElementById("dvRevisionBtn");
     const revArea = document.getElementById("dvRevisionArea");
     const submitBtn = document.getElementById("dvSubmit");
-    const activeStyle = "border-color:" + accent + ";background:" + accent + ";color:#fff;";
-    const inactiveStyle = "border-color:#e5e7eb;background:#fff;color:#1a1a1a;";
-    if(action === "approved"){
-      approveBtn.style.cssText = approveBtn.style.cssText.replace(/border-color[^;]*;background:[^;]*;color:[^;]*;/g,"") + activeStyle;
-      revisionBtn.style.cssText = revisionBtn.style.cssText.replace(/border-color[^;]*;background:[^;]*;color:[^;]*;/g,"") + inactiveStyle;
-      revArea.style.display = "none";
-    } else {
-      revisionBtn.style.cssText = revisionBtn.style.cssText.replace(/border-color[^;]*;background:[^;]*;color:[^;]*;/g,"") + activeStyle;
-      approveBtn.style.cssText = approveBtn.style.cssText.replace(/border-color[^;]*;background:[^;]*;color:[^;]*;/g,"") + inactiveStyle;
-      revArea.style.display = "block";
-    }
+    // The chosen button is filled with the shop colour (CSS on aria-pressed), and screen readers hear "pressed".
+    approveBtn.setAttribute("aria-pressed", action === "approved" ? "true" : "false");
+    revisionBtn.setAttribute("aria-pressed", action === "approved" ? "false" : "true");
+    revArea.style.display = action === "approved" ? "none" : "block";
     submitBtn.style.display = "block";
     document.getElementById("dvError").textContent = "";
   };
@@ -1870,18 +1940,22 @@ async function renderDesignVerify(app, token){
     const statusEl = document.getElementById(targetId + "Status");
     let file = input.files && input.files[0];
     if(!file) return;
+    statusEl.classList.remove("err");
     statusEl.textContent = "Uploading…";
     try{
       file = await heicToJpeg_(file);
       const res = await fetch("/api/upload-verify?token=" + encodeURIComponent(tok), {
         method:"POST", headers:{"Content-Type":file.type}, body:file
       });
-      const d = await res.json();
-      if(!res.ok || d.status !== "ok") throw new Error(d.message || "Upload failed");
+      const d = await res.json().catch(() => ({}));
+      if(!res.ok || d.status !== "ok") throw new Error(d.message || "Upload failed — please try again.");
       document.getElementById(targetId).value = d.url;
-      statusEl.textContent = "✓";
+      statusEl.textContent = "✓ Uploaded";
     }catch(e){
-      statusEl.textContent = "Failed";
+      // Say why (too big, wrong kind of file, link expired…) rather than a bare "Failed".
+      statusEl.classList.add("err");
+      statusEl.textContent = (e && e.message && !/^(Failed to fetch|NetworkError|Load failed)/i.test(e.message))
+        ? e.message : "Upload failed — check your connection and try again.";
     }
   };
 
@@ -1908,9 +1982,9 @@ async function renderDesignVerify(app, token){
       const d = await res.json();
       if(!res.ok || d.status !== "ok") throw new Error(d.message || "Could not submit response");
       document.getElementById("dvFormArea").innerHTML = `
-        <div style="background:${action==='approved'?'#dcfce7':'#fef3c7'};border:1px solid ${action==='approved'?'#86efac':'#fcd34d'};border-radius:6px;padding:18px;font-size:15px;color:#1a1a1a;text-align:center;">
+        <div class="dv-banner ${action==='approved'?'ok':'wait'}" role="status" style="padding:18px;font-size:15px;text-align:center;margin-bottom:0;">
           <div style="font-size:20px;margin-bottom:6px;">${action==='approved'?'✓ Design approved!':'⚠ Revision request sent'}</div>
-          <div style="font-size:14px;color:#555;">${action==='approved'?'Thank you! We\'ll proceed with your order.':'We\'ll review your feedback and be in touch.'}</div>
+          <div class="dv-soft" style="font-size:14px;">${action==='approved'?'Thank you! We\'ll proceed with your order.':'We\'ll review your feedback and be in touch.'}</div>
         </div>`;
     }catch(e){
       document.getElementById("dvError").textContent = e.message || "Could not submit response.";
@@ -1942,6 +2016,23 @@ function renderGenericFallback(app){
       ${business.supportEmail ? `<p style="margin-top:14px;"><a href="mailto:${escapeHtml(business.supportEmail)}" style="color:var(--accent); font-weight:600;">${escapeHtml(business.supportEmail)}</a></p>` : ""}
     </div>
   `;
+}
+
+// Shown when /api/catalog didn't answer (offline, a dropped connection, a passing server error): the
+// address may be perfectly good, so say so and offer to try again, which reloads the page and asks again.
+function renderLoadError(app){
+  document.title = bizName_();
+  app.innerHTML = `
+    <div class="not-ready" id="loadError" role="alert" style="--org-accent:var(--accent);">
+      <div class="stitch"></div>
+      <h2>We couldn't load this page</h2>
+      <p>This is usually brief. Check your connection, then try again.</p>
+      <div class="admin-actions"><button type="button" class="admin-btn" id="loadErrorRetry">Try again</button></div>
+      ${business.supportEmail ? `<p style="margin-top:14px;">Still not loading? Email <a href="mailto:${escapeHtml(business.supportEmail)}" style="color:var(--accent); font-weight:600;">${escapeHtml(business.supportEmail)}</a></p>` : ""}
+    </div>
+  `;
+  const btn = document.getElementById("loadErrorRetry");
+  if(btn) btn.addEventListener("click", () => { btn.disabled = true; btn.textContent = "Loading…"; window.location.reload(); });
 }
 
 // Global settings → Features → Storefront is off: the site is back office only. Every shop address
@@ -2911,14 +3002,16 @@ async function fetchShippingQuote(){
     return { productId: c.productId, qty: c.qty, weightOz: prod.weightOz || 0, type: prod.type || "" };
   });
 
+  const reqZip = shippingZip;
   try{
     const res = await fetch("/api/shipping", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({zip: shippingZip, items, org: currentOrgId})
+      body: JSON.stringify({zip: reqZip, items, org: currentOrgId})
     });
     const data = await res.json();
     if(data.status === "ok"){
+      shippingQuotedZip = reqZip;
       shippingManual = !!data.manualShipping;
       // An order that needs a custom quote ships by default once a ZIP is typed; the
       // customer can still switch back to pickup or another option.
@@ -2976,7 +3069,9 @@ function zipStates_(zip){
   }
   return out;
 }
-function collectShippingAddress(){
+// quotedZip: when the customer picked a carrier rate, the ZIP it was priced for. The address must use
+// that ZIP (the server refuses any other), so a different one is caught here, with the address kept.
+function collectShippingAddress(quotedZip){
   return new Promise(resolve => {
     const overlay = document.createElement("div");
     overlay.className = "ship-addr-overlay";
@@ -2991,22 +3086,24 @@ function collectShippingAddress(){
       overlay.style.setProperty("--org-accent-ink", readableInkOn(acc));
     }
 
-    const prefillName = (document.getElementById("custName") || {}).value || "";
+    const last = lastShipAddr_ || {};
+    const prefillName = last.name || (document.getElementById("custName") || {}).value || "";
+    const prefillZip = shippingZip || last.zip || "";
 
     overlay.innerHTML = `
       <div class="ship-addr-box">
         <h2>Shipping address</h2>
         <div class="ship-addr-fields">
           <input type="text" id="shipName" placeholder="Full name" aria-label="Full name" autocomplete="name" value="${escapeHtml(prefillName)}">
-          <input type="text" id="shipLine1" placeholder="Address line 1" aria-label="Address line 1" autocomplete="address-line1">
-          <input type="text" id="shipLine2" placeholder="Apt, suite, etc. (optional)" aria-label="Address line 2" autocomplete="address-line2">
+          <input type="text" id="shipLine1" placeholder="Address line 1" aria-label="Address line 1" autocomplete="address-line1" value="${escapeHtml(last.line1 || "")}">
+          <input type="text" id="shipLine2" placeholder="Apt, suite, etc. (optional)" aria-label="Address line 2" autocomplete="address-line2" value="${escapeHtml(last.line2 || "")}">
           <div class="ship-addr-row">
-            <input type="text" id="shipCity" placeholder="City" aria-label="City" autocomplete="address-level2" class="ship-addr-city">
+            <input type="text" id="shipCity" placeholder="City" aria-label="City" autocomplete="address-level2" class="ship-addr-city" value="${escapeHtml(last.city || "")}">
             ${isUS_()
-              ? `<input type="text" id="shipState" placeholder="ST" aria-label="State (2 letters)" autocomplete="address-level1" maxlength="2" class="ship-addr-state">
-            <input type="text" id="shipZip" placeholder="ZIP" aria-label="ZIP code" inputmode="numeric" maxlength="5" autocomplete="postal-code" class="ship-addr-zip" value="${escapeHtml(shippingZip)}">`
-              : `<input type="text" id="shipState" placeholder="State / region" aria-label="State / region" autocomplete="address-level1" maxlength="50" class="ship-addr-city">
-            <input type="text" id="shipZip" placeholder="Postal code" aria-label="Postal code" maxlength="20" autocomplete="postal-code" class="ship-addr-zip" style="flex:0 0 130px;width:130px;" value="${escapeHtml(shippingZip)}">`}
+              ? `<input type="text" id="shipState" placeholder="ST" aria-label="State (2 letters)" autocomplete="address-level1" maxlength="2" class="ship-addr-state" value="${escapeHtml(last.state || "")}">
+            <input type="text" id="shipZip" placeholder="ZIP" aria-label="ZIP code" inputmode="numeric" maxlength="5" autocomplete="postal-code" class="ship-addr-zip" value="${escapeHtml(prefillZip)}">`
+              : `<input type="text" id="shipState" placeholder="State / region" aria-label="State / region" autocomplete="address-level1" maxlength="50" class="ship-addr-city" value="${escapeHtml(last.state || "")}">
+            <input type="text" id="shipZip" placeholder="Postal code" aria-label="Postal code" maxlength="20" autocomplete="postal-code" class="ship-addr-zip" style="flex:0 0 130px;width:130px;" value="${escapeHtml(prefillZip)}">`}
           </div>
           <div class="ship-addr-error" id="shipAddrError" role="alert"></div>
         </div>
@@ -3019,7 +3116,12 @@ function collectShippingAddress(){
     document.body.appendChild(overlay);
     overlay.querySelector("#shipName").focus();
 
-    function close(result){ overlay.remove(); resolve(result); }
+    // Whatever was typed is remembered (even on Cancel), so the next time the box opens it's filled in.
+    function remember(){
+      const v = (id) => { const el = overlay.querySelector(id); return el ? el.value.trim() : ""; };
+      lastShipAddr_ = { name: v("#shipName"), line1: v("#shipLine1"), line2: v("#shipLine2"), city: v("#shipCity"), state: v("#shipState"), zip: v("#shipZip") };
+    }
+    function close(result){ remember(); overlay.remove(); resolve(result); }
 
     overlay.querySelector("#shipCancelBtn").addEventListener("click", () => close(null));
     overlay.addEventListener("keydown", e => { if(e.key === "Escape") close(null); });
@@ -3033,12 +3135,23 @@ function collectShippingAddress(){
       const city  = overlay.querySelector("#shipCity").value.trim();
       const us = isUS_();
       const state = us ? overlay.querySelector("#shipState").value.trim().toUpperCase() : overlay.querySelector("#shipState").value.trim();
-      const zip   = overlay.querySelector("#shipZip").value.trim();
+      const zipEl = overlay.querySelector("#shipZip");
+      const zip   = zipEl.value.trim();
       errEl.textContent = "";
+      zipEl.removeAttribute("aria-invalid");
       // Outside the US the region is optional (not every country has one) and neither it nor the
       // postal code has a fixed format.
       if(!name || !line1 || !city || (us && !state) || !zip){
         errEl.textContent = "Please fill in all required fields.";
+        return;
+      }
+      // The shipping rate was priced for one ZIP; the server refuses an address with another. Say so
+      // here, with everything typed still in the box, rather than after the order is sent.
+      if(quotedZip && zip !== quotedZip){
+        const word = us ? "ZIP" : "postal code";
+        errEl.textContent = `Shipping was priced for ${word} ${quotedZip}. To ship to ${zip}, press Cancel, change the ${word} under Delivery and pick a new rate. Your address will still be here.`;
+        zipEl.setAttribute("aria-invalid", "true");
+        zipEl.focus();
         return;
       }
       if(!us){ close({ name, line1, line2: line2 || null, city, state, zip }); return; }
@@ -3241,6 +3354,62 @@ function setRush_(on){
   if(currentOrg && currentOrgId) renderTicket(currentOrg, currentOrgId);
 }
 
+// The order panel and the invoice page are redrawn whole (innerHTML) on every quantity change, delivery
+// or payment choice and rate update, which used to drop keyboard focus to the top of the page. This notes
+// which control inside `root` has focus (by id, by its data-action + line, or by radio name + value, else
+// by its place in the panel), and the returned function puts focus — and the text cursor — back on the
+// matching control after the redraw. When that control is gone (a removed line) focus goes to the one now
+// in its place, else the panel's heading. When it's there but disabled while busy ("Getting rates…"),
+// focus waits on the control just before it and goes back to it on the next redraw, once it's enabled.
+// Nothing happens when focus was outside `root`.
+const FOCUSABLE_ = 'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])';
+let focusPending_ = null;   // { key, placed }: a busy control whose focus is being held next to it
+function keepFocus_(root){
+  const el = document.activeElement;
+  let key = null;
+  if(focusPending_ && el && focusPending_.placed === el && el.isConnected && root && root.contains(el)) key = focusPending_.key;
+  focusPending_ = null;
+  if(!key){
+    if(!root || !el || el === root || !root.contains(el)) return () => {};
+    const all = [...root.querySelectorAll(FOCUSABLE_)];
+    key = { id: el.id || "", action: el.getAttribute("data-action") || "", idx: el.getAttribute("data-idx"), d: el.getAttribute("data-d"),
+      name: el.getAttribute("name") || "", value: el.value, type: el.type || "", order: all.indexOf(el), caret: null };
+    try{ if(typeof el.selectionStart === "number") key.caret = [el.selectionStart, el.selectionEnd]; }catch(_){}
+  }
+  return function restore(){
+    const now = [...root.querySelectorAll(FOCUSABLE_)];
+    const usable = (x) => !!x && !x.disabled && !x.hidden && !x.closest("[hidden]");
+    let target = null, holding = false;
+    if(key.id) target = now.find(x => x.id === key.id);
+    if(!target && key.action) target = now.find(x => x.getAttribute("data-action") === key.action && x.getAttribute("data-idx") === key.idx && x.getAttribute("data-d") === key.d);
+    if(!target && key.name && (key.type === "radio" || key.type === "checkbox")) target = now.find(x => x.getAttribute("name") === key.name && x.value === key.value);
+    if(target && !usable(target)){
+      // A "+" that just reached its limit: its line's "−" is the nearest control.
+      const sameLine = key.action ? now.find(x => usable(x) && x.getAttribute("data-action") === key.action && x.getAttribute("data-idx") === key.idx) : null;
+      if(sameLine) target = sameLine;
+      else {
+        const pos = now.indexOf(target);
+        target = now.slice(0, pos).reverse().find(usable) || now.find(usable) || null;
+        holding = !!target;
+      }
+    }
+    if(!usable(target) && key.order >= 0){
+      const live = now.filter(usable);
+      target = live[Math.min(key.order, live.length - 1)] || null;
+    }
+    if(!usable(target)){
+      target = root.querySelector("h1, h2");
+      if(target && !target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+    }
+    if(!target) return;
+    try{ target.focus({ preventScroll: true }); }catch(_){ target.focus(); }
+    if(holding) focusPending_ = { key, placed: target };
+    else if(key.caret && key.id && target.id === key.id && typeof target.setSelectionRange === "function"){
+      try{ target.setSelectionRange(key.caret[0], key.caret[1]); }catch(_){}
+    }
+  };
+}
+
 function renderTicket(org, orgId){
   saveCart_();
   const panel = document.getElementById("ticketPanel");
@@ -3329,6 +3498,7 @@ function renderTicket(org, orgId){
   const contactEl = document.getElementById("custContact");
   const savedName = nameEl ? nameEl.value : "";
   const savedContact = contactEl ? contactEl.value : "";
+  const restoreFocus = keepFocus_(panel);
 
   panel.innerHTML = `
     <h2>Your order${pieces ? ` <span class="mono" style="font-size:.7em;opacity:.7;">(${pieces} ${pieces === 1 ? "item" : "items"})</span>` : ""}</h2>
@@ -3368,6 +3538,7 @@ function renderTicket(org, orgId){
       updatePaymentHint(savedPayment, true); // skipTicketRender=true to avoid recursion
     }
   }
+  restoreFocus();
 }
 
 /* ---------------- backend (/api) ---------------- */
@@ -3489,7 +3660,7 @@ async function placeOrder(orgId){
     return;
   }
   if(delivery.kind === "quote" || delivery.kind === "manual"){
-    shippingAddress = await collectShippingAddress();
+    shippingAddress = await collectShippingAddress(delivery.kind === "quote" ? (shippingQuotedZip || shippingZip) : "");
     if(!shippingAddress) return; // user cancelled the address modal
   }
   orderShippingCost = delivery.fee;
@@ -3540,6 +3711,7 @@ async function placeOrder(orgId){
   try{
     saved = await saveOrder(order);
     clearOrderAttempt_();   // saved: the next checkout is a new order
+    lastShipAddr_ = null;   // and the address box starts empty for it
     // Tax added on top: the confirmation (and the Venmo/Zelle amount) uses the recorded total.
     if(saved && typeof saved.total === "number"){ order.total = saved.total; order.salesTax = saved.salesTax; }
   }catch(err){
@@ -3759,6 +3931,11 @@ function showConfirmation(orgId, order){
     return;
   }
 
+  if(resolved && resolved.error){
+    route = {view:"load-error"};
+    render();
+    return;
+  }
   if(resolved && resolved.admin){
     route = {view:"admin"};
     render();

@@ -25,6 +25,11 @@
  *   1. POST { email, key } — if a code is needed, the server answers { status:"totp_required" }.
  *   2. POST { email, key, totpCode } — both are checked and the session is issued.
  *
+ * Checking who is at the keyboard (before voiding an order, say): POST { email, key, totpCode?, verify: true }
+ * runs the same checks — password, then the code — but issues no session and keeps the one in the cookie.
+ * It only answers { status:"ok", verified:true } for the user that session belongs to; with no live session
+ * it answers 401 { code:"no_session" }, and the admin signs in again the ordinary way.
+ *
  * DELETE /api/admin-session
  *   Revokes the session in the cookie (server-side) and clears the cookie.
  */
@@ -37,7 +42,7 @@ import {
   timingSafeEqual, issueSession, revokeSession, readCookie, isSameOrigin,
   sessionCookieHeader, clearSessionCookieHeader, SESSION_COOKIE, SESSION_TTL_SEC, readSessionCookie,
   bootstrapState, rememberSecret, verifyUserPassword, pendingFor, revokeAllSessions, weakSetupPassword,
-  looksLikeRecoveryCode, spendRecoveryCode, revokeUserSessionsFor,
+  looksLikeRecoveryCode, spendRecoveryCode, revokeUserSessionsFor, sessionUserId,
   signInBudgetBlocked, countSignInFailure,
 } from "../_lib/adminAuth.js";
 import { accessEnabled, verifyAccess } from "../_lib/access.js";
@@ -142,6 +147,19 @@ export async function onRequestPost(context){
         }
       }
     }catch(e){ return unavailable("could not check the code", e); }
+  }
+
+  // A check, not a sign-in: the password (and code) must belong to the user signed in with this cookie. The
+  // session is kept as it is and no new one is issued, so a wrong password or Cancel never signs anyone out.
+  if(body.verify){
+    let current;
+    try{ current = await sessionUserId(env, readSessionCookie(request, env)); }
+    catch(e){ return unavailable("could not read the session", e); }
+    if(current == null) return jsonResponse({status:"error", code:"no_session", message:"Your session ended — sign in again."}, 401);
+    if(!user || user.id !== current) return refuse("passphrase");
+    const res = jsonResponse({status:"ok", verified:true});
+    res.headers.set("Cache-Control", "no-store");
+    return res;
   }
 
   let session, pending;

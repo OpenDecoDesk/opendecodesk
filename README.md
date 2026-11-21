@@ -180,7 +180,7 @@ without it.
 
 ## Feature switches
 
-Five parts of the site are optional. Each has a switch in the admin under Tools → Global settings →
+Five parts of the site are optional. Each has a switch in the admin under Settings → Global settings →
 Features. **All five are on by default.** Turning one off hides its pages in the admin menu (opening one
 of them directly shows a "this feature is turned off" page), and the server refuses its actions. Nothing
 is deleted — every table and row stays — so turning it back on brings everything back as it was. Each
@@ -227,7 +227,7 @@ catalog).
 
 ## Region
 
-Set in the admin under Tools → Global settings → Region.
+Set in the admin under Settings → Global settings → Region.
 
 - **Time zone** — an IANA name such as `Europe/London` or `America/Chicago`. It decides the local hour
   the daily roll-up email arrives (`DIGEST_HOUR`, default 6) and the dates and times printed in emails.

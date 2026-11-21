@@ -612,6 +612,7 @@
     /* Every other admin field too — tool pages, finance screens and pop-up windows (iOS zooms into anything under 16px). */
     .admin-panel input:not([type=checkbox]):not([type=radio]):not([type=file]), .admin-panel select, .admin-panel textarea,
     .admin-modal input:not([type=checkbox]):not([type=radio]):not([type=file]), .admin-modal select, .admin-modal textarea{font-size:16px!important;}
+    .admin-pass-overlay input:not([type=checkbox]):not([type=radio]):not([type=file]), .admin-pass-overlay select, .admin-pass-overlay textarea{font-size:16px!important;}
     .admin-actions .admin-btn{flex:1 1 auto;}
     /* Designs: the list, or the open design — not both squeezed side by side. */
     .dsg-layout{grid-template-columns:1fr; margin:8px 0 40px!important;}
@@ -704,7 +705,9 @@
   .bc-current{color:var(--ink);font-weight:600;}
   .admin-pass-overlay{
     position:fixed; inset:0; background:rgba(0,0,0,.55);
-    display:flex; align-items:center; justify-content:center; z-index:1000; padding:20px;
+    /* The same level as every other admin window (9999): the one opened last is on top, so a sign-in prompt
+       raised from inside a window shows above it. */
+    display:flex; align-items:center; justify-content:center; z-index:9999; padding:20px;
   }
   .admin-pass-box{
     background:var(--card); color:var(--ink); border-radius:var(--radius);
@@ -1179,7 +1182,7 @@ function productSizes_(sizePricing){
   return keys.sort((a, b) => rank(a) - rank(b));
 }
 // The storefront's sections come from the shop's catalog answer (`categories`: the managed list from
-// admin → Tools → Product categories, in its order). This built-in list is only what a catalog answer
+// admin → Catalog → Product categories, in its order). This built-in list is only what a catalog answer
 // from before that list existed falls back to.
 const DEFAULT_CATEGORIES = [{key:"shirt", label:"Shirts"}, {key:"sweatshirt", label:"Sweatshirts"}, {key:"cap", label:"Caps"}];
 // A product has sizes when it's priced by size; a flat-priced product is one size ("OSFA") whatever

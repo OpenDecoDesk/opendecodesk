@@ -10,7 +10,7 @@ const { createD1 } = require("./testlib/d1-shim.js");
 // Image clean-up (2026-10). Blanks → Find duplicate photos: the same photo more than once on a blank color (same
 // address, same file, or looks the same) is listed with a tick box under each photo — the first kept, the copies
 // ticked — and Remove duplicates takes the ticked ones off by position (the same address twice keeps its first copy).
-// Tools → Orphaned images: files in the image store nothing in the database points to (any text column of any table;
+// Settings → Orphaned images: files in the image store nothing in the database points to (any text column of any table;
 // a "-thumb" copy goes with its main image; uploads under 24 hours old never count), downloadable as one .zip and
 // removable from storage after a server-side re-check. Real db.js / orders.js / orphanImages.js on sql.js with a
 // mock R2 bucket; the windows in jsdom.
@@ -193,7 +193,7 @@ function bucket(objects){
   d.getElementById("dpRemove").click();
   await wait(() => refreshed);
   ok("Remove duplicates takes the ticked copy off the blank", sent.some(b => b.action === "removeBlankImages") && (await colorImgs("Black")).join() === [u("a"), u("q")].join() && refreshed);
-  // Tools → Orphaned images.
+  // Settings → Orphaned images.
   ok("Tools has Orphaned images (admin only)", /\["orphans", "Orphaned images"\]/.test(adminJs) && pageLowest("orphans") === "admin");
   await w.renderOrphanImages(d.getElementById("app"));
   d.getElementById("orScan").click();

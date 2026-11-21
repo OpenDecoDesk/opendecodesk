@@ -1486,7 +1486,7 @@ function parseProduct_(row) {
 //   S&S's published terms: adidas, Columbia, Oakley and Puma (Golf) "must be sold with embellishment"; DRI DUCK may be
 //     resold blank only at its MAP.
 // The default large quantity (100) and the logo concerns are a starting point; each shop sets its own.
-// The rules are a setting (global_settings.brandRules, Tools → Brand rules): a default "large" quantity — pieces of
+// The rules are a setting (global_settings.brandRules, Catalog → Brand rules): a default "large" quantity — pieces of
 // ONE style (a blank) on one customer order or one supplier order — with per-brand overrides; per brand whether it
 // must be decorated and whether a large quantity needs the supplier's logo approval. An approval (brand_approvals) is
 // per product, since the logo on it is what's reviewed, with the supplier's reply attached.
@@ -1837,7 +1837,7 @@ export async function getCatalogIssues(db, orgId = null) {
       text: `${staleBy[key]} open order line${staleBy[key] === 1 ? " was" : "s were"} placed with settings that no longer match the catalog — Orders → Edit items → Update from catalog on ${staleBy[key] === 1 ? "it" : "each"}` });
     const typeOff = linkedTypes.filter(t => t.orgId === p.orgId && t.productId === p.productId && t.productType && p.type && t.productType !== p.type);
     if (typeOff.length) list.push({ code: "blankTypeMismatch", level: "warn", text: `Linked to ${typeOff.map(t => `“${t.blankName}” (filed as ${t.productType})`).join(", ")}, but this product is a ${p.type} — change one of them so they match` });
-    // A restricted brand (Tools → Brand rules): what the supplier requires, and whether the logo is approved.
+    // A restricted brand (Catalog → Brand rules): what the supplier requires, and whether the logo is approved.
     const ruled = new Map();
     for (const t of linkedTypes) if (t.orgId === p.orgId && t.productId === p.productId) { const r = brandRuleFor_(brandRules, t.brand); if (r) ruled.set(brandKey_(r.brand), r); }
     for (const r of ruled.values()) {
@@ -3234,7 +3234,7 @@ const LEGACY_SHIP_FROM_ENV = { name: "SHIP_FROM_NAME", street1: "SHIP_FROM_STREE
   state: "SHIP_FROM_STATE", zip: "SHIP_FROM_ZIP", phone: "SHIP_FROM_PHONE", email: "SHIP_FROM_EMAIL" };
 
 // ---- Features: optional parts of the site, each behind a switch --------------------------------
-// One global_settings value ("features"), edited under Tools → Global settings → Features. Every
+// One global_settings value ("features"), edited under Settings → Global settings → Features. Every
 // feature is ON unless it was saved as false, so a new install (or a database with nothing saved)
 // has everything. Turning one off hides its pages in the admin and makes the server refuse its
 // actions (403); no table or row is touched, so turning it back on restores everything.
@@ -3285,7 +3285,7 @@ export async function setFeatures(db, p) {
 const featureOnSql_ = (key) => `(COALESCE((SELECT json_extract(gs.value, '$.${key}') FROM global_settings gs WHERE gs.key = 'features' AND json_valid(gs.value)), 1) <> 0)`;
 
 // ---- Region: time zone and country ------------------------------------------------------------
-// One global_settings value ("locale"), edited under Tools → Global settings → Region.
+// One global_settings value ("locale"), edited under Settings → Global settings → Region.
 //   timeZone — an IANA name ("Europe/London"). Used wherever a date is shown to a person by the
 //              server (emails, the roll-up) and wherever the server needs "today" or the local hour
 //              (the roll-up's schedule). Blank = not set here: the TIMEZONE variable is used, then UTC.
@@ -3358,7 +3358,7 @@ export async function localToday(env, now) {
 // ---- Business profile -----------------------------------------------------------------------
 // Who runs this install: the name on the storefront, emails and labels, where notifications go, and
 // how customers pay by Venmo / Zelle / check. One global_settings value ("business"), edited under
-// Tools → Global settings → Business profile. Everything is optional; BUSINESS_NAME_FALLBACK stands
+// Settings → Global settings → Business profile. Everything is optional; BUSINESS_NAME_FALLBACK stands
 // in for a missing name so nothing ever renders blank.
 export const BUSINESS_NAME_FALLBACK = "Our shop";
 // phone / website / paymentNote: printed on customers' emails and PDF receipts with the rest of who you are.
@@ -3855,7 +3855,7 @@ function normalizeBlankColors_(fields, sizesArg) {
 // Blanks → Find duplicate photos: take the photos the admin ticked off a blank's colors. `removals` =
 // [{color, items: [{index, url}]}] — by POSITION, and only when the photo there still has that address (the same
 // address can be on a color twice, and the first copy must stay). Everything else on the color stays in order. The
-// files stay in the image store (Tools → Orphaned images clears them). Returns {removed, colors}.
+// files stay in the image store (Settings → Orphaned images clears them). Returns {removed, colors}.
 export async function removeBlankColorImages(db, blankId, removals) {
   const id = Number(blankId);
   let removed = 0, colors = 0;
@@ -14372,7 +14372,9 @@ export async function getAuditLog(db, { orgId, orderId, action, dateFrom, dateTo
   if (orderId)  { conditions.push("orderId = ?");     params.push(orderId); }
   if (action)   { conditions.push("action LIKE ?");   params.push("%" + action + "%"); }
   if (dateFrom) { conditions.push("createdAt >= ?");  params.push(dateFrom); }
-  if (dateTo)   { conditions.push("createdAt <= ?");  params.push(dateTo + "T23:59:59.999Z"); }
+  // A plain day (YYYY-MM-DD) runs to the end of that UTC day; a full time (the admin sends its local day's last
+  // moment) is used as it is.
+  if (dateTo)   { conditions.push("createdAt <= ?");  params.push(/T/.test(dateTo) ? dateTo : dateTo + "T23:59:59.999Z"); }
   const where = conditions.length ? "WHERE " + conditions.join(" AND ") : "";
   const cap = Math.min(Math.max(1, Number(limit) || 20), 200);
   params.push(cap);

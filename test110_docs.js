@@ -101,7 +101,7 @@ ok("it says it has not been followed end to end, and quotes no price, allowance 
 ok("R2 is optional everywhere it is mentioned as a requirement, and the docs say an install without it has been done", /R2 \(file storage\) is optional/.test(readme) && /\*\*R2\*\* \(file storage\) is optional/.test(text["docs/setup.md"]) && /### 3\. Switch on R2 \(file storage\) — optional/.test(guide) &&
   /One real install has been done this way/.test(guide) && /an install that carried on\s+without storage have happened on a real account/.test(text["docs/setup.md"]) && !/with \*\*R2 switched on\*\*|R2 switched on \(which takes/.test(readme + text["docs/setup.md"] + guide));
 ok("users and roles: the docs name the three roles, where people are managed, how a locked-out admin gets back in and what it costs, and that one function on the server enforces it",
-  /Security → Users/.test(text["docs/setup.md"]) && ["`staff` | Back office", "`manager` | Manager", "`admin` | Admin"].every(r => text["docs/operations.md"].includes(r)) && /### Locked out/.test(text["docs/operations.md"]) &&
+  /Settings → Users/.test(text["docs/setup.md"]) && ["`staff` | Back office", "`manager` | Manager", "`admin` | Admin"].every(r => text["docs/operations.md"].includes(r)) && /### Locked out/.test(text["docs/operations.md"]) &&
   /npm run setup -- --new-passphrase/.test(text["docs/operations.md"]) && /Every other user's password\s+stops working too/.test(text["docs/operations.md"]) && /voids \*\*every\*\* user's password/.test(text["docs/configuration.md"]) &&
   /One function enforces them/.test(text["docs/architecture.md"]) && /anything it isn't told is\s+admin-only/.test(text["docs/architecture.md"]) && !/enforced by the admin page, not by each admin request/.test(text["docs/architecture.md"]));
 ok("upgrading: one command applies migrations and then deploys, and it is a real script", /`npm run deploy`/.test(text["docs/operations.md"]) && JSON.parse(read("package.json")).scripts.deploy === "node scripts/deploy.mjs" &&
@@ -156,6 +156,35 @@ const pkg = JSON.parse(read("package.json"));
 ok("every npm script the docs mention exists", [...new Set([...all.matchAll(/npm run ([a-z:]+)/g)].map(m => m[1]))].every(s => s in pkg.scripts));
 ok("every script flag the docs mention is one the installer accepts", [...new Set([...all.matchAll(/(--[a-z][a-z-]+)/g)].map(m => m[1]))].filter(f => ["--dry-run", "--config", "--skip-deploy", "--new-passphrase", "--print-fresh-sql"].includes(f)).length === 5 &&
   ["--dry-run", "--skip-deploy", "--new-passphrase", "--print-fresh-sql"].every(f => read("scripts/setup.mjs").includes('a === "' + f + '"')));
+
+console.log("\n=== Menu paths name menus that exist ===");
+{
+  // The admin's menus (ADMIN_NAV_GROUPS) and the pages in each. A path written "Menu → Page" in the docs, the
+  // installer, the desktop program, the server's messages and emails or the admin itself must name a real menu
+  // and a page in it — there is no "Tools" or "Security" menu.
+  const adminSrc = read("public/admin.js");
+  const groupsSrc = adminSrc.slice(adminSrc.indexOf("const ADMIN_NAV_GROUPS = ["), adminSrc.indexOf("// Flat list of every page hash"));
+  const menus = {};
+  for (const g of groupsSrc.matchAll(/\{ label: "([^"]+)", items: \[([\s\S]*?)\]\}/g)) menus[g[1]] = [...g[2].matchAll(/\["[a-z]+", "([^"]+)"\]|label: "([^"]+)"/g)].map(m => m[1] || m[2]);
+  const files = [...DOCS, "scripts/setup.mjs", "desktop/main.js", "public/admin.js", "public/index.html", "functions/_lib/email.js", "functions/_lib/http.js",
+    "functions/_lib/supplierOrders.js", "functions/api/orders.js", "functions/api/admin-users.js", "functions/api/admin-password.js"];
+  const wrong = [];
+  for (const f of files) {
+    const t = read(f).replace(/\*\*/g, "").replace(/&rarr;/g, "→").replace(/\s*\n\s*(\/\/\s*)?/g, " ");
+    for (const m of t.matchAll(/\b(Tools|Security|Catalog|Production|Inventory|Finance|Reports|Settings) → ([A-Z][\w&()]*(?: [\w&()]+)*)/g)) {
+      const [, menu, rest] = m;
+      if (menu === "Security" && /^2-Step/.test(rest)) continue;   // Google's own account settings
+      // Another program's or site's Settings (Cloudflare, GitHub, macOS, Shippo), not the admin's menu.
+      if (/→ $/.test(t.slice(Math.max(0, m.index - 2), m.index))) continue;   // inside another site's path (Etsy: Shop Manager → Settings → …)
+      if (menu === "Settings" && /^(Secrets and variables|Variables and Secrets|Privacy & Security|API\b|Delete this repository|Domains & Routes)/.test(rest)) continue;
+      const pages = menus[menu];
+      if (!pages || !pages.some(p => rest.toLowerCase().startsWith(p.toLowerCase()))) wrong.push(`${f}: ${menu} → ${rest.slice(0, 30)}`);
+    }
+  }
+  if (wrong.length) console.log("   wrong:", wrong.slice(0, 12).join("; "));
+  ok("the menus are read from the admin (Catalog … Settings)", ["Catalog", "Production", "Inventory", "Finance", "Reports", "Settings"].every(g => (menus[g] || []).length) && menus.Settings.includes("Users"));
+  ok("every 'Menu → Page' path in the docs, installer, desktop program, server messages and admin names a real menu and one of its pages", wrong.length === 0);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

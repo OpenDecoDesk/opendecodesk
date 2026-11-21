@@ -7,7 +7,7 @@ record-keeping aid, not tax advice — check what applies to you with your state
 
 ## The settings
 
-Tools → Global settings → **Sales tax**:
+Settings → Global settings → **Sales tax**:
 
 - **Rate** — a percentage, 0 to 15.
 - **Home state** — the 2-letter code of the state you collect tax for. (With Region → country

@@ -218,7 +218,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 60));
   const app = adoc.getElementById("app");
   const settle = async (pred) => { for (let i = 0; i < 80 && !pred(); i++) await tick(25); };
 
-  console.log("\n=== Admin: Tools → Product categories ===");
+  console.log("\n=== Admin: Catalog → Product categories ===");
   console.log("the page is in the Tools menu and routed:", /\["categories", "Product categories"\]/.test(adminJs) && /renderProductCategories\(app\)/.test(adminJs));
   await aw.renderProductCategories(app);
   await settle(() => app.querySelector("[data-pc-body] table"));

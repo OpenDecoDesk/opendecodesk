@@ -531,7 +531,7 @@ export async function onRequestPost(context) {
   // before-values) is written FIRST, and the action is refused if it can't
   // be — so nothing irreversible ever happens without a record of it.
   // Closed (filed) months are locked: any action that would change a closed
-  // month's numbers is refused until the month is reopened (Reports → Periods).
+  // month's numbers is refused until the month is reopened (Reports → Periods & export).
   const nowMonth = () => monthOf(new Date().toISOString());
   // Optional "date received" (YYYY-MM-DD) on a payment: noon UTC that day, or
   // now if it's today. Null = not given; {error} = invalid.
@@ -2137,7 +2137,7 @@ export async function onRequestPost(context) {
     if (!payment) return jsonResponse({ status: "error", message: "Payment not found" }, 404);
     if (payment.voidedAt) return jsonResponse({ status: "error", message: "That entry is voided" }, 400);
     if (payment.fromStripe) {
-      return jsonResponse({ status: "error", message: "Stripe payments take their date from Stripe — use Global Settings → Sync Stripe fees & dates." }, 400);
+      return jsonResponse({ status: "error", message: "Stripe payments take their date from Stripe — use Sync Stripe fees & dates on Settings → Global settings." }, 400);
     }
     const auditErr = await auditStrict({ orgId: body.org || null, orderId: payment.orderId, action: "payment.date_changed",
       detail: { paymentId, amount: payment.amount, method: payment.method, from: payment.receivedAt, to: when.receivedAt } });
@@ -3367,7 +3367,7 @@ export async function onRequestPost(context) {
       return "";
     };
 
-    // A product's category must be one from Tools → Product categories (migrations/0056). An
+    // A product's category must be one from Catalog → Product categories (migrations/0056). An
     // existing product may keep a category that has since been removed from the list.
     const checkCategory_ = async (b, current) => {
       const type = String(b.type || "");
@@ -4148,7 +4148,7 @@ export async function onRequestPost(context) {
       if (r.removed) audit({ orgId: null, orderId: null, action: "inventory.blank_images_removed", detail: { blankId, removed: r.removed, removals: body.removals.slice(0, 200) } });
       return jsonResponse({ status: "ok", ...r });
     }
-    // Tools → Orphaned images: files in the image store nothing points to; delete re-checks each one first.
+    // Settings → Orphaned images: files in the image store nothing points to; delete re-checks each one first.
     if (body.action === "findOrphanImages" || body.action === "deleteOrphanImages") {
       try {
         if (body.action === "findOrphanImages") return jsonResponse({ status: "ok", ...(await findOrphanImages(env, env.DB)) });
@@ -4565,7 +4565,7 @@ export async function onRequestPost(context) {
       const c = await supplierConnection(env, retry ? retry.connectionId : (body.connectionId || body.id), { context: body.action, actor: adminActor(request), defer: (p) => context.waitUntil(p) });
       if (c.error) return jsonResponse({ status: "error", message: c.error }, c.code);
       const conn = c.conn;
-      if (!conn.endpoints.po) return jsonResponse({ status: "error", message: `${conn.name} has no Purchase Order service set up — add it under Tools → Vendor integrations (the supplier has to turn ordering on for your account first).` }, 400);
+      if (!conn.endpoints.po) return jsonResponse({ status: "error", message: `${conn.name} has no Purchase Order service set up — add it under Settings → Vendor integrations (the supplier has to turn ordering on for your account first).` }, 400);
       const { shipTo, missing } = await supplierShipTo(env);
       const methods = supplierShipMethods(conn.companyCode);
 
@@ -4955,7 +4955,7 @@ export async function onRequestPost(context) {
         return bad(`Only ${fmtPct(allPct)} of the sheet is accounted for. The rows, the written-off part and the personal part must add up to 100% — ${fmtPct(100 - allPct)} is left over.`);
       }
       if ((woPct > 0 || pePct > 0) && !featureOn("bookkeeping")) {
-        return bad("A written-off or personal part of the sheet is recorded as an expense or an owner draw, which need Bookkeeping. It is turned off — turn it on under Tools → Global settings → Features, or put the whole sheet into stock.", 403, { feature: "bookkeeping" });
+        return bad("A written-off or personal part of the sheet is recorded as an expense or an owner draw, which need Bookkeeping. It is turned off — turn it on under Settings → Global settings → Features, or put the whole sheet into stock.", 403, { feature: "bookkeeping" });
       }
       if (woPct > 0 && !woWhat) return bad("Describe what was written off (it's kept on the record).");
       if (pePct > 0 && !peWhat) return bad("Describe the personal part (it's kept on the record).");
@@ -5583,7 +5583,7 @@ export async function onRequestPost(context) {
       // expense and an owner draw) can't be recorded: the order is received as stock only.
       const books = featureOn("bookkeeping");
       if (!books && (Number(body.rdAmount) > 0 || Number(body.personalAmount) > 0)) {
-        return jsonResponse({ status: "error", feature: "bookkeeping", message: "The R&D / testing and personal parts are recorded as an expense and an owner draw, which need Bookkeeping. It is turned off — turn it on under Tools → Global settings → Features, or receive only the blanks." }, 403);
+        return jsonResponse({ status: "error", feature: "bookkeeping", message: "The R&D / testing and personal parts are recorded as an expense and an owner draw, which need Bookkeeping. It is turned off — turn it on under Settings → Global settings → Features, or receive only the blanks." }, 403);
       }
       let accountId = null;
       if (!paidPersonally && (books || body.accountId)) {

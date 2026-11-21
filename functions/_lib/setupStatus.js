@@ -1,5 +1,5 @@
 /**
- * Setup status — what a fresh install still needs, for Tools → Global settings → Setup status.
+ * Setup status — what a fresh install still needs, for Settings → Global settings → Setup status.
  *
  * A new install works with almost nothing configured, and most missing pieces fail quietly (no
  * email is sent, a picture can't be uploaded, a card payment isn't recorded). This list makes them

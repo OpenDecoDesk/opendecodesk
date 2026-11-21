@@ -11,7 +11,7 @@
  *     have a password of their own — a password (`next`). Only a session pending "account" may use
  *     it, and replacing a password that already works needs it as `current`.
  *   { action: "change", current: "<password now>", next: "<new password>" }
- *     Security → Change password, and the step after signing in with a temporary password.
+ *     Settings → Change password, and the step after signing in with a temporary password.
  *
  * Setting a password signs that user out everywhere, this browser included (the cookie is
  * cleared): the next thing they do is sign in with it. Every change is written to the audit log
@@ -88,7 +88,7 @@ export async function onRequestPost(context){
   if(action === "account"){
     // Only the set-up step itself: a session that is already set up can't change its sign-in email or
     // password from here without the current password (that is "change", below).
-    if(me.pending !== "account") return jsonResponse({status:"error", code:"already_set_up", message:"Your account is already set up. To change your password, use Security → Change password."}, 403);
+    if(me.pending !== "account") return jsonResponse({status:"error", code:"already_set_up", message:"Your account is already set up. To change your password, use Settings → Change password."}, 403);
     const name  = typeof body.name === "string" ? body.name.trim() : "";
     const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
     const next  = typeof body.next === "string" ? body.next : "";

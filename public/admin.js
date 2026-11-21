@@ -138,6 +138,34 @@ function clearAdminAuth(){
   try{ localStorage.removeItem(ADMIN_SESSION_STORAGE_KEY); }catch(e){}
 }
 
+// Whether a reply says the session has ended (HTTP 401: expired after 24 hours, signed out elsewhere, or never signed
+// in) — the server says "Session expired — please log in again." or "Unauthorized". Pass the Response or the parsed
+// reply. It also forgets the session, so the next call asks to sign in instead of failing the same way again.
+const SESSION_ENDED_ = "Your session ended — sign in again.";
+function adminSessionEnded_(resOrData){
+  const x = resOrData || {};
+  const ended = x.status === 401 || x.message === "Unauthorized" || /^Session expired/.test(String(x.message || ""));
+  if(ended && adminKey) clearAdminAuth();
+  return ended;
+}
+// The one call to /api/orders for the admin's screens. Signs in first when needed. When the session has ended it
+// asks to sign in again and repeats the request once, so an expired session costs a sign-in, not the edit. Throws an
+// Error carrying the server's message on any other problem.
+async function adminApi_(body){
+  for(let attempt = 0; ; attempt++){
+    if(!adminKey) adminKey = (await adminLogin()) || "";
+    if(!adminKey) throw new Error(attempt ? SESSION_ENDED_ : "Sign-in required");
+    const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, key: adminKey }) });
+    const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
+    if(r.status === 401 && adminSessionEnded_(r)){
+      if(attempt === 0){ showToast(SESSION_ENDED_, true); continue; }
+      throw new Error(SESSION_ENDED_);
+    }
+    if(!r.ok || d.status === "error") throw new Error((d && d.message) || "Request failed");
+    return d;
+  }
+}
+
 // Ends every session of the signed-in user on every device (a lost laptop, a browser left open
 // somewhere), this one included; the next visit asks them to sign in again.
 async function adminSignOutEverywhere(){
@@ -301,7 +329,7 @@ async function adminRoute() {
   if (raw === "security") { render2FASetup(app); return; }
   if (raw === "password") { renderChangePassword(app, false); return; }
   if (raw === "users") { renderUsers(app); return; }
-  // Global Settings lives in the Tools menu (#settings); the old #catalog/settings link still works.
+  // Global Settings lives in the Settings menu (#settings); the old #catalog/settings link still works.
   if (raw === "settings" || raw === "catalog/settings") { renderGlobalSettings(app); return; }
   // A new shop is made with the New shop setup wizard; the old form's address leads there.
   if (raw === "catalog/new-org" || raw === "wizard/new") { await renderShopWizard(app, null); return; }
@@ -360,17 +388,22 @@ async function adminRoute() {
 // string, or "" if the user cancels/dismisses it — matching prompt()'s
 // existing cancel behavior, which every call site already treats as
 // empty via `|| ""`.
-function promptAdminPassphrase(){
+// opts (the identity check before a step that can't be undone): heading, note (replaces the new-install hint), error
+// (why the last try failed, shown above the fields).
+function promptAdminPassphrase(opts){
+  opts = opts || {};
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "admin-pass-overlay";
     overlay.innerHTML = `
       <form class="admin-pass-box" id="adminPassForm" autocomplete="on">
+        ${opts.heading ? `<div style="font-weight:700;font-size:15px;margin-bottom:10px;">${escapeHtml(opts.heading)}</div>` : ""}
+        ${opts.error ? `<div class="admin-pass-error" role="alert" style="color:#b03a2e;font-size:13px;margin-bottom:10px;">${escapeHtml(opts.error)}</div>` : ""}
         <label for="adminEmailInput">Email</label>
         <input type="email" id="adminEmailInput" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" value="${escapeHtml(rememberedAdminEmail_())}" style="margin-bottom:10px;" />
         <label for="adminPassInput">Password</label>
         <input type="password" id="adminPassInput" name="password" autocomplete="current-password" autocapitalize="off" spellcheck="false" />
-        <p style="font-size:12px;margin:8px 0 0;color:#666;">New install? Leave the email empty and type the setup password: the one you chose on Cloudflare's page, or the passphrase the installer printed.</p>
+        ${opts.note ? `<p style="font-size:12px;margin:8px 0 0;color:#666;">${escapeHtml(opts.note)}</p>` : `<p style="font-size:12px;margin:8px 0 0;color:#666;">New install? Leave the email empty and type the setup password: the one you chose on Cloudflare's page, or the passphrase the installer printed.</p>`}
         <details class="admin-forgot" style="font-size:12px;margin:8px 0 0;color:#444;">
           <summary style="cursor:pointer;">Forgot your password?</summary>
           <p style="margin:6px 0 0;">Ask an admin: they can give you a new one under Users.</p>
@@ -396,8 +429,7 @@ function promptAdminPassphrase(){
     form.addEventListener("submit", (e) => { e.preventDefault(); finish(input.value); });
     overlay.querySelector(".admin-pass-cancel").addEventListener("click", () => finish(""));
     // click outside does not close — use Cancel or Submit
-    input.addEventListener("keydown", (e) => { if(e.key === "Escape") finish(""); });
-    emailInput.addEventListener("keydown", (e) => { if(e.key === "Escape") finish(""); });
+    dialogize_(overlay, { label: opts.heading || "Sign in", onEscape: () => finish("") });
     (emailInput.value ? input : emailInput).focus();
   });
 }
@@ -413,7 +445,6 @@ function showTrackingModal(title, { required = false, submitLabel = "Save tracki
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "admin-pass-overlay";
-    overlay.style.zIndex = "1002";
     overlay.innerHTML = `
       <form class="admin-pass-box" style="max-width:420px;">
         <label style="font-weight:600;font-size:15px;margin-bottom:14px;display:block;">${escapeHtml(title)}</label>
@@ -441,9 +472,8 @@ function showTrackingModal(title, { required = false, submitLabel = "Save tracki
     });
     overlay.querySelector(".admin-pass-cancel").addEventListener("click", () => finish(undefined));
     // click outside does not close — use Cancel or Submit
-    document.addEventListener("keydown", function esc(e){
-      if(e.key === "Escape"){ finish(undefined); document.removeEventListener("keydown", esc); }
-    }, {once: true});
+    // Escape closes it while it is the window on top (and only then); Tab stays inside it.
+    dialogize_(overlay, { onEscape: () => { finish(undefined); } });
     input.focus();
   });
 }
@@ -452,7 +482,6 @@ function showBlankOrderModal(title){
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "admin-pass-overlay";
-    overlay.style.zIndex = "1002";
     overlay.innerHTML = `
       <form class="admin-pass-box" id="blankOrderForm" style="max-width:420px;">
         <label style="font-weight:600;font-size:15px;margin-bottom:14px;display:block;">${escapeHtml(title)}</label>
@@ -502,9 +531,8 @@ function showBlankOrderModal(title){
     });
     overlay.querySelector(".admin-pass-cancel").addEventListener("click", () => finish(null));
     // click outside does not close — use Cancel or Submit
-    document.addEventListener("keydown", function esc(e){
-      if(e.key === "Escape"){ finish(null); document.removeEventListener("keydown", esc); }
-    }, {once: true});
+    // Escape closes it while it is the window on top (and only then); Tab stays inside it.
+    dialogize_(overlay, { onEscape: () => { finish(null); } });
     vendorSelect.focus();
   });
 }
@@ -516,7 +544,7 @@ function showBlankOrderModal(title){
 // confirm handler's querySelector-by-idx collection works regardless of display order.
 function showBlankReceiveModal(title, orders){
   return new Promise((resolve) => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localToday_();
 
     // One row per line item; qty >1 shown as ×N.
     const rows = [];
@@ -598,7 +626,6 @@ function showBlankReceiveModal(title, orders){
 
     const overlay = document.createElement("div");
     overlay.className = "admin-pass-overlay";
-    overlay.style.zIndex = "1002";
     overlay.innerHTML = `
       <div class="admin-pass-box" style="max-width:680px;width:calc(100% - 32px);max-height:85vh;overflow-y:auto">
         <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;gap:12px">
@@ -700,9 +727,8 @@ function showBlankReceiveModal(title, orders){
     });
     overlay.querySelector("#brCancel").addEventListener("click", () => finish(null));
     // click outside does not close — use Cancel or Submit
-    document.addEventListener("keydown", function esc(e){
-      if(e.key === "Escape"){ finish(null); document.removeEventListener("keydown", esc); }
-    }, {once: true});
+    // Escape closes it while it is the window on top (and only then); Tab stays inside it.
+    dialogize_(overlay, { onEscape: () => { finish(null); } });
   });
 }
 
@@ -739,7 +765,7 @@ function showBlankShippedModal(title, orders){
     const items = blankItemsOf_(orders);
     const existing = blankShipmentsOf_(orders);
     const inp = "padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;background:#fff;color:#111;";
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localToday_();
     const carriers = ["UPS", "FedEx", "USPS", "DHL", "Other"];
     let n = 0;
     // ship: an existing shipment to pre-fill (null = a blank new block).
@@ -761,7 +787,7 @@ function showBlankShippedModal(title, orders){
         <div style="display:flex;flex-wrap:wrap;gap:4px 12px;">${items.map(it => `<label style="font-size:12px;font-weight:400;display:flex;gap:4px;align-items:center;"><input type="checkbox" class="bsItem" data-order="${escapeHtml(it.orderId)}" data-item="${it.itemId}" ${(checkedSet ? checkedSet.has(Number(it.itemId)) : checkAll) ? "checked" : ""}> ${escapeHtml(it.label)}</label>`).join("") || `<em style="color:#888;">No line items.</em>`}</div>
       </div>`;
     };
-    const ov = document.createElement("div"); ov.className = "admin-pass-overlay"; ov.style.zIndex = "1002";
+    const ov = document.createElement("div"); ov.className = "admin-pass-overlay";
     ov.innerHTML = `<div class="admin-pass-box" style="max-width:700px;width:calc(100% - 32px);max-height:85vh;overflow-y:auto;">
         <div style="font-weight:700;font-size:16px;margin-bottom:6px;">${escapeHtml(title)}</div>
         <div style="font-size:12px;color:#666;margin-bottom:10px;">Add a tracking number for each vendor shipment and tick the line items it covers. Existing tracking numbers are shown below — edit them in place, or Remove one to delete it.</div>
@@ -803,7 +829,8 @@ function showBlankShippedModal(title, orders){
       if(!add.length && !update.length && !removedIds.length){ err.textContent = "Add a tracking number and tick the items it covers."; return; }
       finish({ add, update, remove: removedIds });
     };
-    document.addEventListener("keydown", function esc(e){ if(e.key === "Escape"){ finish(null); document.removeEventListener("keydown", esc); } }, { once: true });
+    // Escape closes it while it is the window on top (and only then); Tab stays inside it.
+    dialogize_(ov, { onEscape: () => { finish(null); } });
   });
 }
 
@@ -817,17 +844,17 @@ async function blankShippedFlow_(orgId, orders){
   try{
     for(const id of (res.remove || [])){
       const { r, d } = await post({ action: "deleteBlankShipment", id });
-      if(!r.ok || d.status === "error"){ if(d && d.message === "Unauthorized") clearAdminAuth(); showToast("Could not remove a shipment: " + ((d && d.message) || "error"), true); return; }
+      if(!r.ok || d.status === "error"){ adminSessionEnded_(d); showToast("Could not remove a shipment: " + ((d && d.message) || "error"), true); return; }
     }
     for(const s of (res.update || [])){
       const { r, d } = await post({ action: "updateBlankShipment", id: s.id, orderId: (s.items[0] && s.items[0].orderId) || "",
         carrier: s.carrier, trackingNumber: s.trackingNumber, shippedAt: s.shippedAt, itemIds: s.itemIds });
-      if(!r.ok || d.status === "error"){ if(d && d.message === "Unauthorized") clearAdminAuth(); showToast("Could not update a shipment: " + ((d && d.message) || "error"), true); return; }
+      if(!r.ok || d.status === "error"){ adminSessionEnded_(d); showToast("Could not update a shipment: " + ((d && d.message) || "error"), true); return; }
     }
     for(const s of (res.add || [])){
       const { r, d } = await post({ action: "addBlankShipment", orderId: (s.items[0] && s.items[0].orderId) || "",
         carrier: s.carrier, trackingNumber: s.trackingNumber, shippedAt: s.shippedAt, itemIds: s.itemIds });
-      if(!r.ok || d.status === "error"){ if(d && d.message === "Unauthorized") clearAdminAuth(); showToast("Shipment failed: " + ((d && d.message) || "error"), true); return; }
+      if(!r.ok || d.status === "error"){ adminSessionEnded_(d); showToast("Shipment failed: " + ((d && d.message) || "error"), true); return; }
     }
     const changed = (res.add || []).length + (res.update || []).length + (res.remove || []).length;
     showToast("Blank shipment" + (changed === 1 ? "" : "s") + " saved.");
@@ -862,9 +889,8 @@ function promptTOTPCode(){
     // click outside does not close — use Cancel or Submit
     input.addEventListener("keydown", (e) => {
       if(e.key === "Enter"){ e.preventDefault(); finish(input.value.trim()); }
-      if(e.key === "Escape") finish("");
     });
-    input.focus();
+    dialogize_(overlay, { onEscape: () => finish(""), focus: input });
   });
 }
 
@@ -873,6 +899,44 @@ function promptTOTPCode(){
 // session cookie. Returns "cookie" on success, or "" on cancel / failure. Also notes who signed
 // in (adminMe) and any step they must finish first (adminPending).
 // Called everywhere adminKey needs to be established (never promptAdminPassphrase() directly).
+// Asks the signed-in person for their password (and code) again before a step that can't be undone, WITHOUT
+// signing them out first: Cancel keeps the session, and a wrong password is simply asked again. The server checks
+// the password belongs to the user of this session (POST /api/admin-session with verify). Resolves true when
+// confirmed. A session that has already ended falls back to the ordinary sign-in.
+async function adminConfirmIdentity_(heading){
+  if(!adminKey){ adminKey = (await adminLogin()) || ""; return !!adminKey; }
+  const post = async (body) => {
+    const res = await fetch("/api/admin-session", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(Object.assign({ verify: true }, body)) });
+    return res.json().catch(() => ({ status: "error", message: "Server error (HTTP " + res.status + ")" }));
+  };
+  let error = "";
+  for(let tries = 0; tries < 5; tries++){
+    const key = await promptAdminPassphrase({ heading: heading || "Confirm it's you", error,
+      note: "Type your own email and password again. You stay signed in either way." });
+    if(!key) return false;
+    const email = _adminSignInEmail;
+    let data;
+    try{
+      data = await post({ email, key });
+      if(data && data.status === "totp_required"){
+        const code = await promptTOTPCode();
+        if(!code) return false;
+        data = await post({ email, key, totpCode: code });
+      }
+    }catch(e){ showToast("Could not reach the server.", true); return false; }
+    if(data && data.status === "ok" && data.verified) return true;
+    if(data && data.code === "no_session"){
+      clearAdminAuth();
+      showToast("Your session ended — sign in again.", true);
+      adminKey = (await adminLogin()) || "";
+      return !!adminKey;
+    }
+    error = data && data.message && data.message !== "Unauthorized" ? data.message : "That email and password don't match. Try again.";
+  }
+  showToast("Not confirmed — too many tries.", true);
+  return false;
+}
+
 async function adminLogin(){
   // 1. Valid stored session — use it without prompting
   const stored = loadStoredSession();
@@ -934,7 +998,7 @@ async function adminLogin(){
   return "";
 }
 
-async function fetchOrders(orgId){
+async function fetchOrders(orgId, retried){
   if(!adminKey){
     adminKey = (await adminLogin()) || "";
   }
@@ -947,6 +1011,10 @@ async function fetchOrders(orgId){
       body: JSON.stringify({action: "getOrders", org: orgId, key: adminKey,
         dateFrom: (window._ordersFilter || {}).from || "", dateTo: (window._ordersFilter || {}).to || ""})
     });
+    if(res.status === 401 && adminSessionEnded_(res)){
+      if(!retried){ adminKey = (await adminLogin()) || ""; if(adminKey) return fetchOrders(orgId, true); }
+      return {error: SESSION_ENDED_};
+    }
     if(!res.ok){
       console.error("Admin orders fetch failed — HTTP " + res.status, await res.text().catch(()=>""));
       return {error: "Server error (HTTP " + res.status + ")"};
@@ -987,7 +1055,7 @@ function renderAdminPicker(app){
   loadAdminOrgList();
 }
 
-// Asks the server who is signed in (Security → Users' "me") and keeps it with the session. A failure
+// Asks the server who is signed in (Settings → Users' "me") and keeps it with the session. A failure
 // leaves what was known; the server refuses anything above the user's role either way.
 async function refreshAdminMe_(){
   try{
@@ -1109,12 +1177,17 @@ async function loadOpenOrdersDashboard_(){
   } catch (e) { el.textContent = "Could not reach the server."; }
 }
 
+// A Home order row's order number: a real button, so the row opens from the keyboard (Tab, then Enter or Space) and
+// screen readers announce it. Its click reaches the row's own handler.
+function dashOpenBtn_(o){
+  return `<button type="button" class="dash-open" aria-label="Open order ${escapeHtml(o.orderId)}" style="background:none;border:none;padding:0;margin:0;font:inherit;color:inherit;text-decoration:underline;cursor:pointer;">${escapeHtml(o.orderId)}</button>`;
+}
 function drawOpenOrdersDashboard_(){
   const el = document.getElementById("dashBody");
   if (!el) return;
   const all = window._dashOrders || [];
   if (!all.length) { el.innerHTML = `<div style="color:#555;">No open orders — everything is completed.</div>`; return; }
-  const money = (n) => "$" + Number(n || 0).toFixed(2);
+  const money = adminMoney_;
   const counts = {};
   all.forEach(o => { const s = dashOrderStatus_(o); counts[s] = (counts[s] || 0) + 1; });
   const filter = counts[window._dashFilter] ? window._dashFilter : "";
@@ -1138,7 +1211,7 @@ function drawOpenOrdersDashboard_(){
     const due = Number(o.balanceDue) || 0;
     return `<tr class="dash-row" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" data-placed="${escapeHtml(o.placedAt || "")}" style="cursor:pointer;">
       <td style="${td}white-space:nowrap;">${o.placedAt ? escapeHtml(new Date(o.placedAt).toLocaleDateString()) : ""}${days !== null ? `<br><span style="${sub}${days >= 21 ? "color:#b45309;font-weight:600;" : ""}">${days} day${days === 1 ? "" : "s"} ago</span>` : ""}</td>
-      <td style="${td}white-space:nowrap;font-family:monospace;font-size:12px;">${escapeHtml(o.orderId)}</td>
+      <td style="${td}white-space:nowrap;font-family:monospace;font-size:12px;">${dashOpenBtn_(o)}</td>
       <td style="${td}">${escapeHtml(o.orgName)}</td>
       <td style="${td}">${escapeHtml(o.customerName || "")}</td>
       <td style="${td}font-size:13px;">${lines}</td>
@@ -1569,7 +1642,7 @@ async function renderHomeStage(app, key){
   const total = data.count != null ? Number(data.count) : orders.length;
   document.getElementById("homeStageCount").textContent = "(" + total + ")";
   if (!orders.length) { el.innerHTML = `<div style="color:#555;">No orders are waiting on this step.</div>`; return; }
-  const money = (n) => "$" + Number(n || 0).toFixed(2);
+  const money = adminMoney_;
   const th = "padding:7px 10px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;white-space:nowrap;";
   const td = "padding:8px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#111;background:#fff;";
   const sub = "color:#666;font-size:12px;";
@@ -1582,7 +1655,7 @@ async function renderHomeStage(app, key){
     const due = Number(o.balanceDue) || 0;
     return `<tr class="dash-row" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" data-placed="${escapeHtml(o.placedAt || "")}" style="cursor:pointer;">
       <td style="${td}white-space:nowrap;">${o.placedAt ? escapeHtml(new Date(o.placedAt).toLocaleDateString()) : ""}${days !== null ? `<br><span style="${sub}${days >= 21 ? "color:#b45309;font-weight:600;" : ""}">${days} day${days === 1 ? "" : "s"} ago</span>` : ""}</td>
-      <td style="${td}white-space:nowrap;font-family:monospace;font-size:12px;">${escapeHtml(o.orderId)}${o.dueDate ? `<br><span style="${sub}">due ${escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString())}</span>` : ""}</td>
+      <td style="${td}white-space:nowrap;font-family:monospace;font-size:12px;">${dashOpenBtn_(o)}${o.dueDate ? `<br><span style="${sub}">due ${escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString())}</span>` : ""}</td>
       <td style="${td}">${escapeHtml(o.orgName)}</td>
       <td style="${td}">${escapeHtml(o.customerName || "")}${rushPill_(o)}</td>
       <td style="${td}font-size:13px;">${lines}</td>
@@ -1909,11 +1982,14 @@ function globalSettingsProblem_(){
     if (missing.some(m => m[0] === "gEmailHost" || m[0] === "gEmailPort") && $("gEmailServer")) $("gEmailServer").open = true;
     need("Your own mailbox", missing, bad);
   }
+  // The rush fee: its rule is read from the page the same way the save reads it.
+  const featureProblems = problems.length;
+  if ($("gRushMode")) { const rush = readRushRule_("gRush"); if (rush.error) { problems.push("Rush fee: " + rush.error.replace(/\.$/, "")); flagged.push(/Full payment/.test(rush.error) ? "gRushPayByDays" : /percentage/.test(rush.error) ? "gRushPct" : /usually/.test(rush.error) ? "gRushEstLow" : "gRushAmount"); } }
   if (!problems.length) return "";
   flagged.filter(Boolean).forEach(id => { const e = $(id); if (e) e.style.outline = "2px solid #b03a2e"; });
   const first = flagged.filter(Boolean).map($).find(Boolean);
   if (first) { const panel = first.closest(".g-feat-panel"); if (panel) panel.hidden = false; if (first.scrollIntoView) first.scrollIntoView({ block: "center" }); }
-  return `Nothing was saved. ${problems.join(". ")}. Fill ${flagged.length > 1 ? "them" : "it"} in, or untick ${problems.length > 1 ? "those features" : "it"}.`;
+  return `Nothing was saved. ${problems.join(". ")}. ` + (featureProblems ? `Fill ${flagged.length > 1 ? "them" : "it"} in, or untick ${featureProblems > 1 ? "those features" : "it"}.` : "Fix it and save again.");
 }
 // The desktop program's part of a save: what changed in the Shipping key, Email and Supplier
 // connections. { shippoKey?, email?: { on, settings, password }, suppliers? } — empty when nothing did.
@@ -2518,8 +2594,7 @@ async function postOrdersInGroups_(payload, orderIds, size){
     }catch(e){ return { replies, done, error: "Could not reach the server.", unreachable: true }; }
     if(!res.ok || !data || data.status === "error"){
       // Signed out only when the server says so (401, or "Unauthorized"), never because a role was refused.
-      if(res.status === 401) clearAdminAuth();
-      else if(data && data.message === "Unauthorized") clearAdminAuth();
+      if(!adminSessionEnded_(res)) adminSessionEnded_(data);
       return { replies, done, error: (data && data.message) || "unknown error" };
     }
     replies.push(data);
@@ -2650,7 +2725,7 @@ async function bulkCancelLineItems(orgId){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(data && data.message === "Unauthorized") clearAdminAuth();
+      adminSessionEnded_(data);
       showToast("Bulk cancel failed: " + ((data && data.message) || "unknown error"), true);
       return;
     }
@@ -2796,9 +2871,9 @@ async function saveBoxPresets(presets){
   }catch(e){ return "Could not reach the server."; }
 }
 
-// Tools → Package sizes (#packages): a regular admin page, like the other Tools screens.
+// Catalog → Package sizes (#packages): a regular admin page, like the other menu pages.
 // Edit the table, then Save; "Discard changes" reloads the saved sizes.
-// ---- Vendor integrations (Tools, migrations/0065): suppliers through PromoStandards -------------------------
+// ---- Vendor integrations (Settings menu, migrations/0065): suppliers through PromoStandards -------------------------
 // One adapter for every PromoStandards supplier (functions/_lib/promostandards.js). Connect a vendor: find it in
 // the PromoStandards directory → its services (Product Data, Pricing, Media) → its login (stored encrypted,
 // never shown again) → test with one of your styles → link your blanks from it. Then Blanks → Refresh from
@@ -3083,7 +3158,7 @@ async function refreshBlanksFromVendors_(blankIds, onDone){
   let conns = window._vendorConnections;
   if (!conns) { try { conns = (await hoopApi_({ action: "listVendorConnections" })).connections || []; } catch (e) { showToast(e.message); return; } }
   const blanks = (window._blanksAll || []).filter(b => b.vendorConnectionId && b.sku && (!blankIds || blankIds.includes(b.id)));
-  if (!blanks.length) { showToast(conns.length ? "No blanks are linked to a connected vendor yet — Tools → Vendor integrations → Link blanks." : "No vendor is connected yet — Tools → Vendor integrations."); return; }
+  if (!blanks.length) { showToast(conns.length ? "No blanks are linked to a connected vendor yet — Settings → Vendor integrations → Link blanks." : "No vendor is connected yet — Settings → Vendor integrations."); return; }
   const { ov, close } = inventoryModal_("Refreshing from vendors", `<div id="rfStatus" style="font-size:13px;color:#555;">Starting…</div>`, 520);
   const res = await fetchFromVendors_(blanks.map(b => ({ connectionId: b.vendorConnectionId, style: b.sku, brand: b.brand })), { onProgress: (t) => { const el = ov.querySelector("#rfStatus"); if (el) el.textContent = t; } });
   close();
@@ -3093,7 +3168,7 @@ async function refreshBlanksFromVendors_(blankIds, onDone){
 async function showVendorStyleLookup_(onDone){
   let conns = [];
   try { conns = ((await hoopApi_({ action: "listVendorConnections" })).connections || []).filter(c => c.hasCredentials); } catch (e) { showToast(e.message); return; }
-  if (!conns.length) { showToast("No vendor is connected yet — Tools → Vendor integrations."); return; }
+  if (!conns.length) { showToast("No vendor is connected yet — Settings → Vendor integrations."); return; }
   const { ov, close } = inventoryModal_("New blank from a connected vendor", `<div style="font-size:13px;">
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
         <select id="vsConn" style="padding:5px;">${conns.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("")}</select>
@@ -3113,7 +3188,7 @@ async function showVendorStyleLookup_(onDone){
   };
 }
 
-// ---- Tools → Orphaned images (2026-10) --------------------------------------------------------------
+// ---- Settings → Orphaned images (2026-10) --------------------------------------------------------------
 // Files in the public image store nothing in the database points to (orphanImages.js decides). Download the ticked
 // ones as one .zip (built here, read back through the same-origin image proxy) and / or remove them from storage —
 // the server re-checks each before deleting. Admin only.
@@ -3186,7 +3261,7 @@ async function renderOrphanImages(app){
       if (!files.length) { status.textContent = "None of them could be read."; return; }
       const a = document.createElement("a");
       a.href = URL.createObjectURL(makeZip_(files));
-      a.download = "orphaned-images-" + new Date().toISOString().slice(0, 10) + ".zip";
+      a.download = "orphaned-images-" + localToday_() + ".zip";
       document.body.appendChild(a); a.click(); a.remove();
       status.textContent = `Downloaded ${files.length} image${files.length === 1 ? "" : "s"}${files.length < sel.length ? ` (${sel.length - files.length} couldn't be read)` : ""}.`;
     };
@@ -3344,7 +3419,7 @@ async function showShippingModal(order){
 
     // Count active (non-cancelled) items by type for auto-selecting a box.
     const _activeItems = (order && order.items || []).filter(it => !it.cancelDate);
-    // Each line counts against the limit its category packs like (Tools → Product categories).
+    // Each line counts against the limit its category packs like (Catalog → Product categories).
     const _countPack = (cls) => _activeItems.filter(it => packClassOf_(it.type) === cls).reduce((s, it) => s + (it.qty || 1), 0);
     const _itemShirts      = _countPack("shirt");
     const _itemCaps        = _countPack("cap");
@@ -3867,7 +3942,7 @@ async function bulkAddTracking(orgId){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(data && data.message === "Unauthorized") clearAdminAuth();
+      adminSessionEnded_(data);
       showToast("Tracking update failed: " + ((data && data.message) || "unknown error"), true);
       return;
     }
@@ -3907,7 +3982,7 @@ async function bulkSetDueDate(orgId){
     ov.querySelector(".admin-pass-cancel").addEventListener("click", () => close(null));
     ov.querySelector("#bulkDueClear").addEventListener("click", () => close({ dueDate: "" }));
     ov.querySelector("form").addEventListener("submit", (e) => { e.preventDefault(); if(!input.value){ errEl.textContent = "Pick a date, or use Clear."; errEl.style.display = ""; return; } close({ dueDate: input.value }); });
-    input.focus();
+    dialogize_(ov, { onEscape: () => close(null), focus: input });
   });
   if(!result) return;
   if(!adminKey) adminKey = (await adminLogin()) || "";
@@ -3939,7 +4014,7 @@ async function cancelLineItem(orgId, sheetRow, itemName, lineTotal){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(data && data.message === "Unauthorized") clearAdminAuth();
+      adminSessionEnded_(data);
       showToast("Cancel failed: " + ((data && data.message) || "unknown error"), true);
       return;
     }
@@ -4006,7 +4081,7 @@ async function setLineItemRefund(orgId, sheetRow, defaultAmount, paymentMethod){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(data && data.message === "Unauthorized") clearAdminAuth();
+      adminSessionEnded_(data);
       showToast("Refund record failed: " + ((data && data.message) || "unknown error"), true);
       return;
     }
@@ -4049,7 +4124,7 @@ function adminActionCell(org, o){
   const dataAttrs = `data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}"`;
   // Each button only for a role that may use it (Users → Roles and permissions); the server refuses the rest anyway.
   const can = (fn, lvl) => adminCan_(fn, lvl);
-  const deleteBtn = !can("orders.details", "full") ? "" : `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" ${dataAttrs} data-need="orders.details:full" onclick="deleteTransaction(this.dataset.org, this.dataset.order)" style="margin-top:6px;">Delete</button>`;
+  const deleteBtn = !can("orders.details", "full") ? "" : `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" ${dataAttrs} data-need="orders.details:full" onclick="deleteTransaction(this.dataset.org, this.dataset.order)" style="margin-top:6px;">Void…</button>`;
 
   const paymentsBtn = !can("orders.payments", "read") ? "" : `<button class="admin-btn" ${dataAttrs} onclick="showPaymentsModal(this.dataset.org, this.dataset.order)" style="margin-top:4px;">💰 Payments</button>`;
 
@@ -4331,7 +4406,7 @@ function showSendInvoiceModal(orgId, orderId){
     done.hidden = false;
     // The desktop program's invoice has no link (it is the email itself): just whether it went.
     if (!r.url) {
-      done.innerHTML = r.emailSent ? `<b>Sent to ${escapeHtml(r.sentTo)}.</b>` : `<b style="color:#b45309;">The email couldn't be sent.</b> Tools → Communications says why.`;
+      done.innerHTML = r.emailSent ? `<b>Sent to ${escapeHtml(r.sentTo)}.</b>` : `<b style="color:#b45309;">The email couldn't be sent.</b> Settings → Communications says why.`;
       ov.querySelector("#siCancel").textContent = "Close";
       return;
     }
@@ -4370,11 +4445,9 @@ async function deleteTransaction(orgId, orderId){
   const reason = await showDeleteConfirmModal(orderId, order);
   if(!reason) return;
 
-  // Step 2 — force fresh credentials (clears stored session → prompts passphrase + TOTP)
-  clearAdminAuth();
-  const freshKey = (await adminLogin()) || "";
-  if(!freshKey) return;
-  adminKey = freshKey;
+  // Step 2 — the person's own password (and code) again. The session is kept: Cancel or a wrong password never
+  // signs them out.
+  if(!(await adminConfirmIdentity_("Confirm it's you to void " + orderId))) return;
 
   // Step 3 — execute delete
   try{
@@ -4384,7 +4457,7 @@ async function deleteTransaction(orgId, orderId){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(res.status === 401) clearAdminAuth();
+      adminSessionEnded_(res);
       showToast("Could not void order: " + ((data && data.message) || "unknown error"), true);
       return;
     }
@@ -4410,7 +4483,6 @@ function showDeleteConfirmModal(orderId, order){
 
     const overlay = document.createElement("div");
     overlay.className = "admin-pass-overlay";
-    overlay.style.zIndex = "1003";
     overlay.innerHTML = `
       <div class="admin-pass-box" style="max-width:420px;">
         <div style="font-weight:700;font-size:16px;color:#b03a2e;margin-bottom:10px;">⚠ Void this order?</div>
@@ -4419,7 +4491,7 @@ function showDeleteConfirmModal(orderId, order){
         <label style="display:block;font-size:13px;margin:10px 0 4px;">Reason (required)
           <input type="text" id="delReason" maxlength="300" placeholder="e.g. Duplicate order" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">
         </label>
-        <p style="font-size:13px;color:var(--ink-soft,#666);margin:6px 0 16px;">You will be asked to re-enter your admin credentials to confirm.</p>
+        <p style="font-size:13px;color:var(--ink-soft,#666);margin:6px 0 16px;">Next you'll type your password again to confirm. You stay signed in either way.</p>
         <div class="admin-pass-actions">
           <button type="button" class="admin-pass-cancel" id="delCancel">Cancel</button>
           <button class="admin-btn-danger admin-btn-danger-solid" type="button" id="delConfirm" style="border-radius:5px;padding:8px 18px;font-size:14px;font-weight:600;cursor:pointer;">Void order</button>
@@ -4435,9 +4507,8 @@ function showDeleteConfirmModal(orderId, order){
       finish(reason);
     });
     overlay.querySelector("#delCancel").addEventListener("click", () => finish(false));
-    document.addEventListener("keydown", function esc(e){
-      if(e.key === "Escape"){ finish(false); document.removeEventListener("keydown", esc); }
-    }, {once: true});
+    // Escape closes it while it is the window on top (and only then); Tab stays inside it.
+    dialogize_(overlay, { onEscape: () => { finish(false); } });
   });
 }
 
@@ -4451,8 +4522,7 @@ function emailBadge(dateStr){
 
 function verifSentCell(verif, rowspan){
   if(!verif) return `<td rowspan="${rowspan}"><span style="color:var(--dim)">—</span></td>`;
-  const m = String(verif.sentAt).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  const d = m ? `${+m[2]}/${+m[3]}/${m[1]}` : new Date(verif.sentAt).toLocaleDateString();
+  const d = adminShortDate_(verif.sentAt);
   const statusLabel = verif.status === "approved" ? `<br><span style="font-size:11px;color:#15803d">✓ Approved</span>`
     : verif.status === "revision" ? `<br><span style="font-size:11px;color:#b45309">⚠ Changes</span>`
     : `<br><span style="font-size:11px;color:var(--dim)">${adminDesktop_() ? "Awaiting reply" : "Pending"}</span>`;
@@ -4463,8 +4533,7 @@ function changeRequestCell(verif, rowspan, org){
   if(!verif || verif.status !== "revision" || !verif.respondedAt){
     return `<td rowspan="${rowspan}"><span style="color:var(--dim)">—</span></td>`;
   }
-  const m = String(verif.respondedAt).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  const d = m ? `${+m[2]}/${+m[3]}/${m[1]}` : new Date(verif.respondedAt).toLocaleDateString();
+  const d = adminShortDate_(verif.respondedAt);
   const orgSubdomain = (org && org.subdomain) || (window._adminOrgRegistry||[]).find(o=>o.orgId===verif.orgId)?.subdomain;
   const verifyUrl = orgSubdomain && siteRootDomain_()
     ? `https://${orgSubdomain}.${siteRootDomain_()}/?verify=${encodeURIComponent(verif.token)}`
@@ -4507,8 +4576,7 @@ function fulfillmentBadge(dateStr, order, stage){
   }
   if(!dateStr) return "<span style='color:var(--dim)'>—</span>";
   // Render the UTC calendar date to avoid timezone-off-by-one (UTC midnight → prev day in negative-offset zones).
-  const m = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  let out = m ? `${+m[2]}/${+m[3]}/${m[1]}` : new Date(dateStr).toLocaleDateString();
+  let out = adminShortDate_(dateStr);
   if(order && stage === "blankOrdered"){
     if(order.blankVendor) out += `<br><span style="font-size:11px;color:var(--ink-soft)">${escapeHtml(order.blankVendor)}</span>`;
     if(order.blankVendorOrderId) out += `<br><span style="font-size:11px;font-family:monospace;color:var(--ink-soft)">${escapeHtml(order.blankVendorOrderId)}</span>`;
@@ -4596,7 +4664,7 @@ async function reprintLabel(orgId, orderId){
     });
     const d = await res.json();
     if(!res.ok || d.status === "error"){
-      if(d && d.message === "Unauthorized") clearAdminAuth();
+      adminSessionEnded_(d);
       showToast("Could not open the label: " + ((d && d.message) || "unknown error"), true);
       return;
     }
@@ -4629,7 +4697,7 @@ async function shipOrder(orgId, orderId){
   }
 
   if(!ratesData || ratesData.status === "error"){
-    if(ratesData && ratesData.message === "Unauthorized") clearAdminAuth();
+    adminSessionEnded_(ratesData);
     showToast("Could not fetch rates: " + ((ratesData && ratesData.message) || "unknown error"), true);
     if(btn){ btn.disabled = false; btn.textContent = "Ship"; }
     return;
@@ -4699,7 +4767,6 @@ async function shipOrder(orgId, orderId){
   // --- Build the overlay (single unified form) ---
   const overlay = document.createElement("div");
   overlay.className = "admin-pass-overlay";
-  overlay.style.zIndex = "1001";
 
   function addrLines(a){
     return [
@@ -4875,7 +4942,8 @@ async function shipOrder(orgId, orderId){
       resolve(null);
     });
     // click outside does not close — use Cancel or Submit
-    document.addEventListener("keydown", function esc(e){ if(e.key === "Escape"){ document.body.removeChild(overlay); resolve(null); document.removeEventListener("keydown", esc); } }, {once: true});
+    // Escape closes it while it is the window on top (and only then); Tab stays inside it.
+    dialogize_(overlay, { onEscape: () => { document.body.removeChild(overlay); resolve(null); } });
   });
 
   if(!selectedRate){
@@ -4928,7 +4996,7 @@ async function shipOrder(orgId, orderId){
   }
 
   if(!purchaseData || purchaseData.status === "error"){
-    if(purchaseData && purchaseData.message === "Unauthorized") clearAdminAuth();
+    adminSessionEnded_(purchaseData);
     showToast("Label purchase failed: " + ((purchaseData && purchaseData.message) || "unknown error"), true);
     if(btn){ btn.disabled = false; btn.textContent = "Ship"; }
     return;
@@ -5349,7 +5417,7 @@ async function renderOrdersPage(app, opts){
       body: JSON.stringify({ action:"getOrdersAllShops", key:adminKey,
         dateFrom: (window._ordersFilter || {}).from || "", dateTo: (window._ordersFilter || {}).to || "" }) });
     const data = await res.json().catch(() => ({ status:"error" }));
-    if(!res.ok || data.status !== "ok"){ if(data && data.message === "Unauthorized") clearAdminAuth(); panel.innerHTML = `<div class="admin-empty">Could not load orders.</div>`; return; }
+    if(!res.ok || data.status !== "ok"){ panel.innerHTML = `<div class="admin-empty">${adminSessionEnded_(res) ? SESSION_ENDED_ : "Could not load orders."}</div>`; return; }
     window._ordersCache = window._ordersCache || {};
     window._verifCache = window._verifCache || {};
     const verifByOrder = {};
@@ -5444,7 +5512,7 @@ function renderAdminOrders(app, org, opts){
     if(orders && orders.error){
       panel.innerHTML = `
         <h2>Orders</h2>
-        <div class="admin-empty">${orders.error === "Unauthorized" ? "Incorrect passphrase." : escapeHtml(orders.error)}</div>
+        <div class="admin-empty">${orders.error === "Unauthorized" ? SESSION_ENDED_ : escapeHtml(orders.error)}</div>
         <div class="admin-actions"><button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="selectAdminOrg(this.dataset.org)">Try again</button></div>
       `;
       return;
@@ -5684,7 +5752,7 @@ async function markOrderPaidOnce_(orgId, orderId){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(res.status === 401) clearAdminAuth();
+      adminSessionEnded_(res);
       showToast("Could not mark as paid: " + ((data && data.message) || "unknown error"), true);
       return;
     }
@@ -5775,7 +5843,7 @@ async function setFulfillmentStage(orgId, orderId, stage){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(res.status === 401) clearAdminAuth();
+      adminSessionEnded_(res);
       showToast("Could not update stage: " + ((data && data.message) || "unknown error"), true);
       return;
     }
@@ -6049,10 +6117,10 @@ async function showPaymentsModal(orgId, orderId) {
       // Stripe (which arrives as all goods). Shipping isn't taxed, so the Sales Tax report backs no tax
       // out of that part.
       window.pmSetRefundShipping = async (idStr, current, refund) => {
-        const v = prompt(`How much of this $${refund} refund was shipping? (Shipping isn't taxed — enter ${refund} if it was all shipping, 0 if none.)`, current || "0.00");
-        if (v === null) return;
-        const amt = Number(String(v).replace(/[$,\s]/g, ""));
-        if (!Number.isFinite(amt) || amt < 0 || amt > Number(refund) + 0.0001) { showToast(`Enter an amount from $0 to $${refund}.`, true); return; }
+        const amt = await askText_(`How much of this $${refund} refund was shipping?\n\nShipping isn't taxed — enter ${refund} if it was all shipping, 0 if none.`, {
+          label: "Shipping part of the refund ($)", value: current || "0.00", inputMode: "decimal", confirmLabel: "Save",
+          validate: (v) => { const n = Number(String(v).replace(/[$,\s]/g, "")); return v !== "" && Number.isFinite(n) && n >= 0 && n <= Number(refund) + 0.0001 ? { value: n } : { error: `Enter an amount from $0 to $${refund}.` }; } });
+        if (amt === null) return;
         try {
           const r = await fetch("/api/orders", {method:"POST",headers:{"Content-Type":"application/json"},
             body: JSON.stringify({action:"setRefundShipping", key:adminKey, paymentId:Number(idStr), shippingAmount: amt, orderId, org: orgId})});
@@ -6329,7 +6397,7 @@ async function resendEmail(orgId, orderId){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(res.status === 401) clearAdminAuth();
+      adminSessionEnded_(res);
       showToast("Could not resend email: " + ((data && data.message) || "unknown error"), true);
       return;
     }
@@ -6396,7 +6464,6 @@ function showEditCustomerModal(orders){
 
     const overlay = document.createElement("div");
     overlay.className = "admin-pass-overlay";
-    overlay.style.zIndex = "1002";
     overlay.innerHTML = `
       <form class="admin-pass-box" id="editCustForm" style="max-width:440px;">
         <div style="font-weight:600;font-size:15px;margin-bottom:14px;">${title}</div>
@@ -6469,9 +6536,8 @@ function showEditCustomerModal(orders){
 
     overlay.querySelector(".admin-pass-cancel").addEventListener("click", () => finish(null));
     // click outside does not close — use Cancel or Submit
-    document.addEventListener("keydown", function esc(e){
-      if(e.key === "Escape"){ finish(null); document.removeEventListener("keydown", esc); }
-    }, {once: true});
+    // Escape closes it while it is the window on top (and only then); Tab stays inside it.
+    dialogize_(overlay, { onEscape: () => { finish(null); } });
 
     overlay.querySelector("#ecName").focus();
   });
@@ -6513,7 +6579,7 @@ async function createLocalSale(orgId){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(res.status === 401) clearAdminAuth();
+      adminSessionEnded_(res);
       showToast("Could not record local sale: " + ((data && data.message) || "unknown error"), true);
       return;
     }
@@ -6552,7 +6618,6 @@ function showLocalSaleModal(products, blanks){
 
     const overlay = document.createElement("div");
     overlay.className = "admin-pass-overlay";
-    overlay.style.zIndex = "1002";
     overlay.innerHTML = `
       <form class="admin-pass-box" id="localSaleForm" style="max-width:480px;max-height:90vh;overflow-y:auto;">
         <div style="font-weight:600;font-size:15px;margin-bottom:14px;">Record local sale</div>
@@ -6955,22 +7020,18 @@ function showLocalSaleModal(products, blanks){
 
     overlay.querySelector(".admin-pass-cancel").addEventListener("click", () => finish(null));
     // click outside does not close — use Cancel or Submit
-    document.addEventListener("keydown", function esc(e){
-      if(e.key === "Escape"){ finish(null); document.removeEventListener("keydown", esc); }
-    }, {once: true});
+    // Escape closes it while it is the window on top (and only then); Tab stays inside it.
+    dialogize_(overlay, { onEscape: () => { finish(null); } });
 
     overlay.querySelector("#lsProduct").focus();
   });
 }
 
 async function createTestTransaction(orgId){
-  const amountStr = window.prompt("Test transaction amount in dollars (e.g. 1.00):");
-  if(!amountStr) return;
-  const amount = parseFloat(amountStr);
-  if(!amount || isNaN(amount) || amount < 0.5 || amount > 500){
-    showToast("Enter an amount between $0.50 and $500.", true);
-    return;
-  }
+  const amount = await askText_("Make a test transaction?\n\nIt opens a checkout for this amount, so you can try the payment flow end to end.", {
+    label: "Amount in dollars (e.g. 1.00)", inputMode: "decimal", confirmLabel: "Continue",
+    validate: (v) => { const n = parseFloat(String(v).replace(/[$,\s]/g, "")); return n >= 0.5 && n <= 500 ? { value: n } : { error: "Enter an amount between $0.50 and $500." }; } });
+  if(amount === null) return;
   if(!adminKey){
     adminKey = (await adminLogin()) || "";
   }
@@ -6983,7 +7044,7 @@ async function createTestTransaction(orgId){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(res.status === 401) clearAdminAuth();
+      adminSessionEnded_(res);
       showToast("Could not create test transaction: " + ((data && data.message) || "unknown error"), true);
       return;
     }
@@ -7637,7 +7698,7 @@ async function renderAdminOrgList(app){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(res.status === 401) clearAdminAuth();
+      adminSessionEnded_(res);
       document.getElementById("adminPanel").innerHTML = `
         <div class="admin-empty">${escapeHtml((data && data.message) || "Could not load shops.")}</div>
         <div class="admin-actions"><button class="admin-btn" onclick="renderAdminOrgList(document.getElementById('app'))">Try again</button></div>
@@ -7870,9 +7931,9 @@ function publishStateHtml_(st){
   if (!st || adminDesktop_()) return "";   // the desktop version has no shop pages to publish
 
   if (st.state === "never") return `<span class="pub-state pub-never" title="Until it's published once, every change shows to shoppers straight away">Not published yet — changes show at once</span>`;
-  if (st.state === "current") return `<span class="pub-state pub-current">✓ Published ${escapeHtml(String(st.publishedAt || "").slice(0, 10))}</span>`;
+  if (st.state === "current") return `<span class="pub-state pub-current">✓ Published ${escapeHtml(adminDay_(st.publishedAt))}</span>`;
   const bits = [st.changedProducts && st.changedProducts.length ? `${st.changedProducts.length} product${st.changedProducts.length === 1 ? "" : "s"}` : "", st.shopChanged ? "shop settings" : ""].filter(Boolean).join(", ");
-  return `<span class="pub-state pub-changed" title="Shoppers still see the version published ${escapeHtml(String(st.publishedAt || "").slice(0, 10))}">● Unpublished changes${bits ? " (" + escapeHtml(bits) + ")" : ""}</span>`;
+  return `<span class="pub-state pub-changed" title="Shoppers still see the version published ${escapeHtml(adminDay_(st.publishedAt))}">● Unpublished changes${bits ? " (" + escapeHtml(bits) + ")" : ""}</span>`;
 }
 function drawPublishStates_(){
   const all = window._publishState || {};
@@ -9579,6 +9640,21 @@ async function submitGlobalSettings(){
     }
   }
   const needPublish = globalSettingsNeedPublish_();
+  // Each part is saved by its own request, in this order. A failure part-way says which parts are already saved (and
+  // live) and which aren't, instead of an error that reads as if nothing was.
+  const $g = (id) => document.getElementById(id);
+  const parts = [["Program settings", Object.keys(program).length > 0], ["Region", !!$g("gLocaleCountry")], ["Features", !!document.querySelector("#gFeatures .gFeature")],
+    ["Payment methods", true], ["Sales tax", true], ["Bookkeeping", !!$g("gSaleDate")], ["Business profile", !!$g("gBizName")],
+    ["Email", !!$g("gEmailAttachPdf") && adminCan_("settings.global", "edit")], ["Digital products", !!$g("gDigDays") && adminCan_("settings.global", "edit")],
+    ["Machine settings", ($g("gMachineSection") || {dataset: {}}).dataset.loaded === "1"], ["Pricing", true], ["Rush fee", true]].filter(x => x[1]).map(x => x[0]);
+  const done = [];
+  const stop = (part, reason) => {
+    const rest = parts.slice(parts.indexOf(part) + 1).filter(x => !done.includes(x));
+    const m = (done.length ? `Saved (already live): ${done.join(", ")}. ` : "Nothing was saved. ") +
+      `Not saved: ${[part, ...rest].join(", ")}${reason ? " — " + reason.replace(/\.$/, "") : ""}. Fix it and save again.`;
+    if(errEl) errEl.textContent = m;
+    showToast(m, true);
+  };
   const body = {
     action: "updateGlobalSettings",
     key: adminKey,
@@ -9607,7 +9683,8 @@ async function submitGlobalSettings(){
       }
       showToast("Saving — the program restarts for a moment…");
       const applied = await window.oddDesktop.applySettings(program);
-      if(!applied || !applied.ok){ if(errEl) errEl.textContent = "Nothing was saved. " + ((applied && applied.message) || "The program's settings couldn't be saved."); return; }
+      if(!applied || !applied.ok){ stop("Program settings", (applied && applied.message) || "The program's settings couldn't be saved."); return; }
+      done.push("Program settings");
     }
     // Region first: the country decides how the ship-from address, and the tax state below, are checked.
     if(document.getElementById("gLocaleCountry")){
@@ -9618,10 +9695,8 @@ async function submitGlobalSettings(){
           country: document.getElementById("gLocaleCountry").value } })
       });
       const locData = await locRes.json();
-      if(!locRes.ok || locData.status === "error"){
-        if(errEl) errEl.textContent = (locData && locData.message) || "Could not save the region.";
-        return;
-      }
+      if(!locRes.ok || locData.status === "error"){ stop("Region", locData && locData.message); return; }
+      done.push("Region");
       if(typeof applyCountry_ === "function") applyCountry_(locData.locale && locData.locale.country);
     }
     // Features next, with Shipping's ship-from address in the same request when Shipping is ticked:
@@ -9640,10 +9715,8 @@ async function submitGlobalSettings(){
         body: JSON.stringify({ action: "updateFeatures", key: adminKey, features: want, ...(shipFrom ? { shipFrom } : {}) })
       });
       const featData = await featRes.json();
-      if(!featRes.ok || featData.status === "error"){
-        if(errEl) errEl.textContent = (featData && featData.message) || "Could not save the features.";
-        return;
-      }
+      if(!featRes.ok || featData.status === "error"){ stop("Features", featData && featData.message); return; }
+      done.push("Features");
       savedFeatures = featData.features || want;
       if(typeof applyFeatures_ === "function") applyFeatures_(savedFeatures);   // the menu follows at once
       _accountsCache = null;
@@ -9655,10 +9728,8 @@ async function submitGlobalSettings(){
       body: JSON.stringify(body)
     });
     const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      if(errEl) errEl.textContent = (data && data.message) || "Something went wrong.";
-      return;
-    }
+    if(!res.ok || data.status === "error"){ stop("Payment methods", data && data.message); return; }
+    done.push("Payment methods");
     const taxRes = await fetch("/api/orders", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ action: "updateSalesTaxSettings", key: adminKey,
@@ -9667,19 +9738,15 @@ async function submitGlobalSettings(){
         taxMode: (document.getElementById("gTaxMode") || {}).value || undefined })
     });
     const taxData = await taxRes.json();
-    if(!taxRes.ok || taxData.status === "error"){
-      if(errEl) errEl.textContent = (taxData && taxData.message) || "Could not save the sales tax rate.";
-      return;
-    }
+    if(!taxRes.ok || taxData.status === "error"){ stop("Sales tax", taxData && taxData.message); return; }
+    done.push("Sales tax");
     const saleDateSel = document.getElementById("gSaleDate");
     if(saleDateSel){
       let acc;
       try{ acc = await hoopApi_({ action: "updateAccountingSettings", saleDate: saleDateSel.value }); }
       catch(e){ acc = { status: "error", message: e.message }; }
-      if(!acc || acc.status !== "ok"){
-        if(errEl) errEl.textContent = (acc && acc.message) || "Could not save the bookkeeping setting.";
-        return;
-      }
+      if(!acc || acc.status !== "ok"){ stop("Bookkeeping", acc && acc.message); return; }
+      done.push("Bookkeeping");
     }
     const gv = (id) => { const e = document.getElementById(id); return e ? e.value.trim() : ""; };
     if(document.getElementById("gBizName")){
@@ -9692,10 +9759,8 @@ async function submitGlobalSettings(){
           phone: gv("gBizPhone"), website: gv("gBizWebsite"), paymentNote: gv("gBizPaymentNote") } })
       });
       const bizData = await bizRes.json();
-      if(!bizRes.ok || bizData.status === "error"){
-        if(errEl) errEl.textContent = (bizData && bizData.message) || "Could not save the business profile.";
-        return;
-      }
+      if(!bizRes.ok || bizData.status === "error"){ stop("Business profile", bizData && bizData.message); return; }
+      done.push("Business profile");
       applyBusiness_(bizData.business);   // the header and page titles follow at once
     }
     const pdfBox = document.getElementById("gEmailAttachPdf");
@@ -9704,17 +9769,19 @@ async function submitGlobalSettings(){
       const mailbox = emailSendingChanges_();
       try{ await hoopApi_({ action: "updateEmailSettings", emailSettings: { attachPdf: pdfBox.checked }, ...(mailbox ? { mailbox } : {}) }); }
       catch(e){
-        if(errEl) errEl.textContent = e.message || "Could not save the email settings.";
+        stop("Email", e.message);
         if(mailbox && mailbox.via === "mailbox"){ const pass = document.getElementById("gEmailPass"); if(pass && pass.scrollIntoView) pass.scrollIntoView({ block: "center" }); }
         return;
       }
+      done.push("Email");
     }
     // Digital products (migrations/0086): the delivery defaults, while the feature is on.
     if(document.getElementById("gDigDays") && stillOn("digital") && adminCan_("settings.global", "edit")){
       const v = (id) => document.getElementById(id).value.trim();
       try{ await hoopApi_({ action: "updateDigitalSettings", digital: { days: v("gDigDays") === "" ? null : Number(v("gDigDays")), downloads: v("gDigDownloads") === "" ? null : Number(v("gDigDownloads")),
         email: document.getElementById("gDigEmail").checked, attach: document.getElementById("gDigAttach").checked, attachMb: Number(v("gDigAttachMb")) || 10 } }); }
-      catch(e){ if(errEl) errEl.textContent = e.message || "Could not save the digital product settings."; return; }
+      catch(e){ stop("Digital products", e.message); return; }
+      done.push("Digital products");
     }
     if(machShown && stillOn("production")){
     const machRes = await fetch("/api/orders", {
@@ -9723,10 +9790,8 @@ async function submitGlobalSettings(){
         machineSettings: { showDeleteButton: document.getElementById("gMachShowDelete").checked } })
     });
     const machData = await machRes.json();
-    if(!machRes.ok || machData.status === "error"){
-      if(errEl) errEl.textContent = (machData && machData.message) || "Could not save machine settings.";
-      return;
-    }
+    if(!machRes.ok || machData.status === "error"){ stop("Machine settings", machData && machData.message); return; }
+    done.push("Machine settings");
     }
     const pval = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
     const priceRes = await fetch("/api/orders", {
@@ -9736,15 +9801,13 @@ async function submitGlobalSettings(){
           targetHourly: pval("gPriceTargetHourly"), targetIncome: pval("gPriceTargetIncome") } })
     });
     const priceData = await priceRes.json();
-    if(!priceRes.ok || priceData.status === "error"){
-      if(errEl) errEl.textContent = (priceData && priceData.message) || "Could not save the pricing settings.";
-      return;
-    }
-    const rushRule = readRushRule_("gRush");
-    if(rushRule.error){ if(errEl) errEl.textContent = rushRule.error; return; }
+    if(!priceRes.ok || priceData.status === "error"){ stop("Pricing", priceData && priceData.message); return; }
+    done.push("Pricing");
+    const rushRule = readRushRule_("gRush");   // checked before anything was sent (globalSettingsProblem_)
+    if(rushRule.error){ stop("Rush fee", rushRule.error); return; }
     const rushData = await hoopApi_({ action: "updateRushSettings", rush: { rule: rushRule.rule, taxable: document.getElementById("gRushTaxable").checked } })
       .catch(e => ({ status: "error", message: e.message || "Could not save the rush fee." }));
-    if(rushData.status === "error"){ if(errEl) errEl.textContent = rushData.message || "Could not save the rush fee."; return; }
+    if(rushData.status === "error"){ stop("Rush fee", rushData.message); return; }
     // New fees / targets re-check every product: say which are now below a target.
     if((priceData.belowTarget || []).length) setTimeout(() => belowTargetToast_(priceData.belowTarget, "With these settings, "), 1200);
     // The program restarted with new settings: reload, so the menu and pages follow them.
@@ -9754,7 +9817,7 @@ async function submitGlobalSettings(){
       : "Global settings saved. The changes are already live — no need to Publish.", false);
     location.hash = "#catalog";
   }catch(e){
-    if(errEl) errEl.textContent = "Could not reach the server.";
+    stop(parts.find(x => !done.includes(x)) || "Rush fee", "Could not reach the server.");
   }
 }
 
@@ -9910,7 +9973,7 @@ async function submitAccountSetup(ev){
   adminStepDone_(data.pending);
 }
 
-// ---- Change password: Security → Change password, and the one screen there is after signing in
+// ---- Change password: Settings → Change password, and the one screen there is after signing in
 // with a temporary password (a new user, or after an admin reset it). Changing it signs this user
 // out everywhere, so the next step is always a fresh sign-in with the new password.
 function renderChangePassword(app, forced){
@@ -9935,7 +9998,7 @@ function renderChangePassword(app, forced){
         <input type="password" id="pwNext" autocomplete="new-password" minlength="${ADMIN_MIN_PASSWORD_}" required style="width:100%;margin:4px 0 12px;" />
         <label for="pwAgain">New password again</label>
         <input type="password" id="pwAgain" autocomplete="new-password" required style="width:100%;margin-top:4px;" />
-        <p class="admin-note" style="margin-top:10px;">Forgotten it? An admin can reset it under Security → Users. If you are the only admin, ${adminDesktop_() ? "choose Help → Locked out? Reset sign-in in the program's menu: you then set up your account again (and everyone's password is reset)." : "run <code>npm run setup -- --new-passphrase</code> on the computer you installed from: it prints a passphrase that gets you back in (and resets everyone's password)."}</p>
+        <p class="admin-note" style="margin-top:10px;">Forgotten it? An admin can reset it under Settings → Users. If you are the only admin, ${adminDesktop_() ? "choose Help → Locked out? Reset sign-in in the program's menu: you then set up your account again (and everyone's password is reset)." : "run <code>npm run setup -- --new-passphrase</code> on the computer you installed from: it prints a passphrase that gets you back in (and resets everyone's password)."}</p>
         <div id="pwError" class="admin-error" style="margin-top:8px;"></div>
         <div class="admin-actions" style="margin-top:14px;">
           <button class="admin-btn" type="submit" id="pwSubmit">${forced ? "Set password" : "Change password"}</button>
@@ -10038,7 +10101,7 @@ function render2FAPanel(enabled){
           <button class="admin-btn" onclick="submit2FANewCodes()">Make new recovery codes</button>
         </div>
         ${_tfa.required ? `
-        <p class="admin-note" id="tfa-required-note">Two-step sign-in is required here, so it can't be switched off. To move it to a new phone, ask an admin to reset it (Security → Users); you then set it up again at your next sign-in.</p>` : `
+        <p class="admin-note" id="tfa-required-note">Two-step sign-in is required here, so it can't be switched off. To move it to a new phone, ask an admin to reset it (Settings → Users); you then set it up again at your next sign-in.</p>` : `
         <h3 style="margin:0 0 8px;">Disable 2FA</h3>
         <p class="admin-note" style="margin-bottom:12px;">Enter your current authenticator code to confirm you still have access before disabling.</p>
         <label for="tfa-disable-code">Current authentication code</label>
@@ -10577,6 +10640,8 @@ function showTemporaryPassword_(user, password){
   document.body.appendChild(overlay);
   overlay.querySelector("#tempCopy").addEventListener("click", () => navigator.clipboard.writeText(password || "").then(() => showToast("Copied."), () => showToast("Copy failed — select it and copy manually.", true)));
   overlay.querySelector("#tempDone").addEventListener("click", () => document.body.removeChild(overlay));
+  // No Escape here: the password is shown only once, so only Done closes it.
+  dialogize_(overlay, { focus: overlay.querySelector("#tempCopy") });
 }
 
 // ---- Org management ----
@@ -10845,7 +10910,7 @@ function renderOrgForm(app, org){
         <label>Certificate expires
           <input type="date" id="orgFormTaxExpires" value="${escapeHtml(org ? (org.taxExemptExpires || "") : "")}">
         </label>
-        ${org && org.taxExempt && org.taxExemptExpires && org.taxExemptExpires < new Date().toISOString().slice(0, 10)
+        ${org && org.taxExempt && org.taxExemptExpires && org.taxExemptExpires < localToday_()
           ? `<div class="admin-error" style="display:block;">This shop's exemption certificate expired on ${escapeHtml(org.taxExemptExpires)}. Get a current one before its next order.</div>` : ""}
         <div class="admin-note">Keep a copy of the certificate on file. Changing this affects new orders only.</div>
 
@@ -11161,7 +11226,7 @@ async function renderProductList(app, orgId, opts){
     }
     window._adminProductRegistry = window._adminProductRegistry || {};
     window._adminProductRegistry[orgId] = data.products;
-    await loadProductCategories_();   // the sections and their order (Tools → Product categories)
+    await loadProductCategories_();   // the sections and their order (Catalog → Product categories)
     renderProductListTable(orgId, data.products);
     // Back from saving a product: the list opens where it was left, with that product highlighted.
     const back = window._productListReturn;
@@ -11185,7 +11250,7 @@ function productPriceSummary(p){
 }
 
 // A shop's products in the order its page shows them: one group per category, in the managed order
-// (Tools → Product categories; a category that's since been deleted comes last), each group's products
+// (Catalog → Product categories; a category that's since been deleted comes last), each group's products
 // in the server's order. Mirrors renderOrgPage in index.html. The shop's page leaves hidden products
 // out; here they're listed too, AFTER the section's visible ones — so the rows above them read exactly
 // as customers see them, and moving a product one place always changes the shop's page.
@@ -11673,7 +11738,7 @@ async function showStockModal(orgId, productId, productName, pricingMode, sizePr
     const list = mv.movements || [], canVoid = adminCan_("inventory.blanks", "full");
     ov.querySelector("#fsHistory").innerHTML = list.length ? `<table style="width:100%;border-collapse:collapse;color:#1a1a1a;">${list.map(m => `
       <tr style="${m.voidedAt ? "text-decoration:line-through;color:#999;" : ""}">
-        <td style="padding:3px 6px;white-space:nowrap;">${escapeHtml(String(m.occurredAt).slice(0, 10))}</td>
+        <td style="padding:3px 6px;white-space:nowrap;">${escapeHtml(adminDay_(m.occurredAt))}</td>
         <td style="padding:3px 6px;">${escapeHtml(FINISHED_KIND_LABELS_[m.kind] || m.kind)}${m.orderId ? " · " + escapeHtml(m.orderId) : ""}${m.voidedAt ? ` <span style="text-decoration:none;color:#b03a2e;">(voided: ${escapeHtml(m.voidReason)})</span>` : ""}</td>
         <td style="padding:3px 6px;">${escapeHtml([m.variantLabel, f.flat ? "" : m.size].filter(Boolean).join(" · "))}</td>
         <td style="padding:3px 6px;${num}">${m.qtyDelta > 0 ? "+" : ""}${m.qtyDelta}</td>
@@ -12130,14 +12195,7 @@ function productPersFields_(options){
     personalizationHoopId: ctx.hoopId ? Number(ctx.hoopId) : null, personalizationOptionDesigns: map };
 }
 
-async function designApi_(body){
-  if (!adminKey) adminKey = (await adminLogin()) || "";
-  if (!adminKey) throw new Error("Sign-in required");
-  const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, key: adminKey }) });
-  const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
-  if (!r.ok || d.status === "error") throw new Error((d && d.message) || "Request failed");
-  return d;
-}
+async function designApi_(body){ return adminApi_(body); }
 
 // A product's designs (migrations/0032): a list in run order — each its own hooping — with a
 // placement label and one MAIN design (the one a typed-in name is combined with). Saved with its
@@ -13749,7 +13807,7 @@ async function renderRevenueReport(app) {
 
   const thisYear  = new Date().getFullYear();
   const defaultFrom = thisYear + "-01-01";
-  const defaultTo   = new Date().toISOString().slice(0, 10);
+  const defaultTo   = localToday_();
 
   app.innerHTML = `
     <div class="org-hero admin-hero" style="--org-accent:var(--accent);">
@@ -14063,7 +14121,7 @@ async function renderSalesTaxReport(app) {
         <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">From</label>
           <input type="date" id="taxFrom" value="${y}-01-01" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
         <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">To</label>
-          <input type="date" id="taxTo" value="${new Date().toISOString().slice(0, 10)}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
+          <input type="date" id="taxTo" value="${localToday_()}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
           <button type="submit" class="admin-pass-submit" style="padding:6px 18px;font-size:13px;">Generate</button>
           ${[0,1,2,3].map(n => `<button type="button" data-from="${q(n)[0]}" data-to="${q(n)[1]}" class="taxQuick" style="padding:6px 10px;font-size:12px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:var(--surface,#fff);">Q${n+1} ${y}</button>`).join("")}
@@ -14073,7 +14131,7 @@ async function renderSalesTaxReport(app) {
       <div id="taxResults"></div>
     </div>`;
 
-  const fmt = (n) => "$" + Number(n).toFixed(2);
+  const fmt = adminMoney_;
   const monthLabel = (m) => new Date(m + "-15T12:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
   const cell = "padding:9px 12px;text-align:right;border-bottom:1px solid #ddd;color:#111;background:#fff;";
   const cellL = "padding:9px 12px;text-align:left;border-bottom:1px solid #ddd;color:#111;background:#fff;";
@@ -14261,27 +14319,112 @@ if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" &
   }).observe(document.body, { childList: true });
 }
 
+// Every pop-up window — the shared one below and the older .admin-pass-overlay prompts — is a dialog: announced as
+// one (role="dialog", aria-modal, labelled by its title), focus moves into it when it opens, Tab stays inside it,
+// Escape closes only the window on top, and focus goes back to what opened it when it closes. Call it right after
+// the window is added to the page. opts: onEscape (what Escape does; none = Escape does nothing), label (the
+// accessible name when the window has no title of its own), focus (the element to start on). Returns release(),
+// which a window may call when it closes; it also runs by itself once the window leaves the page.
+const MODAL_SEL_ = ".admin-modal, .admin-pass-overlay";
+let dialogSeq_ = 0;
+function topModal_(){ const all = document.querySelectorAll(MODAL_SEL_); return all[all.length - 1] || null; }
+function modalFocusables_(box){
+  const all = [...box.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])')];
+  const shown = all.filter(el => el.getClientRects().length);
+  return shown.length ? shown : all;   // no layout (a test page): every one counts
+}
+function dialogize_(ov, opts){
+  opts = opts || {};
+  const box = ov.firstElementChild || ov;
+  linkLabels_(box);
+  const active = document.activeElement;
+  const opener = active && active !== document.body && !ov.contains(active) ? active : null;
+  box.setAttribute("role", "dialog");
+  box.setAttribute("aria-modal", "true");
+  if (opts.label) box.setAttribute("aria-label", opts.label);
+  else if (!box.hasAttribute("aria-labelledby")) {
+    const head = box.querySelector("[data-dialog-title], h1, h2, h3, h4, label");
+    if (head) { if (!head.id) head.id = "dlgTitle" + (++dialogSeq_); box.setAttribute("aria-labelledby", head.id); }
+  }
+  if (!box.hasAttribute("tabindex")) box.setAttribute("tabindex", "-1");
+  let released = false, mo = null;
+  function onKey(e){
+    if (!ov.isConnected) { release(); return; }
+    if (topModal_() !== ov) return;
+    if (e.key === "Escape") {
+      if (e.__modalDone) return;
+      e.__modalDone = true;
+      if (opts.onEscape) opts.onEscape();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const f = modalFocusables_(box);
+    if (!f.length) { e.preventDefault(); box.focus(); return; }
+    const first = f[0], last = f[f.length - 1], at = document.activeElement;
+    if (!box.contains(at) || at === box) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+    else if (e.shiftKey && at === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && at === last) { e.preventDefault(); first.focus(); }
+  }
+  function release(){
+    if (released) return;
+    released = true;
+    document.removeEventListener("keydown", onKey);
+    if (mo) mo.disconnect();
+    // Back to what opened it — unless focus has already moved somewhere real (the next window, say).
+    const at = document.activeElement;
+    if (at && at !== document.body && at.isConnected && !ov.contains(at)) return;
+    const top = topModal_();
+    if (opener && opener.isConnected && (!top || top.contains(opener))) { try { opener.focus(); } catch (e) {} }
+    else if (top && top !== ov) { const f = modalFocusables_(top.firstElementChild || top); try { (f[0] || top).focus(); } catch (e) {} }
+  }
+  document.addEventListener("keydown", onKey);
+  if (ov.parentNode && typeof MutationObserver !== "undefined") {
+    mo = new MutationObserver(() => { if (!ov.isConnected) release(); });
+    mo.observe(ov.parentNode, { childList: true });
+  }
+  // Start inside the window: the given element, else the first field — on a phone the window itself, so the
+  // keyboard doesn't cover half of it before anything is tapped.
+  if (!box.contains(document.activeElement)) {
+    let start = opts.focus || null;
+    if (!start) {
+      const touch = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+      const f = modalFocusables_(box).filter(el => !el.hasAttribute("data-modal-close"));
+      start = touch ? box : (f.find(el => /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) || f[0] || box);
+    }
+    try { start.focus(); } catch (e) {}
+  }
+  return release;
+}
+
+// opts.onClose runs when the window is closed with ✕ or Escape. opts.guard marks a form: once something in it is
+// changed, ✕ or Escape asks "Discard changes?" first.
 function inventoryModal_(title, bodyHtml, width, opts){
+  opts = opts || {};
   const ov = document.createElement("div");
   ov.className = "admin-modal";
   // --org-accent gives .admin-btn its background (the modal sits outside any admin panel).
   ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;--org-accent:var(--accent);";
   ov.innerHTML = `<div style="background:#fff;color:#1a1a1a;font-family:system-ui,sans-serif;border-radius:8px;padding:22px;width:${width || 560}px;max-width:95vw;max-height:90vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.4);">
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 14px;"><h3 style="margin:0;font-size:16px;font-weight:700;">${title}</h3>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 14px;"><h3 data-dialog-title style="margin:0;font-size:16px;font-weight:700;">${title}</h3>
     <button type="button" data-modal-close aria-label="Close" title="Close" style="background:none;border:none;font-size:20px;line-height:1;cursor:pointer;color:#666;padding:0 2px;">✕</button></div>${bodyHtml}</div>`;
-  // Escape closes only the window on top (one press, one window): the first handler to act marks the event.
-  function esc(e){
-    if (e.key !== "Escape" || e.__modalDone || !ov.isConnected) return;
-    const open = document.querySelectorAll(".admin-modal");
-    if (open[open.length - 1] !== ov) return;
-    e.__modalDone = true; dismiss();
-  }
-  const close = () => { document.removeEventListener("keydown", esc); ov.remove(); };
-  const dismiss = () => { close(); if (opts && opts.onClose) opts.onClose(); };
-  // Only a button (✕, Cancel, Save…) or Escape closes it — never a stray click outside.
+  let release = null, dirty = false, asking = false;
+  const close = () => { ov.remove(); if (release) release(); };
+  const dismiss = async () => {
+    if (asking || !ov.isConnected) return;
+    if (opts.guard && dirty) {
+      asking = true;
+      const leave = await askConfirm_("Discard changes?\n\nWhat you typed in this window hasn't been saved.", { confirmLabel: "Discard", cancelLabel: "Keep editing", danger: true });
+      asking = false;
+      if (!leave || !ov.isConnected) return;
+    }
+    close(); if (opts.onClose) opts.onClose();
+  };
+  if (opts.guard) { const mark = () => { dirty = true; }; ov.addEventListener("input", mark); ov.addEventListener("change", mark); }
+  // Only a button (✕, Cancel, Save…) or Escape closes it — never a stray click outside. Escape closes only the
+  // window on top (one press, one window).
   ov.querySelector("[data-modal-close]").onclick = dismiss;
-  document.addEventListener("keydown", esc);
   document.body.appendChild(ov);
+  release = dialogize_(ov, { onEscape: dismiss });
   return { ov, close };
 }
 
@@ -14299,9 +14442,22 @@ function stackLabels_(root){
     });
   });
 }
+// A label written as text just before its field (<label>Amount</label><input …>) names nothing for a screen reader and
+// isn't clickable. Each such label is tied to the field right after it (for= the field's id, one made when it has
+// none). A label that wraps its field, or already has for=, is left alone.
+let labelSeq_ = 0;
+function linkLabels_(root){
+  (root || document).querySelectorAll("label:not([for])").forEach(l => {
+    if (l.querySelector("input, select, textarea")) return;
+    const f = l.nextElementSibling;
+    if (!f || !f.matches || !f.matches("input:not([type=hidden]), select, textarea")) return;
+    if (!f.id) f.id = "fld" + (++labelSeq_);
+    l.htmlFor = f.id;
+  });
+}
 if (typeof MutationObserver !== "undefined" && !window._stackLabelsObserver) {
   let queued = false;
-  window._stackLabelsObserver = new MutationObserver(() => { if (queued) return; queued = true; setTimeout(() => { queued = false; stackLabels_(document); }, 0); });
+  window._stackLabelsObserver = new MutationObserver(() => { if (queued) return; queued = true; setTimeout(() => { queued = false; stackLabels_(document); linkLabels_(document); }, 0); });
   window._stackLabelsObserver.observe(document.body, { childList: true, subtree: true });
 }
 
@@ -14312,6 +14468,36 @@ if (typeof MutationObserver !== "undefined" && !window._stackLabelsObserver) {
 // ---- When it happened (2026-10) ---------------------------------------------------------------------------------
 // Most steps are recorded after the fact, so each asks "when did this happen?" — a date-and-time box defaulting to
 // now in the admin's own time, never later than now. The server checks the time fits the order's other dates.
+// The admin's "today" as YYYY-MM-DD in this computer's own time — never the UTC day, which on a US evening is already
+// tomorrow (a receipt dated tomorrow, a delivery due today shown late). dayOffset moves it by whole days.
+function localToday_(dayOffset){ const d = new Date(); if (dayOffset) d.setDate(d.getDate() + dayOffset); return localDay_(d); }
+// A moment's calendar day (YYYY-MM-DD) in this computer's own time.
+function localDay_(when){
+  const x = new Date(when), p = (n) => String(n).padStart(2, "0");
+  return isNaN(x) ? "" : `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`;
+}
+// Money for display, the way Money and Expenses write it: thousands separated, a true minus sign before the dollar
+// sign ("−$1,234.56", never "$-1234.56").
+function adminMoney_(n){
+  const x = Number(n) || 0;
+  return (x < 0 ? "−$" : "$") + Math.abs(x).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+// A stored date for display. A plain day (YYYY-MM-DD) is shown as written; a full time (ISO) as the day it was here,
+// in this computer's own time — slicing the ISO text would give the UTC day, a day late for a step recorded on a US
+// evening. adminDay_ keeps the YYYY-MM-DD form; adminShortDate_ writes M/D/YYYY, as the order steps show dates.
+function adminDay_(v){
+  const t = String(v == null ? "" : v);
+  if (!t || /^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  return localDay_(t) || t.slice(0, 10);
+}
+function adminShortDate_(v){
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(adminDay_(v));
+  return m ? `${+m[2]}/${+m[3]}/${m[1]}` : String(v == null ? "" : v);
+}
+// The first and last moment of a local day, as ISO times — for a From / To filter on stored timestamps (UTC), so a
+// search for one day finds that day's evening too, and not the evening before.
+function localDayStartIso_(day){ const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || ""); return m ? new Date(+m[1], m[2] - 1, +m[3]).toISOString() : ""; }
+function localDayEndIso_(day){ const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || ""); return m ? new Date(new Date(+m[1], m[2] - 1, +m[3] + 1).getTime() - 1).toISOString() : ""; }
 function localDateTime_(d){
   const x = d ? new Date(d) : new Date(), p = (n) => String(n).padStart(2, "0");
   return isNaN(x) ? "" : `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}T${p(x.getHours())}:${p(x.getMinutes())}`;
@@ -14346,27 +14532,45 @@ function confirmModal_(o){
   o = o || {};
   return new Promise(resolve => {
     const whenBox = o.when ? whenFieldHtml_("cmWhen", o.when.label, o.when.value) : "";
-    const box = whenBox + (o.reason ? `<label for="cmReason" style="display:block;font-size:13px;font-weight:600;margin:12px 0 4px;">${escapeHtml(o.reasonLabel || (o.reason === "required" ? "Reason" : "Reason (optional)"))}</label>
+    // o.input: one typed answer ({label, value, inputMode, placeholder, validate(value) → problem text or "", or
+    // {error} / {value}}), checked here so a wrong value is fixed in the same window. Resolves {ok, value}.
+    const inp = o.input || null;
+    const inputBox = inp ? `<label for="cmInput" style="display:block;font-size:13px;font-weight:600;margin:12px 0 4px;">${escapeHtml(inp.label || "")}</label>
+      <input type="text" id="cmInput" autocomplete="off" ${inp.inputMode ? `inputmode="${escapeHtml(inp.inputMode)}"` : ""} placeholder="${escapeHtml(inp.placeholder || "")}" value="${escapeHtml(inp.value == null ? "" : String(inp.value))}" style="width:100%;box-sizing:border-box;font:inherit;font-size:14px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;">
+      <div id="cmInputErr" role="alert" style="color:#b03a2e;font-size:12px;min-height:14px;margin-top:3px;"></div>` : "";
+    const box = whenBox + inputBox + (o.reason ? `<label for="cmReason" style="display:block;font-size:13px;font-weight:600;margin:12px 0 4px;">${escapeHtml(o.reasonLabel || (o.reason === "required" ? "Reason" : "Reason (optional)"))}</label>
       <textarea id="cmReason" rows="3" style="width:100%;box-sizing:border-box;font:inherit;font-size:14px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;">${escapeHtml(o.defaultReason || "")}</textarea>` : "");
     const { ov, close } = inventoryModal_(escapeHtml(o.title || "Are you sure?"), `<div class="cm-text" style="font-size:14px;line-height:1.5;white-space:pre-line;">${escapeHtml(o.text || "")}</div>${box}
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
         <button type="button" class="admin-btn admin-btn-secondary" id="cmCancel">${escapeHtml(o.cancelLabel || "Back")}</button>
         <button type="button" class="admin-btn${o.danger ? " admin-btn-danger admin-btn-danger-solid" : ""}" id="cmOk">${escapeHtml(o.confirmLabel || "OK")}</button>
-      </div>`, 480);
+      </div>`, 480, { onClose: () => finish({ ok: false, reason: "" }) });
     ov.classList.add("confirm-modal");
     if (o.message != null) ov.dataset.message = String(o.message);
     let done = false;
-    const finish = (v) => { if (done) return; done = true; document.removeEventListener("keydown", onKey, true); close(); resolve(v); };
-    const onKey = (e) => { if (e.key === "Escape" && !e.__modalDone) { e.__modalDone = true; finish({ ok: false, reason: "" }); } };
-    document.addEventListener("keydown", onKey, true);
-    const ok = ov.querySelector("#cmOk"), ta = ov.querySelector("#cmReason");
+    const finish = (v) => { if (done) return; done = true; close(); resolve(v); };
+    const ok = ov.querySelector("#cmOk"), ta = ov.querySelector("#cmReason"), ti = ov.querySelector("#cmInput");
     const sync = () => { if (o.reason === "required") ok.disabled = !(ta && ta.value.trim()); };
-    if (ta) { ta.oninput = sync; setTimeout(() => { try { ta.focus(); ta.select(); } catch (e) {} }, 0); }
+    // Focus starts on the answer, not on the button behind the window (Enter there would open a second window):
+    // the typed answer or reason box when there is one, else Cancel for a question that deletes or undoes, else OK.
+    if (ti || ta) { if (ta) ta.oninput = sync; try { (ti || ta).focus(); (ti || ta).select(); } catch (e) {} }
+    else { try { (o.danger ? ov.querySelector("#cmCancel") : ok).focus(); } catch (e) {} }
+    if (ti) {
+      ti.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); ok.click(); } });
+      ti.addEventListener("input", () => { ov.querySelector("#cmInputErr").textContent = ""; });
+    }
     sync();
     ok.onclick = () => {
-      let at;
+      let at, value;
+      if (ti) {
+        const raw = ti.value.trim();
+        const r = inp.validate ? inp.validate(raw) : "";
+        const err = typeof r === "string" ? r : (r && r.error) || "";
+        if (err) { ov.querySelector("#cmInputErr").textContent = err; ti.focus(); return; }
+        value = r && typeof r === "object" && "value" in r ? r.value : raw;
+      }
       if (o.when) { at = whenFrom_(ov, "cmWhen"); if (!at) return; }
-      finish({ ok: true, reason: ta ? ta.value.trim() : "", ...(o.when ? { at } : {}) });
+      finish({ ok: true, reason: ta ? ta.value.trim() : "", ...(o.when ? { at } : {}), ...(ti ? { value } : {}) });
     };
     ov.querySelector("#cmCancel").onclick = () => finish({ ok: false, reason: "" });
     ov.querySelector("[data-modal-close]").onclick = () => finish({ ok: false, reason: "" });
@@ -14392,6 +14596,17 @@ function askOpts_(message){
 }
 function askConfirm_(message, opts){
   return confirmModal_(Object.assign(askOpts_(message), opts || {})).then(a => !!a.ok);
+}
+// A question with one typed answer, in place of the browser's prompt() (which the desktop edition doesn't have, and
+// which can't be styled). `message` is split like askConfirm_'s; opts: label, value (the starting text), inputMode,
+// placeholder, confirmLabel, validate(value) → "" when fine, else the problem shown under the box (or {value} to
+// hand back a cleaned-up value). Resolves the answer, or null when cancelled.
+function askText_(message, opts){
+  opts = opts || {};
+  const base = askOpts_(message);
+  return confirmModal_(Object.assign(base, { confirmLabel: opts.confirmLabel || (base.confirmLabel === "OK" ? "Save" : base.confirmLabel), cancelLabel: "Cancel", danger: false,
+    input: { label: opts.label || "", value: opts.value, inputMode: opts.inputMode, placeholder: opts.placeholder, validate: opts.validate } }))
+    .then(a => a.ok ? a.value : null);
 }
 // The same question with "When did this happen?" (date and time, default now; opts.whenLabel / opts.whenValue).
 // Resolves the chosen time (ISO), or null when cancelled.
@@ -14425,7 +14640,7 @@ function missingCostHtml_(items){
 async function showBlankCatchUp_(onDone, filter){
   if (!adminKey) adminKey = (await adminLogin()) || "";
   if (!adminKey) return;
-  const fmt = (n) => "$" + Number(n).toFixed(2);
+  const fmt = adminMoney_;
   const { ov, close } = inventoryModal_("Use blanks for past orders", `<div id="cuBody" style="font-size:13px;color:#777;">Checking past orders…</div>`, 1100);
   const body = ov.querySelector("#cuBody");
   const call = async (payload) => {
@@ -14504,7 +14719,7 @@ async function showBlankCatchUp_(onDone, filter){
 async function showTransferCatchUp_(onDone, filter){
   if (!adminKey) adminKey = (await adminLogin()) || "";
   if (!adminKey) return;
-  const fmt = (n) => "$" + Number(n).toFixed(2);
+  const fmt = adminMoney_;
   const { ov, close } = inventoryModal_("Use transfers for past orders", `<div id="tcuBody" style="font-size:13px;color:#777;">Checking past orders…</div>`, 1100);
   const body = ov.querySelector("#tcuBody");
   let d;
@@ -14668,7 +14883,7 @@ function showStockCount_(kind, onDone){
         <button type="button" class="admin-btn admin-btn-secondary" id="scClose">Close</button>
         <button type="button" class="admin-btn" id="scAll" data-need="${perm}:full">Correct all remaining differences</button>
       </span>
-    </div>`, 1000, { onClose: () => finish() });
+    </div>`, 1000, { guard: true, onClose: () => finish() });
   let rows = [], blanks = [];
   const counts = new Map(), failedMsg = new Map();
   let closed = false;
@@ -15029,7 +15244,7 @@ function parseInvoiceMetadata_(lines){
   if (usDate) { const [m, d, y] = usDate.split("/"); receivedAt = `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`; }
   else {
     const orderedMatch = flat.map(t => t.match(/^([A-Za-z]{3}, [A-Za-z]{3} \d{1,2}, \d{4})\b/)).find(Boolean);
-    if (orderedMatch) { const d = new Date(orderedMatch[1]); if (!isNaN(d)) receivedAt = d.toISOString().slice(0, 10); }
+    if (orderedMatch) { const d = new Date(orderedMatch[1]); if (!isNaN(d)) receivedAt = localDay_(d); }
   }
   // S&S invoices still print "S&S Activewear"; the vendor is named "S&S", the company's current name.
   let vendor = flat.some(t => /S&S Activewear/i.test(t)) ? "S&S"
@@ -15203,7 +15418,7 @@ function showPdfImportPreview_(body, parsed, { file, blanks, close, onDone, show
   const matched = matchBlanksForImport_(parsed.groups, blanks);
   const blankName = (b) => b.name || [b.brand, b.color].filter(Boolean).join(" ") || "Blank #" + b.id;
   const inp = "font-size:13px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;";
-  const fmt = (n) => "$" + Number(n).toFixed(2);
+  const fmt = adminMoney_;
   const rowsHtml = matched.map((g, i) => {
     const sizesText = g.lines.map(l => `${escapeHtml(l.size || "—")} × ${l.qty} (${fmt(l.lineTotal)})`).join(", ");
     return `<tr data-pi-row="${i}">
@@ -15228,7 +15443,7 @@ function showPdfImportPreview_(body, parsed, { file, blanks, close, onDone, show
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
       <label style="font-size:12px;font-weight:600;">Vendor<br>${vendorPickerHtml_("piVendor", parsed.vendor, { blanks: true, style: inp + "width:150px;" })}</label>
       <label style="font-size:12px;font-weight:600;">Invoice / order #<br><input id="piRef" value="${escapeHtml(parsed.vendorRef)}" style="${inp}width:130px;"></label>
-      <label style="font-size:12px;font-weight:600;">Date<br><input id="piDate" type="date" value="${escapeHtml(parsed.receivedAt || new Date().toISOString().slice(0, 10))}" style="${inp}"></label>
+      <label style="font-size:12px;font-weight:600;">Date<br><input id="piDate" type="date" value="${escapeHtml(parsed.receivedAt || localToday_())}" style="${inp}"></label>
       <label style="font-size:12px;font-weight:600;">Shipping &amp; other costs<br>$<input id="piShip" type="number" min="0" step="0.01" value="${parsed.extraCost ? Number(parsed.extraCost).toFixed(2) : ""}" style="${inp}width:90px;"></label>
       ${parsed.source === "ai" || !readWithAi ? "" : `<button type="button" class="admin-btn admin-btn-sm" id="piAi" style="align-self:flex-end;background:#fff;color:#232323;border:1px solid #999;" title="Not what the PDF says? Have a Workers AI model read it instead">Read with AI</button>`}
     </div>
@@ -15327,7 +15542,7 @@ async function showReceiveOrderModal(onDone, prefill){
     <div style="display:flex;gap:8px;justify-content:flex-end;">
       <button type="button" id="roCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button>
       <button type="button" id="roSave" class="admin-btn" style="padding:6px 14px;">Record order</button>
-    </div>`, 680);
+    </div>`, 680, { guard: true });
   ov.querySelector("#roCancel").onclick = close;
   const save = ov.querySelector("#roSave");
   const totalEl = ov.querySelector("#roTotal");
@@ -15671,7 +15886,7 @@ function restockOrdersHtml_(list){
   return `<div id="btoRestockOrders" style="margin-top:22px;"><h2 style="margin:0 0 4px;font-size:16px;">Restock ordered by hand</h2>
     <div style="font-size:12px;color:#666;margin-bottom:6px;">Recorded from “Get me to free shipping”, so these blanks aren't suggested again while they're on their way. A line stops counting once that blank is received (or after 45 days).</div>
     <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;"><tbody>
-    ${list.map(o => `<tr><td style="${td}white-space:nowrap;">${escapeHtml(String(o.createdAt || "").slice(0, 10))}</td><td style="${td}">${escapeHtml(o.vendor)}${o.reference ? ` · <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;">${escapeHtml(o.reference)}</span>` : ""}</td>
+    ${list.map(o => `<tr><td style="${td}white-space:nowrap;">${escapeHtml(adminDay_(o.createdAt))}</td><td style="${td}">${escapeHtml(o.vendor)}${o.reference ? ` · <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;">${escapeHtml(o.reference)}</span>` : ""}</td>
       <td style="${td}">${o.lines.length} line${o.lines.length === 1 ? "" : "s"}, ${o.pieces} piece${o.pieces === 1 ? "" : "s"}${o.waiting ? "" : ` <span style="color:#166534;">· received</span>`}</td>
       <td style="${td}text-align:right;"><button type="button" class="admin-btn bto-rso-cancel admin-btn-danger" data-need="inventory.blankorder:full" data-id="${o.id}" style="padding:2px 8px;font-size:12px;">Cancel</button></td></tr>`).join("")}
     </tbody></table></div></div>`;
@@ -15911,14 +16126,15 @@ async function showFreeShipping_(vendor, baseRows, ctx = {}){
   };
   $("fsCsv").onclick = () => {
     if (!on().length) { showToast("Nothing ticked.", true); return; }
-    downloadCsv_(`order-${vendorFileName_(vendor)}-${new Date().toISOString().slice(0, 10)}.csv`, on().map(l => ({ style: l.sku, description: l.blank, color: l.color, size: l.size, qty: l.qty, unit: Number(l.price.toFixed(2)), total: Number((l.price * l.qty).toFixed(2)) })),
+    downloadCsv_(`order-${vendorFileName_(vendor)}-${localToday_()}.csv`, on().map(l => ({ style: l.sku, description: l.blank, color: l.color, size: l.size, qty: l.qty, unit: Number(l.price.toFixed(2)), total: Number((l.price * l.qty).toFixed(2)) })),
       [["style", "Style"], ["description", "Description"], ["color", "Color"], ["size", "Size"], ["qty", "Qty"], ["unit", "Unit"], ["total", "Total"]]);
   };
   // Restock in this order: the added / suggested lines whole, and a base line's own restock part.
   const restockLines = () => on().map(l => ({ blankId: l.blankId, color: l.color, size: l.size, qty: l.kind === "base" ? Math.max(0, Number((l.r && l.r.restock) || 0)) : l.qty })).filter(l => l.qty > 0);
   $("fsMark").onclick = async () => {
     if (!on().length) { showToast("Nothing ticked.", true); return; }
-    const ref = prompt(`Record this ${vendor} order as placed (on ${vendor}'s site, by phone or email)?\n\nThe restock in it won't be suggested again until it's received. Order lines on Blanks to Order still need “Mark blank ordered” on the order.\n\nVendor order # (optional):`, "");
+    const ref = await askText_(`Record this ${vendor} order as placed (on ${vendor}'s site, by phone or email)?\n\nThe restock in it won't be suggested again until it's received. Order lines on Blanks to Order still need “Mark blank ordered” on the order.`,
+      { label: "Vendor order # (optional)", value: "", confirmLabel: "Record as placed" });
     if (ref === null) return;
     try {
       await makeNewBlanks();
@@ -15990,7 +16206,7 @@ async function loadBrandApprovalBox_(orgId, product, brands){
       <b>Supplier logo approval</b> <span style="color:#666;">(${brands.map(escapeHtml).join(", ")})</span>
       ${approvals.length ? `<ul style="margin:6px 0 0 18px;">${approvals.map(a => `<li class="ba-item"><span style="${a.revokedAt ? "color:#888;text-decoration:line-through;" : ""}">${escapeHtml(a.brand)} — approved ${escapeHtml(a.approvedOn)}${a.maxQty != null ? `, up to ${a.maxQty}` : ", any quantity"}${a.note ? ` · ${escapeHtml(a.note)}` : ""}</span>
         <button type="button" class="admin-btn ba-view" data-key="${escapeHtml(a.fileKey)}" style="padding:1px 7px;font-size:11px;">📎 View</button>
-        ${a.revokedAt ? `<span style="color:#888;"> revoked ${escapeHtml(String(a.revokedAt).slice(0, 10))}${a.revokeNote ? ": " + escapeHtml(a.revokeNote) : ""}</span>` : canEdit ? `<button type="button" class="admin-btn ba-revoke admin-btn-danger" data-need="catalog.brandApprovals:full" data-id="${a.id}" style="padding:1px 7px;font-size:11px;">Revoke…</button>` : ""}</li>`).join("")}</ul>`
+        ${a.revokedAt ? `<span style="color:#888;"> revoked ${escapeHtml(adminDay_(a.revokedAt))}${a.revokeNote ? ": " + escapeHtml(a.revokeNote) : ""}</span>` : canEdit ? `<button type="button" class="admin-btn ba-revoke admin-btn-danger" data-need="catalog.brandApprovals:full" data-id="${a.id}" style="padding:1px 7px;font-size:11px;">Revoke…</button>` : ""}</li>`).join("")}</ul>`
         : `<div style="color:#b03a2e;margin-top:4px;">None on file — a large order of this product can't be ordered from the supplier here until it's added (verify the logo with the supplier).</div>`}
       ${canEdit ? `<button type="button" class="admin-btn" id="baAdd" style="margin-top:6px;padding:3px 10px;font-size:12px;">+ Add approval…</button>` : ""}</div>`;
     box.querySelectorAll(".ba-view").forEach(b => b.onclick = () => expViewReceipt_(b.dataset.key));
@@ -16009,7 +16225,7 @@ async function loadBrandApprovalBox_(orgId, product, brands){
 async function showBrandApprovalModal_(orgId, product, brands, onDone){
   let others = [];
   try { others = ((await hoopApi_({ action: "listProducts", org: orgId })).products || []).filter(p => p.productId !== product.productId); } catch (e) {}
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday_();
   const { ov, close } = inventoryModal_("Add the supplier's logo approval", `<div style="font-size:13px;">
     <label style="display:block;margin-bottom:8px;">Brand <select id="baBrand">${brands.map(b => `<option>${escapeHtml(b)}</option>`).join("")}</select></label>
     <label style="display:block;margin-bottom:8px;">The supplier's approval (required — a PDF of the email, or a picture of it)<br><input type="file" id="baFile" accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif"></label>
@@ -16036,7 +16252,7 @@ async function showBrandApprovalModal_(orgId, product, brands, onDone){
     } catch (e) { btn.disabled = false; err.textContent = e.message || "Couldn't save it"; }
   };
 }
-// Tools → Brand rules: the default large quantity, the logo concerns, and the restricted brands (admins edit).
+// Catalog → Brand rules: the default large quantity, the logo concerns, and the restricted brands (admins edit).
 // Price impact (Brand rules): every product size, in every shop, linked to a blank with a MAP — its price now (Before)
 // and MAP + the price rule (After). The rules can be tweaked in the window (the After column follows) and saved from it,
 // and the ticked After prices applied to the products (applyRulePrices; drafts until each shop is published).
@@ -16254,7 +16470,7 @@ function supplierNotOrderableHtml_(block, ctx){
   const names = (rows) => [...new Set(rows.map(r => r.blank + (r.sku ? " (" + r.sku + ")" : "")))];
   const list = (rows) => { const n = names(rows); return n.slice(0, 4).map(escapeHtml).join(", ") + (n.length > 4 ? ` and ${n.length - 4} more` : ""); };
   const parts = [];
-  if (unlinked.length) parts.push(`${unlinked.length} line${unlinked.length === 1 ? "" : "s"} — ${list(unlinked)} — ${unlinked.length === 1 ? "isn't" : "aren't"} linked to a vendor connection (Tools → Vendor integrations → Link blanks…).`);
+  if (unlinked.length) parts.push(`${unlinked.length} line${unlinked.length === 1 ? "" : "s"} — ${list(unlinked)} — ${unlinked.length === 1 ? "isn't" : "aren't"} linked to a vendor connection (Settings → Vendor integrations → Link blanks…).`);
   if (noOrders.length) parts.push(`${noOrders.length} line${noOrders.length === 1 ? "" : "s"} — ${list(noOrders)} — ${noOrders.length === 1 ? "is" : "are"} linked to a connection that can't place orders.`);
   return `<div class="bto-not-orderable" style="font-size:12px;color:#92400e;margin-bottom:4px;">Can't be ordered from here, order by hand: ${parts.join(" ")}</div>`;
 }
@@ -16266,10 +16482,10 @@ function supplierOrdersHtml_(orders){
     const pieces = (o.lines || []).reduce((n, l) => n + (Number(l.qty) || 0), 0);
     const ships = (o.shipments || []).map(s => `${escapeHtml(s.carrier)} ${escapeHtml(s.trackingNumber)}${s.deliveredAt ? " · delivered" : s.status ? " · " + escapeHtml(s.status.toLowerCase().replace(/_/g, " ")) : ""}`).join("<br>");
     const color = o.cancelledAt ? "#555" : o.status === "placed" ? "#166534" : o.status === "sending" ? "#555" : "#b03a2e";
-    const statusText = o.cancelledAt ? `Cancelled at the supplier ${String(o.cancelledAt).slice(0, 10)}` : (SUPPLIER_ORDER_STATUS_[o.status] || o.status);
+    const statusText = o.cancelledAt ? `Cancelled at the supplier ${adminDay_(o.cancelledAt)}` : (SUPPLIER_ORDER_STATUS_[o.status] || o.status);
     return `<tr class="so-row" data-id="${o.id}">
       <td style="${td}font-family:'IBM Plex Mono',monospace;font-size:12px;">${escapeHtml(o.poNumber)}${o.environment === "test" ? ` <span style="font-size:10px;background:#fef3c7;color:#92400e;padding:1px 5px;border-radius:3px;">TEST</span>` : ""}</td>
-      <td style="${td}">${escapeHtml(String(o.placedAt || o.createdAt || "").slice(0, 10))}</td>
+      <td style="${td}">${escapeHtml(adminDay_(o.placedAt || o.createdAt))}</td>
       <td style="${td}">${escapeHtml(o.vendor)}</td>
       <td style="${td}">${(o.lines || []).length} line${(o.lines || []).length === 1 ? "" : "s"} · ${pieces} pc</td>
       <td style="${td}text-align:right;">$${Number(o.total || 0).toFixed(2)}</td>
@@ -16564,7 +16780,7 @@ async function renderInventoryReport(app){
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:980px;margin:8px auto 60px;">
       <form id="cogsFilters" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:var(--surface-alt,#f6f6f6);padding:14px 16px;border-radius:8px;margin-bottom:20px;">
         <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">From</label><input type="date" id="cogsFrom" value="${y}-01-01" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
-        <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">To</label><input type="date" id="cogsTo" value="${new Date().toISOString().slice(0, 10)}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
+        <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">To</label><input type="date" id="cogsTo" value="${localToday_()}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
         <div style="display:flex;gap:6px;"><button type="submit" class="admin-pass-submit" style="padding:6px 18px;font-size:13px;">Generate</button>
           ${[y, y-1].map(yy => `<button type="button" class="cogsQuick" data-from="${yy}-01-01" data-to="${yy}-12-31" style="padding:6px 10px;font-size:12px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:var(--surface,#fff);">${yy}</button>`).join("")}</div>
       </form>
@@ -16575,7 +16791,7 @@ async function renderInventoryReport(app){
       </div>
       <div id="cogsResults"></div>
     </div>`;
-  const fmt = (n) => "$" + Number(n).toFixed(2);
+  const fmt = adminMoney_;
   const monthLabel = (m) => new Date(m + "-15T12:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
   const card = (k, v, sub) => `<div style="border:1px solid #ddd;border-radius:6px;padding:10px 14px;min-width:170px;background:#fff;"><div style="font-size:12px;color:#555;">${k}</div><div style="font-size:20px;font-weight:700;color:#111;">${v}</div>${sub ? `<div style="font-size:11px;color:#777;">${sub}</div>` : ""}</div>`;
   const th = "padding:8px 10px;text-align:right;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
@@ -16728,13 +16944,7 @@ async function renderMoney(app){
   await mnLoad_();
 }
 
-async function mnApi_(body){
-  if (!adminKey) adminKey = (await adminLogin()) || "";
-  const r = await fetch("/api/orders", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(Object.assign({ key: adminKey }, body)) });
-  const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
-  if (!r.ok || d.status === "error") throw new Error((d && d.message) || "Request failed");
-  return d;
-}
+async function mnApi_(body){ return adminApi_(body); }
 
 async function mnLoad_(){
   const el = document.getElementById("mnBody");
@@ -17566,8 +17776,8 @@ function rcRefundForm_(el, { cats, line, onChange }){
   // Purchases from the last two years, best guesses first (shared words with the bank's description, same amount).
   (async () => {
     try{
-      const to = new Date().toISOString().slice(0, 10), fromD = new Date(); fromD.setFullYear(fromD.getFullYear() - 2);
-      const d = await mnApi_({ action: "listExpenses", dateFrom: fromD.toISOString().slice(0, 10), dateTo: to });
+      const to = localToday_(), fromD = new Date(); fromD.setFullYear(fromD.getFullYear() - 2);
+      const d = await mnApi_({ action: "listExpenses", dateFrom: localDay_(fromD), dateTo: to });
       const refunded = {};
       (d.expenses || []).filter(x => x.isRefund && x.refundOfId).forEach(x => { refunded[x.refundOfId] = (refunded[x.refundOfId] || 0) + Math.abs(x.amount); });
       const words = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(w => w.length >= 4);
@@ -17655,7 +17865,7 @@ function rcDepositForm_(el, { cats, line, accountId, onChange }){
     const shown = pays;
     listEl.innerHTML = shown.length ? `<div id="vmEmpty" style="display:none;padding:10px;color:#888;"></div><table style="border-collapse:collapse;width:100%;">${shown.map(p => `<tr data-method="${escapeHtml(p.method)}" style="border-bottom:1px solid #f0f0f0;">
         <td style="padding:4px 8px;width:24px;"><input type="checkbox" data-pid="${p.id}"></td>
-        <td style="padding:4px 4px;white-space:nowrap;">${escapeHtml(String(p.receivedAt).slice(0, 10))}</td>
+        <td style="padding:4px 4px;white-space:nowrap;">${escapeHtml(adminDay_(p.receivedAt))}</td>
         <td style="padding:4px 8px;"><span style="font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;background:#e0e7ff;color:#3730a3;">${escapeHtml((METHOD[p.method] || p.method).toUpperCase())}</span> ${escapeHtml(p.orderId)}
           <div style="font-size:11px;color:#777;">${escapeHtml(p.customerName)} · in ${escapeHtml(p.accountName)}${p.direct ? " (matched whole)" : ""}</div></td>
         <td style="padding:4px 8px;font-size:12px;color:#555;">${p.cashedOut > 0 ? `${$(Math.round(p.remaining * 100))} left of ${$(Math.round(p.amount * 100))}<div style="font-size:11px;color:#777;">${$(Math.round(p.cashedOut * 100))} already deposited</div>` : `${$(Math.round(p.amount * 100))}`}</td>
@@ -17831,14 +18041,7 @@ function expOnRepeatChange_(){
   else if (date.value > expToday_()) date.value = expToday_();
 }
 
-async function expApi_(body){
-  if (!adminKey) adminKey = (await adminLogin()) || "";
-  const r = await fetch("/api/orders", { method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(Object.assign({ key: adminKey }, body)) });
-  const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
-  if (!r.ok || d.status === "error") throw new Error((d && d.message) || "Request failed");
-  return d;
-}
+async function expApi_(body){ return adminApi_(body); }
 const expMoney_ = (n) => (Number(n) < 0 ? "−$" : "$") + Math.abs(Number(n || 0)).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const expToday_ = () => new Date().toLocaleDateString("en-CA");
 const EXP_TYPE_LABEL = { depreciation: "Depreciation", deductible: "Deductible", none: "None" };
@@ -18153,7 +18356,7 @@ function expEditRecurring_(id){
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px;">
       <button type="button" class="admin-btn" id="erCancel">Cancel</button>
       <button type="button" class="admin-pass-submit" id="erSave" style="padding:7px 18px;font-size:13px;">Save changes</button>
-    </div>`, 720);
+    </div>`, 720, { guard: true });
   ov.querySelector("#erCancel").onclick = close;
   ov.querySelector("#erSave").onclick = async () => {
     const err = ov.querySelector("#erErr"); err.textContent = "";
@@ -18603,7 +18806,7 @@ async function renderCommunications(app, opts){
   // Blanks (garments) ordered from a vendor, not yet received — with each shipment's live carrier
   // status (migrations/0039), mirroring the customer "shipped — waiting on delivery" section.
   const dayShort = (s) => { const m = String(s || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${+m[2]}/${+m[3]}/${m[1]}` : ""; };
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = localToday_();
   const blanksHtml = awaitingBlanks.length ? `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
       <thead><tr><th style="${th}">Order</th><th style="${th}">Shop</th><th style="${th}">Customer</th><th style="${th}">Vendor / ordered</th><th style="${th}">Items</th><th style="${th}">Shipments / status</th></tr></thead>
       <tbody>${awaitingBlanks.map(o => {
@@ -18733,7 +18936,7 @@ async function checkBlankShipmentsNow(btn){
     const r = await fetch("/api/orders", { method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ action: "checkBlankShipments", key: adminKey }) });
     const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
-    if(!r.ok || d.status === "error"){ if(d && d.message === "Unauthorized") clearAdminAuth(); showToast((d && d.message) || "Blank shipment check failed.", true); btn.disabled = false; btn.textContent = "Check now"; return; }
+    if(!r.ok || d.status === "error"){ adminSessionEnded_(d); showToast((d && d.message) || "Blank shipment check failed.", true); btn.disabled = false; btn.textContent = "Check now"; return; }
     const n = (d.delivered || []).length;
     showToast(n ? `${n} blank shipment${n === 1 ? "" : "s"} delivered — queued as a reminder to mark received.`
                 : `Checked ${d.checked} shipment${d.checked === 1 ? "" : "s"} — none delivered yet.` + (d.errors ? ` (${d.errors} lookup${d.errors === 1 ? "" : "s"} failed)` : ""), false);
@@ -18882,8 +19085,8 @@ async function renderAuditLog(app) {
   document.title = adminTitle_("Audit log");
 
   // Seed filter state from URL params if any, otherwise defaults
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const thirtyAgoStr = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const todayStr = localToday_();
+  const thirtyAgoStr = localToday_(-30);
 
   app.innerHTML = `
     <div class="org-hero admin-hero" style="--org-accent:var(--accent);">
@@ -18955,8 +19158,9 @@ async function renderAuditLog(app) {
       orgId:    document.getElementById("afOrg")?.value    || undefined,
       orderId:  document.getElementById("afOrder")?.value  || undefined,
       filter:   document.getElementById("afAction")?.value || undefined,
-      dateFrom: document.getElementById("afFrom")?.value   || undefined,
-      dateTo:   document.getElementById("afTo")?.value     || undefined,
+      // The boxes are local days; the log is stored in UTC — so each is sent as that local day's first / last moment.
+      dateFrom: localDayStartIso_(document.getElementById("afFrom")?.value) || undefined,
+      dateTo:   localDayEndIso_(document.getElementById("afTo")?.value)     || undefined,
       limit:    Number(document.getElementById("afLimit")?.value) || 20,
     };
     // Strip undefined keys
@@ -19031,7 +19235,7 @@ function auditActionColor(action) {
 }
 
 // ---- Product categories (migrations/0056) ---------------------------------------------------
-// The managed list a product's Category and a blank's Product type are picked from (Tools → Product
+// The managed list a product's Category and a blank's Product type are picked from (Catalog → Product
 // categories). `key` is the stored value; `name` what the admin sees; `plural` the storefront's
 // heading; `packAs` which package-size limit it counts against. Until the list has been read from
 // the server, the built-in one (the three original categories) stands in.
@@ -19186,7 +19390,7 @@ async function repairBlankThumbs_(onDone){
 // the same (a 16×16 greyscale copy compared by correlation, for the same picture saved at another size) per color. The window
 // lists each blank with a duplicate, its photos by color with a tick box under each: the first of each set is kept
 // (unticked), the copies start ticked. Remove duplicates takes the ticked ones off (removeBlankImages, by position);
-// the files stay in storage until Tools → Orphaned images clears them.
+// the files stay in storage until Settings → Orphaned images clears them.
 async function photoFingerprint_(url){
   const out = { sha: "", look: null };
   let blob = null;
@@ -19327,7 +19531,7 @@ async function findDuplicateBlankPhotos_(onDone){
       }
     } catch (e) { ov.querySelector("#dpErr").textContent = e.message; removeBtn.disabled = false; count(); return; }
     close();
-    showToast(`Removed ${removed} duplicate photo${removed === 1 ? "" : "s"}. Their files are still in storage — Tools → Orphaned images clears them.`);
+    showToast(`Removed ${removed} duplicate photo${removed === 1 ? "" : "s"}. Their files are still in storage — Settings → Orphaned images clears them.`);
     if (onDone) onDone();
   };
 }
@@ -19348,7 +19552,7 @@ async function refreshBlanks_(app) {
 async function loadBlanksPanel(app) {
   const panel = document.getElementById("blanksPanel");
   if (!panel) return;
-  await loadProductCategories_();   // the groups and their headings (Tools → Product categories)
+  await loadProductCategories_();   // the groups and their headings (Catalog → Product categories)
   try {
     const res = await fetch("/api/orders", {
       method: "POST", headers: {"Content-Type": "application/json"},
@@ -19758,7 +19962,7 @@ async function showBlankModal(blank, onSave) {
         <div style="display:flex;gap:8px;justify-content:flex-end;">
           <button id="blkCancel" style="padding:8px 16px;background:#e5e7eb;color:#1a1a1a;border:none;border-radius:5px;cursor:pointer;font-size:14px;">Cancel</button>
           <button id="blkSaveBtn" style="padding:8px 16px;background:#1d4ed8;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:14px;font-weight:600;">${isNew ? "Create blank" : "Save changes"}</button>
-        </div>`, 620, { onClose: () => resolve(null) });
+        </div>`, 620, { guard: true, onClose: () => resolve(null) });
     drawColors();
 
     ov.querySelector("#blkAddColor").onclick = () => { syncFromDom(); colors.push({ color: "", images: [], sizes: [] }); drawColors(); };
@@ -19949,14 +20153,7 @@ function parseHatchChart_(bytes){
   return { rows, errors };
 }
 
-async function threadApi_(body){
-  if (!adminKey) adminKey = (await adminLogin()) || "";
-  if (!adminKey) throw new Error("Sign-in required");
-  const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, key: adminKey }) });
-  const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
-  if (!r.ok || d.status === "error") throw new Error((d && d.message) || "Request failed");
-  return d;
-}
+async function threadApi_(body){ return adminApi_(body); }
 
 async function renderThreadCatalog(app){
   adminSetHash("threads");
@@ -20059,7 +20256,7 @@ function showThreadFormModal_(thread, onDone){
     <div style="display:flex;gap:8px;justify-content:flex-end;">
       <button type="button" id="thfCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button>
       <button type="button" id="thfSave" class="admin-btn">${isNew ? "Create thread" : "Save changes"}</button>
-    </div>`, 480);
+    </div>`, 480, { guard: true });
   ov.querySelector("#thfCancel").onclick = close;
   ov.querySelector("#thfSave").onclick = async () => {
     const err = ov.querySelector("#thfErr");
@@ -20307,6 +20504,7 @@ function showThreadInventoryModal_(thread, spoolSizes, onDone){
       catch (e) { err.textContent = e.message; }
     };
     body.querySelectorAll(".tiDel").forEach(btn => btn.onclick = async () => {
+      if (!(await askConfirm_("Remove this spool size from the thread's inventory?\n\nIts count on hand goes with it."))) return;
       try { const r = await threadApi_({ action: "deleteThreadInventory", id: Number(btn.dataset.id) }); refreshItems(r.threads); render(); onDone && onDone(); }
       catch (e) { showToast(e.message, true); }
     });
@@ -21520,14 +21718,7 @@ function pickOrderImportFile_(orgId){
 // ---- Hoop catalog (migrations/0022) — global, shared across every shop ---------
 // A design's required hoop and a machine's supported hoops both point at this
 // one shared list instead of each typing hoop names/sizes freehand.
-async function hoopApi_(body){
-  if (!adminKey) adminKey = (await adminLogin()) || "";
-  if (!adminKey) throw new Error("Sign-in required");
-  const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, key: adminKey }) });
-  const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
-  if (!r.ok || d.status === "error") throw new Error((d && d.message) || "Request failed");
-  return d;
-}
+async function hoopApi_(body){ return adminApi_(body); }
 
 async function renderHoopCatalog(app){
   adminSetHash("hoops");
@@ -21587,7 +21778,7 @@ function showHoopFormModal_(hoop, onDone){
     <div style="display:flex;gap:8px;justify-content:flex-end;">
       <button type="button" id="hpfCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button>
       <button type="button" id="hpfSave" class="admin-btn">${isNew ? "Create hoop" : "Save changes"}</button>
-    </div>`, 420);
+    </div>`, 420, { guard: true });
   ov.querySelector("#hpfCancel").onclick = close;
   ov.querySelector("#hpfSave").onclick = async () => {
     const err = ov.querySelector("#hpfErr");
@@ -21668,7 +21859,7 @@ function showAbortReasonFormModal_(reason, onDone){
 }
 
 // ---- Locations — global garment-location lookup (migrations/0041) -------------------------------
-// Admin → Tools → Locations. A shared list (Front/Back/Left Chest/Right Chest, editable) that
+// Admin → Catalog → Decoration locations. A shared list (Front/Back/Left Chest/Right Chest, editable) that
 // configurable products' design options and blank color-image tags reference. Delete is refused by
 // the server while anything still references the location.
 let _locationsCache = [];
@@ -21754,7 +21945,7 @@ function showLocationFormModal_(location, onDone){
   };
 }
 
-// ---- Tools → Product categories (migrations/0056) ---------------------------------------------
+// ---- Catalog → Product categories (migrations/0056) ---------------------------------------------
 // The list a product's Category and a blank's Product type are picked from, and the storefront's
 // sections (in this order, under each one's heading). Saving re-reads the list everywhere it's cached.
 const PACK_AS_LABELS_ = { shirt: "Shirts", sweatshirt: "Sweatshirts", cap: "Caps", other: "Nothing — quote shipping by hand" };
@@ -22026,7 +22217,7 @@ function showCategoryFormModal_(category, onSaved){
       <label style="font-size:12px;font-weight:600;">When choosing a box, it counts as<br><select id="pcfPack" style="${inp}">${Object.keys(PACK_AS_LABELS_).map(k => `<option value="${k}"${f.packAs === k ? " selected" : ""}>${escapeHtml(PACK_AS_LABELS_[k])}</option>`).join("")}</select></label>
       <label style="font-size:12px;font-weight:600;">Order on the shop's page<br><input id="pcfSort" type="number" step="1" value="${f.sortOrder === "" ? "" : Number(f.sortOrder) || 0}" placeholder="${isNew ? "last" : ""}" style="${inp}"></label>
     </div>
-    <div style="font-size:12px;color:#666;margin-bottom:8px;">"Counts as" decides which limit in Tools &rarr; Package sizes it uses up (Max shirts, Max sweatshirts, Max caps). With "Nothing", an order containing it gets no automatic shipping rate — the customer is told a quote will follow.</div>
+    <div style="font-size:12px;color:#666;margin-bottom:8px;">"Counts as" decides which limit in Catalog &rarr; Package sizes it uses up (Max shirts, Max sweatshirts, Max caps). With "Nothing", an order containing it gets no automatic shipping rate — the customer is told a quote will follow.</div>
     <div id="pcfErr" style="color:#b03a2e;font-size:13px;min-height:18px;"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;">
       <button type="button" id="pcfCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button>
@@ -22056,7 +22247,7 @@ async function renderRunReport(app){
         <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">From</label>
           <input type="date" id="rrFrom" value="${y}-01-01" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
         <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">To</label>
-          <input type="date" id="rrTo" value="${new Date().toISOString().slice(0, 10)}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
+          <input type="date" id="rrTo" value="${localToday_()}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
         <button type="submit" class="admin-pass-submit" style="padding:6px 18px;font-size:13px;">Generate</button>
       </form>
       <div id="rrResults"></div>
@@ -22405,7 +22596,7 @@ async function renderTransfers(app){
     const { ov, close } = inventoryModal_("History — " + escapeHtml(t.name), `<div style="max-height:60vh;overflow:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;">
       <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:4px 6px;">Date</th><th style="padding:4px 6px;">Kind</th><th style="padding:4px 6px;">Qty</th><th style="padding:4px 6px;">Unit</th><th style="padding:4px 6px;">Sheet / order</th><th style="padding:4px 6px;"></th></tr></thead>
       <tbody>${moves.map(m => `<tr style="border-bottom:1px solid #eee;${m.voidedAt ? "text-decoration:line-through;color:#999;" : ""}"${m.voidedAt && m.voidReason ? ` title="${escapeHtml("Voided: " + m.voidReason)}"` : ""}>
-        <td style="padding:4px 6px;">${escapeHtml((m.occurredAt || "").slice(0, 10))}</td><td style="padding:4px 6px;">${escapeHtml(m.kind)}</td>
+        <td style="padding:4px 6px;">${escapeHtml(adminDay_(m.occurredAt))}</td><td style="padding:4px 6px;">${escapeHtml(m.kind)}</td>
         <td style="padding:4px 6px;">${m.qtyDelta}</td><td style="padding:4px 6px;">$${Number(m.unitCost).toFixed(2)}</td>
         <td style="padding:4px 6px;">${where(m)}</td>
         <td style="padding:4px 6px;white-space:nowrap;">${!m.voidedAt && (["purchase", "adjust", "writeoff"].includes(m.kind) || (m.kind === "consume" && m.itemId && m.reason !== "finished")) ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.transfers:full" onclick="transferVoid_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && m.kind === "consume" ? `<span style="font-size:11px;color:#999;" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : ""))}">voided</span>` : ""}${m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) && m.voidReason !== "Sheet edited" ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : "") + " — click to make this entry count again")}" data-need="inventory.transfers:edit" onclick="transferRestore_(this.dataset.mid)">Undo void</button>` : ""}${m.voidedAt && m.voidReason === "Sheet edited" ? `<span style="font-size:11px;color:#999;">replaced by an edit</span>` : ""}</td>
@@ -22441,7 +22632,7 @@ function showTransferFormModal_(t, onDone){
     <label style="font-size:12px;font-weight:600;display:block;margin-top:8px;">Description<br><input id="tfDesc" value="${escapeHtml(f.description || "")}" style="${inp}"></label>
     <label style="font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;margin-top:8px;"><input type="checkbox" id="tfVis" ${f.visible !== false ? "checked" : ""}> Visible</label>
     <div id="tfErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:6px;"></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" id="tfCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button><button type="button" id="tfSave" class="admin-btn">${isNew ? "Create" : "Save"}</button></div>`, 440);
+    <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" id="tfCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button><button type="button" id="tfSave" class="admin-btn">${isNew ? "Create" : "Save"}</button></div>`, 440, { guard: true });
   ov.querySelector("#tfCancel").onclick = close;
   ov.querySelector("#tfSave").onclick = async () => {
     const payload = { id: f.id, name: ov.querySelector("#tfName").value.trim(), description: ov.querySelector("#tfDesc").value.trim(), visible: ov.querySelector("#tfVis").checked };
@@ -22532,7 +22723,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
       : `<div style="color:#b03a2e;">Add a transfer item first (+ New transfer).</div>`}
     <div id="trErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:6px;"></div>
     <div id="trPreview"></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" id="trCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button><button type="button" id="trSave" class="admin-btn">${ed ? "Preview changes" : "Receive"}</button></div>`, 760);
+    <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" id="trCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button><button type="button" id="trSave" class="admin-btn">${ed ? "Preview changes" : "Receive"}</button></div>`, 760, { guard: true });
   loadAccounts_().then(d => { const cc = d.accounts.find(a => a.type === "credit_card" && a.active);
     const sel = ed ? (ed.paidPersonally ? "personal" : (ed.accountId || "")) : ((cc && cc.id) || "");
     ov.querySelector("#trPaid").innerHTML = accountOptions_(d.accounts, sel, { personal: true, blank: ed ? !ed.accountId && !ed.paidPersonally : !cc }); })
@@ -22778,7 +22969,7 @@ async function renderRunTransfer(app){
       <tbody>${rows.map(r => `<tr style="border-bottom:1px solid #eee;"><td style="padding:5px 6px;">${escapeHtml(r.graphic)}</td><td style="padding:5px 6px;">${escapeHtml(r.ink)}</td><td style="padding:5px 6px;">${escapeHtml(r.size)}</td><td style="padding:5px 6px;font-weight:600;">${r.count}</td></tr>`).join("")}</tbody></table></div>`
       : gangNote + `<div style="color:#888;">Nothing to print — every queued transfer is in stock or already in hand.</div>`, 520);
     const csvBtn = document.getElementById("rtGangCsv");
-    if (csvBtn) csvBtn.onclick = () => downloadCsv_(`odd-gang-sheet-${new Date().toISOString().slice(0, 10)}.csv`, rows,
+    if (csvBtn) csvBtn.onclick = () => downloadCsv_(`odd-gang-sheet-${localToday_()}.csv`, rows,
       [["graphic", "Graphic"], ["ink", "Ink"], ["size", "Size"], ["count", "Count"]]);
   };
   await load();
@@ -23127,7 +23318,7 @@ async function loadDesignDetail_(designId){
       ${versions.length ? `<table class="stack-mobile dsg-versions" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;">
         <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:5px 6px;">Uploaded</th><th style="padding:5px 6px;">Design file</th><th style="padding:5px 6px;">Machine file</th><th style="padding:5px 6px;">Threads</th><th style="padding:5px 6px;">Stitches</th><th style="padding:5px 6px;">Notes</th></tr></thead>
         <tbody>${versions.map((v, i) => `<tr style="border-bottom:1px solid #eee;${i === 0 ? "font-weight:600;" : ""}">
-          <td data-label="Uploaded" style="padding:5px 6px;">${escapeHtml((v.uploadedAt || "").slice(0, 10))}${i === 0 ? ' <span style="font-weight:400;color:#2c6b2f;">(current)</span>' : ""}</td>
+          <td data-label="Uploaded" style="padding:5px 6px;">${escapeHtml(adminDay_(v.uploadedAt))}${i === 0 ? ' <span style="font-weight:400;color:#2c6b2f;">(current)</span>' : ""}</td>
           <td data-label="Design file" style="padding:5px 6px;">${v.designFileKey ? `${escapeHtml(v.designFileName)} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-key="${escapeHtml(v.designFileKey)}" onclick="downloadDesignFile_(this.dataset.key)">Download</button>` : '<span style="color:#888;font-weight:400;">—</span>'}</td>
           <td data-label="Machine file" style="padding:5px 6px;">${escapeHtml(v.machineFileName)} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-key="${escapeHtml(v.machineFileKey)}" onclick="downloadDesignFile_(this.dataset.key)">Download</button></td>
           <td data-label="Threads" style="padding:5px 6px;">${v.threadColors.length ? v.threadColors.map(tc => threadSwatch_(tc.threadId)).join("") + v.threadColors.length + " needle" + (v.threadColors.length === 1 ? "" : "s") : "—"} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-need="catalog.designs:edit" onclick="editVersionColors_(${v.id})">Edit colors</button></td>
@@ -23151,7 +23342,7 @@ async function loadDesignDetail_(designId){
         await ensureStitchReaders_(cur.machineFileExt);
         const parsed = parseStitchFile_(await fetchDesignFileBytes_(cur.machineFileKey), cur.machineFileExt);
         renderDstPreview_(canvas, parsed, dstColorForNeedle_(rows, threadsById, parsed.fileColors));
-        if (info) info.textContent = `${parsed.needleStops} needle stop${parsed.needleStops === 1 ? "" : "s"} · ${parsed.stitchCount.toLocaleString()} stitches · current version (${(cur.uploadedAt || "").slice(0, 10)})`;
+        if (info) info.textContent = `${parsed.needleStops} needle stop${parsed.needleStops === 1 ? "" : "s"} · ${parsed.stitchCount.toLocaleString()} stitches · current version (${adminDay_(cur.uploadedAt)})`;
         // Once the file is read, the thread map lists every stop it has — an empty one too — with what the file
         // names for it and its flags (the closest-thread buttons belong to Edit colors, not here).
         const map = document.getElementById("dsgThreadMap");
@@ -23174,10 +23365,12 @@ async function loadDesignDetail_(designId){
 // Types a version's stitch count by hand — for a machine-file format this page can't read (migrations/0071). Every run
 // of the design adds it to its machine's stitch counter.
 async function setVersionStitches_(btn){
-  const v = prompt("Stitches in this version's machine file:", btn.dataset.cur || "");
+  const v = await askText_("Set the stitch count?\n\nEvery run of this design adds it to its machine's stitch counter.", {
+    label: "Stitches in this version's machine file", value: btn.dataset.cur || "", inputMode: "numeric", confirmLabel: "Save",
+    validate: (x) => { const d = String(x).replace(/[,\s]/g, ""); return /^\d*$/.test(d) ? { value: d } : { error: "Enter a whole number of stitches, like 12500." }; } });
   if (v == null) return;
   try {
-    await designApi_({ action: "setDesignVersionStitches", versionId: Number(btn.dataset.vid), stitchCount: v.replace(/[,\s]/g, "") });
+    await designApi_({ action: "setDesignVersionStitches", versionId: Number(btn.dataset.vid), stitchCount: v });
     showToast("Stitch count saved."); loadDesignDetail_(Number(btn.dataset.did));
   } catch (e) { showToast(e.message, true); }
 }
@@ -23207,7 +23400,7 @@ function showDesignFormModal_(orgId, design, hoops, onDone){
   const own = new Set(requiredHoopIds_(f)), pers = new Set((f.personalizationHoopIds || []).map(Number));
   const hoopBoxes = (cls, chosen) => hoops.length ? hoops.map(h => `<label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:2px 0;">
       <input type="checkbox" class="${cls}" value="${h.id}" ${chosen.has(h.id) ? "checked" : ""}> ${escapeHtml(h.name)}${h.isCapFrame ? " (cap frame)" : ""}</label>`).join("")
-    : `<div style="color:#888;font-size:12px;">No hoops yet — add them under Tools → Hoops.</div>`;
+    : `<div style="color:#888;font-size:12px;">No hoops yet — add them under Production → Hoops.</div>`;
   const { ov, close } = inventoryModal_(isNew ? "New design" : "Edit design", `
     <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Name<br><input id="dsgfName" value="${escapeHtml(f.name)}" style="${inp}"></label>
     <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Stabilizer<br><input id="dsgfStabilizer" value="${escapeHtml(f.stabilizer)}" placeholder="e.g. medium-weight cutaway" style="${inp}"></label>
@@ -23226,7 +23419,7 @@ function showDesignFormModal_(orgId, design, hoops, onDone){
     <div style="display:flex;gap:8px;justify-content:flex-end;">
       <button type="button" id="dsgfCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button>
       <button type="button" id="dsgfSave" class="admin-btn">${isNew ? "Create design" : "Save changes"}</button>
-    </div>`, 440);
+    </div>`, 440, { guard: true });
   ov.querySelector("#dsgfCancel").onclick = close;
   ov.querySelector("#dsgfSave").onclick = async () => {
     const err = ov.querySelector("#dsgfErr");
@@ -23541,7 +23734,7 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
       const v = ((d && d.versions) || [])[0];
       if (v && (v.threadColors || []).some(tc => tc && tc.threadId)) {
         prevVersion = v; copyBtn.disabled = false;
-        copyBtn.title = `Copies the thread map of the version uploaded ${(v.uploadedAt || "").slice(0, 10)}, stop by stop`;
+        copyBtn.title = `Copies the thread map of the version uploaded ${adminDay_(v.uploadedAt)}, stop by stop`;
       } else copyBtn.title = v ? "The previous version has no thread colors to copy" : "This design has no earlier version yet";
     }).catch(() => { copyBtn.title = "Couldn't load the previous version"; });
   }
@@ -23589,7 +23782,7 @@ function showEditVersionColorsModal_(version, onDone){
   let rows = threadRowsByNeedle_(version.threadColors);
   if (!rows.length) rows = [{ threadId: "" }];
   let parsed = null;
-  const { ov, close } = inventoryModal_("Edit thread colors — " + escapeHtml((version.uploadedAt || "").slice(0, 10)), `
+  const { ov, close } = inventoryModal_("Edit thread colors — " + escapeHtml(adminDay_(version.uploadedAt)), `
     <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;">
       <div style="flex:0 0 340px;max-width:100%;">
         <canvas id="dsgcCanvas" width="340" height="340" style="width:340px;max-width:100%;height:340px;background:#faf9f6;border:1px solid #ddd;border-radius:6px;display:block;"></canvas>
@@ -23689,12 +23882,14 @@ async function showOrderItemFilesModal_(itemId, itemLabel, onCountChange, slots)
         </span>
         <span style="flex:none;">
           <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-key="${escapeHtml(f.fileKey)}">Download</button>
-          ${f.uploadedBy === "customer" ? "" : `<button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;" data-need="orders.details:full" data-fid="${f.id}">Delete</button>`}
+          ${f.uploadedBy === "customer" ? "" : `<button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:14px;" data-need="orders.details:full" data-fid="${f.id}" data-fname="${escapeHtml(f.fileName)}">Delete</button>`}
         </span>
       </div>`).join("") : `<div style="color:#888;">No files uploaded yet.</div>`;
     fillDesignThumbs_(body);
     body.querySelectorAll("button[data-key]").forEach(btn => btn.onclick = () => downloadDesignFile_(btn.dataset.key));
     body.querySelectorAll("button[data-fid]").forEach(btn => btn.onclick = async () => {
+      // Like every other file and record delete: asked first (the file is gone for good; Download sits right beside it).
+      if (!(await askConfirm_(`Delete this file from the order line?\n\n${btn.dataset.fname || "The file"} is removed for good — download it first if you might need it.`))) return;
       try { await designApi_({ action: "deleteOrderItemFile", id: Number(btn.dataset.fid) }); await load(); }
       catch (e) { showToast(e.message, true); }
     });
@@ -23713,7 +23908,7 @@ async function showOrderItemFilesModal_(itemId, itemLabel, onCountChange, slots)
       const curFor = (loc) => list.find(d => (d.location || "") === loc) || (loc && customSlots === 1 ? list.find(d => !d.location) : null) || null;
       el.innerHTML = slots.map((slot, i) => { const cur = curFor(slot.location);
         return `<div style="${i ? "margin-top:10px;" : ""}">${slots.length > 1 || slot.label ? `<div style="font-weight:600;color:#111;margin-bottom:2px;">${escapeHtml(slot.label || "Typed-in name")}</div>` : ""}
-          ${cur ? `<div style="color:#111;">${escapeHtml(cur.machineFileName)} · ${cur.threadColors.length} thread${cur.threadColors.length === 1 ? "" : "s"} · uploaded ${escapeHtml(String(cur.uploadedAt || "").slice(0, 10))}
+          ${cur ? `<div style="color:#111;">${escapeHtml(cur.machineFileName)} · ${cur.threadColors.length} thread${cur.threadColors.length === 1 ? "" : "s"} · uploaded ${escapeHtml(adminDay_(cur.uploadedAt))}
             <button type="button" class="admin-btn oifDesignDl" data-key="${escapeHtml(cur.machineFileKey)}" style="padding:2px 8px;font-size:11px;margin-left:6px;">Download</button></div>`
           : `<div style="color:#b45309;">None yet — upload it before the design is sent for approval.</div>`}
           <button type="button" class="admin-btn oifDesignUp" data-need="orders.details:edit|catalog.designs:edit" data-i="${i}" style="margin-top:6px;">${cur ? "Upload a new version…" : "Upload order design…"}</button></div>`; }).join("");
@@ -23755,14 +23950,7 @@ async function showOrderItemFilesModal_(itemId, itemLabel, onCountChange, slots)
 // currentHoopId and machine_needles are its LIVE state: what's physically mounted/threaded on
 // it right now. The mounted hoop follows what Run Order last ran on it; the needles are kept
 // up to date by hand here.
-async function machineApi_(body){
-  if (!adminKey) adminKey = (await adminLogin()) || "";
-  if (!adminKey) throw new Error("Sign-in required");
-  const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, key: adminKey }) });
-  const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
-  if (!r.ok || d.status === "error") throw new Error((d && d.message) || "Request failed");
-  return d;
-}
+async function machineApi_(body){ return adminApi_(body); }
 
 async function renderMachines(app){
   adminSetHash("machines");
@@ -24007,7 +24195,7 @@ function showMaintenanceTasksModal_(m, machines, onDone){
 
 // Records maintenance done — a listed task (it starts counting again) or, with no task, other work typed in.
 function showMaintenanceDoneModal_(m, task, onDone){
-  const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const today = localToday_();
   const { ov, close } = inventoryModal_(task ? `Done — ${escapeHtml(task.name)}` : `Log work — ${escapeHtml(m.name)}`, `
     ${task ? `<div style="font-size:13px;color:#555;margin-bottom:8px;">${escapeHtml(m.name)} · ${escapeHtml(maintProgressText_(task))} since it was last done. Saving starts the count again.</div>`
       : `<label style="display:block;font-size:13px;font-weight:600;">What was done <input type="text" id="mdName" placeholder="e.g. Replaced the rotary hook" style="display:block;width:100%;box-sizing:border-box;padding:6px;margin-top:4px;"></label>`}
@@ -24027,13 +24215,13 @@ function showMaintenanceDoneModal_(m, task, onDone){
   };
 }
 
-// Tools → Machine maintenance (#maintenance, #maintenance/<machineId>): what's due across the machines, then the
+// Production → Machine maintenance (#maintenance, #maintenance/<machineId>): what's due across the machines, then the
 // maintenance log and the counter changes (readings, runs — summed per machine per day), newest first.
 async function renderMaintenance(app, machineIdStr){
   adminSetHash("maintenance" + (machineIdStr ? "/" + machineIdStr : ""));
   document.title = adminTitle_("Machine maintenance");
-  const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-  const from = new Date(Date.now() - 90 * 86400000 - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const today = localToday_();
+  const from = localToday_(-90);
   app.innerHTML = `
     ${adminPageHead_("Machine maintenance")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:960px;margin:8px auto 60px;">
@@ -24138,7 +24326,7 @@ function showMachineFormModal_(machine, hoops, onDone, prefill){
     <div style="display:flex;gap:8px;justify-content:flex-end;">
       <button type="button" id="mchfCancel" style="padding:6px 14px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button>
       <button type="button" id="mchfSave" class="admin-btn">${isNew ? "Create machine" : "Save changes"}</button>
-    </div>`, 460);
+    </div>`, 460, { guard: true });
   ov.querySelector("#mchfCancel").onclick = close;
   ov.querySelector("#mchfSave").onclick = async () => {
     const err = ov.querySelector("#mchfErr");
@@ -24478,7 +24666,7 @@ async function downloadMachineFiles_(machine, storedNames, report){
     if (n) f.name = f.name.replace(/\.DSB$/, ` (${n + 1}).DSB`);
   }
   if (got.length === 1) saveDownload_(new Blob([got[0].bytes], { type: "application/octet-stream" }), got[0].name);
-  else if (got.length > 1) saveDownload_(makeZip_(got), `${machine.name.replace(/[^\w .-]/g, "_")} files ${new Date().toISOString().slice(0, 10)}.zip`);
+  else if (got.length > 1) saveDownload_(makeZip_(got), `${machine.name.replace(/[^\w .-]/g, "_")} files ${localToday_()}.zip`);
   const msg = got.length
     ? `Downloaded ${got.length} file${got.length === 1 ? "" : "s"}${got.length > 1 ? " (one .zip)" : ""}.`
     : "Nothing was downloaded.";
@@ -24564,14 +24752,7 @@ function proposeMachine_(design, machines, hoopsById, excludeIds){
   return { eligible, proposedId: best ? best.id : null };
 }
 
-async function runOrderApi_(body){
-  if (!adminKey) adminKey = (await adminLogin()) || "";
-  if (!adminKey) throw new Error("Sign-in required");
-  const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, key: adminKey }) });
-  const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
-  if (!r.ok || d.status === "error") throw new Error((d && d.message) || "Request failed");
-  return d;
-}
+async function runOrderApi_(body){ return adminApi_(body); }
 
 // Run Order with nothing ready to run: the orders whose blanks are ordered but not received yet, so
 // the operator can see what's coming (and chase a late delivery). Each links to its shop's orders.
@@ -24632,7 +24813,7 @@ function showShipmentHistoryModal_(id){
     </tr>`; }).join("")
     : `<tr><td colspan="2" style="padding:12px;color:#888;">No carrier scans recorded yet. Status is checked in the daily roll-up, or use “Check now” on the Communications page.</td></tr>`;
   const u = carrierTrackUrl_(s.carrier, s.trackingNumber);
-  const ov = document.createElement("div"); ov.className = "admin-pass-overlay"; ov.style.zIndex = "1003";
+  const ov = document.createElement("div"); ov.className = "admin-pass-overlay";
   ov.innerHTML = `<div class="admin-pass-box" style="max-width:560px;width:calc(100% - 32px);max-height:85vh;overflow-y:auto;">
       <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;">
         <div><div style="font-weight:700;font-size:16px;">Tracking history</div>
@@ -24646,7 +24827,8 @@ function showShipmentHistoryModal_(id){
   const finish = () => { if(ov.parentNode) document.body.removeChild(ov); };
   ov.querySelector(".shClose").onclick = finish;
   ov.querySelector(".shClose2").onclick = finish;
-  document.addEventListener("keydown", function esc(e){ if(e.key === "Escape"){ finish(); document.removeEventListener("keydown", esc); } }, { once: true });
+  // Escape closes it while it is the window on top (and only then); Tab stays inside it.
+  dialogize_(ov, { onEscape: () => { finish(); } });
 }
 // Orders → stage "Use blanks from stock" and the run pages' "Use from stock": the order's blanks come off
 // the shelf instead of from a supplier — marked ordered and received now; they come out of stock when
@@ -24671,7 +24853,7 @@ async function paidUnrunUseStock_(btn){
 function waitingOnBlanksHtml_(orders){
   if (!orders || !orders.length) return "";
   const day = (s) => { const m = String(s || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${+m[2]}/${+m[3]}/${m[1]}` : ""; };
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday_();
   const orgName = (id) => ((adminOrgs || []).find(o => o.orgId === id) || {}).name || id;
   const sizeOf = (it) => itemHasSize_(it) ? " · " + it.size : "";
   const cards = orders.map(o => {
@@ -25345,7 +25527,7 @@ async function drawMachineFilesBody_(){
       versions = r.versions || [];
       const withMachine = versions.filter(v => v.machineFileKey);
       versionSel.innerHTML = withMachine.length
-        ? withMachine.map((v, i) => `<option value="${v.id}">${escapeHtml((v.uploadedAt || "").slice(0, 10))} — ${escapeHtml(v.machineFileName)}${i === 0 ? " (current)" : ""}</option>`).join("")
+        ? withMachine.map((v, i) => `<option value="${v.id}">${escapeHtml(adminDay_(v.uploadedAt))} — ${escapeHtml(v.machineFileName)}${i === 0 ? " (current)" : ""}</option>`).join("")
         : `<option value="">No version has a machine file</option>`;
       versionSel.disabled = !withMachine.length;
       sendBtn.disabled = !withMachine.length;
@@ -25488,7 +25670,7 @@ async function editOrder(orgId, orderId){
     });
     const data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(data && data.message === "Unauthorized") clearAdminAuth();
+      adminSessionEnded_(data);
       showToast("Edit failed: " + ((data && data.message) || "unknown error"), true);
       return;
     }
@@ -25813,7 +25995,6 @@ function showEditOrderModal(order, products, ctx){
 
     const overlay = document.createElement("div");
     overlay.className = "admin-pass-overlay";
-    overlay.style.zIndex = "1003";
     overlay.innerHTML = `
       <div class="admin-pass-box" style="max-width:720px;width:95vw;max-height:85vh;overflow-y:auto;">
         <div style="font-weight:700;font-size:16px;margin-bottom:4px;">Edit items — ${escapeHtml(order.orderId)}</div>
@@ -26038,9 +26219,8 @@ function showEditOrderModal(order, products, ctx){
     });
     overlay.querySelector("#editOrderSave").addEventListener("click", () => finish(false));
     overlay.querySelector("#editOrderPay").addEventListener("click", () => finish(true));
-    document.addEventListener("keydown", function esc(e){
-      if(e.key === "Escape"){ document.body.removeChild(overlay); resolve(null); document.removeEventListener("keydown", esc); }
-    }, {once: true});
+    // Escape closes it while it is the window on top (and only then); Tab stays inside it.
+    dialogize_(overlay, { onEscape: () => { document.body.removeChild(overlay); resolve(null); } });
   });
 }
 

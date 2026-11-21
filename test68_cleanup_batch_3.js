@@ -102,7 +102,7 @@ const tick = () => new Promise(r => setTimeout(r, 3));
     console.log("no direct-to-another-backend switch or in-browser storage in the pages:",
       !/const PROXY_MODE|GOOGLE_SCRIPT_URL\s*=|window\.storage/.test(html) && !/PROXY_MODE|GOOGLE_SCRIPT_URL|window\.storage/.test(adminJs));
     console.log("orders still submit to /api/orders, and the admin still loads them from there:",
-      /async function saveOrder\(order\)\{\n  const turnstileToken[\s\S]*?fetch\("\/api\/orders"/.test(html) && /async function fetchOrders\(orgId\)\{[\s\S]*?fetch\("\/api\/orders"/.test(adminJs));
+      /async function saveOrder\(order\)\{\n  const turnstileToken[\s\S]*?fetch\("\/api\/orders"/.test(html) && /async function fetchOrders\(orgId(, retried)?\)\{[\s\S]*?fetch\("\/api\/orders"/.test(adminJs));
   } catch (e) {
     console.log("test68 crashed:", false);
     console.error(e);

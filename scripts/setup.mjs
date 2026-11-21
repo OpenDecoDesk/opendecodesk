@@ -635,10 +635,10 @@ export async function setup({ io, run, files, configPath = "wrangler.toml", flag
   // ---- 8. Business profile ---------------------------------------------------------------------
   step(8, "Business profile");
   const sql = businessSql({ name: businessName, ownerEmail });
-  if (!sql) say("   Nothing typed — left as it is. (Fill it in later under Tools → Global settings → Business profile.)");
+  if (!sql) say("   Nothing typed — left as it is. (Fill it in later under Settings → Global settings → Business profile.)");
   else {
     r = run(commands.d1Execute(configPath, sql));
-    if (!r.skipped && !r.ok) fail("Could not save the business name / owner email.", r, "Everything before this is done. You can also type them in the admin later (Tools → Global settings → Business profile).");
+    if (!r.skipped && !r.ok) fail("Could not save the business name / owner email.", r, "Everything before this is done. You can also type them in the admin later (Settings → Global settings → Business profile).");
     done.push("business name / owner email " + (dry ? "would be saved" : "saved"));
   }
 
@@ -668,9 +668,9 @@ export async function setup({ io, run, files, configPath = "wrangler.toml", flag
   for (const d of done) say("  ✓ " + d);
   say(""); say("What to do next:");
   const next = [];
-  next.push(`Open https://${adminHost} and sign in with the admin passphrase${shown.PROXY_ADMIN_PASSPHRASE ? (dry ? " (a real run shows it once at the end)" : " shown below") : " you already have"}. (A new hostname can take a few minutes to get its certificate.) Leave the email empty the first time: it then asks for your name, your email and a password of your own, and from then on you sign in with those. Add other people under Security → Users.`);
-  next.push("Turn on two-step sign-in: Security → Security (2FA).");
-  next.push("Tools → Global settings: check the Setup status list at the top, then fill in the Business profile, Region and Sales tax.");
+  next.push(`Open https://${adminHost} and sign in with the admin passphrase${shown.PROXY_ADMIN_PASSPHRASE ? (dry ? " (a real run shows it once at the end)" : " shown below") : " you already have"}. (A new hostname can take a few minutes to get its certificate.) Leave the email empty the first time: it then asks for your name, your email and a password of your own, and from then on you sign in with those. Add other people under Settings → Users.`);
+  next.push("Turn on two-step sign-in: Settings → Security (2FA).");
+  next.push("Settings → Global settings: check the Setup status list at the top, then fill in the Business profile, Region and Sales tax.");
   if (noStorage) next.push(`File storage is off, so product pictures, receipts and design files can't be uploaded. To add it: switch on R2 (${R2_WHERE}), then run setup again. It makes the three buckets and turns uploads on.`);
   else if (!vars.R2_PUBLIC_BASE && !cfg.vars.R2_PUBLIC_BASE) next.push(`Make the images bucket "${cfg.buckets.IMAGES}" public (Cloudflare dashboard → Storage & databases → R2 → the bucket → Settings: a custom domain such as images.${rootDomain}, or its r2.dev address), then run setup again and give that address. Until then product pictures can't be uploaded. Keep the receipts and designs buckets private.`);
   const sender = String(vars.EMAIL_FROM || cfg.vars.EMAIL_FROM || ""), sendDomain = sender.includes("@") ? sender.slice(sender.lastIndexOf("@") + 1).replace(/[>\s].*$/, "") : rootDomain;

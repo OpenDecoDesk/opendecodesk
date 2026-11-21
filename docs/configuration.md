@@ -7,10 +7,10 @@ OpenDecoDesk is configured in three places:
 2. **Secrets** — keys and passwords, stored encrypted by Cloudflare. They are never written in a
    file in this repository.
 3. **Global settings** — everything about the business itself, edited in the admin under
-   **Tools → Global settings** and stored in the database.
+   **Settings → Global settings** and stored in the database.
 
 `npm run setup` fills in 1 and 2 for you (see [setup.md](setup.md)). The admin's
-**Tools → Global settings → Setup status** list shows which of these are set on a running install —
+**Settings → Global settings → Setup status** list shows which of these are set on a running install —
 only whether each is set, never its value.
 
 Everything below was read from the code (`env.NAME` in `functions/` and `src/`); the file named in
@@ -94,7 +94,7 @@ Set by `npm run setup`, or one at a time with `npx wrangler secret put NAME`.
 | `CF_EMAIL_API_TOKEN` | one email provider | A Cloudflare API token with only the Email Sending permission (used with `CF_ACCOUNT_ID`). |
 | `TURNSTILE_SECRET_KEY` | with Turnstile | The secret half of the Turnstile widget. **Set it together with `TURNSTILE_SITE_KEY`** — the secret alone refuses every order. |
 | `CF_API_TOKEN` | with automatic hostnames | A Cloudflare API token that can attach hostnames to this Worker. It can change your account, so give it the narrowest permissions that work (see [shops-and-domains.md](shops-and-domains.md)). |
-| `VENDOR_CREDENTIALS_KEY` | with vendor connections, or email through your own mailbox | Encrypts the logins saved under Tools → Vendor integrations (PromoStandards), and the mailbox password saved under Global settings → Email (docs/email.md). Any long random string, set once: changing it makes the saved logins and password unreadable (enter them again). Without it vendors can't be connected and your own mailbox can't be used; everything else works. |
+| `VENDOR_CREDENTIALS_KEY` | with vendor connections, or email through your own mailbox | Encrypts the logins saved under Settings → Vendor integrations (PromoStandards), and the mailbox password saved under Global settings → Email (docs/email.md). Any long random string, set once: changing it makes the saved logins and password unreadable (enter them again). Without it vendors can't be connected and your own mailbox can't be used; everything else works. |
 | `AGENT_TOKEN` | with the send-agent relay | Shared with the send-agent program; at least 32 characters, or the relay stays off. |
 
 Older names still read as fallbacks: `QUOTE_SIGNING_SECRET` and `LINK_SIGNING_SECRET` (used when
@@ -114,7 +114,7 @@ when that install's owner becomes its first user, and each user's own secret is 
 
 ## Global settings (in the admin, stored in the database)
 
-**Tools → Global settings.** All of these take effect without a deploy.
+**Settings → Global settings.** All of these take effect without a deploy.
 
 | Section | What it holds | Default | Notes |
 |---|---|---|---|
@@ -128,7 +128,7 @@ when that install's owner becomes its first user, and each user's own secret is 
 | **Ship-from address** | The sender's name, address, phone and email for shipping quotes and labels. | blank | In the Shipping feature's panel. Every field is required while Shipping is on: nothing saves until it's complete. |
 | **Machine Files** | Whether delete buttons are shown on the Machine Files page. | off | In the Production feature's panel. |
 
-Settings kept elsewhere in the admin: **package sizes** (Tools → Package sizes), the **accounts
+Settings kept elsewhere in the admin: **package sizes** (Catalog → Package sizes), the **accounts
 that postage is paid from and Stripe pays out to** (Finance → Accounts & money), and each shop's
 own settings (Manage catalog → Edit) — delivery options, payment methods, order deadline,
 tax exemption.

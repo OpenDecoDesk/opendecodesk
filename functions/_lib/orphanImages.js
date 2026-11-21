@@ -1,4 +1,4 @@
-// Tools → Orphaned images (2026-10): files in the public image store (the IMAGES R2 bucket) that nothing in the
+// Settings → Orphaned images (2026-10): files in the public image store (the IMAGES R2 bucket) that nothing in the
 // database points to any more — a photo replaced or removed from a product / blank / org / graphic, a duplicate
 // taken off a blank, an upload whose form was never saved, a design-verification image whose record is gone.
 // "Points to" is checked generically: every text column of every table is searched for image addresses, so a new

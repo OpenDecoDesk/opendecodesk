@@ -210,7 +210,7 @@ async function restore() {
 async function resetSignInMenu() {
   const ok = await dialog.showMessageBox(win, { type: "warning", buttons: ["Reset sign-in", "Cancel"], defaultId: 1, cancelId: 1,
     message: "Locked out?",
-    detail: "This clears every password and two-step sign-in. You then set up your account again (name, email, password); other users get a new password from you under Security → Users.\n\nNo orders, books or settings are changed." });
+    detail: "This clears every password and two-step sign-in. You then set up your account again (name, email, password); other users get a new password from you under Settings → Users.\n\nNo orders, books or settings are changed." });
   if (ok.response !== 0) return;
   await whileStopped(async () => {
     resetSignIn(dataDir, crypt());

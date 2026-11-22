@@ -139,7 +139,7 @@ import { verifyQuote, canonicalItems } from "../_lib/quoteToken.js";
 import { selectBox } from "../_lib/boxSize.js";
 import { verifyTurnstile } from "../_lib/turnstile.js";
 // Payments, refunds and money integrity (kept apart from the long list above).
-import { expireCheckoutSession } from "../_lib/db.js";
+import { expireCheckoutSession, listCacheVersions_, readCachedList_, refreshCachedLists_ } from "../_lib/db.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9\-]{1,64}$/;
 // The most orders one shop's list returns (getOrders), and the All shops page in all (getOrdersAllShops): the newest that many.
@@ -441,7 +441,25 @@ async function mailboxToSave_(env, m) {
   return { mailbox: { via: "mailbox", ...settings, password: stored }, passwordChanged: !!typed };
 }
 
+// Versioned list cache, write-through (db.js readCachedList_, migrations/0102): after an admin action that can
+// change something (any edit or full level in ACTION_PERM), every cached list whose version moved is rebuilt and
+// stored again, in waitUntil once the answer has gone, so the next screen to ask finds the new copy ready. Read
+// actions and the storefront's skip it and pay nothing. Tests that load this file without db.js skip it too.
+const listCacheOn_ = () => typeof listCacheVersions_ === "function" && typeof refreshCachedLists_ === "function";
+const writesLists_ = (action) => { const p = ACTION_PERM_[action]; return Array.isArray(p) && p.some((e) => Array.isArray(e) && e[1] !== "read"); };
 export async function onRequestPost(context) {
+  const { request, env } = context;
+  let action = null;
+  if (listCacheOn_() && env && env.DB && request && typeof request.clone === "function") {
+    try { const b = await request.clone().json(); action = b && typeof b.action === "string" ? b.action : null; } catch (e) { /* not JSON: the handler answers */ }
+  }
+  const before = action && writesLists_(action) ? await listCacheVersions_(env.DB).catch(() => null) : null;
+  const res = await handleOrdersPost_(context);
+  if (before && res && res.ok && typeof context.waitUntil === "function") context.waitUntil(refreshCachedLists_(env.DB, before).catch((e) => console.error("list cache refresh failed:", e)));
+  return res;
+}
+
+async function handleOrdersPost_(context) {
   const { request, env } = context;
   // Every audit row records WHO (adminActor: Access email / session label /
   // "passphrase") and from WHERE (client IP).
@@ -497,6 +515,29 @@ export async function onRequestPost(context) {
     const cut = ({ purchasePrice, vendorPrice, vendorPriceAt, ...s }) => s;
     return { ...b, sizes: (b.sizes || []).map(cut), colors: (b.colors || []).map(c => ({ ...c, sizes: (c.sizes || []).map(cut) })) };
   });
+  // Versioned list cache (db.js readCachedList_): { version, data } for blanks, threads, hoops, locations,
+  // machines or orgs. data is shared between requests: shape it into new objects, never change it.
+  const cachedList_ = async (name) => {
+    if (typeof readCachedList_ === "function") return readCachedList_(env.DB, name);
+    const build = { blanks: () => getAllBlanks(env.DB), threads: () => listThreads(env.DB), hoops: () => listHoops(env.DB),
+      locations: () => listLocations(env.DB), machines: () => listMachines(env.DB), orgs: () => getAllOrgs(env.DB) }[name];
+    return { version: null, data: await build() };
+  };
+  // A list read: the page sends the version it holds (body.cacheVersion). Still current → only
+  // { version, unchanged: true } (plus `extra`); otherwise the list under `key`, shaped, and its version.
+  const listAnswer_ = async (name, key, shape = (d) => d, extra = {}, got = null) => {
+    const { version, data } = await (got || cachedList_(name));
+    if (version !== null && body.cacheVersion != null && Number(body.cacheVersion) === version) return jsonResponse({ status: "ok", ...extra, version, unchanged: true });
+    return jsonResponse({ status: "ok", ...extra, [key]: shape(data), ...(version === null ? {} : { version }) });
+  };
+  // A change's answer that carries the list again: the cached copy (built fresh, the change having moved its
+  // version) and cacheVersions: { <name>: n }, so the page can keep it as its own copy.
+  const withList_ = async (payload, name, key, shape = (d) => d) => {
+    const { version, data } = await cachedList_(name);
+    payload[key] = shape(data);
+    if (version !== null) payload.cacheVersions = { [name]: version };
+    return jsonResponse(payload);
+  };
   // Routine actions: written in context.waitUntil() so the runtime keeps the
   // D1 write alive after the response is sent. A failure is logged loudly,
   // never silently swallowed.
@@ -750,8 +791,7 @@ export async function onRequestPost(context) {
   if (body.action === "listOrgs") {
     const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_PERM_[body.action]);
     if (denied) return denied;
-    const orgs = await getAllOrgs(env.DB);
-    return jsonResponse({ status: "ok", orgs: orgs.map((o) => ({ orgId: o.orgId, name: o.name, subdomain: o.subdomain || "" })) });
+    return listAnswer_("orgs", "orgs", (orgs) => orgs.map((o) => ({ orgId: o.orgId, name: o.name, subdomain: o.subdomain || "" })));
   }
 
   // ---- getOrders -------------------------------------------------------------
@@ -3095,10 +3135,7 @@ export async function onRequestPost(context) {
     // One product as the admin has it (for the audit's before / after): only that product is read, not the shop's catalog.
     const productOf_ = async (orgId, productId) => (await getProductsByIds(env.DB, orgId, [productId])).find(p => p.productId === productId) || null;
 
-    if (body.action === "listOrgsAdmin") {
-      const orgs = await getAllOrgs(env.DB);
-      return jsonResponse({ status: "ok", orgs });
-    }
+    if (body.action === "listOrgsAdmin") return listAnswer_("orgs", "orgs");
 
     if (body.action === "createOrg") {
       if (!body.orgId || !body.subdomain || !body.name) {
@@ -4170,13 +4207,11 @@ export async function onRequestPost(context) {
     if (body.action === "getBlanks") {
       // stockOnly (the Orders page's blank breakdown): each blank's sizes and how many are on hand, nothing else —
       // not the reservations, price checks, product uses and low-stock scans the Blanks screen needs.
-      if (body.stockOnly) {
-        const blanks = await getAllBlanks(env.DB);
-        return jsonResponse({ status: "ok", blanks: blanks.map(b => ({ id: b.id, sizes: (b.sizes || []).map(z => ({ size: z.size, quantity: z.quantity })) })) });
-      }
-      // The five reads don't depend on each other, so they run together.
-      const [blanks, reserved, needsPriceCheck, products, lowStock] = await Promise.all([
-        getAllBlanks(env.DB),
+      if (body.stockOnly) return listAnswer_("blanks", "blanks", (blanks) => blanks.map(b => ({ id: b.id, sizes: (b.sizes || []).map(z => ({ size: z.size, quantity: z.quantity })) })));
+      // The blanks themselves come from the list cache (only "unchanged" when the page's copy is current); the
+      // rest depends on orders and the date, so it is worked out every time. These four run together.
+      const got = cachedList_("blanks");
+      const [reserved, needsPriceCheck, products, lowStock] = await Promise.all([
         // Pieces set aside per "<blankId>|<color>|<size>" — still on the shelf, promised to orders.
         getBlankReservations(env.DB).catch((e) => { console.error("getBlankReservations failed:", e); return {}; }),
         // Blanks for sale on visible products whose vendor prices haven't been checked in 30 days (migrations/0062).
@@ -4186,7 +4221,7 @@ export async function onRequestPost(context) {
         // Sizes below their reorder point (migrations/0074).
         getBlankLowStock(env.DB).catch((e) => { console.error("getBlankLowStock failed:", e); return {}; }),
       ]);
-      return jsonResponse({ status: "ok", blanks: blankCostsFor_(blanks), reserved, needsPriceCheck, products, lowStock });
+      return listAnswer_("blanks", "blanks", blankCostsFor_, { reserved, needsPriceCheck, products, lowStock }, got);
     }
 
     // A blank's needle type must be one from Threads → Needle settings ("" / null = not set).
@@ -4267,7 +4302,7 @@ export async function onRequestPost(context) {
         detail: { ...r, source: note } });
       // Prices / new blanks just changed: the products using them that are now below a pricing target.
       const belowTarget = belowFor_(await pricingBelowTargetForBlanks(env.DB, results.map(r => r.blankId)).catch(() => []));
-      return jsonResponse({ status: "ok", results, blanks: await getAllBlanks(env.DB), belowTarget });
+      return withList_({ status: "ok", results, belowTarget }, "blanks", "blanks", blankCostsFor_);
     }
 
     // ---- Vendor connections through PromoStandards (migrations/0065) ----
@@ -4683,7 +4718,7 @@ export async function onRequestPost(context) {
       if (!id || !(await env.DB.prepare("SELECT id FROM blanks WHERE id=?").bind(id).first())) return jsonResponse({ status: "error", message: "Blank not found" }, 404);
       const changed = await recomputeBlankAverageCosts(env.DB, id);
       if (changed.length) audit({ orgId: null, orderId: null, action: "inventory.average_cost_recomputed", detail: { blankId: id, changes: changed } });
-      return jsonResponse({ status: "ok", changed, blanks: await getAllBlanks(env.DB) });
+      return withList_({ status: "ok", changed }, "blanks", "blanks", blankCostsFor_);
     }
 
     if (body.action === "deleteBlank") {
@@ -4694,7 +4729,7 @@ export async function onRequestPost(context) {
     }
 
     if (body.action === "listThreads") {
-      return jsonResponse({ status: "ok", threads: await listThreads(env.DB) });
+      return listAnswer_("threads", "threads");
     }
 
     if (body.action === "saveThread") {
@@ -4745,14 +4780,14 @@ export async function onRequestPost(context) {
       const it = body.item || {};
       if (!it.id && !Number(it.threadId)) return jsonResponse({ status: "error", message: "threadId required" }, 400);
       const id = await saveThreadInventory(env.DB, it);
-      return jsonResponse({ status: "ok", id, threads: await listThreads(env.DB) });
+      return withList_({ status: "ok", id }, "threads", "threads");
     }
 
     if (body.action === "deleteThreadInventory") {
       const id = Number(body.id);
       if (!id) return jsonResponse({ status: "error", message: "id required" }, 400);
       await deleteThreadInventory(env.DB, id);
-      return jsonResponse({ status: "ok", threads: await listThreads(env.DB) });
+      return withList_({ status: "ok" }, "threads", "threads");
     }
 
     // Needle settings (migrations/0044): needle size by thread weight + the needle types a blank
@@ -4772,7 +4807,7 @@ export async function onRequestPost(context) {
     }
 
     if (body.action === "listHoops") {
-      return jsonResponse({ status: "ok", hoops: await listHoops(env.DB) });
+      return listAnswer_("hoops", "hoops");
     }
 
     if (body.action === "saveHoop") {
@@ -4792,7 +4827,7 @@ export async function onRequestPost(context) {
 
     // ---- Locations — global garment-location lookup (migrations/0041) ----
     if (body.action === "listLocations") {
-      return jsonResponse({ status: "ok", locations: await listLocations(env.DB) });
+      return listAnswer_("locations", "locations");
     }
     if (body.action === "saveLocation") {
       const l = body.location || {};
@@ -5325,7 +5360,7 @@ export async function onRequestPost(context) {
     }
 
     if (body.action === "listMachines") {
-      return jsonResponse({ status: "ok", machines: await listMachines(env.DB) });
+      return listAnswer_("machines", "machines");
     }
 
     if (body.action === "getMachine") {
@@ -5372,7 +5407,7 @@ export async function onRequestPost(context) {
     // on the fresh IPs immediately.
     if (body.action === "recordMachineDiscovery") {
       await recordMachineDiscovery(env.DB, body.discovered || []);
-      return jsonResponse({ status: "ok", machines: await listMachines(env.DB) });
+      return withList_({ status: "ok" }, "machines", "machines");
     }
 
     if (body.action === "getProductionQueue") {
@@ -5494,7 +5529,7 @@ export async function onRequestPost(context) {
       try { r = await setMachineStitchCount(env.DB, machineId, { reading: body.reading, runHours: body.runHours, note: body.note, actor: adminActor(request) }); }
       catch (e) { return jsonResponse({ status: "error", message: e.message }, /not found/i.test(e.message) ? 404 : 400); }
       audit({ orgId: null, orderId: null, action: "machine.counter_reading", detail: { machineId, from: r.before, to: { stitchCount: r.stitchCount, runSeconds: r.runSeconds }, note: body.note || "" } });
-      return jsonResponse({ status: "ok", ...r, machines: await listMachines(env.DB) });
+      return withList_({ status: "ok", ...r }, "machines", "machines");
     }
     if (body.action === "listMaintenanceTasks") {
       return jsonResponse({ status: "ok", tasks: await listMaintenanceTasks(env.DB, body.machineId ? Number(body.machineId) : null) });
@@ -5506,14 +5541,14 @@ export async function onRequestPost(context) {
       catch (e) { return jsonResponse({ status: "error", message: e.message }, /not found/i.test(e.message) ? 404 : 400); }
       audit({ orgId: null, orderId: null, action: "machine.maintenance_task_saved", detail: { id, machineId: t.machineId ?? null, name: t.name || "",
         everyHours: t.everyHours ?? null, everyStitches: t.everyStitches ?? null, active: t.active !== false, created: !t.id } });
-      return jsonResponse({ status: "ok", id, machines: await listMachines(env.DB) });
+      return withList_({ status: "ok", id }, "machines", "machines");
     }
     if (body.action === "deleteMaintenanceTask") {
       let gone;
       try { gone = await deleteMaintenanceTask(env.DB, Number(body.taskId)); }
       catch (e) { return jsonResponse({ status: "error", message: e.message }, 404); }
       audit({ orgId: null, orderId: null, action: "machine.maintenance_task_deleted", detail: { id: gone.id, machineId: gone.machineId, name: gone.name } });
-      return jsonResponse({ status: "ok", machines: await listMachines(env.DB) });
+      return withList_({ status: "ok" }, "machines", "machines");
     }
     if (body.action === "recordMaintenance") {
       let r;
@@ -5521,7 +5556,7 @@ export async function onRequestPost(context) {
       catch (e) { return jsonResponse({ status: "error", message: e.message }, /not found/i.test(e.message) ? 404 : 400); }
       audit({ orgId: null, orderId: null, action: "machine.maintenance_done", detail: { machineId: Number(body.machineId), taskId: body.taskId ? Number(body.taskId) : null,
         task: r.taskName, doneAt: r.doneAt, stitchCountAt: r.stitchCountAt, runSecondsAt: r.runSecondsAt, note: body.note || "" } });
-      return jsonResponse({ status: "ok", entry: r, machines: await listMachines(env.DB) });
+      return withList_({ status: "ok", entry: r }, "machines", "machines");
     }
     if (body.action === "getMaintenanceLog") {
       return jsonResponse({ status: "ok", ...(await getMaintenanceLog(env.DB, { machineId: body.machineId, from: body.from, to: body.to })),
@@ -5564,7 +5599,7 @@ export async function onRequestPost(context) {
       }
       const result = await importThreadChart(env.DB, rows);
       audit({ orgId: null, orderId: null, action: "threads.imported", detail: { count: rows.length, created: result.created, updated: result.updated } });
-      return jsonResponse({ status: "ok", ...result, threads: await listThreads(env.DB) });
+      return withList_({ status: "ok", ...result }, "threads", "threads");
     }
 
     // ---- Inventory movements & COGS (migrations/0009) ----------------------
@@ -5604,7 +5639,7 @@ export async function onRequestPost(context) {
       audit({ orgId: null, orderId: null, action: "inventory.order_received", detail: { date, accountId, paidPersonally, keys, parts, total: plan.totalCents / 100 } });
       // The received blanks' average cost moved: products using them that are now below a pricing target.
       const belowTarget = belowFor_(await pricingBelowTargetForBlanks(env.DB, plan.groups.map(g => g.blankId)).catch(() => []));
-      return jsonResponse({ status: "ok", parts, total: plan.totalCents / 100, blanks: await getAllBlanks(env.DB), belowTarget });
+      return withList_({ status: "ok", parts, total: plan.totalCents / 100, belowTarget }, "blanks", "blanks", blankCostsFor_);
     }
     if (body.action === "receiveBlanks") {
       const blankId = Number(body.blankId);
@@ -5633,7 +5668,7 @@ export async function onRequestPost(context) {
       await receiveBlanks(env.DB, { blankId, lines: landed, vendor, vendorRef, receivedAt, vendorChargedTax, accountId, paidPersonally, receiptGroup: newReceiptGroup_(),
         note: extraCost ? `Received (landed cost incl. $${extraCost.toFixed(2)} shipping & other costs)` : "Received" });
       audit({ orgId: null, orderId: null, action: "inventory.received", detail: { blankId, lines, extraCost, vendor, vendorRef, receivedAt: receivedAt || null, vendorChargedTax } });
-      return jsonResponse({ status: "ok", blanks: await getAllBlanks(env.DB) });
+      return withList_({ status: "ok" }, "blanks", "blanks", blankCostsFor_);
     }
     if (body.action === "writeOffBlanks") {
       const locked = await periodGuard(body); if (locked) return locked;
@@ -5658,7 +5693,7 @@ export async function onRequestPost(context) {
         : /test|sample|scrap/i.test(note) ? "testing" : /damage/i.test(note) ? "damaged" : /lost|miscount/i.test(note) ? "lost" : "other";
       await writeOffBlanks(env.DB, { blankId, color, size, qty, note, occurredAt, reason });
       audit({ orgId: null, orderId: null, action: "inventory.written_off", detail: { blankId, color, size, qty, note, reason, occurredAt: occurredAt || null } });
-      return jsonResponse({ status: "ok", blanks: await getAllBlanks(env.DB) });
+      return withList_({ status: "ok" }, "blanks", "blanks", blankCostsFor_);
     }
     // Count stock (blanks): each row's counted number, recorded as a correction for the difference
     // (setBlankCount). rows: [{blankId, color, size, counted, onHand}] — one row from a row's Correct count,
@@ -5679,7 +5714,7 @@ export async function onRequestPost(context) {
         catch (e) { if (!e.userFacing) throw e; failed.push({ ...row, error: e.message }); }
       }
       if (done.length) audit({ orgId: null, orderId: null, action: "inventory.counted", detail: { rows: done, ...(note ? { note } : {}), occurredAt: when ? when.at : null } });
-      return jsonResponse({ status: "ok", corrected: done, failed, blanks: await getAllBlanks(env.DB) });
+      return withList_({ status: "ok", corrected: done, failed }, "blanks", "blanks", blankCostsFor_);
     }
     if (body.action === "getBlankMovements") {
       return jsonResponse({ status: "ok", movements: await getBlankMovements(env.DB, Number(body.blankId)) });
@@ -5700,7 +5735,7 @@ export async function onRequestPost(context) {
           kind: mv.kind, vendor: mv.vendor, vendorRef: mv.vendorRef, occurredAt: mv.occurredAt, reason } });
       if (auditErr) return auditErr;
       await voidInventoryMovement(env.DB, movementId, reason);
-      return jsonResponse({ status: "ok", movements: await getBlankMovements(env.DB, mv.blankId), blanks: await getAllBlanks(env.DB) });
+      return withList_({ status: "ok", movements: await getBlankMovements(env.DB, mv.blankId) }, "blanks", "blanks", blankCostsFor_);
     }
     // Undo a void: the entry counts again. Same guards as voiding (closed months, audit written first).
     if (body.action === "restoreInventoryMovement") {
@@ -5717,7 +5752,7 @@ export async function onRequestPost(context) {
       if (auditErr) return auditErr;
       const restored = await restoreInventoryMovement(env.DB, movementId);
       if (!restored) return jsonResponse({ status: "error", message: "That entry was just changed — reload the history and try again." }, 409);
-      return jsonResponse({ status: "ok", movements: await getBlankMovements(env.DB, mv.blankId), blanks: await getAllBlanks(env.DB) });
+      return withList_({ status: "ok", movements: await getBlankMovements(env.DB, mv.blankId) }, "blanks", "blanks", blankCostsFor_);
     }
     if (body.action === "previewBlankCatchUp") {
       const plan = await planBlankCatchUp(env.DB);
@@ -5743,7 +5778,7 @@ export async function onRequestPost(context) {
         detail: { lines: chosen.map(l => ({ itemId: l.itemId, orderId: l.orderId, blankId: l.blankId, blankSize: l.blankSize, qty: l.qty, unitCostCents: l.unitCostCents, oldCostCents: l.oldCostCents, useDate: l.useDate })) } });
       if (auditErr) return auditErr;
       const r = await applyBlankCatchUp(env.DB, chosen.map(l => l.itemId));
-      return jsonResponse({ status: "ok", applied: r.applied.length, totalUnits: r.totalUnits, total: r.totalCents / 100, blanks: await getAllBlanks(env.DB) });
+      return withList_({ status: "ok", applied: r.applied.length, totalUnits: r.totalUnits, total: r.totalCents / 100 }, "blanks", "blanks", blankCostsFor_);
     }
     // Use transfers for past orders: made lines that never took their transfers out of stock (planTransferCatchUp).
     // The preview plans every line; the apply re-plans exactly the ticked ones, so the later uses it re-costs match them.
@@ -5917,7 +5952,7 @@ export async function onRequestPost(context) {
       const names = before.filter(b => sourceIds.includes(b.id)).map(b => b.name || b.brand);
       const result = await mergeBlanks(env.DB, { targetId, sourceIds });
       audit({ orgId: null, orderId: null, action: "inventory.blanks_merged", detail: { targetId, sourceIds, mergedNames: names } });
-      return jsonResponse({ status: "ok", ...result, blanks: await getAllBlanks(env.DB) });
+      return withList_({ status: "ok", ...result }, "blanks", "blanks", blankCostsFor_);
     }
 
     // Finished stock (migrations/0060). getReadyToShip: the shop's AVAILABLE counts (what its site shows),

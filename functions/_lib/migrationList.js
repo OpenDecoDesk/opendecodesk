@@ -103,4 +103,5 @@ export const MIGRATIONS = [
   "0099_deposit_open.sql",
   "0100_account_move_indexes.sql",
   "0101_catalog_snapshot_parts.sql",
+  "0102_list_cache_versions.sql",
 ];

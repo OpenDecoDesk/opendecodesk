@@ -13817,7 +13817,7 @@ async function renderRevenueReport(app) {
 
   const thisYear  = new Date().getFullYear();
   const defaultFrom = thisYear + "-01-01";
-  const defaultTo   = localToday_();
+  const defaultTo   = reportToDay_();
 
   app.innerHTML = `
     <div class="org-hero admin-hero" style="--org-accent:var(--accent);">
@@ -14131,7 +14131,7 @@ async function renderSalesTaxReport(app) {
         <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">From</label>
           <input type="date" id="taxFrom" value="${y}-01-01" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
         <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">To</label>
-          <input type="date" id="taxTo" value="${localToday_()}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
+          <input type="date" id="taxTo" value="${reportToDay_()}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
           <button type="submit" class="admin-pass-submit" style="padding:6px 18px;font-size:13px;">Generate</button>
           ${[0,1,2,3].map(n => `<button type="button" data-from="${q(n)[0]}" data-to="${q(n)[1]}" class="taxQuick" style="padding:6px 10px;font-size:12px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:var(--surface,#fff);">Q${n+1} ${y}</button>`).join("")}
@@ -14480,6 +14480,10 @@ if (typeof MutationObserver !== "undefined" && !window._stackLabelsObserver) {
 // now in the admin's own time, never later than now. The server checks the time fits the order's other dates.
 // The admin's "today" as YYYY-MM-DD in this computer's own time — never the UTC day, which on a US evening is already
 // tomorrow (a receipt dated tomorrow, a delivery due today shown late). dayOffset moves it by whole days.
+// The default "To" of a report's date range. The server counts report days in UTC (a plain To date runs to the
+// end of that UTC day), so in the evening west of UTC the local day is a day behind and would leave out what
+// happened since UTC midnight: this evening's runs, sales and stock moves. The later of the two days never does.
+function reportToDay_(){ const local = localToday_(), utc = new Date().toISOString().slice(0, 10); return utc > local ? utc : local; }
 function localToday_(dayOffset){ const d = new Date(); if (dayOffset) d.setDate(d.getDate() + dayOffset); return localDay_(d); }
 // A moment's calendar day (YYYY-MM-DD) in this computer's own time.
 function localDay_(when){
@@ -16790,7 +16794,7 @@ async function renderInventoryReport(app){
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:980px;margin:8px auto 60px;">
       <form id="cogsFilters" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:var(--surface-alt,#f6f6f6);padding:14px 16px;border-radius:8px;margin-bottom:20px;">
         <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">From</label><input type="date" id="cogsFrom" value="${y}-01-01" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
-        <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">To</label><input type="date" id="cogsTo" value="${localToday_()}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
+        <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">To</label><input type="date" id="cogsTo" value="${reportToDay_()}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
         <div style="display:flex;gap:6px;"><button type="submit" class="admin-pass-submit" style="padding:6px 18px;font-size:13px;">Generate</button>
           ${[y, y-1].map(yy => `<button type="button" class="cogsQuick" data-from="${yy}-01-01" data-to="${yy}-12-31" style="padding:6px 10px;font-size:12px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:var(--surface,#fff);">${yy}</button>`).join("")}</div>
       </form>
@@ -22257,7 +22261,7 @@ async function renderRunReport(app){
         <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">From</label>
           <input type="date" id="rrFrom" value="${y}-01-01" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
         <div><label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">To</label>
-          <input type="date" id="rrTo" value="${localToday_()}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
+          <input type="date" id="rrTo" value="${reportToDay_()}" style="font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;"></div>
         <button type="submit" class="admin-pass-submit" style="padding:6px 18px;font-size:13px;">Generate</button>
       </form>
       <div id="rrResults"></div>

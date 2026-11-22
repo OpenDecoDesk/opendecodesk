@@ -20271,7 +20271,7 @@ async function renderThreadCatalog(app){
   };
   function draw(){
     const q = (document.getElementById("thrSearch").value || "").toLowerCase().trim();
-    const filtered = !q ? threads : threads.filter(t => [t.brand, t.type, t.weight, t.code, t.name].some(v => (v || "").toLowerCase().includes(q)));
+    const filtered = !q ? threads : threads.filter(t => threadMatches_(t, q));   // the same search as every thread picker
     const groups = new Map();
     filtered.forEach(t => { const k = t.brand || "(no brand)"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(t); });
     const body = document.getElementById("thrBody");
@@ -23281,6 +23281,126 @@ async function fetchDesignFileBytes_(key){
 // The thread-colour swatch <select> list shared by the upload and edit-colours modals. `rows` is
 // [{threadId}] in needle order. Renders each row, wires change/remove, and calls onChange after any
 // edit (so the caller re-renders the preview). `allowAddRemove` shows the ✕ (upload only).
+// ---- Searchable thread picker ----
+// Every thread dropdown (a design's colours when uploading its files, Edit colours, a machine's needles) is a box to
+// type in: the list narrows as you type, by brand, type, weight, code or name — the same search as the Threads
+// screen (threadMatches_) — over the threads the page already holds, with no request to the server. Several words
+// narrow further ("madeira 1147"). The <select> stays, hidden, as the value: picking sets it and fires its change
+// event, so each screen's own handler (and what it saves) is unchanged.
+function threadMatches_(t, q){
+  const words = String(q || "").toLowerCase().trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return true;
+  const fields = [t.brand, t.type, t.weight, t.code, t.name].map(v => String(v == null ? "" : v).toLowerCase());
+  return words.every(w => fields.some(f => f.includes(w)));
+}
+function threadPickLabel_(t){ return t ? `${t.brand || ""}${t.type ? " " + t.type : ""}${t.weight ? " " + t.weight : ""} ${t.code || ""} — ${t.name || ""}`.trim() : ""; }
+const THREAD_PICK_MAX_ = 100;   // at most this many matches drawn; the rest are counted (type more to narrow)
+let _threadPickSeq = 0;
+function threadPicker_(sel, threads){
+  if (!sel || sel.dataset.threadPicker) return null;
+  sel.dataset.threadPicker = "1";
+  const id = "tpk" + (++_threadPickSeq);
+  const byId = new Map((threads || []).map(t => [String(t.id), t]));
+  const emptyOpt = [...sel.options].find(o => o.value === "");
+  const emptyLabel = emptyOpt ? emptyOpt.textContent : "—";
+  const wrap = document.createElement("span");
+  wrap.className = "thread-pick";
+  const input = document.createElement("input");
+  input.type = "text"; input.id = id; input.className = "thread-pick-input";
+  input.autocomplete = "off"; input.spellcheck = false;
+  input.setAttribute("role", "combobox"); input.setAttribute("aria-autocomplete", "list");
+  input.setAttribute("aria-expanded", "false"); input.setAttribute("aria-controls", id + "-list");
+  input.setAttribute("aria-label", sel.getAttribute("aria-label") || (sel.dataset.needle ? "Needle " + sel.dataset.needle + " thread" : sel.dataset.i != null ? "Colour " + (Number(sel.dataset.i) + 1) + " thread" : "Thread"));
+  input.placeholder = "Search code, brand, name…";
+  if (sel.style.fontSize) input.style.fontSize = sel.style.fontSize;
+  if (sel.style.padding) input.style.padding = sel.style.padding;
+  // A field locked for this role (data-need-form) is locked here too.
+  if (sel.hasAttribute("data-need-form")) input.setAttribute("data-need-form", sel.getAttribute("data-need-form"));
+  const list = document.createElement("ul");
+  list.id = id + "-list"; list.className = "thread-pick-list"; list.setAttribute("role", "listbox"); list.hidden = true;
+  sel.parentNode.insertBefore(wrap, sel);
+  wrap.append(input, list, sel);
+  sel.hidden = true; sel.tabIndex = -1;
+  let shown = [], active = -1;
+  const show = () => { const t = byId.get(String(sel.value)); input.value = t ? threadPickLabel_(t) : ""; input.title = input.value; };
+  const syncDisabled = () => { input.disabled = sel.disabled; };
+  const place = () => {
+    // Fixed, so a scrolling window or table can't cut the list off; opens upward when there's no room below.
+    // As wide as the names need (at least the box), and kept inside the window.
+    const r = input.getBoundingClientRect(), vh = window.innerHeight || 0, vw = window.innerWidth || 0, below = vh - r.bottom;
+    list.style.minWidth = Math.max(r.width, 240) + "px"; list.style.left = r.left + "px";
+    if (below < 220 && r.top > below) { list.style.top = ""; list.style.bottom = (vh - r.top + 2) + "px"; }
+    else { list.style.bottom = ""; list.style.top = (r.bottom + 2) + "px"; }
+    const w = list.getBoundingClientRect().width;
+    if (vw && r.left + w > vw - 8) list.style.left = Math.max(8, vw - w - 8) + "px";
+  };
+  const setActive = (i) => {
+    active = i;
+    [...list.querySelectorAll("[role=option]")].forEach((li, j) => li.classList.toggle("active", j === i));
+    const li = list.querySelector(`#${id}-o${i}`);
+    if (li) { input.setAttribute("aria-activedescendant", li.id); if (li.scrollIntoView) li.scrollIntoView({ block: "nearest" }); }
+    else input.removeAttribute("aria-activedescendant");
+  };
+  const render = (q) => {
+    const hits = (threads || []).filter(t => threadMatches_(t, q));
+    shown = [{ id: "", label: emptyLabel }].concat(hits.slice(0, THREAD_PICK_MAX_).map(t => ({ id: String(t.id), label: threadPickLabel_(t), hex: t.colorHex })));
+    list.innerHTML = shown.map((o, i) => `<li role="option" id="${id}-o${i}" data-v="${escapeHtml(o.id)}" aria-selected="${o.id === String(sel.value)}"${o.id ? "" : ' class="thread-pick-none"'}>` +
+      (o.id ? `<span class="thread-pick-swatch" style="background:#${escapeHtml(/^[0-9a-fA-F]{6}$/.test(o.hex || "") ? o.hex : "ccc")};"></span>` : "") + `${escapeHtml(o.label)}</li>`).join("") +
+      (!hits.length ? `<li class="thread-pick-note" role="presentation">No thread matches “${escapeHtml(String(q).trim())}”.</li>` : "") +
+      (hits.length > THREAD_PICK_MAX_ ? `<li class="thread-pick-note" role="presentation">${hits.length - THREAD_PICK_MAX_} more — type more to narrow the list.</li>` : "");
+    const cur = shown.findIndex(o => o.id === String(sel.value));
+    setActive(q && hits.length ? 1 : Math.max(cur, 0));
+  };
+  const follow = () => { if (!list.hidden) place(); };
+  const open = (q) => {
+    if (input.disabled) return;
+    render(q || "");
+    if (list.hidden) { window.addEventListener("scroll", follow, true); window.addEventListener("resize", follow); }
+    list.hidden = false; input.setAttribute("aria-expanded", "true"); place();
+  };
+  const close = () => {
+    list.hidden = true; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); show();
+    window.removeEventListener("scroll", follow, true); window.removeEventListener("resize", follow);
+  };
+  const pick = (v) => {
+    close();
+    if (String(sel.value) === String(v)) return;
+    sel.value = v; show();
+    sel.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  input.addEventListener("focus", () => { syncDisabled(); if (input.select) input.select(); });
+  input.addEventListener("click", () => { if (list.hidden) open(""); });
+  input.addEventListener("input", () => open(input.value));
+  input.addEventListener("blur", () => { if (!list.hidden) close(); });
+  input.addEventListener("keydown", (e) => {
+    const n = shown.length;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (list.hidden) { open(""); return; }
+      setActive(e.key === "ArrowDown" ? Math.min(active + 1, n - 1) : Math.max(active - 1, 0));
+    } else if (e.key === "Enter") {
+      if (list.hidden) return;
+      e.preventDefault();
+      if (shown[active]) pick(shown[active].id);
+    } else if (e.key === "Escape") {
+      if (list.hidden) return;
+      e.preventDefault(); e.stopPropagation();   // closes the list, not the window it sits in
+      close();
+    }
+  });
+  // mousedown, not click: the box keeps focus, so its blur doesn't close the list before the pick.
+  list.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const li = e.target.closest("[role=option]");
+    if (li) pick(li.dataset.v);
+  });
+  sel.addEventListener("change", show);
+  if (typeof MutationObserver !== "undefined") new MutationObserver(syncDisabled).observe(sel, { attributes: true, attributeFilter: ["disabled"] });
+  sel._threadPickShow = show;   // for a screen that puts the value back without a change event (a failed save)
+  syncDisabled(); show();
+  return input;
+}
+
 function designThreadRowsHtml_(threads){
   return (selected) => `<option value="">— pick a thread —</option>` +
     threads.map(t => `<option value="${t.id}" ${t.id === selected ? "selected" : ""}>${escapeHtml(t.brand)}${t.type ? " " + escapeHtml(t.type) : ""}${t.weight ? " " + escapeHtml(t.weight) : ""} ${escapeHtml(t.code)} — ${escapeHtml(t.name)}</option>`).join("");
@@ -23774,7 +23894,7 @@ function showDesignVersionUploadModal_(designId, onDone, opts){
         <select data-i="${i}" class="dsgvThreadSelect" style="flex:1;font-size:13px;padding:4px 6px;">${threadOptions(r.threadId)}</select>
         <button type="button" data-i="${i}" class="dsgvRemoveRow" style="font-size:11px;padding:2px 8px;">✕</button>
       </div>${fileColorNoteHtml_(fileColors()[i], r, i, threads, threadsById, "dsgvSuggest")}`).join("");
-    ov.querySelectorAll(".dsgvThreadSelect").forEach(sel => sel.onchange = () => { rows[Number(sel.dataset.i)].threadId = Number(sel.value) || ""; drawRows(); renderPreview(); });
+    ov.querySelectorAll(".dsgvThreadSelect").forEach(sel => { sel.onchange = () => { rows[Number(sel.dataset.i)].threadId = Number(sel.value) || ""; drawRows(); renderPreview(); }; threadPicker_(sel, threads); });
     ov.querySelectorAll(".dsgvSuggest").forEach(btn => btn.onclick = () => { rows[Number(btn.dataset.i)].threadId = Number(btn.dataset.tid); drawRows(); renderPreview(); });
     ov.querySelectorAll(".dsgvRemoveRow").forEach(btn => btn.onclick = () => { rows.splice(Number(btn.dataset.i), 1); drawRows(); renderPreview(); });
   };
@@ -23899,7 +24019,7 @@ function showEditVersionColorsModal_(version, onDone){
         <span style="font-size:12px;color:#888;width:20px;">${i + 1}.</span>
         <select data-i="${i}" class="dsgcThreadSelect" style="flex:1;font-size:13px;padding:4px 6px;">${threadOptions(r.threadId)}</select>
       </div>${fileColorNoteHtml_(fileColors()[i], r, i, threads, threadsById, "dsgcSuggest")}`).join("");
-    ov.querySelectorAll(".dsgcThreadSelect").forEach(sel => sel.onchange = () => { rows[Number(sel.dataset.i)].threadId = Number(sel.value) || ""; drawRows(); renderPreview(); });
+    ov.querySelectorAll(".dsgcThreadSelect").forEach(sel => { sel.onchange = () => { rows[Number(sel.dataset.i)].threadId = Number(sel.value) || ""; drawRows(); renderPreview(); }; threadPicker_(sel, threads); });
     ov.querySelectorAll(".dsgcSuggest").forEach(btn => btn.onclick = () => { rows[Number(btn.dataset.i)].threadId = Number(btn.dataset.tid); drawRows(); renderPreview(); });
   };
   drawPreviewPlaceholder_(canvas, "Loading preview…");
@@ -24113,11 +24233,11 @@ async function renderMachines(app){
       try { await machineApi_({ action: "setMachineHoop", machineId: mid, hoopId: sel.value || null }); showToast("Current hoop saved."); await load(); }
       catch (e) { sel.value = sel.dataset.saved; showToast("Not saved: " + e.message, true); }
     });
-    body.querySelectorAll(".mchNeedleSelect").forEach(sel => sel.onchange = async () => {
+    body.querySelectorAll(".mchNeedleSelect").forEach(sel => { sel.onchange = async () => {
       const mid = Number(sel.dataset.mid), needle = Number(sel.dataset.needle);
       try { await machineApi_({ action: "setMachineNeedle", machineId: mid, needle, threadId: sel.value || null }); sel.dataset.saved = sel.value; showToast(`Needle ${needle} saved.`); }
-      catch (e) { sel.value = sel.dataset.saved; showToast("Not saved: " + e.message, true); }
-    });
+      catch (e) { sel.value = sel.dataset.saved; if (sel._threadPickShow) sel._threadPickShow(); showToast("Not saved: " + e.message, true); }
+    }; threadPicker_(sel, threads); });
   };
   async function load(){
     try { machines = (await machineApi_({ action: "listMachines" })).machines || []; window._mchCtx.machines = machines; draw(); }

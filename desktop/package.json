@@ -27,6 +27,13 @@
     "appId": "org.opendecodesk.desktop",
     "productName": "OpenDecoDesk",
     "asar": false,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "grantFileProtocolExtraPrivileges": false,
+      "resetAdHocDarwinSignature": true
+    },
     "directories": {
       "output": "dist"
     },

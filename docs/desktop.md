@@ -346,6 +346,13 @@ npx electron-builder --mac zip --arm64 --x64  # dist/OpenDecoDesk-<version>-mac-
 (`desktop/package.json` has the same two as its `dist:win` and `dist:mac` scripts.) Built this way
 the version is `0.0.0` in the file names, and the program says `dev`.
 
+A built program can't be opened up for debugging from outside. The build sets Electron's fuses
+(`build.electronFuses` in `desktop/package.json`): it can't be run as plain Node
+(`ELECTRON_RUN_AS_NODE`), and it ignores `NODE_OPTIONS` and `--inspect`. `main.js` refuses to start
+with Chromium's `--remote-debugging-port` or `--remote-debugging-pipe`, which have no fuse. Run from
+the source (`npm start`), all of these still work. To check a build's fuses:
+`npx @electron/fuses read --app <path to OpenDecoDesk.app or OpenDecoDesk.exe>`.
+
 The program's icon is the brand mark, as on the website and the Facebook group: a navy tile, the
 cream hoop and the orange D. It comes in two drawings: `public/images/icon-large.svg` (64 px and
 up, the stitched D) and `public/images/icon.svg` (48 px and under, a solid D; also the admin's

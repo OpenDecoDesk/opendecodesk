@@ -9,6 +9,15 @@
 
 const { app, BrowserWindow, Menu, dialog, shell, ipcMain, safeStorage, session, net } = require("electron");
 const fs = require("fs");
+// A downloaded program refuses Chromium's remote-debugging switches: with them, anything else on this computer could
+// drive the window (and the signed-in session) over a local port. Electron has no fuse for these, so the check is
+// here, before a window or the server exists. `--inspect` and friends are switched off by the build's fuses
+// (package.json → build.electronFuses). Run from the source (npm start) both still work, for development.
+const DEBUG_SWITCHES = ["remote-debugging-port", "remote-debugging-pipe", "remote-debugging-address", "remote-allow-origins"];
+if (app.isPackaged && DEBUG_SWITCHES.some((s) => app.commandLine.hasSwitch(s))) {
+  console.error("OpenDecoDesk: remote-debugging switches aren't allowed in the installed program.");
+  app.exit(1);
+}
 const path = require("path");
 const { startServer, copyState, restoreState, resetSignIn, setShippoKey, setSupplierConnections, setSmtp, setEmailOn, savedSmtpPassword, recordBackup, stamp, IMAGES_HOST, desktopCsp } = require("./server.js");
 const { Mailer, cleanSmtpSettings, cleanPdf } = require("./mailer.js");

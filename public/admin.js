@@ -158,7 +158,7 @@ async function adminApi_(body){
     const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, key: adminKey }) });
     const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
     if(r.status === 401 && adminSessionEnded_(r)){
-      if(attempt === 0){ showToast(SESSION_ENDED_, true); continue; }
+      if(attempt === 0){ if(!_adminLoginInFlight) showToast(SESSION_ENDED_, true); continue; }
       throw new Error(SESSION_ENDED_);
     }
     if(!r.ok || d.status === "error") throw new Error((d && d.message) || "Request failed");
@@ -937,7 +937,17 @@ async function adminConfirmIdentity_(heading){
   return false;
 }
 
+// One sign-in at a time. A screen that sends several requests at once (or a session that ends while they are on
+// their way) would otherwise open a sign-in window for each one, stacked, with the same field ids. Every caller
+// waiting while a sign-in is open gets that sign-in's answer instead.
+let _adminLoginInFlight = null;
 async function adminLogin(){
+  if(_adminLoginInFlight) return _adminLoginInFlight;
+  _adminLoginInFlight = adminLoginOnce_();
+  try{ return await _adminLoginInFlight; }
+  finally{ _adminLoginInFlight = null; }
+}
+async function adminLoginOnce_(){
   // 1. Valid stored session — use it without prompting
   const stored = loadStoredSession();
   if(stored){ adminPending = stored.pending || null; adminMe = stored.user || null; return stored.token; }

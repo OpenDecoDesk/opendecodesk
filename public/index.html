@@ -414,6 +414,18 @@
   .admin-menu{display:inline-block;}
   .admin-menu > .admin-btn::after{content:" \25be"; font-size:9px; opacity:.7;}
   .admin-menu.admin-menu-dots > .admin-btn::after{content:none;}
+  /* Searchable thread picker (admin.js threadPicker_): a text box over a hidden <select>; the list is fixed so a
+     scrolling window can't cut it off, above admin windows (9999). */
+  .thread-pick{position:relative; flex:1; min-width:0; display:block;}
+  .thread-pick-input{width:100%; box-sizing:border-box; font:inherit; font-size:13px; padding:4px 6px; border:1px solid #bbb; border-radius:4px; background:#fff; color:var(--ink);}
+  .thread-pick-input:disabled{background:#f3f4f6; color:#666;}
+  .thread-pick-list{position:fixed; z-index:10001; max-width:min(560px, calc(100vw - 16px)); margin:0; padding:3px 0; list-style:none; max-height:260px; overflow-y:auto; background:#fff; border:1px solid var(--card-line); border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.18); font-size:13px; color:var(--ink);}
+  .thread-pick-list [role=option]{padding:5px 8px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .thread-pick-list [role=option].active{background:#e8eefc;}
+  .thread-pick-list [role=option][aria-selected=true]{font-weight:600;}
+  .thread-pick-list .thread-pick-none{color:#666;}
+  .thread-pick-list .thread-pick-note{padding:5px 8px; color:#777; font-size:12px; cursor:default;}
+  .thread-pick-swatch{display:inline-block; width:12px; height:12px; border-radius:2px; border:1px solid #0003; vertical-align:-1px; margin-right:6px;}
   .admin-menu-list{position:fixed; z-index:960; background:#fff; border:1px solid var(--card-line); border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.16); min-width:210px; padding:5px; display:none; flex-direction:column; gap:2px;}
   .admin-menu.open .admin-menu-list{display:flex;}
   .admin-menu-item{display:block; width:100%; text-align:left; font-size:13px; padding:6px 10px; border:0; border-radius:4px; background:#fff; color:#111; cursor:pointer; white-space:nowrap;}

@@ -1663,3 +1663,96 @@ CREATE INDEX IF NOT EXISTS idx_download_log_grant ON download_log(grantId, at);
 
 -- Orders imported from another store (migrations/0087): the same store order is only imported once per shop.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_external ON orders(orgId, source, externalOrderId) WHERE externalOrderId IS NOT NULL;
+
+-- Versioned list cache (migrations/0102): one version per admin reference list, raised by the triggers below on
+-- every change to a table behind it. '_ns' is a random number per database (Cache API keys).
+CREATE TABLE IF NOT EXISTS list_cache_versions (
+  name     TEXT    PRIMARY KEY,
+  version  INTEGER NOT NULL DEFAULT 1
+);
+INSERT OR IGNORE INTO list_cache_versions (name, version) VALUES
+  ('blanks', 1), ('threads', 1), ('hoops', 1), ('locations', 1), ('machines', 1), ('orgs', 1), ('_ns', abs(random()) % 1000000000000);
+CREATE TRIGGER IF NOT EXISTS lcv_blanks_ins AFTER INSERT ON blanks
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_blanks_upd AFTER UPDATE ON blanks
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_blanks_del AFTER DELETE ON blanks
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_blank_sizes_ins AFTER INSERT ON blank_sizes
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_blank_sizes_upd AFTER UPDATE ON blank_sizes
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_blank_sizes_del AFTER DELETE ON blank_sizes
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_blank_colors_ins AFTER INSERT ON blank_colors
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_blank_colors_upd AFTER UPDATE ON blank_colors
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_blank_colors_del AFTER DELETE ON blank_colors
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_needle_types_ins AFTER INSERT ON needle_types
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_needle_types_upd AFTER UPDATE ON needle_types
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_needle_types_del AFTER DELETE ON needle_types
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'blanks'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_threads_ins AFTER INSERT ON threads
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'threads'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_threads_upd AFTER UPDATE ON threads
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'threads'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_threads_del AFTER DELETE ON threads
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'threads'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_thread_inventory_ins AFTER INSERT ON thread_inventory
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'threads'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_thread_inventory_upd AFTER UPDATE ON thread_inventory
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'threads'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_thread_inventory_del AFTER DELETE ON thread_inventory
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'threads'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_spool_sizes_ins AFTER INSERT ON spool_sizes
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'threads'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_spool_sizes_upd AFTER UPDATE ON spool_sizes
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'threads'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_spool_sizes_del AFTER DELETE ON spool_sizes
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'threads'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_hoops_ins AFTER INSERT ON hoops
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'hoops'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_hoops_upd AFTER UPDATE ON hoops
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'hoops'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_hoops_del AFTER DELETE ON hoops
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'hoops'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_locations_ins AFTER INSERT ON locations
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'locations'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_locations_upd AFTER UPDATE ON locations
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'locations'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_locations_del AFTER DELETE ON locations
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'locations'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machines_ins AFTER INSERT ON machines
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machines_upd AFTER UPDATE ON machines
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machines_del AFTER DELETE ON machines
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machine_hoops_ins AFTER INSERT ON machine_hoops
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machine_hoops_upd AFTER UPDATE ON machine_hoops
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machine_hoops_del AFTER DELETE ON machine_hoops
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machine_needles_ins AFTER INSERT ON machine_needles
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machine_needles_upd AFTER UPDATE ON machine_needles
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machine_needles_del AFTER DELETE ON machine_needles
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machine_maintenance_tasks_ins AFTER INSERT ON machine_maintenance_tasks
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machine_maintenance_tasks_upd AFTER UPDATE ON machine_maintenance_tasks
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_machine_maintenance_tasks_del AFTER DELETE ON machine_maintenance_tasks
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'machines'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_orgs_ins AFTER INSERT ON orgs
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'orgs'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_orgs_upd AFTER UPDATE ON orgs
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'orgs'; END;
+CREATE TRIGGER IF NOT EXISTS lcv_orgs_del AFTER DELETE ON orgs
+BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'orgs'; END;

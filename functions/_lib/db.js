@@ -2970,6 +2970,78 @@ export async function getCatalogCacheState(db) {
   return { version: m.catalogVersion || "0", ns: m.cacheNs };
 }
 
+// ---- Versioned list cache (migrations/0102) ------------------------------------------------------
+// The admin's reference lists, each kept under a version number in list_cache_versions. Triggers add 1 to a
+// list's version in the same statement as any change to a table behind it, so a cached copy is current
+// exactly when its version is. Copies are kept in this isolate's memory and in the Cache API (keyed by the
+// database's '_ns' number, the list and its version, so a key never goes stale). A read takes the version
+// FIRST and the rows after, so a copy is never older than its number (at worst newer, which the next change
+// corrects). Copies are shared between requests: callers must not change what they are given.
+export const LIST_CACHE_BUILDERS = {
+  blanks: (db) => getAllBlanks(db),
+  threads: (db) => listThreads(db),
+  hoops: (db) => listHoops(db),
+  locations: (db) => listLocations(db),
+  machines: (db) => listMachines(db),
+  orgs: (db) => getAllOrgs(db),
+};
+const _listMem = new Map();   // "<ns>/<name>" → { version, data }
+const listCacheKey_ = (ns, name, version) => "https://list-cache.internal/" + ns + "/" + name + "/v" + version;
+
+// { ns, versions: { blanks: n, … } }, or null on a database without the table (not yet migrated).
+export async function listCacheVersions_(db) {
+  let rows;
+  try { rows = (await db.prepare("SELECT name, version FROM list_cache_versions").all()).results || []; }
+  catch (e) { if (/no such table/i.test(String(e && e.message))) return null; throw e; }
+  const versions = {};
+  let ns = null;
+  for (const r of rows) { if (r.name === "_ns") ns = String(r.version); else versions[r.name] = Number(r.version); }
+  return ns ? { ns, versions } : null;
+}
+
+// { version, data } for one list, from memory, the Cache API or D1 (and then kept in both). `state` is
+// listCacheVersions_'s answer when the caller already has it. version is null when the database has no
+// version table: the list then comes straight from D1, as before.
+export async function readCachedList_(db, name, state) {
+  const build = LIST_CACHE_BUILDERS[name];
+  if (!build) throw new Error("No such cached list: " + name);
+  const st = state === undefined ? await listCacheVersions_(db) : state;
+  if (!st || !Number.isFinite(st.versions[name])) return { version: null, data: await build(db) };
+  const version = st.versions[name], memKey = st.ns + "/" + name;
+  const mem = _listMem.get(memKey);
+  if (mem && mem.version === version) return { version, data: mem.data };
+  const cache = typeof caches !== "undefined" && caches && caches.default ? caches.default : null;
+  const key = listCacheKey_(st.ns, name, version);
+  if (cache) {
+    try {
+      const hit = await cache.match(key);
+      if (hit) { const data = await hit.json(); _listMem.set(memKey, { version, data }); return { version, data }; }
+    } catch (e) { /* a Cache API failure only costs a rebuild */ }
+  }
+  const data = await build(db);
+  _listMem.set(memKey, { version, data });
+  if (cache) {
+    try {
+      await cache.put(key, new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json", "Cache-Control": "max-age=86400" } }));
+    } catch (e) { /* kept in memory; another isolate rebuilds */ }
+  }
+  return { version, data };
+}
+
+// After a change: rebuild and store every list whose version moved since `before` (listCacheVersions_ taken
+// before the change), so the next read anywhere finds the new copy ready. Returns the lists refreshed.
+export async function refreshCachedLists_(db, before) {
+  if (!before) return [];
+  const after = await listCacheVersions_(db);
+  if (!after) return [];
+  const moved = Object.keys(LIST_CACHE_BUILDERS).filter(n => Number.isFinite(after.versions[n]) && after.versions[n] !== before.versions[n]);
+  for (const n of moved) await readCachedList_(db, n, after);
+  return moved;
+}
+
+// Test hook: forget this isolate's copies (a new isolate).
+export function _resetListCacheMemory() { _listMem.clear(); }
+
 // Records a TOTP counter as used. Returns false if this counter (or a later one) was already
 // accepted — a replay. One conditional UPSERT, so two simultaneous logins can't both pass.
 export async function claimTotpCounter(db, counter) {

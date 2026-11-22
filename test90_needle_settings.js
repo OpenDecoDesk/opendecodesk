@@ -30,7 +30,9 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
 const newDb = async (without) => {
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
-  for (const f of migrations) if (!without || !f.startsWith(without)) d1.execFile(read("migrations/" + f));
+  // 0102 (the list cache's triggers) puts a trigger on needle_types, so it can't run without 0044: a database
+  // missing 0044 is left without 0102 too (its lists then come straight from D1, as before 0102).
+  for (const f of migrations) if (!without || (!f.startsWith(without) && !(without === "0044" && f.startsWith("0102")))) d1.execFile(read("migrations/" + f));
   return d1;
 };
 const tick = (ms) => new Promise(res => setTimeout(res, ms || 60));

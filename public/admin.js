@@ -135,6 +135,7 @@ function clearAdminAuth(){
   adminPending = null;
   adminMe = null;
   adminPerms = null;
+  listCacheClear_();   // another user (or role) never sees this one's copies, costs included
   try{ localStorage.removeItem(ADMIN_SESSION_STORAGE_KEY); }catch(e){}
 }
 
@@ -148,15 +149,82 @@ function adminSessionEnded_(resOrData){
   if(ended && adminKey) clearAdminAuth();
   return ended;
 }
+// ---- Versioned list cache (the server's side: db.js readCachedList_, migrations/0102) ----
+// The reference lists most screens ask for (blanks, threads, hoops, locations, machines and shops) are kept here
+// for this visit, each with the version number the server sent with it. Asking for one sends that number
+// (cacheVersion); while it is still current the server answers just "unchanged" and the copy is used, and
+// otherwise the new list and number replace it. A change's answer that carries a list again (cacheVersions)
+// replaces the copy too. Memory only (blanks carry costs, and shop computers are shared), emptied whenever the
+// session ends. Every caller gets its own copy, so changing what it gets never changes the cache.
+const LIST_CACHE_ACTIONS_ = { getBlanks: "blanks", listThreads: "threads", listHoops: "hoops", listLocations: "locations",
+  listMachines: "machines", listOrgs: "orgs", listOrgsAdmin: "orgs" };   // action → the reply's key for the list
+const LIST_CACHE_FROM_CHANGE_ = { blanks: "getBlanks", threads: "listThreads", machines: "listMachines" };   // cacheVersions name → copy
+let _listCache = new Map();          // "<action>[/stock]" → { version, data }
+const _listCacheAsked = new WeakMap();   // a request sent with a version → the copy it named
+const _listInFlight = new Map();     // "<action>[/stock]" → the reply on its way, shared by everyone asking meanwhile
+const listCacheKey_ = (body) => body && LIST_CACHE_ACTIONS_[body.action] ? body.action + (body.stockOnly ? "/stock" : "") : null;
+function listCacheCopy_(v){ try{ return structuredClone(v); }catch(e){ return JSON.parse(JSON.stringify(v)); } }
+function listCacheClear_(){ try{ _listCache = new Map(); }catch(e){ /* called before this part of the script ran: nothing held yet */ } }
+// The request to send for a list: the same, plus the version of the copy held (if any).
+function listCacheAsk_(body){
+  const k = listCacheKey_(body), held = k ? _listCache.get(k) : null;
+  if(!held) return body;
+  const asked = { ...body, cacheVersion: held.version };
+  _listCacheAsked.set(asked, held);
+  return asked;
+}
+// The reply as its caller expects it. "unchanged" → the copy goes back under the list's key, exactly as if the
+// server had sent it; a list with a version replaces the copy. A reply without a version (an older server) is
+// passed on as it came. `asked` is what listCacheAsk_ returned.
+function listCacheTake_(asked, d){
+  if(!d || d.status === "error") return d;
+  const k = listCacheKey_(asked), field = k ? LIST_CACHE_ACTIONS_[asked.action] : null;
+  if(k && d.unchanged){
+    const held = _listCacheAsked.get(asked);
+    if(held && held.version === d.version){ delete d.unchanged; d[field] = listCacheCopy_(held.data); }
+  } else if(k && typeof d.version === "number" && Array.isArray(d[field])){
+    _listCache.set(k, { version: d.version, data: listCacheCopy_(d[field]) });
+  }
+  if(d.cacheVersions && typeof d.cacheVersions === "object"){
+    for(const [name, v] of Object.entries(d.cacheVersions)){
+      const action = LIST_CACHE_FROM_CHANGE_[name];
+      if(action && typeof v === "number" && Array.isArray(d[name])) _listCache.set(action, { version: v, data: listCacheCopy_(d[name]) });
+    }
+  }
+  return d;
+}
+
 // The one call to /api/orders for the admin's screens. Signs in first when needed. When the session has ended it
 // asks to sign in again and repeats the request once, so an expired session costs a sign-in, not the edit. Throws an
-// Error carrying the server's message on any other problem.
+// Error carrying the server's message on any other problem. A cached list (above) asked for again while a request
+// for it is on its way waits for that one and gets its own copy of the answer.
 async function adminApi_(body){
+  const k = listCacheKey_(body);
+  if(!k){
+    // Anything else may change a list: a list request already on its way may predate the change, so reads from
+    // now on (and after it is done) start their own instead of sharing it.
+    _listInFlight.clear();
+    try{ return await adminApiOnce_(body); }
+    finally{ _listInFlight.clear(); }
+  }
+  const waiting = _listInFlight.get(k);
+  if(waiting){
+    // The first caller may already be changing its copy, so copy from the cache's own (never handed out).
+    const d = await waiting, field = LIST_CACHE_ACTIONS_[body.action], held = _listCache.get(k);
+    return { ...d, [field]: listCacheCopy_(held && held.version === d.version ? held.data : d[field]) };
+  }
+  const p = adminApiOnce_(body);
+  _listInFlight.set(k, p);
+  try{ return await p; }
+  finally{ if(_listInFlight.get(k) === p) _listInFlight.delete(k); }
+}
+async function adminApiOnce_(body){
   for(let attempt = 0; ; attempt++){
     if(!adminKey) adminKey = (await adminLogin()) || "";
     if(!adminKey) throw new Error(attempt ? SESSION_ENDED_ : "Sign-in required");
-    const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, key: adminKey }) });
-    const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
+    const asked = listCacheAsk_(body);
+    const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...asked, key: adminKey }) });
+    const d = listCacheTake_(asked, await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" })));
     if(r.status === 401 && adminSessionEnded_(r)){
       if(attempt === 0){ if(!_adminLoginInFlight) showToast(SESSION_ENDED_, true); continue; }
       throw new Error(SESSION_ENDED_);
@@ -1095,12 +1163,13 @@ async function loadAdminOrgList(){
   // A step still owed: the server answers nothing else until it is done, so go straight to it.
   if(adminPending){ renderPendingStep_(document.getElementById("app")); return; }
   try{
+    const asked = listCacheAsk_({action: "listOrgs", key: adminKey});
     const res = await fetch("/api/orders", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({action: "listOrgs", key: adminKey})
+      body: JSON.stringify(asked)
     });
-    const data = await res.json();
+    const data = listCacheTake_(asked, await res.json());
     if(!res.ok || data.status === "error"){
       // The server says a step is owed that this browser didn't know about (an older marker).
       if(data && data.code === "setup_required"){ adminPending = data.pending || "account"; updateStoredSession_(); renderPendingStep_(document.getElementById("app")); return; }
@@ -5491,6 +5560,7 @@ function renderAdminOrders(app, org, opts){
   `;
     window._ordersRenderLimit = ORDERS_RENDER_STEP_;
   }
+  const blanksAsked = listCacheAsk_({action:"getBlanks", stockOnly:true, key:adminKey});
   return Promise.all([
     fetchOrders(org.orgId),
     !adminFeatureOn_("designVerification") ? Promise.resolve({status:"error"}) : fetch("/api/orders", {
@@ -5505,8 +5575,8 @@ function renderAdminOrders(app, org, opts){
     // Only what the breakdown reads: each blank's stock on hand (stockOnly), not the whole Blanks screen.
     fetch("/api/orders", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({action:"getBlanks", stockOnly:true, key:adminKey})
-    }).then(r => r.ok ? r.json() : {status:"error"}).catch(() => ({status:"error"})),
+      body: JSON.stringify(blanksAsked)
+    }).then(r => r.ok ? r.json() : {status:"error"}).then(d => listCacheTake_(blanksAsked, d)).catch(() => ({status:"error"})),
   ]).then(([orders, verifData, blankLinksData, blanksData]) => {
     // Build a map of orderId → latest verification record
     const verifMap = {};
@@ -6560,13 +6630,14 @@ async function createLocalSale(orgId){
   // Fetch all products (including hidden) and blanks
   let products, blanks;
   try{
+    const blanksAsked = listCacheAsk_({action:"getBlanks", key:adminKey});
     const [pRes, bRes] = await Promise.all([
       fetch("/api/orders", {method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({action:"listProducts", org:orgId, key:adminKey})}),
       fetch("/api/orders", {method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({action:"getBlanks", key:adminKey})}),
+        body: JSON.stringify(blanksAsked)}),
     ]);
-    const [pData, bData] = await Promise.all([pRes.json(), bRes.json()]);
+    const [pData, bData] = await Promise.all([pRes.json(), bRes.json().then(d => listCacheTake_(blanksAsked, d))]);
     if(!pRes.ok || pData.status === "error"){
       showToast("Could not load products: " + ((pData && pData.message) || "unknown error"), true);
       return;
@@ -7702,11 +7773,12 @@ async function renderAdminOrgList(app){
     return;
   }
   try{
+    const asked = listCacheAsk_({action: "listOrgsAdmin", key: adminKey});
     const res = await fetch("/api/orders", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({action: "listOrgsAdmin", key: adminKey})
+      body: JSON.stringify(asked)
     });
-    const data = await res.json();
+    const data = listCacheTake_(asked, await res.json());
     if(!res.ok || data.status === "error"){
       adminSessionEnded_(res);
       document.getElementById("adminPanel").innerHTML = `
@@ -13552,11 +13624,12 @@ async function loadBlankLinksSection(orgId, product) {
   if (!sizes.length) sizes = ["OSFA"];
 
   try {
+    const blanksAsked = listCacheAsk_({action:"getBlanks",key:adminKey});
     const [blanksRes, linksRes] = await Promise.all([
-      fetch("/api/orders", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"getBlanks",key:adminKey})}),
+      fetch("/api/orders", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(blanksAsked)}),
       fetch("/api/orders", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"getBlankLinks",key:adminKey,org:orgId})}),
     ]);
-    const [blanksData, linksData] = await Promise.all([blanksRes.json(), linksRes.json()]);
+    const [blanksData, linksData] = await Promise.all([blanksRes.json().then(d => listCacheTake_(blanksAsked, d)), linksRes.json()]);
     const allBlanks = (blanksData && blanksData.status === "ok") ? (blanksData.blanks || []) : [];
     const links = (linksData && linksData.status === "ok") ? (linksData.links || []) : [];
     drawProductBlankImages_(product, allBlanks, links);
@@ -19568,11 +19641,12 @@ async function loadBlanksPanel(app) {
   if (!panel) return;
   await loadProductCategories_();   // the groups and their headings (Catalog → Product categories)
   try {
+    const asked = listCacheAsk_({action: "getBlanks", key: adminKey});
     const res = await fetch("/api/orders", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({action: "getBlanks", key: adminKey})
+      body: JSON.stringify(asked)
     });
-    const data = await res.json();
+    const data = listCacheTake_(asked, await res.json());
     if (!res.ok || data.status === "error") {
       panel.innerHTML = `<div class="admin-empty">${escapeHtml((data && data.message) || "Could not load blanks.")}</div>`;
       return;

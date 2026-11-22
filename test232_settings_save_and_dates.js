@@ -61,9 +61,14 @@ const tick = (ms) => new Promise(r => setTimeout(r, ms || 40));
   w.eval(`(() => { const R = Date; const T = ${fixed.getTime()}; class D extends R { constructor(...a){ if (a.length) super(...a); else super(T); } static now(){ return T; } } window.Date = D; })()`);
   const tzDay = new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(fixed);
   ok("localToday_() is the browser's own calendar day, not the UTC one", w.localToday_() === tzDay);
+  // A report's To date has to reach the UTC day too: the server counts report days in UTC, so this evening's
+  // runs and sales (already "tomorrow" in UTC) would be left out of a report that stops at the local day.
+  ok("a report's default To covers what happened since UTC midnight (the later of the two days)", w.reportToDay_() === "2026-11-05" && tzDay <= w.reportToDay_());
   w.Date = realDate;
-  const code = adminJs.split("\n").filter(l => !/^\s*\/\//.test(l)).join("\n");
-  ok("no screen takes 'today' from the UTC date any more", !/new Date\(\)\.toISOString\(\)\.slice\(0, ?10\)/.test(code));
+  ok("Revenue, Sales tax, Cost of goods and Run Times default their To to that day",
+    /const defaultTo   = reportToDay_\(\);/.test(adminJs) && ["taxTo", "cogsTo", "rrTo"].every(id => new RegExp('id="' + id + '" value="\\$\\{reportToDay_\\(\\)\\}"').test(adminJs)));
+  const code = adminJs.split("\n").filter(l => !/^\s*\/\//.test(l) && !/^function reportToDay_\(\)/.test(l)).join("\n");
+  ok("no screen takes 'today' from the UTC date any more (except a report's To, above)", !/new Date\(\)\.toISOString\(\)\.slice\(0, ?10\)/.test(code));
   ok("the audit log's From / To are sent as the local day's bounds", /dateFrom:\s+localDayStartIso_\(/.test(adminJs) && /dateTo:\s+localDayEndIso_\(/.test(adminJs));
   ok("a step's time (ISO) shows as the local day, a plain day as written", w.adminShortDate_("2026-11-04") === "11/4/2026" &&
     w.adminShortDate_(new Date(2026, 10, 4, 21, 30).toISOString()) === "11/4/2026" && w.adminDay_(new Date(2026, 10, 4, 23, 50).toISOString()) === "2026-11-04");

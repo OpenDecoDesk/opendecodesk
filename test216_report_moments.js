@@ -8,7 +8,7 @@ const { createD1 } = require("./testlib/d1-shim.js");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1");
 const L = new Function(strip(read("functions/_lib/db.js")) + `\nreturn { getTransferValuation, getTransferValuations, getFinishedGoodsValuation, getFinishedGoodsValuations,
-  getOrderCostsNotYetSold, getOrderCostsNotYetSoldAt, getAccountantExport, saleDateSql_ };`)();
+  getOrderCostsNotYetSold, getOrderCostsNotYetSoldAt, getAccountantExport, saleDateSql_, closePeriod };`)();
 const ok = (d, c) => console.log(d + ":", !!c);
 const fromCents = (c) => Math.round(c) / 100;
 
@@ -99,6 +99,20 @@ async function oldNotYetSold(db, asOf, basis) {
   const fin = exp.inventoryGroups.find(g => g.group === "Finished stock");
   ok("the accountant export's finished stock beginning and ending come from the one read", fin.beginning === (await oldFinishedValuation(d1, "2025-06-30T23:59:59.999Z")).value &&
     fin.ending === (await oldFinishedValuation(d1, "2026-06-30T23:59:59.999Z")).value);
+  // Month-end snapshots (migrations/0103): with months closed, a report starts from the latest closed month before
+  // it and replays only what came after. Twice — once writing the snapshots, once reading them — the same numbers.
+  for (const m of ["2025-01", "2025-02", "2025-06", "2025-12", "2026-03"]) await L.closePeriod(d1, m, "test");
+  for (const pass of ["writing month-end snapshots", "reading them"]) {
+    let same = true;
+    for (const [from, to] of periods) {
+      const e = [new Date(Date.parse(from + "T00:00:00.000Z") - 1).toISOString(), to + "T23:59:59.999Z"];
+      same = same && JSON.stringify(await L.getTransferValuations(d1, e)) === JSON.stringify([await oldTransferValuation(d1, e[0]), await oldTransferValuation(d1, e[1])]) &&
+        JSON.stringify(await L.getFinishedGoodsValuations(d1, e)) === JSON.stringify([await oldFinishedValuation(d1, e[0]), await oldFinishedValuation(d1, e[1])]) &&
+        JSON.stringify(await L.getOrderCostsNotYetSoldAt(d1, e, { basis: "shipped" })) === JSON.stringify([await oldNotYetSold(d1, e[0], "shipped"), await oldNotYetSold(d1, e[1], "shipped")]);
+    }
+    ok(`with months closed (${pass}), every period's transfers, finished stock and costs not yet sold are the full history's`, same);
+  }
+  ok("…and the snapshots were written for the closed months the periods start after", d1.q("SELECT COUNT(*) n FROM inventory_period_snapshots WHERE key = '#complete' AND month IN ('2025-02', '2025-06')")[0].n === 4);
   const ordersSrc = read("functions/api/orders.js");
   ok("the Inventory report reads each history once for both ends", /getTransferValuations\(env\.DB, ends\)/.test(ordersSrc) && /getFinishedGoodsValuations\(env\.DB, ends\)/.test(ordersSrc) &&
     /getOrderCostsNotYetSoldAt\(env\.DB, ends/.test(ordersSrc) && !/getTransferValuation\(env\.DB, dayBefore\)/.test(ordersSrc));

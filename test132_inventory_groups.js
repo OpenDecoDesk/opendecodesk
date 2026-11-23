@@ -203,7 +203,7 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   // COGS lands in the month of each order's sale date, so add up the months (an order made in an earlier month counts there).
   const allFinished = Math.round(ex.summary.reduce((n, m) => n + m.cogsFinished * 100, 0)) / 100;
   ok("the accountant export splits COGS and write-offs the same way", allFinished === t.cogsFinished && month.writeoffsTesting === 6 && month.toFinishedStock === t.toFinished);
-  ok("…and lists each group's beginning and ending inventory", ex.inventoryGroups.length === 3 && ex.inventoryGroups[1].group === "Blanks for testing / shop use" && ex.inventoryGroups[1].ending === 24);
+  ok("…and lists each group's beginning and ending inventory", ex.inventoryGroups.length === 4 && ex.inventoryGroups[3].group === "Transfer sheets" && ex.inventoryGroups[1].group === "Blanks for testing / shop use" && ex.inventoryGroups[1].ending === 24);
 
   console.log("\n=== The admin screens ===");
   const adminJs = read("public/admin.js");

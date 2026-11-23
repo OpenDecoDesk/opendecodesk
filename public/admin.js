@@ -19383,7 +19383,7 @@ async function renderBooks(app){
         <button type="button" class="admin-btn" data-exp="transfers">Transfers</button>
         <button type="button" class="admin-btn" data-exp="accounts">Account balances</button>
         <button type="button" class="admin-btn" data-exp="reconciliations">Reconciliations</button>
-        <button type="button" class="admin-btn" data-exp="inventoryGroups" title="Blanks for sale, blanks for testing / shop use and finished stock — beginning and ending value">Inventory by group</button>
+        <button type="button" class="admin-btn" data-exp="inventoryGroups" title="Blanks for sale, blanks for testing / shop use, finished stock and transfer sheets — beginning and ending value">Inventory by group</button>
       </div>
       <div id="expStatus" style="font-size:13px;color:#555;margin-top:10px;min-height:18px;"></div>
     </div>`;

@@ -126,10 +126,14 @@ export async function getAccountingSettings(db) {
 }
 export async function getSaleDateBasis(db) { return (await getAccountingSettings(db)).saleDate; }
 export async function buildAccountingSettings(db, { saleDate }) {
-  const next = { ...(await getAccountingSettings(db)), saleDate: saleDateBasis_(saleDate) };
+  const prev = await getAccountingSettings(db);
+  const next = { ...prev, saleDate: saleDateBasis_(saleDate) };
+  const stmts = [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES (?, ?)").bind("accounting", JSON.stringify(next))];
+  // A new basis restates every month's COGS: no month-end stock snapshot (migrations/0103) is kept across it. Deleted
+  // in the same write as the setting, so the two can't disagree.
+  if (next.saleDate !== prev.saleDate) stmts.push(db.prepare("DELETE FROM inventory_period_snapshots"));
   // Home's figures depend on it: work them out again on the next visit.
-  return { value: next, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES (?, ?)").bind("accounting", JSON.stringify(next))],
-    after: [dropDashboardCache_(db)] };
+  return { value: next, stmts, after: [dropDashboardCache_(db)] };
 }
 export async function setAccountingSettings(db, p) {
   const b = await buildAccountingSettings(db, p);
@@ -7765,22 +7769,19 @@ export async function getInventoryValuation(db, asOf) {
 // The valuation at several moments from ONE read of the movement history (up to the latest of them):
 // the running state is snapshotted as the read passes each moment. A report's beginning and ending
 // inventory used to read the whole history twice. Returns one valuation per moment, in the order given.
+// Starts from the latest month-end snapshot it can (migrations/0103) and reads only the movements after it.
 export async function getInventoryValuations(db, asOfList) {
-  const moments = asOfList.map((asOf, i) => ({ asOf, i })).sort((a, b) => (a.asOf < b.asOf ? -1 : a.asOf > b.asOf ? 1 : 0));
-  const last = moments[moments.length - 1].asOf;
-  const { results } = await db.prepare(
-    "SELECT blankId, blankName, color, size, qtyDelta, unitCostCents, kind, occurredAt FROM inventory_movements WHERE occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id"
-  ).bind(last).all();
+  const last = latestMoment_(asOfList);
   let testingIds = new Set();
   try { testingIds = new Set((await db.prepare("SELECT id FROM blanks WHERE forTesting = 1").all()).results.map(r => Number(r.id))); }
   catch (e) { if (!/no such column/i.test(String(e && e.message))) throw e; }
-  // Each blank by its CURRENT name; the name saved on its movements only for a blank since deleted.
+  // Each blank by its CURRENT name; the name saved on its movements (`raw`, the last one given) only for a blank
+  // since deleted.
   const current = await currentBlankNames_(db);
   const state = new Map();
-  const out = new Array(asOfList.length);
   const snapshot = (asOf) => {
     const rows = [...state.values()].filter(r => r.qty !== 0)
-      .map(r => ({ blankId: r.blankId, name: r.name, color: r.color, size: r.size, qty: r.qty, avgCost: fromCents(r.avg), value: fromCents(Math.max(0, r.qty) * r.avg),
+      .map(r => ({ blankId: r.blankId, name: current.get(r.blankId) || r.raw, color: r.color, size: r.size, qty: r.qty, avgCost: fromCents(r.avg), value: fromCents(Math.max(0, r.qty) * r.avg),
         forTesting: testingIds.has(r.blankId) }))
       .sort((a, b) => (a.name + a.color + a.size).localeCompare(b.name + b.color + b.size));
     const group = (list) => ({ units: list.reduce((s, r) => s + r.qty, 0), value: fromCents(list.reduce((s, r) => s + toCents(r.value), 0)) });
@@ -7788,22 +7789,31 @@ export async function getInventoryValuations(db, asOfList) {
       value: fromCents(rows.reduce((s, r) => s + toCents(r.value), 0)),
       groups: { forSale: group(rows.filter(r => !r.forTesting)), testing: group(rows.filter(r => r.forTesting)) } };
   };
-  let next = 0;
-  for (const m of results) {
-    while (next < moments.length && m.occurredAt > moments[next].asOf) { out[moments[next].i] = snapshot(moments[next].asOf); next++; }
-    const key = m.blankId + "|" + (m.color || "") + "|" + m.size;
-    const st = state.get(key) || { blankId: Number(m.blankId), name: m.blankName, color: m.color || "", size: m.size, qty: 0, avg: 0 };
-    const d = Number(m.qtyDelta);
-    if (d > 0 && (m.kind === "purchase" || m.kind === "adjust")) {
-      const onHand = Math.max(0, st.qty);
-      st.avg = Math.round((onHand * st.avg + d * Number(m.unitCostCents)) / (onHand + d));
-    }
-    st.qty += d;
-    st.name = current.get(Number(m.blankId)) || m.blankName || st.name;
-    state.set(key, st);
-  }
-  for (; next < moments.length; next++) out[moments[next].i] = snapshot(moments[next].asOf);
-  return out;
+  const keyOf = (blankId, color, size) => blankId + "|" + color + "|" + size;
+  return replayStock_(db, "blank", asOfList, {
+    readAfter: async (from) => (await db.prepare(
+      `SELECT blankId, blankName, color, size, qtyDelta, unitCostCents, kind, occurredAt FROM inventory_movements
+       WHERE ${from ? "occurredAt > ? AND " : ""}occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id`
+    ).bind(...(from ? [from, last] : [last])).all()).results,
+    state, snapshot,
+    apply: (m) => {
+      const key = keyOf(m.blankId, m.color || "", m.size);
+      const st = state.get(key) || { blankId: Number(m.blankId), raw: m.blankName, color: m.color || "", size: m.size, qty: 0, avg: 0 };
+      const d = Number(m.qtyDelta);
+      if (d > 0 && (m.kind === "purchase" || m.kind === "adjust")) {
+        const onHand = Math.max(0, st.qty);
+        st.avg = Math.round((onHand * st.avg + d * Number(m.unitCostCents)) / (onHand + d));
+      }
+      st.qty += d;
+      st.raw = m.blankName || st.raw;
+      state.set(key, st);
+    },
+    codec: {
+      save: (st) => [JSON.stringify([st.blankId, st.color, st.size]), st.qty, st.avg, st.raw, ""],
+      restore: (r) => ({ blankId: r.key[0], raw: r.name, color: r.key[1], size: r.key[2], qty: r.qty, avg: r.avg }),
+      mapKey: (st) => keyOf(st.blankId, st.color, st.size),
+    },
+  });
 }
 
 // COGS for a period by month: blanks consumed (at average cost, by the
@@ -8274,10 +8284,9 @@ export async function getTransferValuation(db, asOf) {
   return (await getTransferValuations(db, [asOf]))[0];
 }
 // The same at several moments from ONE read of the history (as getInventoryValuations does for blanks).
+// Starts from the latest month-end snapshot it can (migrations/0103) and reads only the movements after it.
 export async function getTransferValuations(db, asOfList) {
-  const { results } = await db.prepare(
-    "SELECT transferId, transferName, qtyDelta, unitCostCents, kind, occurredAt FROM transfer_movements WHERE occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id"
-  ).bind(latestMoment_(asOfList)).all();
+  const last = latestMoment_(asOfList);
   const state = new Map();
   const snapshot = (asOf) => {
     const rows = [...state.values()].filter(r => r.qty !== 0)
@@ -8285,32 +8294,132 @@ export async function getTransferValuations(db, asOfList) {
       .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     return { asOf, rows, units: rows.reduce((s, r) => s + r.qty, 0), value: fromCents(rows.reduce((s, r) => s + toCents(r.value), 0)) };
   };
-  return replayAtMoments_(results, asOfList, snapshot, (m) => {
-    const key = String(m.transferId);
-    const st = state.get(key) || { transferId: Number(m.transferId), name: m.transferName, qty: 0, avg: 0 };
-    const d = Number(m.qtyDelta);
-    if (d > 0 && (m.kind === "purchase" || m.kind === "adjust")) {
-      const onHand = Math.max(0, st.qty);
-      st.avg = Math.round((onHand * st.avg + d * Number(m.unitCostCents)) / (onHand + d));
-    }
-    st.qty += d; st.name = m.transferName || st.name;
-    state.set(key, st);
+  return replayStock_(db, "transfer", asOfList, {
+    readAfter: async (from) => (await db.prepare(
+      `SELECT transferId, transferName, qtyDelta, unitCostCents, kind, occurredAt FROM transfer_movements
+       WHERE ${from ? "occurredAt > ? AND " : ""}occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id`
+    ).bind(...(from ? [from, last] : [last])).all()).results,
+    state, snapshot,
+    apply: (m) => {
+      const key = String(m.transferId);
+      const st = state.get(key) || { transferId: Number(m.transferId), name: m.transferName, qty: 0, avg: 0 };
+      const d = Number(m.qtyDelta);
+      if (d > 0 && (m.kind === "purchase" || m.kind === "adjust")) {
+        const onHand = Math.max(0, st.qty);
+        st.avg = Math.round((onHand * st.avg + d * Number(m.unitCostCents)) / (onHand + d));
+      }
+      st.qty += d; st.name = m.transferName || st.name;
+      state.set(key, st);
+    },
+    codec: {
+      save: (st) => [JSON.stringify([st.transferId]), st.qty, st.avg, st.name, ""],
+      restore: (r) => ({ transferId: r.key[0], name: r.name, qty: r.qty, avg: r.avg }),
+      mapKey: (st) => String(st.transferId),
+    },
   });
 }
 // The latest of several ISO moments (what a multi-moment replay reads up to).
 const latestMoment_ = (asOfList) => asOfList.reduce((a, b) => (b > a ? b : a));
-// Replays movements (ordered by occurredAt) through `apply`, calling `snapshot(asOf)` as the replay passes each
-// moment; one result per moment, in the order given.
+// The earliest of several ISO moments (where a multi-moment replay can start from a month-end snapshot).
+const earliestMoment_ = (asOfList) => asOfList.reduce((a, b) => (b < a ? b : a));
+// Replays movements (ordered by occurredAt) through `apply`, calling `snapshot(asOf, i)` as the replay passes each
+// moment (i = its place in asOfList); one result per moment, in the order given.
 function replayAtMoments_(movements, asOfList, snapshot, apply) {
   const moments = asOfList.map((asOf, i) => ({ asOf, i })).sort((a, b) => (a.asOf < b.asOf ? -1 : a.asOf > b.asOf ? 1 : 0));
   const out = new Array(asOfList.length);
   let next = 0;
   for (const m of movements) {
-    while (next < moments.length && m.occurredAt > moments[next].asOf) { out[moments[next].i] = snapshot(moments[next].asOf); next++; }
+    while (next < moments.length && m.occurredAt > moments[next].asOf) { out[moments[next].i] = snapshot(moments[next].asOf, moments[next].i); next++; }
     apply(m);
   }
-  for (; next < moments.length; next++) out[moments[next].i] = snapshot(moments[next].asOf);
+  for (; next < moments.length; next++) out[moments[next].i] = snapshot(moments[next].asOf, moments[next].i);
   return out;
+}
+
+// ---- Month-end stock snapshots (migrations/0103) ------------------------------------------------------------
+// A stock valuation replays a movement history. For a report that starts after a CLOSED month, the replay state at
+// that month's end (each item's signed qty, integer average cents and names, exactly as the replay holds them) is
+// kept in inventory_period_snapshots, so the next report starts there and replays only the movements after it —
+// the same numbers, to the cent, as replaying everything. Written lazily, the first time a report needs that month.
+// The migration's triggers delete every snapshot from a changed movement's month on; reopenPeriod and a change of
+// sale-date basis delete them too.
+const SNAP_COMPLETE_ = "#complete", SNAP_PENDING_ = "#pending";
+// The last instant of a month 'YYYY-MM', written the way the reports write their moments.
+function monthEndMoment_(month) {
+  const [y, m] = String(month).split("-").map(Number);
+  return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10) + "T23:59:59.999Z";
+}
+// Where a replay of `kind` ('blank' | 'transfer' | 'finished') for these moments can start:
+//   from   the moment the seed covers up to ('' = no seed: replay everything); read only movements after it
+//   rows   the seed: [{ key: [..identity], qty, avg, name, label }] in the order the replay first met each item
+//   write  { month, end, token } when the latest closed month the report could start from has no snapshot yet:
+//          the caller captures the state at `end` and passes it to stockSnapshotWrite_.
+// The writer's '#pending' row goes in BEFORE the history is read: a movement changed in that month or earlier
+// deletes it (the same triggers), and the write only lands while it is still there, so a snapshot can't be saved
+// from a history that changed while it was being read.
+async function stockSnapshotStart_(db, kind, asOfList) {
+  const none = { from: "", rows: [], write: null };
+  try {
+    const first = earliestMoment_(asOfList);
+    const { results: closed } = await db.prepare("SELECT month FROM closed_periods WHERE month <= ? ORDER BY month DESC LIMIT 2").bind(monthOf(first)).all();
+    const target = (closed.find(r => monthEndMoment_(r.month) <= first) || {}).month;
+    if (!target) return none;
+    // The latest whole snapshot at or before the target, read in one statement (the triggers delete a month's rows
+    // in one statement too, so this sees all of a snapshot or none of it).
+    const read = async () => (await db.prepare(
+      `SELECT month, key, qty, avgCents, name, label FROM inventory_period_snapshots WHERE kind = ? AND month =
+         (SELECT MAX(month) FROM inventory_period_snapshots WHERE kind = ? AND key = ? AND month <= ?) ORDER BY rowid`
+    ).bind(kind, kind, SNAP_COMPLETE_, target).all()).results;
+    let rows = await read(), base = (rows.find(r => r.key === SNAP_COMPLETE_) || {}).month || "";
+    let write = null;
+    if (base !== target) {
+      write = { month: target, end: monthEndMoment_(target), token: crypto.randomUUID() };
+      await db.prepare("INSERT OR REPLACE INTO inventory_period_snapshots (month, kind, key, qty, avgCents, name, label) VALUES (?, ?, ?, 0, 0, ?, '')")
+        .bind(target, kind, SNAP_PENDING_, write.token).run();
+      // A change at or before the seed between reading it and the '#pending' row would have gone unnoticed: if the
+      // seed is gone now, read again (a seed read from here on is guarded by '#pending').
+      if (base && !(await db.prepare("SELECT 1 AS x FROM inventory_period_snapshots WHERE month = ? AND kind = ? AND key = ?").bind(base, kind, SNAP_COMPLETE_).first())) {
+        rows = await read(); base = (rows.find(r => r.key === SNAP_COMPLETE_) || {}).month || "";
+      }
+    }
+    return { from: base ? monthEndMoment_(base) : "", write,
+      rows: base ? rows.filter(r => !r.key.startsWith("#")).map(r => ({ key: JSON.parse(r.key), qty: Number(r.qty), avg: Number(r.avgCents), name: r.name, label: r.label })) : [] };
+  } catch (e) { if (/no such table/i.test(String(e && e.message))) return none; throw e; }
+}
+// Saves the state captured at write.end as that month's snapshot: entries [[keyJson, qty, avg, name, label]] in
+// replay order. One batch (one transaction); every statement lands only while this writer's '#pending' row is still
+// there. A failed write costs nothing but the next report's time, so it never fails the report.
+async function stockSnapshotWrite_(db, kind, write, entries) {
+  const guard = "EXISTS (SELECT 1 FROM inventory_period_snapshots WHERE month = ? AND kind = ? AND key = ? AND name = ?)";
+  const g = [write.month, kind, SNAP_PENDING_, write.token];
+  const stmts = [db.prepare(`DELETE FROM inventory_period_snapshots WHERE month = ? AND kind = ? AND key <> ? AND ${guard}`).bind(write.month, kind, SNAP_PENDING_, ...g)];
+  for (let i = 0; i < entries.length; i += 400) {
+    stmts.push(db.prepare(`INSERT OR REPLACE INTO inventory_period_snapshots (month, kind, key, qty, avgCents, name, label)
+      SELECT ?, ?, json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]'), json_extract(value, '$[3]'), json_extract(value, '$[4]')
+      FROM json_each(?) WHERE ${guard}`).bind(write.month, kind, JSON.stringify(entries.slice(i, i + 400)), ...g));
+  }
+  stmts.push(db.prepare(`INSERT OR REPLACE INTO inventory_period_snapshots (month, kind, key, qty, avgCents, name, label) SELECT ?, ?, ?, 0, 0, '', '' WHERE ${guard}`)
+    .bind(write.month, kind, SNAP_COMPLETE_, ...g));
+  stmts.push(db.prepare("DELETE FROM inventory_period_snapshots WHERE month = ? AND kind = ? AND key = ? AND name = ?").bind(...g));
+  try { await db.batch(stmts); } catch (e) { /* the next report replays from the older seed and tries again */ }
+}
+// One stock replay for several moments, seeded from the latest usable snapshot. `readAfter(from)` reads the
+// movements after `from` ('' = all) up to the latest moment, in replay order; `codec` turns a state entry into a
+// snapshot entry (save), back (restore), and gives its key in `state` (mapKey). Returns one snapshot(asOf) per moment.
+async function replayStock_(db, kind, asOfList, { readAfter, state, apply, snapshot, codec }) {
+  const start = await stockSnapshotStart_(db, kind, asOfList);
+  for (const r of start.rows) { const st = codec.restore(r); state.set(codec.mapKey(st), st); }
+  const movements = await readAfter(start.from);
+  let captured = null;
+  const moments = start.write ? [...asOfList, start.write.end] : asOfList;
+  const out = replayAtMoments_(movements, moments, (asOf, i) => (i === asOfList.length ? (captured = [...state.values()].map(codec.save)) : snapshot(asOf)), apply);
+  if (captured) await stockSnapshotWrite_(db, kind, start.write, captured);
+  return out.slice(0, asOfList.length);
+}
+// Snapshots of every kind from `month` on, gone (a reopened month; all of them for a new sale-date basis).
+async function dropStockSnapshots_(db, month = "") {
+  try { await db.prepare("DELETE FROM inventory_period_snapshots WHERE month >= ?").bind(month).run(); }
+  catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
 }
 
 // Cost already taken out of stock for orders that don't count as sold yet at `asOf` (end of that
@@ -8321,18 +8430,24 @@ export async function getOrderCostsNotYetSold(db, asOf, { basis } = {}) {
   return (await getOrderCostsNotYetSoldAt(db, [asOf], { basis }))[0];
 }
 // The same at several moments, each table read once for all of them (a report's beginning and end).
+// Used-on-orders minus sold, without reading all history: what was used by a moment on an order not sold by then,
+// less what was sold by a moment but only used after it. The first sum reads only orders not sold at the earliest
+// moment (by the sale-date index) and their movements (by orderId); the second only movements after the earliest
+// moment. The same cents as summing everything used and everything sold since the first movement.
 export async function getOrderCostsNotYetSoldAt(db, asOfList, { basis } = {}) {
   const sale = saleDateSql_(basis || await getSaleDateBasis(db), "o");
-  const sums = (col) => asOfList.map((_, i) => `COALESCE(SUM(CASE WHEN ${col} <= ? THEN -m.qtyDelta * m.unitCostCents ELSE 0 END), 0) AS c${i}`).join(", ");
+  const first = earliestMoment_(asOfList), last = latestMoment_(asOfList);
+  const sums = (cond) => asOfList.map((_, i) => `COALESCE(SUM(CASE WHEN ${cond} THEN -m.qtyDelta * m.unitCostCents ELSE 0 END), 0) AS c${i}`).join(", ");
   const two = async (table, kinds) => {
     const k = kinds.map(x => `'${x}'`).join(", ");
     try {
-      const used = await db.prepare(`SELECT ${sums("m.occurredAt")} FROM ${table} m
-        WHERE m.occurredAt <= ? AND m.kind IN (${k}) AND m.voidedAt IS NULL AND m.orderId IS NOT NULL
-          AND EXISTS (SELECT 1 FROM orders ox WHERE ox.orderId = m.orderId)`).bind(...asOfList, latestMoment_(asOfList)).first();
-      const sold = await db.prepare(`SELECT ${sums(sale)} FROM orders o JOIN ${table} m ON m.orderId = o.orderId
-        WHERE ${sale} <= ? AND m.kind IN (${k}) AND m.voidedAt IS NULL`).bind(...asOfList, latestMoment_(asOfList)).first();
-      return asOfList.map((_, i) => Number(used["c" + i]) - Number(sold["c" + i]));
+      const unsold = await db.prepare(`SELECT ${sums(`m.occurredAt <= ? AND (${sale} IS NULL OR ${sale} > ?)`)} FROM orders o JOIN ${table} m ON m.orderId = o.orderId
+        WHERE (${sale} IS NULL OR ${sale} > ?) AND m.occurredAt <= ? AND m.kind IN (${k}) AND m.voidedAt IS NULL`)
+        .bind(...asOfList.flatMap(a => [a, a]), first, last).first();
+      const soldFirst = await db.prepare(`SELECT ${sums(`m.occurredAt > ? AND ${sale} <= ?`)} FROM ${table} m JOIN orders o ON o.orderId = m.orderId
+        WHERE m.occurredAt > ? AND ${sale} <= ? AND m.kind IN (${k}) AND m.voidedAt IS NULL`)
+        .bind(...asOfList.flatMap(a => [a, a]), first, last).first();
+      return asOfList.map((_, i) => Number(unsold["c" + i]) - Number(soldFirst["c" + i]));
     } catch (e) { if (/no such table/i.test(String(e && e.message))) return asOfList.map(() => 0); throw e; }
   };
   const [blanks, finished, transfers] = await Promise.all([
@@ -11662,8 +11777,10 @@ export async function closePeriod(db, month, closedBy) {
   await db.prepare("INSERT OR IGNORE INTO closed_periods (month, closedAt, closedBy) VALUES (?, ?, ?)")
     .bind(month, new Date().toISOString(), closedBy || "").run();
 }
+// Its month-end stock snapshots, and every later month's, go with it (migrations/0103): its numbers can change again.
 export async function reopenPeriod(db, month) {
   await db.prepare("DELETE FROM closed_periods WHERE month=?").bind(month).run();
+  await dropStockSnapshots_(db, month);
 }
 
 // ---- Cash-basis revenue ------------------------------------------------------
@@ -11776,14 +11893,16 @@ export async function getAccountantExport(db, dateFrom, dateTo) {
 
   const status = (r) => r.voidedAt ? "void" : r.isTest ? "test" : "";
   // Inventory by group at the start and end of the period (migrations/0060): blanks for sale, blanks for
-  // testing / shop use, finished stock (Schedule C Part III, beginning and ending inventory).
+  // testing / shop use, finished stock and transfer sheets (Schedule C Part III, beginning and ending inventory).
   const before = new Date(new Date(dateFrom).getTime() - 1).toISOString();
-  const [[b0, b1], [f0, f1]] = await Promise.all([getInventoryValuations(db, [before, dateTo]),
-    getFinishedGoodsValuations(db, [before, dateTo])]);   // each history read once for both ends
+  const [[b0, b1], [f0, f1], [t0, t1]] = await Promise.all([getInventoryValuations(db, [before, dateTo]),
+    getFinishedGoodsValuations(db, [before, dateTo]), getTransferValuations(db, [before, dateTo])]);   // each history read once for both ends
   const inventoryGroups = [
     { group: "Blanks for sale", beginning: b0.groups.forSale.value, ending: b1.groups.forSale.value },
     { group: "Blanks for testing / shop use", beginning: b0.groups.testing.value, ending: b1.groups.testing.value },
     { group: "Finished stock", beginning: f0.value, ending: f1.value },
+    // Transfer sheets on hand (migrations/0036): the Inventory report's own section, at the same two moments.
+    { group: "Transfer sheets", beginning: t0.value, ending: t1.value },
   ];
   return {
     summary,
@@ -14137,13 +14256,9 @@ export async function getFinishedGoodsValuation(db, asOf) {
   return (await getFinishedGoodsValuations(db, [asOf]))[0];
 }
 // The same at several moments from ONE read of the history (as getInventoryValuations does for blanks).
+// Starts from the latest month-end snapshot it can (migrations/0103) and reads only the movements after it.
 export async function getFinishedGoodsValuations(db, asOfList) {
-  let results = [];
-  try {
-    ({ results } = await db.prepare(
-      "SELECT orgId, productId, productName, size, variant, variantLabel, qtyDelta, unitCostCents, kind, occurredAt FROM finished_goods_movements WHERE occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id"
-    ).bind(latestMoment_(asOfList)).all());
-  } catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
+  const last = latestMoment_(asOfList);
   const state = new Map();
   const snapshot = (asOf) => {
     const rows = [...state.values()].filter(r => r.qty !== 0)
@@ -14151,13 +14266,29 @@ export async function getFinishedGoodsValuations(db, asOfList) {
       .sort((a, b) => (a.orgId + a.name + a.size).localeCompare(b.orgId + b.name + b.size));
     return { asOf, rows, units: rows.reduce((s, r) => s + r.qty, 0), value: fromCents(rows.reduce((s, r) => s + toCents(r.value), 0)) };
   };
-  return replayAtMoments_(results, asOfList, snapshot, (m) => {
-    const key = heldKey_(m.orgId, m.productId, m.size, m.variant);
-    const st = state.get(key) || { orgId: m.orgId, productId: m.productId, name: m.productName, size: m.size || "", variant: m.variant || "", label: "", qty: 0, avg: 0 };
-    const d = Number(m.qtyDelta);
-    if (d > 0 && m.kind !== "sell") { const on = Math.max(0, st.qty); st.avg = Math.round((on * st.avg + d * Number(m.unitCostCents)) / (on + d)); }
-    st.qty += d; st.name = m.productName || st.name; st.label = m.variantLabel || st.label;
-    state.set(key, st);
+  return replayStock_(db, "finished", asOfList, {
+    readAfter: async (from) => {
+      try {
+        return (await db.prepare(
+          `SELECT orgId, productId, productName, size, variant, variantLabel, qtyDelta, unitCostCents, kind, occurredAt FROM finished_goods_movements
+           WHERE ${from ? "occurredAt > ? AND " : ""}occurredAt <= ? AND voidedAt IS NULL ORDER BY occurredAt, id`
+        ).bind(...(from ? [from, last] : [last])).all()).results;
+      } catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; return []; }
+    },
+    state, snapshot,
+    apply: (m) => {
+      const key = heldKey_(m.orgId, m.productId, m.size, m.variant);
+      const st = state.get(key) || { orgId: m.orgId, productId: m.productId, name: m.productName, size: m.size || "", variant: m.variant || "", label: "", qty: 0, avg: 0 };
+      const d = Number(m.qtyDelta);
+      if (d > 0 && m.kind !== "sell") { const on = Math.max(0, st.qty); st.avg = Math.round((on * st.avg + d * Number(m.unitCostCents)) / (on + d)); }
+      st.qty += d; st.name = m.productName || st.name; st.label = m.variantLabel || st.label;
+      state.set(key, st);
+    },
+    codec: {
+      save: (st) => [heldKey_(st.orgId, st.productId, st.size, st.variant), st.qty, st.avg, st.name, st.label],
+      restore: (r) => ({ orgId: r.key[0], productId: r.key[1], name: r.name, size: r.key[2], variant: r.key[3], label: r.label, qty: r.qty, avg: r.avg }),
+      mapKey: (st) => heldKey_(st.orgId, st.productId, st.size, st.variant),
+    },
   });
 }
 

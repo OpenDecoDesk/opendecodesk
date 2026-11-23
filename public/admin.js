@@ -9979,44 +9979,65 @@ async function submitGlobalSettings(){
   const program = globalProgramChanges_();   // the desktop program's part: Shippo key, mailbox, supplier switch
   // A cloud install switching to (or changing) its own mailbox: signed in to before anything is saved.
   const mailboxChange = emailSendingChanges_();
+  const outlinePass = () => { const pass = document.getElementById("gEmailPass"); if(pass){ pass.style.outline = "2px solid #b03a2e"; if(pass.scrollIntoView) pass.scrollIntoView({ block: "center" }); } };
   if(mailboxChange && mailboxChange.via === "mailbox"){
     let tried = null;
     try{ tried = await hoopApi_({ action: "checkMailbox", mailbox: mailboxChange }); }catch(e){ tried = { ok: false, message: e.message }; }
     if(!tried || !tried.ok){
       const m = "Nothing was saved. The mailbox didn't sign in: " + ((tried && tried.message) || "no answer");
       if(errEl) errEl.textContent = m; showToast(m, true);
-      const pass = document.getElementById("gEmailPass"); if(pass){ pass.style.outline = "2px solid #b03a2e"; if(pass.scrollIntoView) pass.scrollIntoView({ block: "center" }); }
+      outlinePass();
       return;
     }
   }
   const needPublish = globalSettingsNeedPublish_();
-  // Each part is saved by its own request, in this order. A failure part-way says which parts are already saved (and
-  // live) and which aren't, instead of an error that reads as if nothing was.
+  const say = (m) => { if(errEl) errEl.textContent = m; showToast(m, true); };
   const $g = (id) => document.getElementById(id);
-  const parts = [["Program settings", Object.keys(program).length > 0], ["Region", !!$g("gLocaleCountry")], ["Features", !!document.querySelector("#gFeatures .gFeature")],
-    ["Payment methods", true], ["Sales tax", true], ["Bookkeeping", !!$g("gSaleDate")], ["Business profile", !!$g("gBizName")],
-    ["Email", !!$g("gEmailAttachPdf") && adminCan_("settings.global", "edit")], ["Digital products", !!$g("gDigDays") && adminCan_("settings.global", "edit")],
-    ["Machine settings", ($g("gMachineSection") || {dataset: {}}).dataset.loaded === "1"], ["Pricing", true], ["Rush fee", true]].filter(x => x[1]).map(x => x[0]);
-  const done = [];
-  const stop = (part, reason) => {
-    const rest = parts.slice(parts.indexOf(part) + 1).filter(x => !done.includes(x));
-    const m = (done.length ? `Saved (already live): ${done.join(", ")}. ` : "Nothing was saved. ") +
-      `Not saved: ${[part, ...rest].join(", ")}${reason ? " — " + reason.replace(/\.$/, "") : ""}. Fix it and save again.`;
-    if(errEl) errEl.textContent = m;
-    showToast(m, true);
-  };
-  const body = {
-    action: "updateGlobalSettings",
-    key: adminKey,
-    globalSettings: {
-      enabledPayments: {
-        card:  document.getElementById("gPayCard").checked,
-        venmo: document.getElementById("gPayVenmo").checked,
-        zelle: document.getElementById("gPayZelle").checked,
-        check: document.getElementById("gPayCheck").checked
-      }
+  // Every section on the page goes in ONE request (saveGlobalSettingsAll): the server checks them all and saves
+  // them all, or saves nothing and says which section it refused. Only what this page shows is sent. (Read
+  // after the desktop program's part below, which may stop the save first.)
+  const collect = () => {
+    const settings = {
+      payments: { card: $g("gPayCard").checked, venmo: $g("gPayVenmo").checked, zelle: $g("gPayZelle").checked, check: $g("gPayCheck").checked },
+      salesTax: { ratePercent: parseFloat($g("gTaxRate").value), jurisdiction: $g("gTaxJurisdiction").value.trim(), taxMode: ($g("gTaxMode") || {}).value || undefined },
+    };
+    // Region: the country decides how the ship-from address, and the tax state, are checked (the server does it first).
+    if($g("gLocaleCountry")) settings.locale = { timeZone: $g("gLocaleTimeZone").value.trim(), country: $g("gLocaleCountry").value };
+    // Features, with Shipping's ship-from address when Shipping is ticked: saved together, or neither.
+    const featBoxes = [...document.querySelectorAll("#gFeatures .gFeature")];
+    const want = {};
+    featBoxes.forEach(b => { want[b.dataset.feature] = b.checked; });
+    if(featBoxes.length){
+      settings.features = want;
+      const sv = (id) => (($g(id) || {}).value || "").trim();
+      if(want.shipping && $g("gShipStreet1")) settings.shipFrom = { name: sv("gShipName"), street1: sv("gShipStreet1"), city: sv("gShipCity"),
+        state: sv("gShipState"), zip: sv("gShipZip"), phone: sv("gShipPhone"), email: sv("gShipEmail") };
     }
+    // A feature switched off on this form: its own section isn't sent (the server would refuse it).
+    const stillOn = (k) => !featBoxes.length || want[k] !== false;
+    if($g("gSaleDate")) settings.accounting = { saleDate: $g("gSaleDate").value };
+    const gv = (id) => { const e = $g(id); return e ? e.value.trim() : ""; };
+    if($g("gBizName")) settings.business = {
+      name: gv("gBizName"), tagline: gv("gBizTagline"), footer: gv("gBizFooter"), supportEmail: gv("gBizSupportEmail"),
+      ownerEmail: gv("gBizOwnerEmail"), receiptsEmail: gv("gBizReceiptsEmail"), venmo: gv("gBizVenmo"), zelle: gv("gBizZelle"),
+      legalName: gv("gBizLegalName"), mailingAddress: gv("gBizMailing"), poPrefix: gv("gBizPoPrefix"),
+      phone: gv("gBizPhone"), website: gv("gBizWebsite"), paymentNote: gv("gBizPaymentNote") };
+    if($g("gEmailAttachPdf") && adminCan_("settings.global", "edit")) settings.email = { attachPdf: $g("gEmailAttachPdf").checked };
+    // Digital products (migrations/0086): the delivery defaults, while the feature is on.
+    if($g("gDigDays") && stillOn("digital") && adminCan_("settings.global", "edit")){
+      const v = (id) => $g(id).value.trim();
+      settings.digital = { days: v("gDigDays") === "" ? null : Number(v("gDigDays")), downloads: v("gDigDownloads") === "" ? null : Number(v("gDigDownloads")),
+        email: $g("gDigEmail").checked, attach: $g("gDigAttach").checked, attachMb: Number(v("gDigAttachMb")) || 10 };
+    }
+    // The Machine Files setting is saved only if its section was shown when the page loaded.
+    if(($g("gMachineSection") || {dataset: {}}).dataset.loaded === "1" && stillOn("production")) settings.machine = { showDeleteButton: $g("gMachShowDelete").checked };
+    settings.pricing = { cardPct: gv("gPriceCardPct"), cardFixed: gv("gPriceCardFixed"), supplies: gv("gPriceSupplies"), targetHourly: gv("gPriceTargetHourly"), targetIncome: gv("gPriceTargetIncome") };
+    const rushRule = readRushRule_("gRush");   // checked before anything was sent (globalSettingsProblem_)
+    if(rushRule.error) return { error: "Rush fee: " + rushRule.error };
+    settings.rush = { rule: rushRule.rule, taxable: $g("gRushTaxable").checked };
+    return { settings, want, featBoxes };
   };
+  let programSaved = false;
   try{
     // The desktop program's part first, so the features it unlocks (Shipping with a new key, Design
     // approval with email) can be saved on in the same go: a new mailbox is tried (sign-in only),
@@ -10024,151 +10045,54 @@ async function submitGlobalSettings(){
     if(Object.keys(program).length){
       if(program.email && program.email.on){
         const tried = await window.oddDesktop.checkEmail(program.email.settings, program.email.password);
-        if(!tried || !tried.ok){
-          const m = "Nothing was saved. The mailbox didn't sign in: " + ((tried && tried.message) || "no answer") ;
-          if(errEl) errEl.textContent = m; showToast(m, true);
-          const pass = document.getElementById("gEmailPass"); if(pass){ pass.style.outline = "2px solid #b03a2e"; if(pass.scrollIntoView) pass.scrollIntoView({ block: "center" }); }
-          return;
-        }
+        if(!tried || !tried.ok){ say("Nothing was saved. The mailbox didn't sign in: " + ((tried && tried.message) || "no answer")); outlinePass(); return; }
       }
       showToast("Saving — the program restarts for a moment…");
       const applied = await window.oddDesktop.applySettings(program);
-      if(!applied || !applied.ok){ stop("Program settings", (applied && applied.message) || "The program's settings couldn't be saved."); return; }
-      done.push("Program settings");
+      if(!applied || !applied.ok){ say("Nothing was saved. Program settings: " + ((applied && applied.message) || "The program's settings couldn't be saved.").replace(/\.$/, "") + ". Fix it and save again."); return; }
+      programSaved = true;
     }
-    // Region first: the country decides how the ship-from address, and the tax state below, are checked.
-    if(document.getElementById("gLocaleCountry")){
-      const locRes = await fetch("/api/orders", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ action: "updateLocaleSettings", key: adminKey, locale: {
-          timeZone: document.getElementById("gLocaleTimeZone").value.trim(),
-          country: document.getElementById("gLocaleCountry").value } })
-      });
-      const locData = await locRes.json();
-      if(!locRes.ok || locData.status === "error"){ stop("Region", locData && locData.message); return; }
-      done.push("Region");
-      if(typeof applyCountry_ === "function") applyCountry_(locData.locale && locData.locale.country);
-      setAdminTimeZone_(locData.effectiveTimeZone);   // a new Region time zone: today and every date follow it at once
+    const { settings, error } = collect();
+    if(error){ say((programSaved ? "The program's settings are saved; nothing else was. " : "Nothing was saved. ") + error); return; }
+    const res = await fetch("/api/orders", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ action: "saveGlobalSettingsAll", key: adminKey, settings })
+    });
+    const data = await res.json();
+    if(!res.ok || data.status === "error"){
+      const why = ((data && data.section) ? data.section + ": " : "") + String((data && data.message) || "Could not save.").replace(/\.$/, "");
+      say((programSaved ? "The program's settings are saved; nothing else was. " : "Nothing was saved. ") + why + ". Fix it and save again.");
+      return;
     }
-    // Features next, with Shipping's ship-from address in the same request when Shipping is ticked:
-    // the server saves the two together, or neither (orders.js updateFeatures). The Machine Files
-    // setting is saved only if its section was shown when the page loaded.
-    const machShown = (document.getElementById("gMachineSection") || {dataset: {}}).dataset.loaded === "1";
-    let savedFeatures = null;
-    const featBoxes = [...document.querySelectorAll("#gFeatures .gFeature")];
-    if(featBoxes.length){
-      const want = {}; featBoxes.forEach(b => { want[b.dataset.feature] = b.checked; });
-      const sv = (id) => ((document.getElementById(id) || {}).value || "").trim();
-      const shipFrom = want.shipping && document.getElementById("gShipStreet1") ? { name: sv("gShipName"), street1: sv("gShipStreet1"), city: sv("gShipCity"),
-        state: sv("gShipState"), zip: sv("gShipZip"), phone: sv("gShipPhone"), email: sv("gShipEmail") } : null;
-      const featRes = await fetch("/api/orders", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ action: "updateFeatures", key: adminKey, features: want, ...(shipFrom ? { shipFrom } : {}) })
-      });
-      const featData = await featRes.json();
-      if(!featRes.ok || featData.status === "error"){ stop("Features", featData && featData.message); return; }
-      done.push("Features");
-      savedFeatures = featData.features || want;
-      if(typeof applyFeatures_ === "function") applyFeatures_(savedFeatures);   // the menu follows at once
+    const saved = data.settings || {};
+    if(saved.locale && typeof applyCountry_ === "function") applyCountry_(saved.locale.country);
+    if(data.effectiveTimeZone) setAdminTimeZone_(data.effectiveTimeZone);   // a new Region time zone: today and every date follow it at once
+    if(saved.features){
+      if(typeof applyFeatures_ === "function") applyFeatures_(saved.features);   // the menu follows at once
       _accountsCache = null;
       renderAdminNav();
     }
-    const stillOn = (k) => !savedFeatures || savedFeatures[k] !== false;
-    const res = await fetch("/api/orders", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(body)
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){ stop("Payment methods", data && data.message); return; }
-    done.push("Payment methods");
-    const taxRes = await fetch("/api/orders", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ action: "updateSalesTaxSettings", key: adminKey,
-        ratePercent: parseFloat(document.getElementById("gTaxRate").value),
-        jurisdiction: document.getElementById("gTaxJurisdiction").value.trim(),
-        taxMode: (document.getElementById("gTaxMode") || {}).value || undefined })
-    });
-    const taxData = await taxRes.json();
-    if(!taxRes.ok || taxData.status === "error"){ stop("Sales tax", taxData && taxData.message); return; }
-    done.push("Sales tax");
-    const saleDateSel = document.getElementById("gSaleDate");
-    if(saleDateSel){
-      let acc;
-      try{ acc = await hoopApi_({ action: "updateAccountingSettings", saleDate: saleDateSel.value }); }
-      catch(e){ acc = { status: "error", message: e.message }; }
-      if(!acc || acc.status !== "ok"){ stop("Bookkeeping", acc && acc.message); return; }
-      done.push("Bookkeeping");
-    }
-    const gv = (id) => { const e = document.getElementById(id); return e ? e.value.trim() : ""; };
-    if(document.getElementById("gBizName")){
-      const bizRes = await fetch("/api/orders", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ action: "updateBusinessProfile", key: adminKey, business: {
-          name: gv("gBizName"), tagline: gv("gBizTagline"), footer: gv("gBizFooter"), supportEmail: gv("gBizSupportEmail"),
-          ownerEmail: gv("gBizOwnerEmail"), receiptsEmail: gv("gBizReceiptsEmail"), venmo: gv("gBizVenmo"), zelle: gv("gBizZelle"),
-          legalName: gv("gBizLegalName"), mailingAddress: gv("gBizMailing"), poPrefix: gv("gBizPoPrefix"),
-          phone: gv("gBizPhone"), website: gv("gBizWebsite"), paymentNote: gv("gBizPaymentNote") } })
-      });
-      const bizData = await bizRes.json();
-      if(!bizRes.ok || bizData.status === "error"){ stop("Business profile", bizData && bizData.message); return; }
-      done.push("Business profile");
-      applyBusiness_(bizData.business);   // the header and page titles follow at once
-    }
-    const pdfBox = document.getElementById("gEmailAttachPdf");
-    if(pdfBox && adminCan_("settings.global", "edit")){
-      // On a cloud install, how to send too: a new mailbox is signed in to by the server before it's saved.
-      const mailbox = emailSendingChanges_();
-      try{ await hoopApi_({ action: "updateEmailSettings", emailSettings: { attachPdf: pdfBox.checked }, ...(mailbox ? { mailbox } : {}) }); }
+    if(saved.business) applyBusiness_(saved.business);   // the header and page titles follow at once
+    // How a cloud install sends email (its mailbox, signed in to above) is its own request, after the rest: the
+    // password goes only there. Everything else is already saved if this one fails.
+    if(mailboxChange){
+      try{ await hoopApi_({ action: "updateEmailSettings", mailbox: mailboxChange }); }
       catch(e){
-        stop("Email", e.message);
-        if(mailbox && mailbox.via === "mailbox"){ const pass = document.getElementById("gEmailPass"); if(pass && pass.scrollIntoView) pass.scrollIntoView({ block: "center" }); }
+        say("Everything else is saved (and live). Not saved: how email is sent — " + String(e.message || "Could not save.").replace(/\.$/, "") + ". Fix it and save again.");
+        if(mailboxChange.via === "mailbox") outlinePass();
         return;
       }
-      done.push("Email");
     }
-    // Digital products (migrations/0086): the delivery defaults, while the feature is on.
-    if(document.getElementById("gDigDays") && stillOn("digital") && adminCan_("settings.global", "edit")){
-      const v = (id) => document.getElementById(id).value.trim();
-      try{ await hoopApi_({ action: "updateDigitalSettings", digital: { days: v("gDigDays") === "" ? null : Number(v("gDigDays")), downloads: v("gDigDownloads") === "" ? null : Number(v("gDigDownloads")),
-        email: document.getElementById("gDigEmail").checked, attach: document.getElementById("gDigAttach").checked, attachMb: Number(v("gDigAttachMb")) || 10 } }); }
-      catch(e){ stop("Digital products", e.message); return; }
-      done.push("Digital products");
-    }
-    if(machShown && stillOn("production")){
-    const machRes = await fetch("/api/orders", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ action: "updateMachineSettings", key: adminKey,
-        machineSettings: { showDeleteButton: document.getElementById("gMachShowDelete").checked } })
-    });
-    const machData = await machRes.json();
-    if(!machRes.ok || machData.status === "error"){ stop("Machine settings", machData && machData.message); return; }
-    done.push("Machine settings");
-    }
-    const pval = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
-    const priceRes = await fetch("/api/orders", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ action: "updatePricingSettings", key: adminKey,
-        pricing: { cardPct: pval("gPriceCardPct"), cardFixed: pval("gPriceCardFixed"), supplies: pval("gPriceSupplies"),
-          targetHourly: pval("gPriceTargetHourly"), targetIncome: pval("gPriceTargetIncome") } })
-    });
-    const priceData = await priceRes.json();
-    if(!priceRes.ok || priceData.status === "error"){ stop("Pricing", priceData && priceData.message); return; }
-    done.push("Pricing");
-    const rushRule = readRushRule_("gRush");   // checked before anything was sent (globalSettingsProblem_)
-    if(rushRule.error){ stop("Rush fee", rushRule.error); return; }
-    const rushData = await hoopApi_({ action: "updateRushSettings", rush: { rule: rushRule.rule, taxable: document.getElementById("gRushTaxable").checked } })
-      .catch(e => ({ status: "error", message: e.message || "Could not save the rush fee." }));
-    if(rushData.status === "error"){ stop("Rush fee", rushData.message); return; }
     // New fees / targets re-check every product: say which are now below a target.
-    if((priceData.belowTarget || []).length) setTimeout(() => belowTargetToast_(priceData.belowTarget, "With these settings, "), 1200);
+    if((data.belowTarget || []).length) setTimeout(() => belowTargetToast_(data.belowTarget, "With these settings, "), 1200);
     // The program restarted with new settings: reload, so the menu and pages follow them.
-    if(Object.keys(program).length){ try { sessionStorage.setItem("oddSettingsSaved", "1"); } catch (e) {} location.hash = "#settings"; location.reload(); return; }
+    if(programSaved){ try { sessionStorage.setItem("oddSettingsSaved", "1"); } catch (e) {} location.hash = "#settings"; location.reload(); return; }
     showToast(adminDesktop_() ? "Global settings saved." : needPublish
       ? "Global settings saved. The payment-method change reaches the storefront when you click Publish on the Manage catalog screen; everything else is already live."
       : "Global settings saved. The changes are already live — no need to Publish.", false);
     location.hash = "#catalog";
   }catch(e){
-    stop(parts.find(x => !done.includes(x)) || "Rush fee", "Could not reach the server.");
+    say((programSaved ? "The program's settings are saved; nothing else was" : "Nothing was saved") + " — could not reach the server. Try again.");
   }
 }
 

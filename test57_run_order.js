@@ -213,7 +213,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   ms = await call({ action: "updateMachineSettings", machineSettings: { showDeleteButton: "" } });
   console.log("coerces truthiness to a real boolean:", ms.body.machineSettings.showDeleteButton === false);
   console.log("Global Settings form has the toggle + saves it:",
-    /id="gMachShowDelete"/.test(adminJs) && /action: "updateMachineSettings"/.test(adminJs) && /action: "getMachineSettings"/.test(adminJs));
+    /id="gMachShowDelete"/.test(adminJs) && /settings\.machine = \{ showDeleteButton: \$g\("gMachShowDelete"\)\.checked \}/.test(adminJs) && /action: "getMachineSettings"/.test(adminJs));
   console.log("Machine Files reads the setting on load and gates the Delete button on it:",
     /action: "getMachineSettings"/.test(adminJs) && /window\._mfCtx\.showDelete/.test(adminJs) && /showDelete \?/.test(adminJs));
 

@@ -11,7 +11,8 @@
  *     context shape Pages Functions use ({request, env, params, waitUntil, next, data}).
  *   - scheduled(): the daily roll-up, at the configured local hour (functions/_lib/schedule.js), and an
  *     hour before it the daily housekeeping: Stripe fees still to fill in, old vendor web-service logs,
- *     and customers' design uploads no order used (functions/api/customer-design.js).
+ *     customers' design uploads no order used (functions/api/customer-design.js), and receipts and
+ *     design / order / digital files whose form was never saved (functions/_lib/unsavedUploads.js).
  */
 
 import * as adminTwoFa from "../functions/api/admin-2fa.js";
@@ -23,6 +24,7 @@ import * as catalog from "../functions/api/catalog.js";
 import * as checkout from "../functions/api/checkout.js";
 import * as customerDesign from "../functions/api/customer-design.js";
 import { cleanUpVendorApiLog } from "../functions/_lib/vendorLog.js";
+import { cleanUpUnsavedUploads } from "../functions/_lib/unsavedUploads.js";
 import * as dailyDigest from "../functions/api/daily-digest.js";
 import * as design from "../functions/api/design.js";
 import * as download from "../functions/api/download.js";
@@ -164,6 +166,14 @@ async function runHousekeeping_(env) {
     out.customerDesigns = c;
     if (c.deleted) console.log("Deleted", c.deleted, "customer design upload(s) no order used");
   } catch (e) { console.error("Cleaning up customer design uploads failed:", e); out.customerDesigns = { error: String(e && e.message) }; await recordSystemIssue(env.DB, "cleanup_failed", "Customer design uploads: " + (e && e.message)); }
+  // Receipts and design / order / digital files uploaded more than 48 hours ago that nothing in the database names
+  // (their form was never saved): at most 1,000 a run, within a time limit; a missing bucket is skipped.
+  try {
+    const u = await cleanUpUnsavedUploads(env);
+    out.unsavedUploads = u;
+    if (u.deleted) console.log("Deleted", u.deleted, "upload(s) whose form was never saved");
+    for (const m of u.errors || []) { console.error("Cleaning up unsaved uploads:", m); await recordSystemIssue(env.DB, "cleanup_failed", "Unsaved uploads: " + m); }
+  } catch (e) { console.error("Cleaning up unsaved uploads failed:", e); out.unsavedUploads = { error: String(e && e.message) }; await recordSystemIssue(env.DB, "cleanup_failed", "Unsaved uploads: " + (e && e.message)); }
   return out;
 }
 

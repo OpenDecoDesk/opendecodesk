@@ -189,7 +189,7 @@ const wait = async (cond, n = 300) => { for (let i = 0; i < n && !cond(); i++) a
   await w.renderGlobalSettings(app);
   await wait(() => d.getElementById("gPriceTargetIncome"));
   ok("Global settings → Pricing has the fee, supplies and target fields, filled in", d.getElementById("gPriceCardPct").value === "2.9" && d.getElementById("gPriceSupplies").value === "0.5" && d.getElementById("gPriceTargetIncome").value === "9.5" && d.getElementById("gPriceTargetHourly").value === "30");
-  ok("…saving it sends updatePricingSettings and names what's now below target", /action: "updatePricingSettings"/.test(adminJs) && /belowTargetToast_\(priceData\.belowTarget/.test(adminJs));
+  ok("…saving it sends the pricing with the rest of Global settings and names what's now below target", /action: "saveGlobalSettingsAll"/.test(adminJs) && /settings\.pricing = \{ cardPct:/.test(adminJs) && /belowTargetToast_\(data\.belowTarget/.test(adminJs));
 
   console.log("\n=== Who sees costs and margins ===");
   // Staff save products in OpenDecoDesk, but what an item costs and leaves is a manager's to see.

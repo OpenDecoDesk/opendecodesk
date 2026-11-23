@@ -307,8 +307,13 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
           if (body.action === "getShipFromAddress") return j({ status: "ok", shipFrom: { name: "", street1: "", city: "", state: "OH", zip: "43004", phone: "", email: "" } });
           if (body.action === "getBusinessProfile") return j({ status: "ok", business: {} });
           if (body.action === "getMachineSettings") return j({ status: "ok", machineSettings: { showDeleteButton: false } });
-          if (["updateGlobalSettings", "updateBusinessProfile", "updateShipFromAddress"].includes(body.action)) return j({ status: "ok", business: {}, shipFrom: {}, globalSettings: {} });
-          // The last save step fails on purpose, so the page stays on the form instead of navigating away.
+          // Save: every section in one request (saveGlobalSettingsAll), refused as a whole for a zone the server doesn't know.
+          if (body.action === "saveGlobalSettingsAll") {
+            const s = body.settings || {};
+            if (s.locale && s.locale.timeZone === "Nowhere/Land") return { ok: false, status: 400, json: async () => ({ status: "error", section: "Region", message: "\"Nowhere/Land\" isn't a time zone this site knows." }) };
+            if (s.locale) savedLocale = s.locale;
+            return j({ status: "ok", sections: Object.keys(s), settings: { ...s, business: {} }, belowTarget: [] });
+          }
           return j({ status: "error", message: "n/a" });
         };
       } });
@@ -328,14 +333,16 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
     tz.value = "Nowhere/Land";
     calls.length = 0;
     await w2.submitGlobalSettings(); await tick2();
-    ok("a zone the server refuses stops the save and shows why", /isn't a time zone/.test(doc.getElementById("globalSettingsError").textContent) && !calls.some(c2 => c2.action === "updateShipFromAddress"));
+    ok("a zone the server refuses stops the save and shows why: nothing saved, the Region named", /^Nothing was saved\. Region: "Nowhere\/Land" isn't a time zone/.test(doc.getElementById("globalSettingsError").textContent) &&
+      calls.filter(c2 => c2.action === "saveGlobalSettingsAll").length === 1 && !calls.some(c2 => /^update/.test(c2.action)));
     tz.value = " Europe/London ";
     calls.length = 0;
     await w2.submitGlobalSettings(); await tick2();
     const order2 = calls.map(c2 => c2.action);
-    const sent = calls.find(c2 => c2.action === "updateLocaleSettings");
+    const sent = (calls.find(c2 => c2.action === "saveGlobalSettingsAll") || {}).settings;
     ok("Save sends the region with the rest", !!sent && sent.locale.timeZone === "Europe/London" && sent.locale.country === "OTHER");
-    ok("…first, before the tax state and the ship-from address (sent with the features), which are checked against the country", order2[0] === "updateLocaleSettings" && order2.indexOf("updateLocaleSettings") < order2.indexOf("updateSalesTaxSettings"));
+    ok("…in the one request with the tax state and the features, which the server checks against that country", order2.filter(a => a === "saveGlobalSettingsAll").length === 1 &&
+      !order2.some(a => /^update/.test(a)) && !!sent.salesTax && !!sent.features && !sent.shipFrom);
     ok("the admin's own forms follow at once", w2.eval("adminIsUS_()") === false);
     doc.body.insertAdjacentHTML("beforeend", '<div id="orgFormDelivery"></div>');
     w2.setOrgDeliveryList_([{ type: "pickup" }, { type: "shipping" }]);

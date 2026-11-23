@@ -74,7 +74,7 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
   w.saveAdminSession("cookie", new Date(T + 3600e3).toISOString());
   ok("the sign-in marker keeps it, so a reload has it before \"me\" answers", JSON.parse(w.localStorage.getItem("oddAdminSession")).timeZone === "Pacific/Auckland" &&
     /if\(stored\)\{[^\n]*setAdminTimeZone_\(stored\.timeZone\)/.test(adminJs) && /adminMe = data\.user \|\| null;\s*setAdminTimeZone_\(data\.timeZone\);/.test(adminJs));
-  ok("a Region saved in Global settings is used at once", /setAdminTimeZone_\(locData\.effectiveTimeZone\)/.test(adminJs));
+  ok("a Region saved in Global settings is used at once", /setAdminTimeZone_\(data\.effectiveTimeZone\)/.test(adminJs));
 
   console.log("\n=== Today, report dates and the audit filter follow the business ===");
   ok("today is the business's: Jan 1 2027 in Auckland", w.localToday_() === "2027-01-01");

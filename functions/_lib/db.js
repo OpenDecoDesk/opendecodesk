@@ -84,12 +84,31 @@ export async function getSalesTaxSettings(db) {
   return s;
 }
 
-export async function setSalesTaxSettings(db, { rateBps, jurisdiction, taxMode }) {
+// ---- Global settings sections, saved in two steps ---------------------------------------------------
+// Each section's setter below is a BUILD step and a write. build…Settings checks what it is given (throwing a
+// userFacing error, as the setter always did) and returns { value, stmts, after } without writing anything:
+// `value` is what will be stored, `stmts` the statements that store it, `after` cached figures to throw away once
+// it is stored (a failure there doesn't matter). Each setter runs its own build (writeSettingBuilds); Global
+// settings → Save (orders.js saveGlobalSettingsAll) builds every section first and writes them all in one
+// db.batch, so a refusal in any section saves nothing.
+export async function writeSettingBuilds(db, builds, { batch = false } = {}) {
+  const stmts = builds.flatMap(b => b.stmts || []), after = builds.flatMap(b => b.after || []);
+  if (batch) { if (stmts.length) await db.batch(stmts); }
+  else for (const s of stmts) await s.run();
+  for (const s of after) await Promise.resolve().then(() => s.run()).catch(() => {});
+}
+// Home's kept figures (getDashboardMoney) depend on the sale-date basis and the Bookkeeping switch.
+const dropDashboardCache_ = (db) => db.prepare("DELETE FROM global_settings WHERE key = 'dashboardCache'");
+
+export async function buildSalesTaxSettings(db, { rateBps, jurisdiction, taxMode }) {
   const current = await getSalesTaxSettings(db);
   const next = { ...current, rateBps, jurisdiction, taxMode: taxMode_(taxMode === undefined ? current.taxMode : taxMode) };
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('salesTax', ?)")
-    .bind(JSON.stringify(next)).run();
-  return next;
+  return { value: next, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('salesTax', ?)").bind(JSON.stringify(next))] };
+}
+export async function setSalesTaxSettings(db, p) {
+  const b = await buildSalesTaxSettings(db, p);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
 }
 
 // ---- Bookkeeping: the date an order counts as sold (Global settings → Bookkeeping) -----------------
@@ -106,12 +125,16 @@ export async function getAccountingSettings(db) {
   return { saleDate: saleDateBasis_(v.saleDate) };
 }
 export async function getSaleDateBasis(db) { return (await getAccountingSettings(db)).saleDate; }
-export async function setAccountingSettings(db, { saleDate }) {
+export async function buildAccountingSettings(db, { saleDate }) {
   const next = { ...(await getAccountingSettings(db)), saleDate: saleDateBasis_(saleDate) };
-  await setSettingRaw(db, "accounting", JSON.stringify(next));
   // Home's figures depend on it: work them out again on the next visit.
-  await db.prepare("DELETE FROM global_settings WHERE key = 'dashboardCache'").run().catch(() => {});
-  return next;
+  return { value: next, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES (?, ?)").bind("accounting", JSON.stringify(next))],
+    after: [dropDashboardCache_(db)] };
+}
+export async function setAccountingSettings(db, p) {
+  const b = await buildAccountingSettings(db, p);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
 }
 // The SQL for an order's sale date. The "shipped" expression is exactly the one indexed by
 // idx_orders_sale_date (migrations/0088), so a range on it can use that index; keep them identical.
@@ -795,10 +818,15 @@ export async function getRushSettings(db) {
     taxable: !!(v && v.taxable) };
 }
 // Saves the global rule (dollars in) and whether the fee is taxable. Returns what's stored.
-export async function setRushSettings(db, { rule, taxable }) {
+export async function buildRushSettings(db, { rule, taxable }) {
   const next = { ...cleanRushRule(rule), taxable: !!taxable };
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('rushFee', ?)").bind(JSON.stringify(next)).run();
-  return { rule: { ...next }, taxable: next.taxable };
+  return { value: { rule: { ...next }, taxable: next.taxable },
+    stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('rushFee', ?)").bind(JSON.stringify(next))] };
+}
+export async function setRushSettings(db, p) {
+  const b = await buildRushSettings(db, p);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
 }
 // A shop's own setting: null = follow the global rule, {offer:false}, or {offer:true, …rule}.
 export function cleanShopRush(input) {
@@ -1216,10 +1244,14 @@ export async function getDigitalSettings(db) {
   const raw = await getSettingRaw(db, "digital").catch(() => null);
   return cleanDigitalDelivery_(tryParse_(raw, {}) || {}, false);
 }
-export async function setDigitalSettings(db, s) {
+export async function buildDigitalSettings(db, s) {
   const clean = cleanDigitalDelivery_(s, false);
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('digital', ?)").bind(JSON.stringify(clean)).run();
-  return clean;
+  return { value: clean, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('digital', ?)").bind(JSON.stringify(clean))] };
+}
+export async function setDigitalSettings(db, s) {
+  const b = await buildDigitalSettings(db, s);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
 }
 // A product's delivery: the global settings with its own overrides on top.
 export function digitalDeliveryFor(product, global) {
@@ -2260,6 +2292,11 @@ export async function getPricingSettingsView(db) {
 }
 // Takes cents / basis points (orders.js converts what the form sends). A blank target turns that alert off.
 export async function setPricingSettings(db, s) {
+  const b = await buildPricingSettings(db, s);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
+}
+export async function buildPricingSettings(db, s) {
   const n = (v, max, nullable) => {
     if (v === null || v === undefined || v === "") { if (nullable) return null; throw pricingError_("Fill in every fee field (0 is fine)."); }
     const x = Math.round(Number(v));
@@ -2268,8 +2305,7 @@ export async function setPricingSettings(db, s) {
   };
   const next = { cardPctBps: n(s.cardPctBps, 2000), cardFixedCents: n(s.cardFixedCents, 1000), suppliesCents: n(s.suppliesCents, 100000),
     targetHourlyCents: n(s.targetHourlyCents, 10000000, true), targetIncomeCents: n(s.targetIncomeCents, 10000000, true) };
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('pricing', ?)").bind(JSON.stringify(next)).run();
-  return next;
+  return { value: next, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('pricing', ?)").bind(JSON.stringify(next))] };
 }
 
 // ---- Shop rate (Finance → Shop rate) ------------------------------------------------------------------------
@@ -2834,9 +2870,13 @@ export async function getGlobalSettings(db) {
   };
 }
 
+// The payment-method boxes (enabledPayments): stored as sent.
+export async function buildGlobalSettings(db, settings) {
+  const enabledPayments = (settings && settings.enabledPayments) || {};
+  return { value: { enabledPayments }, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('enabledPayments', ?)").bind(JSON.stringify(enabledPayments))] };
+}
 export async function setGlobalSettings(db, settings) {
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('enabledPayments', ?)")
-    .bind(JSON.stringify(settings.enabledPayments || {})).run();
+  await writeSettingBuilds(db, [await buildGlobalSettings(db, settings)]);
 }
 
 // ---- Platform state in global_settings / admin_sessions ---------------------------------------
@@ -3283,10 +3323,12 @@ export async function getMachineSettings(db) {
   return row ? tryParse_(row.value, { showDeleteButton: false }) : { showDeleteButton: false };
 }
 
-export async function setMachineSettings(db, settings) {
+export async function buildMachineSettings(db, settings) {
   const clean = { showDeleteButton: !!(settings && settings.showDeleteButton) };
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('machineSettings', ?)")
-    .bind(JSON.stringify(clean)).run();
+  return { value: clean, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('machineSettings', ?)").bind(JSON.stringify(clean))] };
+}
+export async function setMachineSettings(db, settings) {
+  await writeSettingBuilds(db, [await buildMachineSettings(db, settings)]);
 }
 
 // The "ship from" address on shipping labels/quotes — admin-editable business
@@ -3353,13 +3395,17 @@ export async function getFeatures(db) {
 }
 // Saves the switches that are passed (true / false); one left out keeps its value. Unknown keys
 // are ignored. Returns the full set.
-export async function setFeatures(db, p) {
+export async function buildFeatureSettings(db, p) {
   const next = await getFeatures(db);
   for (const k of FEATURE_KEYS_) if (p && typeof p[k] === "boolean") next[k] = p[k];
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('features', ?)").bind(JSON.stringify(next)).run();
   // Home's kept figures depend on Bookkeeping (getDashboardMoney): work them out again on the next visit.
-  await db.prepare("DELETE FROM global_settings WHERE key = 'dashboardCache'").run().catch(() => {});
-  return next;
+  return { value: next, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('features', ?)").bind(JSON.stringify(next))],
+    after: [dropDashboardCache_(db)] };
+}
+export async function setFeatures(db, p) {
+  const b = await buildFeatureSettings(db, p);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
 }
 // SQL: true unless the feature was saved as false. For rules that live in a query (which orders
 // need design approval / digitizing), so they can't disagree with the setting.
@@ -3396,6 +3442,11 @@ export async function getLocaleSettings(db) {
 // Saves what's passed (a field left undefined keeps its value). Throws (userFacing) on a time zone
 // the runtime doesn't know or a country that isn't offered. A blank time zone clears it.
 export async function setLocaleSettings(db, p) {
+  const b = await buildLocaleSettings(db, p);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
+}
+export async function buildLocaleSettings(db, p) {
   const current = await getLocaleSettings(db);
   const next = { ...current };
   const bad = (m) => { const e = new Error(m); e.userFacing = true; return e; };
@@ -3409,8 +3460,7 @@ export async function setLocaleSettings(db, p) {
     if (!LOCALE_COUNTRIES.includes(c)) throw bad("Country must be US or OTHER.");
     next.country = c;
   }
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('locale', ?)").bind(JSON.stringify(next)).run();
-  return next;
+  return { value: next, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('locale', ?)").bind(JSON.stringify(next))] };
 }
 
 // THE time zone: the one saved in Region, else the TIMEZONE variable, else UTC. Never throws — a
@@ -3471,6 +3521,11 @@ export function publicBusinessProfile(p) {
 
 // Returns the saved profile. Throws (userFacing) on an invalid email or Venmo name.
 export async function setBusinessProfile(db, p) {
+  const b = await buildBusinessProfile(db, p);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
+}
+export async function buildBusinessProfile(db, p) {
   const clean = {};
   for (const k of Object.keys(BUSINESS_FIELDS)) clean[k] = String((p && p[k]) == null ? "" : p[k]).trim().slice(0, BUSINESS_FIELDS[k]);
   clean.venmo = clean.venmo.replace(/^@/, "");
@@ -3483,8 +3538,7 @@ export async function setBusinessProfile(db, p) {
   // Starts the number of each purchase order placed with a supplier (migrations/0072): PO-20261021-1.
   clean.poPrefix = clean.poPrefix.toUpperCase();
   if (clean.poPrefix && !/^[A-Z0-9]+$/.test(clean.poPrefix)) throw bad("A purchase order prefix has only letters and numbers");
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('business', ?)").bind(JSON.stringify(clean)).run();
-  return clean;
+  return { value: clean, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('business', ?)").bind(JSON.stringify(clean))] };
 }
 
 // ---- Customer email settings ------------------------------------------------------------------
@@ -3496,10 +3550,14 @@ export async function getEmailSettings(db) {
   catch (e) { /* no table yet — defaults */ }
   return { attachPdf: saved.attachPdf !== false };
 }
-export async function setEmailSettings(db, s) {
+export async function buildEmailSettings(db, s) {
   const clean = { attachPdf: !(s && s.attachPdf === false) };
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('emailSettings', ?)").bind(JSON.stringify(clean)).run();
-  return clean;
+  return { value: clean, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('emailSettings', ?)").bind(JSON.stringify(clean))] };
+}
+export async function setEmailSettings(db, s) {
+  const b = await buildEmailSettings(db, s);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
 }
 
 // How a cloud install sends email (Global settings → Email): through a hosted service ("hosted": Resend
@@ -3541,6 +3599,11 @@ export async function getShipFromAddress(db, env) {
 
 // `country` (Region setting): outside the US the state / region is free text, kept as typed.
 export async function setShipFromAddress(db, addr, country) {
+  const b = await buildShipFromAddress(db, addr, country);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
+}
+export async function buildShipFromAddress(db, addr, country) {
   const a = addr || {};
   const other = localeCountry_(country) === "OTHER";
   const clean = {
@@ -3552,9 +3615,7 @@ export async function setShipFromAddress(db, addr, country) {
     phone: String(a.phone || "").trim().slice(0, 30),
     email: String(a.email || "").trim().slice(0, 200),
   };
-  await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('shipFrom', ?)")
-    .bind(JSON.stringify(clean)).run();
-  return clean;
+  return { value: clean, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('shipFrom', ?)").bind(JSON.stringify(clean))] };
 }
 
 export async function getBoxPresets(db) {
@@ -14612,6 +14673,14 @@ export async function insertAuditLog(db, { orgId, orderId, action, detail, actor
     ).bind(createdAt, orgId || null, orderId || null, action,
       JSON.stringify({ ...(detail || {}), _actor: actor || null, _ip: ip || null })).run();
   }
+}
+
+// An audit row as a statement, for a change that writes its record in the same db.batch as itself (orders.js
+// saveGlobalSettingsAll: a feature switched off is always on record, and never on record unless it was saved).
+export function auditLogStatement(db, { orgId, orderId, action, detail, actor, ip }) {
+  orderId = orderId != null && /^[A-Za-z0-9\-]{1,64}$/.test(String(orderId)) ? String(orderId) : null;
+  return db.prepare("INSERT INTO audit_log (createdAt, orgId, orderId, action, detail, actor, ip) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(new Date().toISOString(), orgId || null, orderId, action, detail != null ? JSON.stringify(detail) : null, actor || null, ip || null);
 }
 
 export async function getAuditLog(db, { orgId, orderId, action, dateFrom, dateTo, limit = 20 } = {}) {

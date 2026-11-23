@@ -126,6 +126,8 @@ import {
   getRushSettings, setRushSettings, getRushFeesToSet, rushRuleView, resolveRushRule, rushFeeFor, cleanShopRush, setOrgRushFee, setOrderRushFee, rushPayByFor, localToday,
   getEmailSettings, setEmailSettings, getEmailMailbox, setEmailMailbox, emailMailboxForBrowser,
   getDigitalSettings, setDigitalSettings, listProductFiles, addProductFile, deleteProductFile, listDownloadGrants, resetOrderDownloads, revokeOrderDownloads, getDownloadsEmailedAt, grantBlocked, splitTaxInclusive, addTaxExclusive, orderAmounts,
+  writeSettingBuilds, buildLocaleSettings, buildFeatureSettings, buildShipFromAddress, buildGlobalSettings, buildSalesTaxSettings, buildAccountingSettings, buildBusinessProfile,
+  buildEmailSettings, buildDigitalSettings, buildMachineSettings, buildPricingSettings, buildRushSettings, auditLogStatement,
 } from "../_lib/db.js";
 import { smtpCleanSettings, smtpVerify } from "../_lib/smtp.js";
 import { deliverOrderDownloads } from "../_lib/digital.js";
@@ -235,6 +237,7 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "getEmailSettings", "updateEmailSettings", "checkMailbox", "previewCustomerEmail", "samplePdf", "sendSampleEmail",
   "getSalesTaxSettings", "updateSalesTaxSettings",
   "getAccountingSettings", "updateAccountingSettings",
+  "saveGlobalSettingsAll",   // Global settings → Save: every section above in one request, all or nothing
   "getBoxPresets", "setBoxPresets",
   "getInventory", "createInventoryItem", "updateInventoryItem", "deleteInventoryItem",
   "getBlanks", "createBlank", "updateBlank", "deleteBlank", "mergeBlanks", "markBlankPricesChecked", "getBlankVendorPriceHistory", "recomputeBlankAverageCosts", "confirmProductPrices",
@@ -299,6 +302,58 @@ function checkCosting_(b) {
   return "";
 }
 
+// ---- Global settings sections: what each one's form sends, checked the same way wherever it is saved ----
+// (its own action, or Global settings → Save, saveGlobalSettingsAll). Each returns { error } or what to save.
+// Sales tax: rate 0–15%, the home state, inside or on top of prices. `country` is the Region's (the one being saved
+// with it, on Global settings).
+function salesTaxInput_(b, country) {
+  const pct = Number(b && b.ratePercent);
+  if (!Number.isFinite(pct) || pct < 0 || pct > 15) return { error: "Tax rate must be between 0% and 15%" };
+  // The home state's 2-letter code; blank = not set (then nothing counts as out of state).
+  // Outside the US (Region → country OTHER) it's the home region as free text ("Ontario"),
+  // compared with an order's region without regard to case.
+  const usFormats = country === "US";
+  const jurisdiction = usFormats ? String(b.jurisdiction || "").trim().toUpperCase()
+    : String(b.jurisdiction || "").trim().replace(/\s+/g, " ").slice(0, 50);
+  if (usFormats && jurisdiction && !/^[A-Z]{2}$/.test(jurisdiction)) return { error: "Jurisdiction must be a 2-letter state code" };
+  // Tax inside the listed prices ("inclusive") or added on top ("exclusive"). Left out = unchanged.
+  // Like the rate, it applies to new orders only (each order keeps its own).
+  const taxMode = b.taxMode == null || b.taxMode === "" ? undefined : String(b.taxMode);
+  if (taxMode !== undefined && taxMode !== "inclusive" && taxMode !== "exclusive") {
+    return { error: "Tax mode must be \"inclusive\" (prices include tax) or \"exclusive\" (tax added on top)" };
+  }
+  return { rateBps: Math.round(pct * 100), jurisdiction, taxMode };
+}
+// Bookkeeping: the date a sale counts on.
+function saleDateInput_(v) {
+  const saleDate = String(v || "");
+  return saleDate === "shipped" || saleDate === "placed" ? { saleDate }
+    : { error: "Choose when a sale counts: \"shipped\" (ships or is delivered) or \"placed\" (the order is placed)" };
+}
+// Pricing: the form's dollars and percent as cents and basis points (db.js buildPricingSettings checks the ranges).
+function pricingInput_(b) {
+  b = b || {};
+  const money = (v) => v === null || v === undefined || v === "" ? null : Math.round(Number(v) * 100);
+  return { cardPctBps: b.cardPct === "" || b.cardPct == null ? null : Math.round(Number(b.cardPct) * 100), cardFixedCents: money(b.cardFixed),
+    suppliesCents: money(b.supplies), targetHourlyCents: money(b.targetHourly), targetIncomeCents: money(b.targetIncome) };
+}
+// Global settings → Save (saveGlobalSettingsAll): each section, the action that saves it on its own — whose
+// permission (ACTION_PERM) and feature switch (FEATURE_ACTIONS) the section needs — and its name in messages.
+// In the order they are checked.
+const GLOBAL_SETTINGS_SECTIONS_ = {
+  locale: { action: "updateLocaleSettings", label: "Region" },
+  features: { action: "updateFeatures", label: "Features" },
+  payments: { action: "updateGlobalSettings", label: "Payment methods" },
+  salesTax: { action: "updateSalesTaxSettings", label: "Sales tax" },
+  accounting: { action: "updateAccountingSettings", label: "Bookkeeping" },
+  business: { action: "updateBusinessProfile", label: "Business profile" },
+  email: { action: "updateEmailSettings", label: "Email" },
+  digital: { action: "updateDigitalSettings", label: "Digital products" },
+  machine: { action: "updateMachineSettings", label: "Machine settings" },
+  pricing: { action: "updatePricingSettings", label: "Pricing" },
+  rush: { action: "updateRushSettings", label: "Rush fee" },
+};
+
 // A product's price must be entered: a flat price, or at least one size's (a blank box used to save as $0).
 // `before` is the stored product on an update (only what's sent is checked there).
 function checkProductPrice_(body, before) {
@@ -361,7 +416,7 @@ const NO_MONTH_ACTIONS = new Set([
   "saveAccount", "saveMoneyDefaults", "setRecordReceipt", "importStatement", "autoMatchStatement", "matchStatementLine", "unmatchStatementLine",
   "ignoreStatementLine", "reconcileMonth", "unreconcileMonth", "saveShopRate", "closePeriod", "reopenPeriod",
   // Settings
-  "updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "updateLocaleSettings", "updateSalesTaxSettings", "updateShipFromAddress",
+  "saveGlobalSettingsAll", "updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "updateLocaleSettings", "updateSalesTaxSettings", "updateShipFromAddress",
   "getAccountingSettings", "updateAccountingSettings", "updateMachineSettings", "updatePricingSettings", "updateRushSettings", "updateEmailSettings",
   "sendSampleEmail", "sendTestEmail", "checkMailbox", "updateDigitalSettings", "getCloudflareSetup", "connectCloudflare", "backfillStripeFees",
   "saveVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks", "deleteVendorConnection", "deleteOrphanImages",
@@ -564,6 +619,16 @@ async function handleOrdersPost_(context) {
   // An action that does more than its own level (permissions.js ACTION_PERM) asks again for the part that needs more:
   // a removal in Edit items is a cancel, a paid local sale is a payment. Called after the action's sign-in check.
   const can_ = (fn, level) => typeof adminCan !== "function" || adminCan(request, fn, level);
+  // Whether the user may use another action of this file, as its own ACTION_PERM entry says: for an action made of
+  // other actions' parts (saveGlobalSettingsAll), each part needs what its own action would. An action missing
+  // there is an admin's alone. (No user behind the request — a test's stand-in for the sign-in check — may.)
+  const mayUse_ = (action) => {
+    const spec = ACTION_PERM_[action];
+    if (spec === "*") return true;
+    if (Array.isArray(spec) && spec.length) return spec.some(e => Array.isArray(e) && e.length === 2 && can_(e[0], e[1]));
+    const u = typeof adminUser === "function" ? adminUser(request) : null;
+    return !u || !u.roleInfo || (u.roleInfo.locked === true && u.roleInfo.key === "admin");
+  };
   const forbidden_ = (message) => jsonResponse({ status: "error", code: "forbidden", message }, 403);
   // Products now below a target or a blank's MAP: all of it for a manager; a worker hears only of MAP (a vendor's
   // public price), never of costs or targets.
@@ -3879,13 +3944,9 @@ async function handleOrdersPost_(context) {
       return jsonResponse({ status: "ok", shopRate: shopRateView_(r), input: await getShopRate(env.DB), belowTarget: below });
     }
     if (body.action === "updatePricingSettings") {
-      const b = body.pricing || {};
-      const money = (v) => v === null || v === undefined || v === "" ? null : Math.round(Number(v) * 100);
       let saved;
-      try {
-        saved = await setPricingSettings(env.DB, { cardPctBps: b.cardPct === "" || b.cardPct == null ? null : Math.round(Number(b.cardPct) * 100), cardFixedCents: money(b.cardFixed),
-          suppliesCents: money(b.supplies), targetHourlyCents: money(b.targetHourly), targetIncomeCents: money(b.targetIncome) });
-      } catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
+      try { saved = await setPricingSettings(env.DB, pricingInput_(body.pricing)); }
+      catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
       audit({ orgId: null, orderId: null, action: "settings.pricing_set", detail: saved });
       // A new fee, supplies cost or target re-flags products straight away: say which are now below a target.
       const all = await analyzePricing(env.DB);
@@ -4089,16 +4150,21 @@ async function handleOrdersPost_(context) {
     if (body.action === "getFeatures") {
       return jsonResponse({ status: "ok", features: await getFeatures(env.DB), list: FEATURES, locked: lockedFeatures_, shippoKey: !!env.SHIPPO_API_KEY });
     }
-    if (body.action === "updateFeatures") {
+    // What a Features save would do, checked before anything is written (updateFeatures, saveGlobalSettingsAll):
+    // { refused: { status, body } } — the answer to send — or { want, before, shipFrom, changes }: the switches as
+    // sent, as they were, the ship-from address to save with them (null: none), and the audit's changes.
+    // `country` is the Region the address is checked by (on Global settings, the one being saved with it).
+    const featuresPlan_ = async (wantIn, shipFromIn, country) => {
       const before = await getFeatures(env.DB);
-      const want = body.features && typeof body.features === "object" ? body.features : {};
+      const want = wantIn && typeof wantIn === "object" ? wantIn : {};
+      const refused = (status, b) => ({ refused: { status, body: { status: "error", ...b } } });
       for (const k of Object.keys(want)) {
-        if (!FEATURES.some(f => f.key === k)) return jsonResponse({ status: "error", message: `"${String(k).slice(0, 40)}" isn't a feature.` }, 400);
-        if (typeof want[k] !== "boolean") return jsonResponse({ status: "error", message: "Each feature is either on (true) or off (false)." }, 400);
-        if (want[k] && lockedFeatures_.includes(k)) return jsonResponse({ status: "error", message: k === "shipping"
+        if (!FEATURES.some(f => f.key === k)) return refused(400, { message: `"${String(k).slice(0, 40)}" isn't a feature.` });
+        if (typeof want[k] !== "boolean") return refused(400, { message: "Each feature is either on (true) or off (false)." });
+        if (want[k] && lockedFeatures_.includes(k)) return refused(400, { message: k === "shipping"
           ? "Carrier shipping needs a Shippo key — add it under Global settings → Carrier shipping (Shippo)."
           : k === "designVerification" ? "Design approval needs email — set up your mailbox under Global settings → Email."
-          : `${featureLabel_(k)} isn't part of the desktop version.` }, 400);
+          : `${featureLabel_(k)} isn't part of the desktop version.` });
       }
       // Shipping on (asked for in this request) needs what buying a label needs: a Shippo key and a
       // complete ship-from address. The address can come with the request (Global settings sends
@@ -4106,34 +4172,39 @@ async function handleOrdersPost_(context) {
       // while either is missing. A request that doesn't mention Shipping isn't held up by it.
       // Only switching Shipping ON is held to that: an install where it is already on (a new one starts that way,
       // key or not) saves the rest of Global settings as it is — buying a label still says what's missing.
-      let shipFromToSave = null;
+      let shipFrom = null;
       if (want.shipping === true) {
-        const { country } = await getLocaleSettings(env.DB);
-        const sent = body.shipFrom && typeof body.shipFrom === "object" ? body.shipFrom : null;
+        const sent = shipFromIn && typeof shipFromIn === "object" ? shipFromIn : null;
         const sentAny = !!sent && Object.values(sent).some(v => String(v == null ? "" : v).trim());
-        if (sentAny) { const bad = shipFromFormatError_(sent, country); if (bad) return jsonResponse({ status: "error", message: "Ship-from address: " + bad }, 400); }
+        if (sentAny) { const bad = shipFromFormatError_(sent, country); if (bad) return refused(400, { message: "Ship-from address: " + bad }); }
         const missing = before.shipping ? [] : shipFromMissing(sent || await getShipFromAddress(env.DB, env), country);
         if (!before.shipping && (!env.SHIPPO_API_KEY || missing.length)) {
           const need = [!env.SHIPPO_API_KEY ? (isDesktopEdition(env) ? "a Shippo key (Global settings → Carrier shipping (Shippo))" : "a Shippo key (the SHIPPO_API_KEY secret — see docs/configuration.md)") : "",
             missing.length ? "in the Ship-from address: " + missing.join(", ") : ""].filter(Boolean).join(", and ");
-          return jsonResponse({ status: "error", code: "shipping_setup", shippoKey: !!env.SHIPPO_API_KEY, missing,
-            message: `Shipping needs ${need}. Fill ${missing.length && env.SHIPPO_API_KEY ? "them" : "it"} in, or untick Shipping.` }, 400);
+          return refused(400, { code: "shipping_setup", shippoKey: !!env.SHIPPO_API_KEY, missing,
+            message: `Shipping needs ${need}. Fill ${missing.length && env.SHIPPO_API_KEY ? "them" : "it"} in, or untick Shipping.` });
         }
-        shipFromToSave = sentAny ? { a: sent, country } : null;
-      }
-      if (shipFromToSave) {
-        const before = await getShipFromAddress(env.DB, env);
-        const shipFrom = await setShipFromAddress(env.DB, shipFromToSave.a, shipFromToSave.country);
-        audit({ orgId: null, orderId: null, action: "settings.ship_from_set", detail: { from: before, to: shipFrom } });
+        shipFrom = sentAny ? sent : null;
       }
       const changes = {};
       for (const f of FEATURES) if (typeof want[f.key] === "boolean" && want[f.key] !== before[f.key]) changes[f.key] = { from: before[f.key], to: want[f.key] };
+      return { want, before, shipFrom, changes };
+    };
+    if (body.action === "updateFeatures") {
+      const country = (await getLocaleSettings(env.DB)).country;
+      const plan = await featuresPlan_(body.features, body.shipFrom, country);
+      if (plan.refused) return jsonResponse(plan.refused.body, plan.refused.status);
+      if (plan.shipFrom) {
+        const before = await getShipFromAddress(env.DB, env);
+        const shipFrom = await setShipFromAddress(env.DB, plan.shipFrom, country);
+        audit({ orgId: null, orderId: null, action: "settings.ship_from_set", detail: { from: before, to: shipFrom } });
+      }
       // Audited FIRST: switching a feature off takes pages and actions away, so there's always a record.
-      if (Object.keys(changes).length) {
-        const auditErr = await auditStrict({ orgId: null, orderId: null, action: "settings.features_set", detail: { changes } });
+      if (Object.keys(plan.changes).length) {
+        const auditErr = await auditStrict({ orgId: null, orderId: null, action: "settings.features_set", detail: { changes: plan.changes } });
         if (auditErr) return auditErr;
       }
-      const features = await setFeatures(env.DB, want);
+      const features = await setFeatures(env.DB, plan.want);
       // Everything reads the switches from the cached catalog — refresh it.
       try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
       return jsonResponse({ status: "ok", features, list: FEATURES, locked: lockedFeatures_, shippoKey: !!env.SHIPPO_API_KEY });
@@ -4159,27 +4230,12 @@ async function handleOrdersPost_(context) {
       return jsonResponse({ status: "ok", salesTax: { ...salesTax, ratePercent: salesTax.rateBps / 100 } });
     }
     if (body.action === "updateSalesTaxSettings") {
-      const pct = Number(body.ratePercent);
-      if (!Number.isFinite(pct) || pct < 0 || pct > 15) {
-        return jsonResponse({ status: "error", message: "Tax rate must be between 0% and 15%" }, 400);
-      }
-      // The home state's 2-letter code; blank = not set (then nothing counts as out of state).
-      // Outside the US (Region → country OTHER) it's the home region as free text ("Ontario"),
-      // compared with an order's region without regard to case.
-      const usFormats = (await getLocaleSettings(env.DB)).country === "US";
-      const jurisdiction = usFormats ? String(body.jurisdiction || "").trim().toUpperCase()
-        : String(body.jurisdiction || "").trim().replace(/\s+/g, " ").slice(0, 50);
-      if (usFormats && jurisdiction && !/^[A-Z]{2}$/.test(jurisdiction)) {
-        return jsonResponse({ status: "error", message: "Jurisdiction must be a 2-letter state code" }, 400);
-      }
-      // Tax inside the listed prices ("inclusive") or added on top ("exclusive"). Left out = unchanged.
-      // Like the rate, it applies to new orders only (each order keeps its own).
-      const taxMode = body.taxMode == null || body.taxMode === "" ? undefined : String(body.taxMode);
-      if (taxMode !== undefined && taxMode !== "inclusive" && taxMode !== "exclusive") {
-        return jsonResponse({ status: "error", message: "Tax mode must be \"inclusive\" (prices include tax) or \"exclusive\" (tax added on top)" }, 400);
-      }
+      // Checked as salesTaxInput_ says (the rate, the home state by Region, the mode).
+      const input = salesTaxInput_(body, (await getLocaleSettings(env.DB)).country);
+      if (input.error) return jsonResponse({ status: "error", message: input.error }, 400);
+      const { jurisdiction } = input;
       const before = await getSalesTaxSettings(env.DB);
-      const salesTax = await setSalesTaxSettings(env.DB, { rateBps: Math.round(pct * 100), jurisdiction, taxMode });
+      const salesTax = await setSalesTaxSettings(env.DB, input);
       // The storefront shows the rate and adds the tax itself when it's on top, so it must not keep
       // serving a cached catalog with the old rate or mode.
       try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
@@ -4195,14 +4251,156 @@ async function handleOrdersPost_(context) {
       return jsonResponse({ status: "ok", accounting: await getAccountingSettings(env.DB) });
     }
     if (body.action === "updateAccountingSettings") {
-      const saleDate = String(body.saleDate || "");
-      if (saleDate !== "shipped" && saleDate !== "placed") {
-        return jsonResponse({ status: "error", message: "Choose when a sale counts: \"shipped\" (ships or is delivered) or \"placed\" (the order is placed)" }, 400);
-      }
+      const input = saleDateInput_(body.saleDate);
+      if (input.error) return jsonResponse({ status: "error", message: input.error }, 400);
       const before = await getAccountingSettings(env.DB);
-      const accounting = await setAccountingSettings(env.DB, { saleDate });
+      const accounting = await setAccountingSettings(env.DB, { saleDate: input.saleDate });
       audit({ orgId: null, orderId: null, action: "settings.accounting_set", detail: { from: before, to: accounting } });
       return jsonResponse({ status: "ok", accounting });
+    }
+
+    // ---- Global settings → Save: every section in one request, saved all together or not at all ----
+    // `settings` holds the sections the page shows (GLOBAL_SETTINGS_SECTIONS_), each as its own action takes it:
+    // locale, features (with shipFrom), payments (the enabledPayments boxes), salesTax, accounting ({ saleDate }),
+    // business, email ({ attachPdf }), digital, machine, pricing, rush. A section left out is left as it is.
+    // Each section needs what its own action needs (its permission, its feature switched on — as it will be after
+    // this save), and every one is checked and built (db.js build…Settings) before anything is written: one
+    // refusal and nothing is saved, the answer naming the section (`section`). Then one db.batch writes them all,
+    // with the Features audit entry inside it (always on record, and never on record unless saved). After the
+    // write, once: the other sections' audit entries, the catalog refresh, the pricing check. How a cloud install
+    // sends email (its mailbox and password) and the desktop program's own settings stay their own requests.
+    if (body.action === "saveGlobalSettingsAll") {
+      const SECTIONS = GLOBAL_SETTINGS_SECTIONS_;
+      const s = body.settings && typeof body.settings === "object" && !Array.isArray(body.settings) ? body.settings : {};
+      const unknown = Object.keys(s).filter(k => !SECTIONS[k] && k !== "shipFrom");
+      if (unknown.length) return jsonResponse({ status: "error", message: `"${String(unknown[0]).slice(0, 40)}" isn't a part of Global settings.` }, 400);
+      const included = Object.keys(SECTIONS).filter(k => s[k] != null);
+      if (!included.length) return jsonResponse({ status: "error", message: "Nothing to save." }, 400);
+      const label = (k) => SECTIONS[k].label;
+      const cannot = included.filter(k => !mayUse_(SECTIONS[k].action));
+      if (cannot.length) return forbidden_(`Nothing was saved: your role can't change ${cannot.map(label).join(", ")}. Ask an admin.`);
+      if (isDesktopEdition(env)) {
+        const offline = included.find(k => DESKTOP_REFUSED_ACTIONS.has(SECTIONS[k].action));
+        if (offline) return jsonResponse({ status: "error", code: "desktop", section: label(offline), message: DESKTOP_REFUSED_MSG }, 403);
+      }
+      const refuse = (k, message, status = 400, extra = {}) => jsonResponse({ status: "error", ...extra, section: label(k), message }, status);
+      const bad = included.find(k => typeof s[k] !== "object" || Array.isArray(s[k]));
+      if (bad) return refuse(bad, "That isn't a valid " + label(bad) + " section.");
+      // Every section's build: what it checks is refused (userFacing) here, before anything is written.
+      const builds = {}, before = {};
+      const build = async (k, fn) => {
+        try { builds[k] = await fn(); return null; }
+        catch (e) { if (e && e.userFacing) return refuse(k, e.message); throw e; }
+      };
+      let r;
+      // Region first: the country decides how the ship-from address and the sales tax home state are checked.
+      before.locale = await getLocaleSettings(env.DB);
+      if (s.locale && (r = await build("locale", () => buildLocaleSettings(env.DB, { timeZone: s.locale.timeZone, country: s.locale.country })))) return r;
+      const country = builds.locale ? builds.locale.value.country : before.locale.country;
+      let plan = null;
+      if (s.features) {
+        plan = await featuresPlan_(s.features, s.shipFrom, country);
+        if (plan.refused) return jsonResponse({ ...plan.refused.body, section: label("features") }, plan.refused.status);
+        builds.features = await buildFeatureSettings(env.DB, plan.want);
+        if (plan.shipFrom) {
+          before.shipFrom = await getShipFromAddress(env.DB, env);
+          builds.shipFrom = await buildShipFromAddress(env.DB, plan.shipFrom, country);
+        }
+      }
+      // A section whose feature is off — as it will be once this is saved — is refused, as its own action would be.
+      const featuresAfter = builds.features ? builds.features.value : await getFeatures(env.DB);
+      for (const k of included) {
+        const f = ACTION_FEATURE[SECTIONS[k].action];
+        if (f && featuresAfter[f] === false) return refuse(k, `${featureLabel_(f)} is turned off. Turn it on under Settings → Global settings → Features.`, 403, { feature: f });
+      }
+      if (s.payments && (r = await build("payments", () => buildGlobalSettings(env.DB, { enabledPayments: s.payments })))) return r;
+      if (s.salesTax) {
+        const input = salesTaxInput_(s.salesTax, country);
+        if (input.error) return refuse("salesTax", input.error);
+        before.salesTax = await getSalesTaxSettings(env.DB);
+        builds.salesTax = await buildSalesTaxSettings(env.DB, input);
+      }
+      if (s.accounting) {
+        const input = saleDateInput_(s.accounting.saleDate);
+        if (input.error) return refuse("accounting", input.error);
+        before.accounting = await getAccountingSettings(env.DB);
+        builds.accounting = await buildAccountingSettings(env.DB, input);
+      }
+      if (s.business) {
+        before.business = await getBusinessProfile(env.DB);
+        if ((r = await build("business", () => buildBusinessProfile(env.DB, s.business)))) return r;
+      }
+      if (s.email) {
+        before.email = await getEmailSettings(env.DB);
+        builds.email = await buildEmailSettings(env.DB, { attachPdf: s.email.attachPdf });
+      }
+      if (s.digital) {
+        before.digital = await getDigitalSettings(env.DB);
+        builds.digital = await buildDigitalSettings(env.DB, s.digital);
+      }
+      if (s.machine) builds.machine = await buildMachineSettings(env.DB, s.machine);
+      if (s.pricing && (r = await build("pricing", () => buildPricingSettings(env.DB, pricingInput_(s.pricing))))) return r;
+      if (s.rush) {
+        before.rush = await getRushSettings(env.DB);
+        if ((r = await build("rush", () => buildRushSettings(env.DB, { rule: s.rush.rule, taxable: s.rush.taxable === true })))) return r;
+      }
+
+      // Everything checked: the write, all of it or none of it.
+      const writes = Object.values(builds);
+      if (plan && Object.keys(plan.changes).length) {
+        writes.push({ stmts: [auditLogStatement(env.DB, auditEntry({ orgId: null, orderId: null, action: "settings.features_set", detail: { changes: plan.changes } }))] });
+      }
+      try { await writeSettingBuilds(env.DB, writes, { batch: true }); }
+      catch (e) {
+        console.error("Saving Global settings failed (nothing was saved):", e);
+        return jsonResponse({ status: "error", message: "Nothing was saved: the database didn't take the change. Try again." }, 503);
+      }
+
+      // After the write: each section's audit entry, as its own action records it.
+      const v = (k) => builds[k] && builds[k].value;
+      const changed = (from, to) => { const c = {}; for (const k of Object.keys(to)) if (to[k] !== from[k]) c[k] = { from: from[k], to: to[k] }; return c; };
+      if (builds.locale) audit({ orgId: null, orderId: null, action: "settings.locale_set", detail: { changes: changed(before.locale, v("locale")) } });
+      if (builds.shipFrom) audit({ orgId: null, orderId: null, action: "settings.ship_from_set", detail: { from: before.shipFrom, to: v("shipFrom") } });
+      if (builds.business) audit({ orgId: null, orderId: null, action: "settings.business_set", detail: { changes: changed(before.business, v("business")) } });
+      if (builds.salesTax) {
+        const a = before.salesTax, b = v("salesTax");
+        audit({ orgId: null, orderId: null, action: "settings.sales_tax_set",
+          detail: { from: { rateBps: a.rateBps, jurisdiction: a.jurisdiction, taxMode: a.taxMode }, to: { rateBps: b.rateBps, jurisdiction: b.jurisdiction, taxMode: b.taxMode } } });
+      }
+      if (builds.accounting) audit({ orgId: null, orderId: null, action: "settings.accounting_set", detail: { from: before.accounting, to: v("accounting") } });
+      if (builds.email) {
+        const detail = {};
+        if (v("email").attachPdf !== before.email.attachPdf) detail.attachPdf = { from: before.email.attachPdf, to: v("email").attachPdf };
+        audit({ orgId: null, orderId: null, action: "settings.email_set", detail });
+      }
+      if (builds.digital) audit({ orgId: null, orderId: null, action: "settings.digital_set", detail: { from: before.digital, to: v("digital") } });
+      if (builds.machine) audit({ orgId: null, orderId: null, action: "settings.machine_set", detail: s.machine });
+      if (builds.pricing) audit({ orgId: null, orderId: null, action: "settings.pricing_set", detail: v("pricing") });
+      if (builds.rush) {
+        audit({ orgId: null, orderId: null, action: "settings.rush_fee_set",
+          detail: { from: { ...rushRuleView(before.rush.rule), taxable: before.rush.taxable }, to: { ...rushRuleView(v("rush").rule), taxable: v("rush").taxable } } });
+      }
+      // The storefront reads the country, the switches, the tax rate and mode, the business's name and payment
+      // details and the rush rule from the cached catalog: one refresh for all of them. (The payment-method boxes
+      // wait for Publish, as they always have.)
+      if (["locale", "features", "salesTax", "business", "rush"].some(k => builds[k])) {
+        try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
+      }
+      // New fees, targets or a new tax rate re-check every product: which are now below a target.
+      let belowTarget = [];
+      if (builds.pricing || builds.salesTax) {
+        const all = await analyzePricing(env.DB).catch(() => ({ products: [] }));
+        belowTarget = all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems }));
+      }
+      const saved = {};
+      for (const k of included) saved[k] = v(k);
+      if (builds.shipFrom) saved.shipFrom = v("shipFrom");
+      if (saved.salesTax) saved.salesTax = { ...saved.salesTax, ratePercent: saved.salesTax.rateBps / 100 };
+      if (saved.rush) saved.rush = { rule: rushRuleView(saved.rush.rule), taxable: saved.rush.taxable };
+      // A Region save also sends the time zone now in force (the Region's, else TIMEZONE, else UTC): the admin page
+      // shows every date and "today" on it.
+      const tz = builds.locale ? { effectiveTimeZone: await resolveTimeZone(env) } : {};
+      return jsonResponse({ status: "ok", sections: included.map(label), settings: saved, belowTarget, ...tz });
     }
 
     if (body.action === "getBoxPresets") {

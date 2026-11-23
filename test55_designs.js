@@ -40,13 +40,22 @@ const designApi = new Function(hostConfigSrc + "\n" + rateLimitSrc + "\n" + admi
 if (!global.crypto) global.crypto = {};
 if (!global.crypto.randomUUID) global.crypto.randomUUID = (() => { let n = 0; return () => "aaaaaaaa-bbbb-cccc-dddd-" + String(n++).padStart(12, "0"); })();
 
+// Signed in: the admin API takes only the session cookie (the setup passphrase is no key). A request below sent with
+// key "proxy-pass-for-tests" stands for the signed-in admin's page, so it carries the cookie of a session the
+// stand-in lookup knows, from the page's own origin.
+const SESSION_TOKEN = "sess_" + "9a".repeat(24);
+const SESSION_HASH = require("crypto").createHash("sha256").update(SESSION_TOKEN).digest("hex");
+global.getAdminSession = async (db, hash) => hash === SESSION_HASH
+  ? { expiresAt: new Date(Date.now() + 3600e3).toISOString(), userId: 1, pending: null, user: { id: 1, email: "owner@example.test", name: "Owner", role: "admin", status: "active" } } : null;
 function designCtx(opts, env){
   const headers = new Map();
   if (opts.key !== undefined) headers.set("x-admin-key", opts.key);
   if (opts.contentType !== undefined) headers.set("content-type", opts.contentType);
+  const url = opts.url || "https://admin.example.com/api/design" + (opts.qs || "");
+  if (opts.key === "proxy-pass-for-tests") { headers.set("cookie", "__Host-odd_admin=" + SESSION_TOKEN); headers.set("origin", new URL(url).origin); }
   return {
     request: {
-      url: opts.url || "https://admin.example.com/api/design" + (opts.qs || ""),
+      url,
       headers: { get: (k) => (headers.has(String(k).toLowerCase()) ? headers.get(String(k).toLowerCase()) : null) },
       json: async () => opts.jsonBody,
       body: null, // force the arrayBuffer fallback path in readBodyWithLimit

@@ -31,7 +31,8 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 
   const admin = await A.firstAdmin();
   clearLimits();
-  for (let i = 1; i <= 10; i++) await signInFrom("2001:db8:1:2::" + i.toString(16), "olive@myshop.com", "wrong password");
+  // (Tried as an account nobody has, so the per-account count, below, doesn't come into it.)
+  for (let i = 1; i <= 10; i++) await signInFrom("2001:db8:1:2::" + i.toString(16), "nobody@myshop.com", "wrong password");
   ok("ten tries from addresses in one /64 use up that /64's budget", (await signInFrom("2001:db8:1:2::ff", "olive@myshop.com", "correct horse battery")).status === 429);
   ok("…while the next /64 has its own", (await signInFrom("2001:db8:1:3::1", "olive@myshop.com", "correct horse battery")).status === 200);
   clearLimits();
@@ -96,7 +97,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   r = await signInFrom("192.0.2.99", "olive@myshop.com", "correct horse battery");
   ok("five failures from five addresses use up a limit of 5: a sixth address can't sign in either", r.status === 429);
   ok("…but someone already signed in carries on", (await gate(fresh)) === null);
-  ok("…and a passphrase sent without a session is refused while it lasts", (await gate("", "anything", "192.0.2.50")).status === 429);
+  ok("…and a key sent without a session opens nothing, as always (it is not a sign-in)", (await gate("", "anything", "192.0.2.50")).status === 401);
   A.env.ADMIN_AUTH_GLOBAL_LIMIT = "0";
   ok("with the limit at 0 it's off", (await signInFrom("192.0.2.100", "olive@myshop.com", "correct horse battery")).status === 200);
   clearLimits();
@@ -120,8 +121,8 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("…while everyone else still signs in", (await signInB("198.51.100.67", "correct horse battery")).status === 200);
   ok("only its share counted toward everyone's budget", allCount() === 2);
   for (let i = 0; i < 6; i++) await gateB("a wrong key " + i, "198.51.100.68");
-  ok("a wrong key sent to the API without a session is held to the same share", allCount() === 4 && (await gateB("another wrong key", "198.51.100.68")).status === 429);
-  for (let i = 1; i <= 3; i++){ await signInB("192.0.2.1" + i, "wrong password"); await signInB("192.0.2.1" + i, "wrong password"); }
+  ok("a key sent to the API without a session is no sign-in: refused, and not counted toward everyone's budget", allCount() === 2 && (await gateB("another wrong key", "198.51.100.68")).status === 401);
+  for (let i = 1; i <= 4; i++){ await signInB("192.0.2.1" + i, "wrong password"); await signInB("192.0.2.1" + i, "wrong password"); }
   ok("five addresses together can still use the budget up", allCount() === 10 && (await signInB("192.0.2.30", "correct horse battery")).status === 429);
 
   console.log("\n=== Spreadsheet export ===");

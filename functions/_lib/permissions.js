@@ -139,12 +139,14 @@ const BY_FN = {
   "inventory.blanks": {
     read: ["getInventory", "getBlanks", "getBlankMovements", "getBlankVendorPriceHistory", "getBlankLinks", "getReadyToShip", "getFinishedGoodsMovements",
       "previewBlankCatchUp", "previewVendorBlanks", "suggestColorGroups", "listVendorConnections", "fetchVendorProducts"],
-    // A product's blank links are its set-up, kept by the product form (saveBlankLinks drops a link whose color or
-    // size the product no longer offers), so removing one is Edit like setting one. Merging deletes blanks: Full.
+    // Setting a product's blank links is Edit; removing one is a deletion, so Full (saveBlankLinks asks for Full when
+    // its save removes any). Merging deletes blanks: Full. Counts and average cost are Full's too: the blank form
+    // changes them only with Full (updateBlank), and correcting a finished-stock count is setReadyToShipQty.
     edit: ["createInventoryItem", "updateInventoryItem", "createBlank", "updateBlank", "receiveBlanks", "receiveBlankOrder", "addBlankSizes",
-      "readInvoiceWithAi", "markBlankPricesChecked", "setBlankLink", "saveBlankLinks", "deleteBlankLink", "applyBlankCatchUp", "setReadyToShipQty", "makeForStock", "importBlanks",
+      "readInvoiceWithAi", "markBlankPricesChecked", "setBlankLink", "saveBlankLinks", "applyBlankCatchUp", "makeForStock", "importBlanks",
       "applyVendorBlanks", "copyVendorImage", "removeBlankImages", "restoreInventoryMovement"],
-    full: ["deleteInventoryItem", "deleteBlank", "mergeBlanks", "writeOffBlanks", "countBlankStock", "voidInventoryMovement", "voidFinishedGoodsMovement", "recomputeBlankAverageCosts"] },
+    full: ["deleteInventoryItem", "deleteBlank", "deleteBlankLink", "mergeBlanks", "writeOffBlanks", "countBlankStock", "setReadyToShipQty", "voidInventoryMovement", "voidFinishedGoodsMovement",
+      "recomputeBlankAverageCosts"] },
   "inventory.blankorder": { read: ["getBlanksToOrder", "freeShippingSuggestions", "listVendors"], edit: ["recordRestockOrder"], full: ["cancelRestockOrder", "saveVendor", "deleteVendor"] },
   "inventory.supplierOrders": { read: ["listSupplierOrders", "checkSupplierOrderShipments", "listVendorApiLog", "getVendorApiLogEntry"], edit: ["previewSupplierOrder", "placeSupplierOrder"], full: ["cancelSupplierOrder"] },
   "inventory.transfers": {

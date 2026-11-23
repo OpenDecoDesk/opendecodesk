@@ -162,6 +162,16 @@ function makeD1(){
 function reqWithIp(ip, extra){
   return Object.assign({ headers: { get: (h) => h === "CF-Connecting-IP" ? ip : null } }, extra || {});
 }
+// Signed in: the session cookie (the only credential the admin API takes — the setup passphrase is no key) for a
+// session the stand-in database knows, sent from the admin page itself.
+const SESSION_TOKEN = "sess_" + "ab".repeat(24);
+const SESSION_HASH = require("crypto").createHash("sha256").update(SESSION_TOKEN).digest("hex");
+global.getAdminSession = async (db, hash) => hash === SESSION_HASH
+  ? { expiresAt: new Date(Date.now() + 3600e3).toISOString(), userId: 1, pending: null, user: { id: 1, email: "owner@example.test", name: "Owner", role: "admin", status: "active" } } : null;
+function reqSignedIn(ip, extra){
+  const h = { "CF-Connecting-IP": ip, "Cookie": "__Host-odd_admin=" + SESSION_TOKEN, "Origin": "https://admin.example.com" };
+  return Object.assign({ url: "https://admin.example.com/api/orders", headers: { get: (k) => h[k] || null } }, extra || {});
+}
 
 (async () => {
   // ========================
@@ -288,8 +298,10 @@ function reqWithIp(ip, extra){
     console.log("Wrong passphrase -> 401 Unauthorized:", wrongKey.status === 401);
     console.log("Message is exactly 'Unauthorized':", JSON.parse(await wrongKey.text()).message === "Unauthorized");
 
-    const ok = await requireAdmin(env, {kind:"admin"}, "proxy-pass-for-tests", req, "msg");
-    console.log("Correct passphrase -> null (proceed):", ok === null);
+    const asKey = await requireAdmin(env, {kind:"admin"}, "proxy-pass-for-tests", req, "msg");
+    console.log("The setup passphrase sent as a key is no credential -> 401:", asKey.status === 401);
+    const ok = await requireAdmin(env, {kind:"admin"}, "", reqSignedIn("2.2.2.2"), "msg");
+    console.log("A signed-in session -> null (proceed):", ok === null);
 
     const unconfigured = await requireAdmin({DB: makeD1()}, {kind:"admin"}, "anything", reqWithIp("2.2.2.3"), "msg");
     console.log("Unset PROXY_ADMIN_PASSPHRASE -> 401 Unauthorized (not a separate 500 leaking config state):", unconfigured.status === 401);
@@ -314,7 +326,7 @@ function reqWithIp(ip, extra){
     const env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", DB: db };
     const req = reqWithIp("3.3.3.4");
     let ok = true;
-    for(let i = 0; i < 200; i++){ ok = ok && (await requireAdmin(env, {kind:"admin"}, "proxy-pass-for-tests", req, "msg")) === null; }
+    for(let i = 0; i < 200; i++){ ok = ok && (await requireAdmin(env, {kind:"admin"}, "", reqSignedIn("3.3.3.4"), "msg")) === null; }
     console.log("200 authorized admin requests in one minute all pass:", ok);
     console.log("...and cost zero rate-limit writes:", db._writes === 0);
   }
@@ -386,7 +398,7 @@ function reqWithIp(ip, extra){
     console.log("\n=== admin_auth budget is untouched by checkout traffic sharing the same IP ===");
     const ordersEnv = { DB: kv, PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests" };
     const adminRes = await ordersHandler({
-      request: reqWithIp(ip, { json: async () => ({action:"getOrders", org:"league-101", key:"proxy-pass-for-tests"}), url: "https://admin.example.com/api/orders" }),
+      request: reqSignedIn(ip, { json: async () => ({action:"getOrders", org:"league-101"}), url: "https://admin.example.com/api/orders" }),
       env: ordersEnv
     });
     console.log("Admin request from the SAME IP still works fine (separate bucket from checkout):", adminRes.status === 200);

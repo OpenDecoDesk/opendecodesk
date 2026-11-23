@@ -249,12 +249,14 @@ What a role can't use isn't shown: no menu entry, link or button for it.
   every device, this one included. Turning your two-step sign-in on or off also signs your other
   devices out.
 - **Failed sign-ins are limited:** 10 a minute from one address (an IPv6 address counts by its /64),
-  and 100 every 15 minutes across the whole site from anywhere (`ADMIN_AUTH_GLOBAL_LIMIT`, see
-  [configuration.md](configuration.md)). One address may use no more than a fifth of the site-wide
-  budget (20 failures in 15 minutes) before it is refused on its own, so it takes at least five
-  addresses to hold everyone's new sign-ins up. Someone already signed in is never locked out by
-  them. Against a flood from many addresses, add a Cloudflare rate-limiting rule (WAF → Rate
-  limiting rules; the free plan includes one) for the path `/api/admin-session`.
+  10 every 15 minutes for one account, and 100 every 15 minutes across the whole site from anywhere
+  (`ADMIN_AUTH_ACCOUNT_LIMIT`, `ADMIN_AUTH_GLOBAL_LIMIT`, see [configuration.md](configuration.md)).
+  One address may use no more than a fifth of the site-wide budget (20 failures in 15 minutes)
+  before it is refused on its own. Past the site's budget or an account's, a sign-in from an address
+  that hasn't signed in here in the last 30 days is asked for a Turnstile check first — when the
+  Turnstile keys are set; without them it waits for the window to end. Someone already signed in is
+  never locked out by them. Against a flood from many addresses, add a Cloudflare rate-limiting rule
+  (WAF → Rate limiting rules; the free plan includes one) for the path `/api/admin-session`.
 - **Everything above is in the audit log** (Reports → Audit Log → Security & users).
 
 ### Locked out

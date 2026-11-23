@@ -72,14 +72,15 @@ function memIncrement(w){
 }
 function memCount(w){ const cur = _memCount.get(w.key); return cur ? cur.count : 0; }
 
-// `request` null = one counter for the whole install (see the *Global functions below).
+// `request` null = one counter for the whole install (see the *Global functions below); a string instead of a
+// request = a counter for that (an account's hashed email, say: adminAuth.js), wherever the request comes from.
 function windowInfo(bucket, request, windowSeconds){
   const span = windowSeconds || WINDOW_SECONDS;
   const nowSeconds = Math.floor(Date.now() / 1000);
   const windowIndex = Math.floor(nowSeconds / span);
   const windowEnd = (windowIndex + 1) * span;
   return {
-    key: "rl:" + bucket + ":" + (request ? clientIp(request) : "*") + ":" + windowIndex,
+    key: "rl:" + bucket + ":" + (typeof request === "string" ? request : request ? clientIp(request) : "*") + ":" + windowIndex,
     retryAfter: Math.max(windowEnd - nowSeconds, 1),
     expiresAt: windowEnd + span, // keep one extra window, then sweep
     nowSeconds,
@@ -168,6 +169,25 @@ export async function rateLimitHitGlobal(env, bucket, windowSeconds){
   const w = windowInfo(bucket, null, windowSeconds);
   try{ await increment(env.DB, w); }
   catch(err){ console.error("Rate limiter global hit error (bucket=" + bucket + "), counting in memory:", err); memIncrement(w); }
+}
+
+// A mark on this request's address that lasts `seconds` (an address that signed in, adminAuth.js), kept in the same
+// table: the sweep above removes it once it has run out. rateLimitMarked: is there one still? A database error
+// reads as no mark — never as a pass.
+export async function rateLimitMark(env, bucket, request, seconds){
+  if(!hasDb(env)) return;
+  const key = "rl:" + bucket + ":" + clientIp(request), until = Math.floor(Date.now() / 1000) + seconds;
+  try{
+    await env.DB.prepare("INSERT INTO rate_limits (key, count, expiresAt) VALUES (?, 1, ?) ON CONFLICT(key) DO UPDATE SET count = count + 1, expiresAt = excluded.expiresAt")
+      .bind(key, until).run();
+  }catch(err){ console.error("Rate limiter mark error (bucket=" + bucket + "):", err); }
+}
+export async function rateLimitMarked(env, bucket, request){
+  if(!hasDb(env)) return false;
+  try{
+    const row = await env.DB.prepare("SELECT 1 AS x FROM rate_limits WHERE key = ? AND expiresAt > ?").bind("rl:" + bucket + ":" + clientIp(request), Math.floor(Date.now() / 1000)).first();
+    return !!row;
+  }catch(err){ console.error("Rate limiter mark check error (bucket=" + bucket + "):", err); return false; }
 }
 
 export function rateLimitResponse(retryAfter){

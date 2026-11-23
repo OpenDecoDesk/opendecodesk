@@ -5,7 +5,8 @@
  *     admin (locked, always everything), manager, staff ("Back office"), production, and any role
  *     added on Users → Roles and permissions. A role says, per function of the back office, none /
  *     read / edit / full (functions/_lib/permissions.js).
- * requireAdmin(env, host, key, request, message, need) is the ONE place a role is enforced.
+ * requireAdmin(env, host, key, request, message, need) is the ONE place a role is enforced (`key` is
+ * no longer a credential: it is only looked at to answer a stale "sess_" token plainly).
  * `need` is what the call needs: [[fn, level], ...] (any one is enough — permissions.js ACTION_PERM),
  * "*" (anyone signed in), or the older words "staff" (= anyone signed in) and "manager". Anything
  * else — including leaving it out — means admin only, so a call nobody thought about is closed to
@@ -13,7 +14,7 @@
  *
  * CREDENTIALS, in order:
  *   1. Cloudflare Access (optional — see access.js). When ACCESS_TEAM_DOMAIN + ACCESS_AUD are
- *      set, a valid Access JWT is REQUIRED on top of 2/3. It is an outer gate only: who you are
+ *      set, a valid Access JWT is REQUIRED on top of 2. It is an outer gate only: who you are
  *      inside the app is still the user you signed in as.
  *   2. A session COOKIE (`__Host-odd_admin`), issued by /api/admin-session after email +
  *      password (+ a code when two-step is on). HttpOnly, so page JavaScript — and therefore an
@@ -23,20 +24,21 @@
  *      session can be PENDING — the user must first finish setting up their account, replace a
  *      temporary password, or enrol in two-step — in which case only the route that finishes
  *      that step answers.
- *   3. The installer's passphrase (the PROXY_ADMIN_PASSPHRASE secret) sent with the request.
- *      It is the way in to a NEW install and the way back in to a locked one, nothing more: it
- *      is accepted only while no active admin has a usable password (see "The installer's
- *      passphrase" below), and never when that admin has two-step sign-in.
- * Bearer "sess_…" tokens in the body/header are NOT accepted: a token page JavaScript can hold
+ * Nothing else. The installer's passphrase (the PROXY_ADMIN_PASSPHRASE secret) is the way in to a NEW
+ * install and the way back in to a locked one, and only through the sign-in page: /api/admin-session
+ * turns it into a session that must first set up the account (see "The installer's passphrase"
+ * below). Sent with an API request (body.key, X-Admin-Key) it opens nothing (review #11).
+ * Bearer "sess_…" tokens in the body/header are NOT accepted either: a token page JavaScript can hold
  * is one any XSS could copy out and replay.
  *
  * Every storage-dependent check FAILS CLOSED (503) — unlike the rate limiter, which may fail
- * open. The failure budget is checked BEFORE the credential, and only a FAILED CREDENTIAL counts
- * against it: being told "your role can't do that" or "finish setting up first" does not, or one
- * person clicking around would lock the whole office out.
+ * open. Sign-in (/api/admin-session) checks its failure budget BEFORE the password, and only a
+ * FAILED CREDENTIAL counts against it: being told "your role can't do that" or "finish setting up
+ * first" does not, or one person clicking around would lock the whole office out.
  */
 
-import { rateLimitCheck, rateLimitHit, rateLimitResponse, rateLimitCheckGlobal, rateLimitHitGlobal } from "./rateLimit.js";
+import { rateLimitCheck, rateLimitHit, rateLimitResponse, rateLimitCheckGlobal, rateLimitHitGlobal, rateLimitMark, rateLimitMarked } from "./rateLimit.js";
+import { verifyTurnstile } from "./turnstile.js";
 import { jsonResponse } from "./http.js";
 import { accessEnabled, verifyAccess } from "./access.js";
 import { DEFAULT_ROLES, normalizePermissions, roleAllows, effectiveLevel, permRank } from "./permissions.js";
@@ -52,9 +54,10 @@ const ADMIN_AUTH_BUCKET = "admin_auth";
 const ADMIN_AUTH_LIMIT  = 10;
 // FAILED sign-in attempts across the whole install, from any address, per 15 minutes. The per-address
 // limit above is no limit against someone with many addresses; this one caps how fast a password,
-// passphrase or code can be guessed at all. While it is used up, NEW sign-ins are refused for the rest
-// of the window — people already signed in are not affected (their session is checked first).
-// ADMIN_AUTH_GLOBAL_LIMIT overrides the number; 0 turns it off.
+// passphrase or code can be guessed at all. While it is used up, a NEW sign-in from an address that hasn't
+// signed in here lately must pass a Turnstile check first (or, on a site without Turnstile keys, waits
+// for the window to end) — people already signed in are not affected (their session is checked first).
+// ADMIN_AUTH_GLOBAL_LIMIT overrides the number; 0 turns it off (and the per-account limit with it).
 export const ADMIN_AUTH_GLOBAL_BUCKET = "admin_auth_all";
 export const ADMIN_AUTH_GLOBAL_WINDOW = 15 * 60;
 export function adminAuthGlobalLimit(env){
@@ -69,23 +72,56 @@ export function adminAuthIpShare(env){
   const all = adminAuthGlobalLimit(env);
   return all > 0 ? Math.max(1, Math.floor(all / 5)) : 0;
 }
-// Before checking a credential sent without a session: this address's share, then the whole budget.
-// Returns null, or the 429 to send back.
-export async function signInBudgetBlocked(env, request){
+// FAILED sign-ins per ACCOUNT (review #1), from any address, in the same 15 minutes: many addresses guessing one
+// person's password are held up past this as everyone is past the whole budget. Counted under a hash of the
+// email typed, never the email itself. ADMIN_AUTH_ACCOUNT_LIMIT overrides the number.
+const ADMIN_AUTH_ACCOUNT_BUCKET = "admin_auth_acct";
+export function adminAuthAccountLimit(env){
+  const n = Number(env && env.ADMIN_AUTH_ACCOUNT_LIMIT);
+  return Number.isFinite(n) && n > 0 && String(env.ADMIN_AUTH_ACCOUNT_LIMIT).trim() !== "" ? Math.floor(n) : 10;
+}
+async function accountKey_(email){
+  const e = String(email || "").trim().toLowerCase();
+  return e ? (await sha256Hex_("odd-signin-account:" + e)).slice(0, 32) : "";
+}
+// An address that signed in here (a right password) in the last 30 days is let past a spent budget without a
+// check: the people who work here keep signing in while someone else floods the sign-in page.
+const ADMIN_KNOWN_BUCKET = "admin_known";
+const ADMIN_KNOWN_SECONDS = 30 * 24 * 60 * 60;
+export async function noteSignInAddress(env, request){
+  await rateLimitMark(env, ADMIN_KNOWN_BUCKET, request, ADMIN_KNOWN_SECONDS);
+}
+// The Turnstile check needs both halves: the secret to verify it, the site key for the page to show it.
+const turnstileReady_ = (env) => !!(env && env.TURNSTILE_SECRET_KEY && env.TURNSTILE_SITE_KEY);
+const askForCheck_ = (env, message) => jsonResponse({ status: "error", code: "turnstile_required", siteKey: env.TURNSTILE_SITE_KEY,
+  message: message || "There have been many failed sign-ins on this site just now. Complete the check to go on." }, 429);
+// Before checking a credential sent without a session (/api/admin-session): this address's share (refused past
+// it), then — unless the address signed in here lately — the whole budget and this account's. Past either, a
+// Turnstile check (`turnstileToken`) is needed instead; a site without Turnstile keys refuses as before.
+// Returns null, or the answer to send back.
+export async function signInBudgetBlocked(env, request, { email = "", turnstileToken = "" } = {}){
   const share = adminAuthIpShare(env);
   if(!(share > 0)) return null;
   const mine = await rateLimitCheck(env, ADMIN_AUTH_IP_SHARE_BUCKET, request, share, ADMIN_AUTH_GLOBAL_WINDOW);
   if(mine.blocked) return rateLimitResponse(mine.retryAfter);
+  if(await rateLimitMarked(env, ADMIN_KNOWN_BUCKET, request)) return null;
   const all = await rateLimitCheckGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, adminAuthGlobalLimit(env), ADMIN_AUTH_GLOBAL_WINDOW);
-  if(all.blocked) return rateLimitResponse(all.retryAfter);
-  return null;
+  const account = await accountKey_(email);
+  const acct = account ? await rateLimitCheck(env, ADMIN_AUTH_ACCOUNT_BUCKET, "acct:" + account, adminAuthAccountLimit(env), ADMIN_AUTH_GLOBAL_WINDOW) : { blocked: false };
+  if(!all.blocked && !acct.blocked) return null;
+  if(!turnstileReady_(env)) return rateLimitResponse(Math.max(all.retryAfter || 0, acct.retryAfter || 0, 1));
+  if(!turnstileToken) return askForCheck_(env);
+  const check = await verifyTurnstile(env, String(turnstileToken), request);
+  return check.ok ? null : askForCheck_(env, check.message);
 }
-// After a refused credential sent without a session: counts against this address's share and,
-// while the address is still within it, against the whole budget.
-export async function countSignInFailure(env, request){
+// After a refused credential sent without a session: counts against this address's share, the account typed
+// and, while the address is still within its share, against the whole budget.
+export async function countSignInFailure(env, request, email = ""){
   const share = adminAuthIpShare(env);
   if(!(share > 0)) return;
   const mine = await rateLimitHit(env, ADMIN_AUTH_IP_SHARE_BUCKET, request, ADMIN_AUTH_GLOBAL_WINDOW);
+  const account = await accountKey_(email);
+  if(account) await rateLimitHit(env, ADMIN_AUTH_ACCOUNT_BUCKET, "acct:" + account, ADMIN_AUTH_GLOBAL_WINDOW);
   if(mine <= share) await rateLimitHitGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, ADMIN_AUTH_GLOBAL_WINDOW);
 }
 
@@ -349,10 +385,10 @@ export function generateTempPassword(){ return randomGroups_(4, 4); }
 //     gets the first admin back in.
 // Whoever gets in this way must then set a name, an email and a password of their own.
 // bootstrapState(env) → { open, admin, replaced, totp }
-//   open      the passphrase is accepted right now
+//   open      the passphrase is accepted right now (by the sign-in page only)
 //   admin     the user it signs in as (the oldest active admin; else the oldest admin), or null
 //   replaced  the secret is not the one last used here — the lock-out recovery case
-//   totp      that admin has two-step sign-in (so the bare passphrase in a request is refused)
+//   totp      that admin has two-step sign-in (so signing in with the passphrase asks for a code)
 // THROWS on a storage error; callers answer 503 rather than guess.
 export async function bootstrapState(env){
   if(!env.DB) return { open: true, admin: null, replaced: false, totp: !!env.TOTP_SECRET };
@@ -479,13 +515,13 @@ async function readSession_(env, token){
 }
 
 // The audit-log actor for a request that passed requireAdmin(): the user's email (their name
-// until they have one), or "passphrase" for the installer's.
+// until they have one).
 export function adminActor(request){
   return _actors.get(request) || "unknown";
 }
 
 // The user behind a request that passed requireAdmin(): { id, email, name, role, pending,
-// tokenHash, bootstrap }. id is null for the installer's passphrase on an install with no users.
+// tokenHash, bootstrap } (bootstrap is always false now: only a session gets past requireAdmin).
 export function adminUser(request){
   return _users.get(request) || null;
 }
@@ -506,8 +542,8 @@ const SETUP_MESSAGES = {
   "2fa":    "Set up two-step sign-in first.",
 };
 
-// Checks the failure budget, then the credential, then that the user may do this. Returns a
-// Response to send back immediately, or null when the request may go ahead.
+// Checks the session, then that the user may do this. Returns a Response to send back immediately, or null
+// when the request may go ahead. (Sign-in itself, and its failure budget, is /api/admin-session.)
 //   role     the LOWEST role allowed: "staff" or "manager". Anything else means admin only.
 //   options  { pending: [...] } — the unfinished steps this route is there to finish
 //            (see the header); every other route refuses a pending session.
@@ -529,21 +565,13 @@ export async function requireAdmin(env, host, providedKey, request, notAdminMess
 
   const rl = await rateLimitCheck(env, ADMIN_AUTH_BUCKET, request, ADMIN_AUTH_LIMIT);
   if(rl.blocked) return rateLimitResponse(rl.retryAfter);
-  if(!hasCookie){
-    const spent = await signInBudgetBlocked(env, request);
-    if(spent) return spent;
-  }
 
   if(!result) result = await checkCredential(env, providedKey, request, need, options || {});
   const { denied, wrongCredential } = result;
-  // Only a rejected credential counts toward the budget. A 503 is our outage, and "your role
-  // can't do this" or "finish setting up first" is not a guess at a password.
-  if(denied && wrongCredential){
-    await rateLimitHit(env, ADMIN_AUTH_BUCKET, request);
-    // A wrong key with no session counts toward the install-wide budget too. A stale session cookie
-    // doesn't: that's an open tab whose session ran out, not a guess.
-    if(!hasCookie) await countSignInFailure(env, request);
-  }
+  // A refused request counts against this address's per-minute limit. A 503 is our outage, and "your role can't
+  // do this" or "finish setting up first" is not a refusal of who you are. Nothing here counts toward the
+  // install-wide sign-in budget: without a session there is no credential an API request could be guessing at.
+  if(denied && wrongCredential) await rateLimitHit(env, ADMIN_AUTH_BUCKET, request);
   return denied;
 }
 
@@ -583,29 +611,8 @@ async function checkCredential(env, providedKey, request, need, options){
     return { denied: null, wrongCredential: false };
   }
 
-  const key = providedKey || "";
-
-  // Bearer session tokens in the request are not honored (see the header comment).
-  if(key.startsWith(SESSION_PREFIX)){
-    return wrong("Session expired — please log in again.", 401);
-  }
-
-  // 3. The installer's passphrase, while it is still the way in.
-  let boot;
-  try{ boot = await bootstrapState(env); }
-  catch(e){
-    console.error("requireAdmin: could not read the sign-in state — refusing (fail closed):", e);
-    return unavailable();
-  }
-  if(boot.totp){
-    return wrong("Two-factor authentication is required. Please log in through the admin panel.", 403);
-  }
-  // A setup password that is the example's placeholder or too short opens nothing here either (the
-  // sign-in page says why; here it is just a wrong key, so this answer tells a guesser nothing).
-  if(!env.PROXY_ADMIN_PASSPHRASE || !boot.open || weakSetupPassword(env) || !timingSafeEqual(key, env.PROXY_ADMIN_PASSPHRASE)){
-    return wrong("Unauthorized", 401);
-  }
-  _actors.set(request, accessEmail || "passphrase");
-  _users.set(request, { id: boot.admin ? boot.admin.id : null, email: "", name: "", role: "admin", roleInfo: resolveRole("admin", null), pending: null, tokenHash: "", bootstrap: true });
-  return { denied: null, wrongCredential: false };
+  // No session: nothing sent with the request is a credential (see the header). A bearer session token is
+  // answered as the ended session it is; anything else — the installer's passphrase included — is just refused.
+  if(String(providedKey || "").startsWith(SESSION_PREFIX)) return wrong("Session expired — please log in again.", 401);
+  return wrong("Unauthorized", 401);
 }

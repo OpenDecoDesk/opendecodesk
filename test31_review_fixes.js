@@ -52,9 +52,9 @@ global.rateLimitCheckGlobal = async () => ({ blocked: false, retryAfter: 0 }); g
     r = await ns.requireAdmin(broken, ADMIN, "cookie", req("sess_anything"));
     console.log("Malformed session cookie refused (401):", r !== null && r.status === 401);
 
-    console.log("\n=== adminAuth: storage outage on the passphrase path → 503, NOT a silent 2FA downgrade ===");
+    console.log("\n=== adminAuth: the setup passphrase sent with a request is no key, outage or not ===");
     r = await ns.requireAdmin(broken, ADMIN, "pw-long-enough-pass", req(null));
-    console.log("Correct passphrase still refused with 503 while TOTP state is unknown:", r !== null && r.status === 503);
+    console.log("Correct passphrase refused (401) during an outage — never admitted:", r !== null && r.status === 401);
 
     console.log("\n=== adminAuth: healthy storage still works normally ===");
     const DB = await makePlatformDb();
@@ -70,11 +70,10 @@ global.rateLimitCheckGlobal = async () => ({ blocked: false, retryAfter: 0 }); g
     console.log("Expired session → 401:", r !== null && r.status === 401);
     console.log("The raw token is never stored (only its hash):", DB.q("SELECT tokenHash FROM admin_sessions").every(x => x.tokenHash !== validToken && /^[0-9a-f]{64}$/.test(x.tokenHash)));
     r = await ns.requireAdmin(okEnv, ADMIN, "pw-long-enough-pass", req(null));
-    console.log("Passphrase accepted when TOTP is genuinely off:", r === null);
-    // Two-step sign-in belongs to the admin the passphrase would sign in as.
+    console.log("Passphrase sent as a key is refused even with TOTP off (the sign-in page is its only door):", r !== null && r.status === 401);
     await DB.prepare("UPDATE users SET totpSecret = ? WHERE role = 'admin'").bind("JBSWY3DPEHPK3PXP").run();
     r = await ns.requireAdmin(okEnv, ADMIN, "pw-long-enough-pass", req(null));
-    console.log("Bare passphrase refused when TOTP is on (403):", r !== null && r.status === 403);
+    console.log("…and with TOTP on:", r !== null && r.status === 401);
   }
 
   // ---------------------------------------------------------------------

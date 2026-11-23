@@ -132,8 +132,8 @@ const ok = (m, c) => console.log(m + ":", !!c);
   ok("…but saves everything else", r.status === 200 && blankRow().name === "Renamed Blank" && blankRow().quantity === 10);
   r = await A.orders(blankSave(12), admin);
   ok("Full changes the count, as an adjustment", r.status === 200 && blankRow().quantity === 12 && A.d1.q("SELECT count(*) n FROM inventory_movements WHERE blankId=7")[0].n === 1);
-  ok("merging blanks (which deletes them) needs Full; removing a product's blank link is Edit, as saving its links is",
-    !may("staff", "mergeBlanks") && may("manager", "mergeBlanks") && may("staff", "deleteBlankLink") && may("staff", "saveBlankLinks"));
+  ok("merging blanks (which deletes them) needs Full; so does removing a product's blank link, while saving its links is Edit",
+    !may("staff", "mergeBlanks") && may("manager", "mergeBlanks") && !may("staff", "deleteBlankLink") && may("manager", "deleteBlankLink") && may("staff", "saveBlankLinks"));
 
   console.log("=== Local sale: Paid and Delivered ===");
   r = await A.orders({ action: "createLocalSale", org: "shop1", items: [{ productId: "tee", size: "M", qty: 1 }], paid: true }, clerk);

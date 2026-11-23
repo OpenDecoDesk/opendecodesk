@@ -40,7 +40,7 @@ function makeReq(url, { body, headers = {}, method = "POST" } = {}){
 global.rateLimited = async () => ({ blocked: false, retryAfter: 0 });
 global.rateLimitCheck = async () => ({ blocked: false, retryAfter: 0 });
 global.rateLimitHit = async () => {};
-global.rateLimitCheckGlobal = async () => ({ blocked: false, retryAfter: 0 }); global.rateLimitHitGlobal = async () => {};
+global.rateLimitCheckGlobal = async () => ({ blocked: false, retryAfter: 0 }); global.rateLimitHitGlobal = async () => {}; global.rateLimitMark = async () => {}; global.rateLimitMarked = async () => false;
 global.rateLimitResponse = () => new Response("", { status: 429 });
 global.getCatalogData = async () => ({ subdomainMap: { league101: "league-101", rec: "rec" }, orgs: {} });
 
@@ -107,7 +107,7 @@ const SAME = { Origin: ADMIN, "CF-Connecting-IP": "203.0.113.7" };
     console.log("Old-style bearer token in the body → 401 (no longer accepted):", r !== null && r.status === 401);
     const pr = makeReq(ADMIN + "/api/orders", { headers: SAME });
     r = await auth.requireAdmin(envA, { kind: "admin" }, "pw-long-enough-pass", pr);
-    console.log("Passphrase path (TOTP off) still works, actor = passphrase:", r === null && auth.adminActor(pr) === "passphrase");
+    console.log("The setup passphrase sent as a key opens nothing (401), TOTP off or not:", r !== null && r.status === 401 && auth.adminActor(pr) === "unknown");
   }
 
   // =====================================================================
@@ -185,18 +185,22 @@ const SAME = { Origin: ADMIN, "CF-Connecting-IP": "203.0.113.7" };
       expireCheckoutSession: async () => "closed",   // no card page open for the order (migrations/0093)
       setOrderDiscount: async () => {}, updateOrderPlacedAt: async () => {},
       getSettingRaw: async () => null, // these envs carry a stub DB; no 2FA secret stored
-      getBootstrapState: async () => ({ userCount: 0, admins: [] }),   // …and no users yet: the passphrase is the way in
+      getBootstrapState: async () => ({ userCount: 0, admins: [] }),
     });
+    // The admin's page, signed in: its session cookie (the only credential the admin API takes).
+    const realGetAdminSession = global.getAdminSession, tokenHash = await sha256Hex(token);
+    global.getAdminSession = async (db, hash) => hash === tokenHash
+      ? { expiresAt: future, userId: 1, pending: null, user: { id: 1, email: "owner@myshop.com", name: "Owner", role: "admin", status: "active" } } : realGetAdminSession(db, hash);
     const O = load("functions/api/orders.js", ["onRequestPost"]);
     const ctx = (body) => ({ env: { DB: {}, PROXY_ADMIN_PASSPHRASE: "pw-long-enough-pass" }, waitUntil: () => {},
-      request: makeReq(ADMIN + "/api/orders", { body: Object.assign({ key: "pw-long-enough-pass" }, body), headers: SAME }) });
+      request: makeReq(ADMIN + "/api/orders", { body: Object.assign({ key: "cookie" }, body), headers: Object.assign({ Cookie: "__Host-odd_admin=" + token }, SAME) }) });
 
     console.log("\n=== Audit: payment.voided records the amount, actor and IP ===");
     let res = await O.onRequestPost(ctx({ action: "voidPayment", paymentId: 7, org: "league-101", reason: "typo" }));
     const a = audits.find(x => x.action === "payment.voided");
     console.log("Voided:", res.status === 200 && deleted.payment === 1);
     console.log("Audit has amount/note/date of the deleted payment:", !!a && a.detail.amount === 42.5 && a.detail.note === "Venmo" && !!a.detail.receivedAt);
-    console.log("Audit records actor + IP:", !!a && a.actor === "passphrase" && a.ip === "203.0.113.7");
+    console.log("Audit records actor + IP:", !!a && a.actor === "owner@myshop.com" && a.ip === "203.0.113.7");
 
     console.log("\n=== Audit: order.voided keeps a full snapshot (items + payments) ===");
     res = await O.onRequestPost(ctx({ action: "voidOrder", orderId: "ORD-1", reason: "duplicate" }));

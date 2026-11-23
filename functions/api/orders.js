@@ -318,6 +318,59 @@ function checkProductPrice_(body, before) {
 // every action if the map itself were missing (tests that load this file as plain source stub the gate).
 const ACTION_PERM_ = typeof ACTION_PERM !== "undefined" ? ACTION_PERM : Object.create(null);
 
+// Closed (filed) months: periodGuard (in handleOrdersPost_ below) works out the months an action would change and
+// refuses one that is closed. Every action that can change something (edit or full in ACTION_PERM) is either named
+// in periodGuard's rules or here, as touching no month's numbers (set-up, catalog, production, messages, settings).
+// test242 fails for an action in neither, so a new action can't miss the closed-month check by being forgotten.
+const NO_MONTH_ACTIONS = new Set([
+  // Orders: details, files, steps that don't date stock, shipping, messages, downloads
+  "updateCustomerInfo", "setOrderDates", "setOrderDueDate", "bulkSetDueDate", "refreshOrderFromCatalog", "saveOrderItemFile", "saveOrderItemDesign",
+  "sendDesignVerification", "deleteOrderItemFile", "useBlanksFromStock", "addBlankShipment", "updateBlankShipment", "checkBlankShipments",
+  "deleteBlankShipment", "setOrderCompleted", "checkDeliveries", "recordTracking", "bulkRecordTracking", "createShippingPaymentLink", "sendInvoice",
+  "resendEmail", "resendDownloads", "resetDownloads", "revokeDownloads", "importOrders",
+  // Run Order and transfer sheets
+  "startRun", "completeRun", "abortRun", "markManufacturedOnMachine", "setTransferReceived", "setTransfersApplied",
+  // Catalog and shops
+  "createProduct", "updateProduct", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion",
+  "copyProductsFromOrg", "importProducts", "setProductDesign", "setProductDesigns", "setProductGraphicImage", "setProductGraphicColorBlocked", "setTierPrices",
+  "confirmProductPrices", "deleteProductGraphicImage", "addProductFileFromDesign", "deleteProductFile", "createOrg", "updateOrg", "setupOrgDomain", "publish",
+  "setOrgReady", "saveShopWizard", "buildProductFromBlank", "previewDiscardShopChanges", "deleteShopWizard", "discardShopChanges", "saveDesign",
+  "saveDesignVersion", "updateDesignVersionColors", "setDesignVersionStitches", "fillDesignStitchCounts", "deleteDesign", "saveGraphic", "deleteGraphic",
+  "saveProductCategory", "deleteProductCategory", "saveLocation", "deleteLocation", "updateBrandRules", "addBrandApproval", "applyRulePrices",
+  "revokeBrandApproval", "setBoxPresets",
+  // Production
+  "saveMachine", "setMachineHoop", "setMachineNeedle", "recordMachineDiscovery", "setMachineStitchCount", "deleteMachine", "saveMaintenanceTask",
+  "deleteMaintenanceTask", "recordMaintenance", "saveHoop", "deleteHoop", "saveThread", "importThreadChart", "saveSpoolSize", "saveThreadInventory",
+  "saveNeedleSize", "saveNeedleType", "deleteThread", "deleteSpoolSize", "deleteThreadInventory", "deleteNeedleSize", "deleteNeedleType",
+  "listAbortReasons", "saveAbortReason", "deleteAbortReason",
+  // Inventory set-up (stock received, counted or written off is dated, and in periodGuard)
+  "createInventoryItem", "updateInventoryItem", "createBlank", "updateBlank", "addBlankSizes", "readInvoiceWithAi", "markBlankPricesChecked", "setBlankLink",
+  "saveBlankLinks", "deleteBlankLink", "applyBlankCatchUp", "importBlanks", "applyVendorBlanks", "copyVendorImage", "removeBlankImages", "deleteInventoryItem",
+  "deleteBlank", "mergeBlanks", "recomputeBlankAverageCosts", "recordRestockOrder", "cancelRestockOrder", "saveVendor", "deleteVendor", "previewSupplierOrder",
+  "placeSupplierOrder", "cancelSupplierOrder", "saveTransfer", "applyTransferCatchUp", "deleteTransfer",
+  // Finance set-up, statements, and the periods themselves
+  "listExpenseCategories", "saveRecurringExpense", "stopRecurringExpense", "saveExpenseCategory", "deleteRecurringExpense", "deleteExpenseCategory",
+  "saveAccount", "saveMoneyDefaults", "setRecordReceipt", "importStatement", "autoMatchStatement", "matchStatementLine", "unmatchStatementLine",
+  "ignoreStatementLine", "reconcileMonth", "unreconcileMonth", "saveShopRate", "closePeriod", "reopenPeriod",
+  // Settings
+  "updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "updateLocaleSettings", "updateSalesTaxSettings", "updateShipFromAddress",
+  "getAccountingSettings", "updateAccountingSettings", "updateMachineSettings", "updatePricingSettings", "updateRushSettings", "updateEmailSettings",
+  "sendSampleEmail", "sendTestEmail", "checkMailbox", "updateDigitalSettings", "getCloudflareSetup", "connectCloudflare", "backfillStripeFees",
+  "saveVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks", "deleteVendorConnection", "deleteOrphanImages",
+]);
+
+// Costs in a reply (stripCosts_ in handleOrdersPost_): which fields are costs, by kind of answer.
+const COST_FIELDS_ = {
+  products: (k) => /^(transferCost|suppliesCost)(Cents)?$/.test(k),
+  stock: (k) => /^(cost|avgCost|value|unitCost)(Cents)?$/.test(k),
+  purchases: (k) => /^purchasePrice/.test(k) || /^(unitCost|cost)(Cents)?$/.test(k),
+};
+// A copy of `v` without the fields `drop` names, at any depth.
+const dropFields_ = (v, drop) => Array.isArray(v) ? v.map(x => dropFields_(x, drop))
+  : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).filter(([k]) => !drop(k)).map(([k, x]) => [k, dropFields_(x, drop)])) : v;
+// Audit entries whose detail is money: pricing settings, the shop rate, payments, expenses (and recurring ones).
+const MONEY_AUDIT_ACTIONS_ = /^(settings\.pricing|settings\.shop_rate|payment\.|expense\.|recurring_expense\.)/;
+
 // ---- Features (Global settings → Features; db.js FEATURES) ---------------------------------------
 // Which optional feature an admin action belongs to. An action listed here is refused (403) while
 // its feature is switched off — checked in ONE place, right after the host check below, before any
@@ -468,8 +521,8 @@ export async function onRequestPost(context) {
 
 async function handleOrdersPost_(context) {
   const { request, env } = context;
-  // Every audit row records WHO (adminActor: Access email / session label /
-  // "passphrase") and from WHERE (client IP).
+  // Every audit row records WHO (adminActor: the signed-in user, and the Access email when there is one)
+  // and from WHERE (client IP).
   const clientIp = request.headers.get("CF-Connecting-IP") || null;
   const auditEntry = (args) => ({ ...args, actor: adminActor(request), ip: clientIp });
   // A Deploy-button install has no domain until its Setup step, and every shop's address is
@@ -480,8 +533,8 @@ async function handleOrdersPost_(context) {
   const noDomainResponse = () => jsonResponse({ status: "error", code: "no_domain", message: NO_DOMAIN_MSG }, 409);
   // Costs and margins (pricing awareness, migrations/0067) are a manager's, and so is the business's money
   // (Home's totals, getDashboard). Staff save products and blanks
-  // too, so those replies leave the analysis / below-target list out for them. (No signed-in user — the
-  // installer's passphrase — sees everything, as with every other action.)
+  // too, so those replies leave the analysis / below-target list out for them. (No user behind the request —
+  // only a test's stand-in for the sign-in check — sees everything.)
   // Money, costs and margins (permissions.js costs.view): a role without it gets counts, not money.
   const seesPricing_ = () => {
     const u = typeof adminUser === "function" ? adminUser(request) : null;
@@ -522,6 +575,14 @@ async function handleOrdersPost_(context) {
     const cut = ({ purchasePrice, vendorPrice, vendorPriceAt, ...s }) => s;
     return { ...b, sizes: (b.sizes || []).map(cut), colors: (b.colors || []).map(c => ({ ...c, sizes: (c.sizes || []).map(cut) })) };
   });
+  // What things cost, on the screens that show it (review #22): a role without costs.view that can only LOOK at a
+  // screen gets its answer without the costs. Whoever adds or changes things there (receiving, counting, pricing a
+  // product) still sees them, as does a role with costs.view. `fn` is the screen's function, `kind` which fields
+  // are costs (COST_FIELDS_); they are left out wherever they sit in the answer (a size row, its blank, a link).
+  const stripCosts_ = (data, fn, kind) => seesPricing_() || can_(fn, "edit") ? data : dropFields_(data, COST_FIELDS_[kind]);
+  // The audit log's money entries (pricing settings, shop rate, payments, expenses) keep their row without costs.view,
+  // not their detail: the amounts are in it.
+  const auditCostsFor_ = (entries) => seesPricing_() ? entries : entries.map(e => e && MONEY_AUDIT_ACTIONS_.test(String(e.action || "")) ? { ...e, detail: null } : e);
   // Versioned list cache (db.js readCachedList_): { version, data } for blanks, threads, hoops, locations,
   // machines or orgs. data is shared between requests: shape it into new objects, never change it.
   const cachedList_ = async (name) => {
@@ -890,7 +951,7 @@ async function handleOrdersPost_(context) {
       dateTo:   body.dateTo   ? String(body.dateTo).trim()   : undefined,
       limit:    body.limit    ? Number(body.limit)           : 20,
     });
-    return jsonResponse({ status: "ok", entries });
+    return jsonResponse({ status: "ok", entries: auditCostsFor_(entries) });
   }
 
   // ---- getDashboard — admin Home: orders by step and the money, kept for an hour (db.js getDashboard) ----
@@ -3315,7 +3376,7 @@ async function handleOrdersPost_(context) {
 
     if (body.action === "listProducts") {
       const products = await getProductsByOrg(env.DB, body.org, false);
-      return jsonResponse({ status: "ok", products });
+      return jsonResponse({ status: "ok", products: stripCosts_(products, "catalog.products", "products") });
     }
 
     // Personalization setup (migrations/0032): every pick-list option must map to one of the shop's
@@ -4126,7 +4187,7 @@ async function handleOrdersPost_(context) {
 
     if (body.action === "getInventory") {
       const items = await getAllInventory(env.DB);
-      return jsonResponse({ status: "ok", items });
+      return jsonResponse({ status: "ok", items: stripCosts_(items, "inventory.blanks", "purchases") });
     }
 
     if (body.action === "createInventoryItem") {
@@ -4983,7 +5044,7 @@ async function handleOrdersPost_(context) {
 
     // ---- Transfer-sheet inventory (migrations/0036) ----
     if (body.action === "listTransfers") {
-      return jsonResponse({ status: "ok", transfers: await listTransfers(env.DB, body.org || null) });
+      return jsonResponse({ status: "ok", transfers: stripCosts_(await listTransfers(env.DB, body.org || null), "inventory.transfers", "purchases") });
     }
     if (body.action === "saveTransfer") {
       const t = body.transfer || {};
@@ -5139,7 +5200,7 @@ async function handleOrdersPost_(context) {
       return jsonResponse({ status: "ok", corrected: done, failed, transfers: await listTransfers(env.DB, body.org || null) });
     }
     if (body.action === "getTransferMovements") {
-      return jsonResponse({ status: "ok", movements: await getTransferMovements(env.DB, Number(body.transferId)) });
+      return jsonResponse({ status: "ok", movements: stripCosts_(await getTransferMovements(env.DB, Number(body.transferId)), "inventory.transfers", "purchases") });
     }
     // Void a mistaken transfer movement. Held to the same rules as voiding a blank movement: a closed month
     // refuses it (periodGuard), and the audit row is written FIRST — no record, no change.
@@ -5952,6 +6013,8 @@ async function handleOrdersPost_(context) {
         blankId: Number(l && l.blankId) || 0, blankColor: String((l && l.blankColor) || "").slice(0, 80), blankSize: String((l && l.blankSize) || "").slice(0, 20) });
       const sets = set.map(clean), removes = remove.map(clean);
       if (sets.some(l => !l.blankId)) return jsonResponse({ status: "error", message: "Every link needs a blank." }, 400);
+      // Removing a link is a deletion (deleteBlankLink): Full on Blanks. Refused whole, before anything is written.
+      if (removes.length && !can_("inventory.blanks", "full")) return forbidden_("Removing a product's blank link needs Full access to Blanks. Ask an admin, or link it to another blank.");
       if (!sets.length && !removes.length) return jsonResponse({ status: "ok", saved: 0, removed: 0 });
       const mapCheck = async () => {
         const x = (await analyzePricing(env.DB, { orgId: org, productId }).catch(() => ({ products: [] }))).products[0] || { rows: [], mapProblems: [] };
@@ -5997,7 +6060,7 @@ async function handleOrdersPost_(context) {
       if (!body.org) return jsonResponse({ status: "error", message: "org required" }, 400);
       const stock = await getReadyToShipByOrg(env.DB, body.org);
       const finished = body.productId ? await getFinishedStock(env.DB, body.org, String(body.productId)) : undefined;
-      return jsonResponse({ status: "ok", stock, finished });
+      return jsonResponse({ status: "ok", stock, finished: stripCosts_(finished, "inventory.blanks", "stock") });
     }
 
     // Stock window → Correct count: the counted number, recorded as a correction (setFinishedCount).
@@ -6039,7 +6102,7 @@ async function handleOrdersPost_(context) {
 
     if (body.action === "getFinishedGoodsMovements") {
       if (!body.org || !body.productId) return jsonResponse({ status: "error", message: "org, productId required" }, 400);
-      return jsonResponse({ status: "ok", movements: await getFinishedGoodsMovements(env.DB, body.org, String(body.productId)) });
+      return jsonResponse({ status: "ok", movements: stripCosts_(await getFinishedGoodsMovements(env.DB, body.org, String(body.productId)), "inventory.blanks", "stock") });
     }
 
     if (body.action === "voidFinishedGoodsMovement") {

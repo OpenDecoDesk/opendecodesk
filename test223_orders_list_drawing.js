@@ -105,7 +105,7 @@ const wait = async (fn, n = 400) => { for (let i = 0; i < n && !fn(); i++) await
   ok("Show more on All shops draws the rest without a request", drawn() === 329 && !sent.length);
 
   console.log("\n=== The default dates follow the calendar ===");
-  const day = (n) => w.ordersLocalDay_(new Date(Date.now() - n * 86400000));
+  const day = (n) => w.localDay_(new Date(Date.now() - n * 86400000));
   // As if the page was opened yesterday: the range it set then is still the automatic one.
   w._ordersFilter = { from: day(31), to: day(1) }; w._ordersFilterAuto_ = { from: day(31), to: day(1) };
   ok("a range left from yesterday moves on to today", w.ordersRollDates_() === true && w._ordersFilter.to === day(0) && w._ordersFilter.from === day(30));

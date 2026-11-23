@@ -34,7 +34,7 @@ const httpSrc = strip(read("functions/_lib/http.js"));
   const grab = (name) => { const i = adminSrc.indexOf("function " + name); let d = 0; for (let k = adminSrc.indexOf("{", i); k < adminSrc.length; k++) {
     if (adminSrc[k] === "{") d++; else if (adminSrc[k] === "}" && --d === 0) return adminSrc.slice(i, k + 1); } };
   const summarize = new Function("function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}\n" +
-    grab("auditDetailSummary") + "\nreturn auditDetailSummary;")();
+    grab("adminMoney_") + "\n" + grab("auditDetailSummary") + "\nreturn auditDetailSummary;")();
   const evil = "<img src=x onerror=alert(1)>";
   const outs = [
     summarize("expense.created", { description: evil, amount: 5, category: evil }),

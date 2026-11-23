@@ -160,8 +160,9 @@ test("Inventory & COGS report shows inventory by group, a roll-forward and its o
     await expect(results.getByRole("row", { name: new RegExp("^" + label.replace(/[+]/g, "\\+")) }).first()).toBeVisible();
   }
   // The page checks the roll-forward itself and says so. Other specs receive, count and write off stock on the
-  // same install at the same time, so whether it adds up is theirs to make true; this checks the check is shown.
-  await expect(results).toContainText(/Adds up\.|Doesn't add up by \$[\d.,]+/);
+  // same install at the same time, so whether it adds up is theirs to make true; this checks the check is shown
+  // (the gap can be either sign: "Doesn't add up by −$0.40").
+  await expect(results).toContainText(/Adds up\.|Doesn't add up by −?\$[\d.,]+/);
 });
 
 test("Periods & export: close last year's March, see it listed with who closed it, and reopen it", async ({ page, api }) => {

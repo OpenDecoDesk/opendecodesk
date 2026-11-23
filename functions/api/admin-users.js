@@ -75,6 +75,10 @@ export async function onRequestPost(context){
   const need = self ? "staff" : action === "setRequire2fa" ? "admin"
     : action === "list" || action === "listRoles" ? [["settings.users", "read"]]
     : action === "deleteRole" ? [["settings.users", "full"]] : [["settings.users", "edit"]];
+  // The role saveRole / deleteRole act on: `roleKey`. `key` is the caller's credential on every request (the admin
+  // page sends "cookie" when signed in with its session), so it names a role only for an older caller that sent no
+  // roleKey — and never as "cookie", which made every "+ Add role" answer "No such role.".
+  const roleKeyOf_ = (b) => b.roleKey !== undefined ? b.roleKey : (b.key === "cookie" ? undefined : b.key);
   const authErr = await requireAdmin(env, host, String((body && body.key) || ""), request, "Not available here.",
     need, self ? { pending: ["account", "password", "2fa"] } : undefined);
   if(authErr) return authErr;
@@ -195,9 +199,10 @@ export async function onRequestPost(context){
       const over = PERM_FUNCTIONS.filter(k => permRank(effectiveLevel({ key: "x", permissions }, k)) > permRank(myLevels[k]));
       if(over.length) return bad("You can't give a role more than your own role has (" + over.slice(0, 3).join(", ") + (over.length > 3 ? ", …" : "") + ").", 403);
       let before = null;
-      if(body.key != null){
-        if(typeof body.key !== "string" || !body.key) return bad("No such role.", 404);
-        try{ before = await getRoleRow(env.DB, body.key); }catch(e){ return bad("Roles need the database update (migrations/0089) first.", 409); }
+      const roleKey = roleKeyOf_(body);
+      if(roleKey != null){
+        if(typeof roleKey !== "string" || !roleKey) return bad("No such role.", 404);
+        try{ before = await getRoleRow(env.DB, roleKey); }catch(e){ return bad("Roles need the database update (migrations/0089) first.", 409); }
         if(!before) return bad("No such role.", 404);
         if(before.locked) return bad("The Admin role can't be changed.", 403);
         if(before.rank >= myRank) return bad("You can only change a role that ranks below your own.", 403);
@@ -216,7 +221,8 @@ export async function onRequestPost(context){
     }
     if(action === "deleteRole"){
       let row = null;
-      try{ row = typeof body.key === "string" ? await getRoleRow(env.DB, body.key) : null; }catch(e){ row = null; }
+      const roleKey = roleKeyOf_(body);
+      try{ row = typeof roleKey === "string" ? await getRoleRow(env.DB, roleKey) : null; }catch(e){ row = null; }
       if(!row) return bad("No such role.", 404);
       if(row.builtIn || row.locked) return bad("A built-in role can't be deleted.", 409);
       if(row.rank >= myRank) return bad("You can only delete a role that ranks below your own.", 403);

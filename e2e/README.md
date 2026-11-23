@@ -82,8 +82,8 @@ A full run takes a little over two minutes on a recent Mac.
 
 | File | Tests | Covers |
 |---|---|---|
-| `setup/first-run.setup.mjs` | 9 | Setup passphrase, Finish setting up, the passphrase stops working, owner sign-in, a custom Read only role, users of every role with temporary passwords, the first sign-in password change, turning on two-step sign-in. |
-| `specs/auth.spec.mjs` | 16 | Wrong password and unknown email, sign out (the server forgets the session), two-step sign-in with a wrong and a right code, a recovery code works once, the sign-in rate limit, a session ended elsewhere (the next save asks to sign in and still goes through), reload after the session ended, Sign out everywhere, Change password, what Production, Back office, Manager and Read only see and what the server refuses them, no changing your own role, a role change, disabling and enabling a user, resetting a password. |
+| `setup/first-run.setup.mjs` | 8 | Setup passphrase, Finish setting up, the passphrase stops working, owner sign-in, a custom Read only role (made through the owner's session), users of every role with temporary passwords, the first sign-in password change, turning on two-step sign-in. |
+| `specs/auth.spec.mjs` | 17 | + Add role under Roles and permissions; Wrong password and unknown email, sign out (the server forgets the session), two-step sign-in with a wrong and a right code, a recovery code works once, the sign-in rate limit, a session ended elsewhere (the next save asks to sign in and still goes through), reload after the session ended, Sign out everywhere, Change password, what Production, Back office, Manager and Read only see and what the server refuses them, no changing your own role, a role change, disabling and enabling a user, resetting a password. |
 | `specs/shops.spec.mjs` | 9 | The New shop setup wizard (name, decoration, delivery, payment, deadline, look), turning a quick blank into a product with an uploaded graphic, Go live and Publish, the shop at its own address, Shop settings as a draft with Preview, the Live / Coming soon switch, Back office has no shop setup or Publish. |
 | `specs/catalog.spec.mjs` | 10 | Product categories, the product form (validation, a flat-price product, an uploaded picture that loads back, a personalised product), drafts until Publish, personalisation in the cart, a price change stays a draft until Publish, hiding a product, Read only can't change products. |
 | `specs/storefront.spec.mjs` | 14 | Categories and products with prices (no card without Stripe), the cart (add, quantity, + and −, remove, survives a reload), what Place order asks for, delivery fees vs pickup, checkout by Check, Venmo and Zelle with the confirmation, a closed shop, an unknown address, the customer's invoice page (delivery choice, what's owed), a broken invoice link, design approval (approve, request changes) and a broken approval link. |
@@ -94,7 +94,7 @@ A full run takes a little over two minutes on a recent Mac.
 | `specs/settings.spec.mjs` | 9 | Business profile (admin titles, shop page, Setup status), region and time zone, the Digital products and Shipping feature switches, sales tax rate, rush fee (in a shop's cart), pricing settings, the audit log listing those changes. |
 | `specs/accessibility.spec.mjs` | 41 | Every page of the admin menu reached with the keyboard only (Tab, Enter) with its own title, the menu closed and no console errors or uncaught exceptions; a visible focus ring on the menu; the storefront cart operated by keyboard without console errors. |
 
-152 tests in all, 10 of them expected failures (below).
+152 tests in all. None is marked as an expected failure: every test checks behaviour that works.
 
 Tests in a file run in order; files run side by side (3 workers) on the same install. Every test makes its own
 data with unique names, so a file passes on its own as well as with the others, and tests never assert
@@ -103,33 +103,28 @@ rush fee, pricing, a feature switch) sets it back in a `finally`, and picks valu
 (shops made by `makeShop` are tax-exempt; only the Digital products switch is toggled; the time zone stays UTC).
 Nothing is retried: a flaky test is a bug to fix.
 
-## Known bugs the suite found
+## Bugs the suite found, now fixed
 
-Each has a test of the correct behaviour marked `test.fail(...)`. Playwright counts such a test as passed while
-the bug is there, and **fails it once the bug is fixed**, as a reminder to remove the marker.
+The first version of the suite found these and pinned each with a test of the correct behaviour (marked as an
+expected failure). They are fixed, and those tests now pass like any other:
 
-1. **Users → Roles and permissions → Add role always answers "No such role."** The page's users helper
-   (`usersCall_` in `public/admin.js`) sends `key: adminKey` (`"cookie"`) with every request, and `saveRole`
-   (`functions/api/admin-users.js`) reads `key` as the key of the role to change. Copy role fails the same way.
-   (`setup/first-run.setup.mjs`. The setup then makes the role with the same request, minus the stray key.)
-2. **Shop setup, Designs and Graphics break when chosen from the menu while a shop exists.** `adminRoute`
-   assigns to `const raw` (`raw = raw + "/" + …`): "TypeError: Assignment to constant variable". The
-   address changes but the previous page stays on screen. (`specs/accessibility.spec.mjs`)
-3. **A new install without a Shippo key can't save Global settings.** The Shipping feature starts switched on,
-   and Save then refuses everything ("Nothing was saved. Shipping needs a Shippo key…"). The only way through is
-   unticking Shipping, which the server then won't undo without a key. (`specs/settings.spec.mjs`)
-4. **Paying in full from 💰 Payments leaves the order row "Unpaid"** with "Mark as paid" still offered, until
-   the page is reloaded. The server has it right. (`specs/orders.spec.mjs`)
-5. **On a published shop, the Live switch only changes the draft.** "Show coming soon" says shoppers can't
-   order, but they can until the next Publish. (`specs/shops.spec.mjs`)
-6. **A new shop answers 404 at its own address** (and its wizard's Preview link) until the catalog version next
-   changes (a Publish anywhere, or up to 5 minutes): `createOrg` doesn't bump it. (`specs/shops.spec.mjs`. In
-   theory another worker's Publish landing in the few milliseconds between this test's two requests would make
-   it pass unexpectedly.)
-7. **The order confirmation says "A copy of your order was emailed to …"** even when the install has no email
-   provider and nothing is sent. (`specs/storefront.spec.mjs`)
-8. **The shop bar's Publish button stays "✓ Published"** for up to 15 seconds after a product is saved, while
-   the page itself says "Unpublished changes". (`specs/catalog.spec.mjs`)
+1. **Users → Roles and permissions → Add role always answered "No such role."** The page sends its credential as
+   `key` with every request, and `saveRole` read `key` as the role to change. The role to change is now `roleKey`.
+   (`specs/auth.spec.mjs`)
+2. **Shop setup, Designs and Graphics broke when chosen from the menu while a shop existed:** `adminRoute`
+   assigned to `const raw`. (`specs/accessibility.spec.mjs`)
+3. **A new install without a Shippo key couldn't save Global settings,** because Shipping starts switched on.
+   Only switching Shipping on now needs the key and the ship-from address. (`specs/settings.spec.mjs`)
+4. **Paying in full from 💰 Payments left the order row "Unpaid"** until a reload. Money actions now return the
+   order's paid state, and the row follows it. (`specs/orders.spec.mjs`)
+5. **On a published shop, the Live switch only changed the draft.** It now changes the published copy too, so
+   "Show coming soon" stops orders at once. (`specs/shops.spec.mjs`)
+6. **A new shop answered 404 at its own address** for up to 5 minutes. Creating a shop now refreshes the catalog.
+   (`specs/shops.spec.mjs`)
+7. **The order confirmation promised an email** even on an install that can't send one. It now says so only when
+   email is set up. (`specs/storefront.spec.mjs`)
+8. **The shop bar's Publish button stayed "✓ Published"** for up to 15 seconds after a product was saved. It now
+   follows the page's own publish state. (`specs/catalog.spec.mjs`)
 
 Also seen, not marked: Edit items' "+ Add item" can miss a click straight after typing a quantity (the
 quantity's `change` redraws the rows between mouse-down and mouse-up); Run Order and Machine files log console

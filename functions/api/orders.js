@@ -134,6 +134,7 @@ import {
   sendPaymentConfirmedEmail, sendCancellationEmail, sendShippedEmail,
   sendDesignVerificationEmail, sendShippingPaymentEmail, sendInvoiceEmail, sendTestEmail, invoiceDocument,
   buildOrderReceivedEmail, buildPaymentReceivedEmail, buildShippedEmail, buildInvoiceEmail, previewMessage, sendSampleMessage, orderPdfFile,
+  emailCanSend,
 } from "../_lib/email.js";
 import { verifyQuote, canonicalItems } from "../_lib/quoteToken.js";
 import { selectBox } from "../_lib/boxSize.js";
@@ -142,6 +143,10 @@ import { verifyTurnstile } from "../_lib/turnstile.js";
 import { expireCheckoutSession, createCheckoutSession, CHECKOUT_LINK_SECONDS, listCacheVersions_, readCachedList_, refreshCachedLists_ } from "../_lib/db.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9\-]{1,64}$/;
+// Whether an order counts as paid, for a money action's reply: the Payments window redraws the row from it (Mark as
+// paid, the steps), so a payment that settles the order shows it at once, not after a reload.
+const paidState_ = (o) => o ? { paid: !!o.paid, paidForWork: !!o.paidForWork, paidAt: o.paidAt || null } : {};
+
 // The most orders one shop's list returns (getOrders), and the All shops page in all (getOrdersAllShops): the newest that many.
 const ORDERS_LIST_MAX = 2000;
 // The most open orders Home's lists return (getOpenOrders): the oldest that many.
@@ -1989,7 +1994,7 @@ async function handleOrdersPost_(context) {
       return jsonResponse({ status: "ok", orderId, duplicate: true,
         amountReceived: same.amountReceived, balanceDue: same.balanceDue,
         discountAmount: same.discountAmount, discountNote: same.discountNote,
-        effectiveTotal: same.effectiveTotal, salesTax: same.salesTax, payments: same.payments });
+        effectiveTotal: same.effectiveTotal, salesTax: same.salesTax, payments: same.payments, ...paidState_(same) });
     }
 
     // Optionally apply a discount for the remaining balance
@@ -2018,7 +2023,7 @@ async function handleOrdersPost_(context) {
     return jsonResponse({ status: "ok", orderId,
       amountReceived: updated.amountReceived, balanceDue: updated.balanceDue,
       discountAmount: updated.discountAmount, discountNote: updated.discountNote,
-      effectiveTotal: updated.effectiveTotal, salesTax: updated.salesTax, payments: updated.payments });
+      effectiveTotal: updated.effectiveTotal, salesTax: updated.salesTax, payments: updated.payments, ...paidState_(updated) });
   }
 
   // ---- recordRefund — money returned outside Stripe (Venmo, check, cash…) ----
@@ -2054,7 +2059,7 @@ async function handleOrdersPost_(context) {
     if (await alreadyRecorded(requestKey)) {
       const same = await getOrderById(env.DB, orderId);
       return jsonResponse({ status: "ok", orderId, duplicate: true, payments: same.payments, amountReceived: same.amountReceived,
-        refundedAmount: same.refundedAmount, netReceived: same.netReceived, balanceDue: same.balanceDue });
+        refundedAmount: same.refundedAmount, netReceived: same.netReceived, balanceDue: same.balanceDue, ...paidState_(same) });
     }
     const auditErr = await auditStrict({ orgId: order.orgId, orderId, action: "payment.refunded",
       detail: { amount, method, reference, note, shipping } });
@@ -2071,7 +2076,7 @@ async function handleOrdersPost_(context) {
       shippingCents: Math.round(shipping * 100), ...(requestKey ? { requestKey } : {}) });
     const updated = await getOrderById(env.DB, orderId);
     return jsonResponse({ status: "ok", orderId, payments: updated.payments, amountReceived: updated.amountReceived,
-      refundedAmount: updated.refundedAmount, netReceived: updated.netReceived, balanceDue: updated.balanceDue });
+      refundedAmount: updated.refundedAmount, netReceived: updated.netReceived, balanceDue: updated.balanceDue, ...paidState_(updated) });
   }
 
   // Sets how much of an existing refund was shipping (migrations/0035) — e.g. a card refund made in
@@ -2092,7 +2097,7 @@ async function handleOrdersPost_(context) {
     catch (e) { return jsonResponse({ status: "error", message: e.message }, 400); }
     const updated = await getOrderById(env.DB, before.orderId);
     return jsonResponse({ status: "ok", orderId: before.orderId, payments: updated.payments, amountReceived: updated.amountReceived,
-      refundedAmount: updated.refundedAmount, netReceived: updated.netReceived, balanceDue: updated.balanceDue });
+      refundedAmount: updated.refundedAmount, netReceived: updated.netReceived, balanceDue: updated.balanceDue, ...paidState_(updated) });
   }
 
   // ---- backfillStripeFees — one-time: record Stripe's fee on past card payments
@@ -2244,7 +2249,7 @@ async function handleOrdersPost_(context) {
     return jsonResponse({ status: "ok",
       amountReceived: updated ? updated.amountReceived : null,
       balanceDue: updated ? updated.balanceDue : null,
-      payments: updated ? updated.payments : [] });
+      payments: updated ? updated.payments : [], ...paidState_(updated) });
   }
 
   // ---- setDiscount — apply or clear a discount on an order -------------------
@@ -2271,7 +2276,7 @@ async function handleOrdersPost_(context) {
     const updated = await getOrderById(env.DB, orderId);
     return jsonResponse({ status: "ok", orderId,
       discountAmount: updated.discountAmount, discountNote: updated.discountNote,
-      effectiveTotal: updated.effectiveTotal, balanceDue: updated.balanceDue });
+      effectiveTotal: updated.effectiveTotal, balanceDue: updated.balanceDue, ...paidState_(updated) });
   }
 
   // ---- setRushFee (migrations/0082): rush on or off for one order, its fee or "to follow", and the due date ----
@@ -3212,6 +3217,9 @@ async function handleOrdersPost_(context) {
       });
       if (newDelivery) await setOrgDeliveryOptions(env.DB, body.orgId, newDelivery);
       if (!newRush.skip) await setOrgRushFee(env.DB, body.orgId, newRush.value);
+      // Its address works at once ("coming soon" until it opens): the shop list comes from the cached catalog,
+      // which is keyed by the catalog version — without this a new shop was "not found" for up to 5 minutes.
+      try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
       // Tax exemption is only touched when the form sends it (see setOrgTaxExemption).
       if (body.taxExempt !== undefined) {
         const certificate = String(body.taxExemptCertificate || "").trim().slice(0, 100);
@@ -4014,19 +4022,22 @@ async function handleOrdersPost_(context) {
       // complete ship-from address. The address can come with the request (Global settings sends
       // it here, so the two are saved together), else the saved one is checked. Nothing is saved
       // while either is missing. A request that doesn't mention Shipping isn't held up by it.
+      // Only switching Shipping ON is held to that: an install where it is already on (a new one starts that way,
+      // key or not) saves the rest of Global settings as it is — buying a label still says what's missing.
       let shipFromToSave = null;
       if (want.shipping === true) {
         const { country } = await getLocaleSettings(env.DB);
         const sent = body.shipFrom && typeof body.shipFrom === "object" ? body.shipFrom : null;
-        if (sent) { const bad = shipFromFormatError_(sent, country); if (bad) return jsonResponse({ status: "error", message: "Ship-from address: " + bad }, 400); }
-        const missing = shipFromMissing(sent || await getShipFromAddress(env.DB, env), country);
-        if (!env.SHIPPO_API_KEY || missing.length) {
+        const sentAny = !!sent && Object.values(sent).some(v => String(v == null ? "" : v).trim());
+        if (sentAny) { const bad = shipFromFormatError_(sent, country); if (bad) return jsonResponse({ status: "error", message: "Ship-from address: " + bad }, 400); }
+        const missing = before.shipping ? [] : shipFromMissing(sent || await getShipFromAddress(env.DB, env), country);
+        if (!before.shipping && (!env.SHIPPO_API_KEY || missing.length)) {
           const need = [!env.SHIPPO_API_KEY ? (isDesktopEdition(env) ? "a Shippo key (Global settings → Carrier shipping (Shippo))" : "a Shippo key (the SHIPPO_API_KEY secret — see docs/configuration.md)") : "",
             missing.length ? "in the Ship-from address: " + missing.join(", ") : ""].filter(Boolean).join(", and ");
           return jsonResponse({ status: "error", code: "shipping_setup", shippoKey: !!env.SHIPPO_API_KEY, missing,
             message: `Shipping needs ${need}. Fill ${missing.length && env.SHIPPO_API_KEY ? "them" : "it"} in, or untick Shipping.` }, 400);
         }
-        shipFromToSave = sent ? { a: sent, country } : null;
+        shipFromToSave = sentAny ? { a: sent, country } : null;
       }
       if (shipFromToSave) {
         const before = await getShipFromAddress(env.DB, env);
@@ -4569,6 +4580,8 @@ async function handleOrdersPost_(context) {
       if (!!before.ready !== ready) {
         await setOrgReady(env.DB, before.orgId, ready);
         audit({ orgId: before.orgId, orderId: null, action: "org.updated", detail: { changes: { ready: { from: !!before.ready, to: ready } } } });
+        // Shoppers see it now (db.js setOrgReady changes the published copy too): the cached catalog is refreshed.
+        try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
       }
       return jsonResponse({ status: "ok", ready });
     }
@@ -6942,9 +6955,12 @@ async function handleOrdersPost_(context) {
 
   // checkoutToken: what lets THIS customer start a card payment for this order (see http.js).
   const checkoutToken = await signOrderToken(env, orderId);
+  // emailOn: whether this install can email at all, so the confirmation promises a copy only when one can go.
+  let emailOn = true;
+  try { if (typeof emailCanSend === "function") emailOn = await emailCanSend(env); } catch (_) {}
   return jsonResponse(placed.taxMode === "exclusive"
-    ? { status: "ok", taxMode: "exclusive", salesTax: placed.salesTax, total: placed.total, checkoutToken }
-    : { status: "ok", checkoutToken });
+    ? { status: "ok", taxMode: "exclusive", salesTax: placed.salesTax, total: placed.total, checkoutToken, emailOn }
+    : { status: "ok", checkoutToken, emailOn });
 }
 
 export async function onRequestGet() {

@@ -246,6 +246,15 @@ async function sendViaCloudflare_(env, { to, subject, html, text, attachments },
 // happened that someone can act on: which provider, from which address, what it answered, and — for
 // the usual mistakes — what to do. Never records an email_failed issue (it's a deliberate test).
 // Secrets are never returned: a key is described (set or not, its length, whether it looks right).
+// Whether this install can send email at all (a provider is set up), for pages that would otherwise promise one —
+// the order confirmation's "A copy of your order was emailed to …". Not whether a given email will arrive.
+export async function emailCanSend(env) {
+  const desktop = desktopEmail_(env);
+  if (desktop === "on") return true;
+  if (desktop === "off") return false;
+  if (await webMailbox_(env)) return true;
+  return !!(env && (env.RESEND_API_KEY || (env.EMAIL && typeof env.EMAIL.send === "function") || (env.CF_EMAIL_API_TOKEN && env.CF_ACCOUNT_ID)));
+}
 export async function sendTestEmail(env, to) {
   const id = await mailIdentity_(env);
   const desktop = desktopEmail_(env);

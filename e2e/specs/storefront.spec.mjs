@@ -176,11 +176,10 @@ test("paying by Venmo or Zelle: the confirmation names the method", async ({ as 
   }
 });
 
-// KNOWN BUG (reported): the confirmation always says "A copy of your order was emailed to …"
+// Fixed bug: the confirmation always said "A copy of your order was emailed to …"
 // (public/index.html, the confirmation page), even on an install with no email provider, where Global settings →
 // Setup status says no email is sent at all. The customer is told to expect an email that never comes.
 test("the confirmation doesn't promise an email the install can't send", async ({ as }) => {
-  test.fail(true, "Known bug: the order confirmation says a copy was emailed even though no email provider is set up");
   // This install has no email provider (no RESEND_API_KEY / CF_EMAIL_API_TOKEN / mailbox).
   const page = await as(null);
   await placeOrder(page, shop, { payment: "Check", customer: "Casey Mailless", email: "mailless@example.test" });

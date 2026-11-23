@@ -378,3 +378,31 @@ test.describe("users and roles", () => {
     await pending.dispose();
   });
 });
+
+// Roles and permissions → + Add role, through the page (review of the e2e run: usersCall_ sent { key: 'cookie' } with
+// every call and saveRole read it as the role to change, so every new role was refused).
+test("Roles and permissions: + Add role adds a role (it answered 'No such role.')", async ({ page }) => {
+  const roleName = "Viewer " + slug("r").slice(-5);
+  await page.goto(ADMIN + "/#users");
+  await expect(page.locator("#usersTable")).toBeVisible();
+  await page.getByRole("tab", { name: "Roles and permissions" }).click();
+  await page.getByRole("button", { name: "＋ Add role" }).click();
+  await page.getByLabel("Name").fill(roleName);
+  await page.getByLabel(/^Rank/).fill("10");
+  // A new role starts from Production's permissions: switch every menu off, then on again — switching a
+  // menu on opens each of its pages at Read.
+  const menus = page.locator(".perm-menu-head input[type=checkbox]");
+  const n = await menus.count();
+  expect(n).toBeGreaterThan(5);
+  for (let i = 0; i < n; i++) {
+    const box = page.locator(".perm-menu-head input[type=checkbox]").nth(i);
+    if (await box.isChecked()) await box.uncheck();
+    await page.locator(".perm-menu-head input[type=checkbox]").nth(i).check();
+  }
+  // Nothing above Read anywhere.
+  await expect(page.locator(".perm-seg input[value=edit]:checked, .perm-seg input[value=full]:checked")).toHaveCount(0);
+  expect(await page.locator(".perm-seg input[value=read]:checked").count()).toBeGreaterThan(20);
+  await page.getByRole("button", { name: "Add role" }).last().click();
+  await expect(toast(page)).toContainText("Role added.", { timeout: 4000 });
+  await expect(page.locator(".role-chip", { hasText: roleName })).toBeVisible();
+});

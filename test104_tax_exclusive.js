@@ -215,7 +215,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   ok("a non-taxable product in the cart isn't taxed: $16 + $0.96 + $10 = $26.96", r.body.total === 26.96 && r.body.salesTax === 0.96);
   await mode("inclusive");
   r = await shop("WEB-4");
-  ok("with tax-included prices the response is the plain one it always was (plus the card-checkout token)", r.status === 200 && eq(Object.assign({}, r.body, { checkoutToken: undefined }), { status: "ok", checkoutToken: undefined }) && (await get("WEB-4")).effectiveTotal === 32);
+  ok("with tax-included prices the response is the plain one it always was (plus the card-checkout token)", r.status === 200 && eq(Object.assign({}, r.body, { checkoutToken: undefined, emailOn: undefined }), { status: "ok", checkoutToken: undefined, emailOn: undefined }) && (await get("WEB-4")).effectiveTotal === 32);
   r = await call({ action: "createTestTransaction", org: "acme", amount: 5 });
   await mode("exclusive");
   r = await call({ action: "createTestTransaction", org: "acme", amount: 5 });

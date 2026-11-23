@@ -210,11 +210,10 @@ test("Mark as paid books the balance once, and a discount lowers what is due", a
   await expect(page.locator("#pmContent")).toContainText("Marked paid manually (Check)");
 });
 
-// KNOWN BUG: Payments → Save that pays the order in full leaves the row saying "Unpaid", with "Mark as paid"
+// Fixed bug: Payments → Save that paid the order in full left the row saying "Unpaid", with "Mark as paid"
 // and no stage list, until the page is loaded again (the window's row update copies the new balance but not the
 // server's paid flag: public/admin.js showPaymentsModal → updateOrderTableRow).
 test("paying the whole balance in the Payments window shows the order as paid at once", async ({ page, api }) => {
-  test.fail(true, "Known bug: the row stays 'Unpaid' with 'Mark as paid' until the page is reloaded");
   const { shop, order } = await shopWithOrder(api, page);
   const id = order.orderId;
   await ordersPage(page, shop);

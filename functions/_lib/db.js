@@ -647,10 +647,19 @@ export async function setOrgTaxExemption(db, orgId, { taxExempt, certificate, ex
     .bind(taxExempt ? 1 : 0, certificate || "", expires || null, new Date().toISOString(), orgId).run();
 }
 
-// Open or close a shop for orders without touching anything else on it (Shop setup → Go live). Like every shop
-// setting it reaches shoppers on the shop's next Publish.
+// Open or close a shop for orders without touching anything else on it (Shop setup → Go live, the Live switch). Unlike
+// other shop settings it reaches shoppers at once, as its confirmation says: the published copy (catalog_snapshots,
+// what the shop page and order placing read) gets the same ready flag and time, so a shop with nothing else changed
+// still reads as published. The caller refreshes the catalog version.
 export async function setOrgReady(db, orgId, ready) {
-  await db.prepare("UPDATE orgs SET ready = ?, updatedAt = ? WHERE orgId = ?").bind(ready ? 1 : 0, new Date().toISOString(), orgId).run();
+  const now = new Date().toISOString(), flag = ready ? 1 : 0;
+  const live = db.prepare("UPDATE orgs SET ready = ?, updatedAt = ? WHERE orgId = ?").bind(flag, now, orgId);
+  try {
+    await db.batch([live, db.prepare("UPDATE catalog_snapshots SET json = json_set(json, '$.org.ready', ?, '$.org.updatedAt', ?) WHERE orgId = ? AND json_valid(json)").bind(flag, now, orgId)]);
+  } catch (e) {
+    if (!/no such table/i.test(String(e && e.message))) throw e;
+    await live.run();   // before migrations/0076: nothing is published
+  }
 }
 
 export async function updateOrg(db, orgId, o) {

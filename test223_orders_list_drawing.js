@@ -122,5 +122,35 @@ const wait = async (fn, n = 400) => { for (let i = 0; i < n && !fn(); i++) await
   ok("opening the list on the new day asks for today, and the date boxes show it", sent.slice(-4).some(b => b.action === "getOrders" && b.dateTo === day(0) && b.dateFrom === day(30)) &&
     d.getElementById("ordFilterTo").value === day(0));
 
+  console.log("\n=== An action on one order of a long list redraws only its rows (review #62) ===");
+  const acme = { orgId: "acme", name: "Example Club" };
+  await w.renderAdminOrders(app, acme);
+  await wait(() => d.getElementById("ordSummaryBar") && drawn() === 300);
+  const ids = () => [...new Set([...d.querySelectorAll("#adminPanel tbody tr[data-order]")].map(tr => tr.dataset.order))];
+  const capText = () => (d.querySelector("#adminPanel .orders-cap-note") || {}).textContent || "";
+  const tbody = d.querySelector("#adminPanel tbody"), a010 = d.querySelector('tr[data-order="A010"]');
+  ok("(319 match, the newest 300 drawn, the 301st not)", /of 319 matching/.test(capText()) && drawn() === 300 && !d.querySelector('tr[data-order="A301"]'));
+  // A005 completed: it leaves the list, and the next order down takes the last place drawn.
+  d1._raw.run("UPDATE orders SET paid = 1, deliveredAt = ?, completedAt = ? WHERE orderId = 'A005'", [hoursAgo(1), hoursAgo(1)]);
+  sent.length = 0;
+  await w.refreshOrderRows_("acme", ["A005"]);
+  ok("the order is asked for alone — no list reload", JSON.stringify(sent.map(b => b.action)) === '["getOrdersByIds"]');
+  ok("…it leaves the list; still 300 drawn, the next one (A301) now among them; the rest are the same rows",
+    !d.querySelector('tr[data-order="A005"]') && drawn() === 300 && !!d.querySelector('tr[data-order="A301"]') && d.querySelector('tr[data-order="A010"]') === a010 &&
+    d.querySelector("#adminPanel tbody") === tbody);
+  ok("…the note and the totals follow (318 matching)", /of 318 matching/.test(capText()) && /^318 orders/.test(summary()) && /\$6360\.00 active total/.test(summary()));
+  // A new order (a Local sale) goes in at the top; the last one drawn drops below the line.
+  await lib.insertOrder(d1, { orderId: "A900", orgId: "acme", customerName: "Walk-in", contact: "walkin@example.com", placedAt: new Date().toISOString() },
+    [{ productId: "cap", name: "Cap", type: "cap", size: "OSFA", qty: 1, unitPrice: 20 }]);
+  sent.length = 0;
+  await w.refreshOrderRows_("acme", ["A900"]);
+  ok("a new order is put in first, still 300 drawn (A301 drops below the line again), one request", ids()[0] === "A900" && drawn() === 300 && !d.querySelector('tr[data-order="A301"]') &&
+    sent.length === 1 && sent[0].action === "getOrdersByIds" && /of 319 matching/.test(capText()) && /^319 orders/.test(summary()));
+  ok("…and the loaded list has it first and A005 completed, so Show more draws from it", w._ordersCache.acme[0].orderId === "A900" &&
+    !!w._ordersCache.acme.find(o => o.orderId === "A005").completedAt && w._ordersCache.acme.length === 321);
+  sent.length = 0;
+  await w.ordersShowMore_();
+  ok("…Show more then draws all 319 without a request, A005 still out", drawn() === 319 && !sent.length && !d.querySelector('tr[data-order="A005"]'));
+
   if (failed) { console.log("\n" + failed + " check(s) failed"); process.exit(1); }
 })().catch((e) => { console.error(e); console.log("test223 crashed: false"); process.exit(1); });

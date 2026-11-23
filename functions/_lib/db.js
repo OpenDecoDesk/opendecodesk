@@ -10017,11 +10017,14 @@ export async function getOpenOrderStages(db) {
 }
 
 // These orders in full (as loadOrders_ gives them), in no set order; ids not found are left out. One search
-// and one read of each child table for the whole list, however many there are.
-export async function getOrdersByIds(db, orderIds) {
+// and one read of each child table for the whole list, however many there are. opts.orgId: only that shop's
+// (the Orders page redrawing the rows an action changed, getOrdersByIds in orders.js) — another shop's are left out.
+export async function getOrdersByIds(db, orderIds, opts = {}) {
   const ids = [...new Set((orderIds || []).map(String))];
   if (!ids.length) return [];
-  return loadOrders_(db, "o.orderId IN (SELECT value FROM json_each(?))", [JSON.stringify(ids)], "o.placedAt ASC");
+  const where = ["o.orderId IN (SELECT value FROM json_each(?))"], binds = [JSON.stringify(ids)];
+  if (opts.orgId != null) { where.push("o.orgId = ?"); binds.push(String(opts.orgId)); }
+  return loadOrders_(db, where.join(" AND "), binds, "o.placedAt ASC");
 }
 
 // How many active lines with typed-in (free-form) personalization — or the customer's own design to

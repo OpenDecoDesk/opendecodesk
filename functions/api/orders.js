@@ -151,6 +151,9 @@ const paidState_ = (o) => o ? { paid: !!o.paid, paidForWork: !!o.paidForWork, pa
 const ORDERS_LIST_MAX = 2000;
 // The most open orders Home's lists return (getOpenOrders): the oldest that many.
 const OPEN_ORDERS_MAX = 1000;
+// The most orders one getOrdersByIds asks for: the Orders page redraws the rows an action changed (replaceOrderRows_
+// in admin.js), and sends a bigger selection as one full reload instead.
+const ORDERS_BY_IDS_MAX = 100;
 // The most orders one bulk request changes. D1 caps the queries one Worker request may run (1,000 on Workers Paid),
 // and a step change runs several per order (its lines, the blank roll-up, the blanks it uses up, the shipped email),
 // so the admin page sends a bigger selection in groups of this size (postOrdersInGroups_ in admin.js).
@@ -898,6 +901,23 @@ async function handleOrdersPost_(context) {
     const orders = await getOrdersByOrg(env.DB, org, { from: body.dateFrom, to: body.dateTo }, { limit: ORDERS_LIST_MAX + 1 });
     const more = orders.length > ORDERS_LIST_MAX;
     return jsonResponse({ status: "ok", orders: orderCostsFor_(more ? orders.slice(0, ORDERS_LIST_MAX) : orders), more, max: ORDERS_LIST_MAX });
+  }
+
+  // ---- getOrdersByIds — some of one shop's orders, after an action on them ----
+  // The Orders page asks for just the orders an action changed and redraws their rows (admin.js replaceOrderRows_)
+  // instead of reloading the whole list. Only that shop's orders come back: an id of another shop's order is left
+  // out, as is one not found. Costs are left out for a role without costs.view, as in getOrders.
+  if (body.action === "getOrdersByIds") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const org = typeof body.org === "string" ? body.org : "";
+    if (!org) return jsonResponse({ status: "error", message: "Unknown org" }, 404);
+    const ids = Array.isArray(body.orderIds) ? [...new Set(body.orderIds)] : [];
+    if (!ids.length) return jsonResponse({ status: "error", message: "No order IDs" }, 400);
+    if (ids.length > ORDERS_BY_IDS_MAX) return jsonResponse({ status: "error", message: `Too many orders at once (max ${ORDERS_BY_IDS_MAX})` }, 400);
+    if (!ids.every((id) => typeof id === "string" && ORDER_ID_RE.test(id))) return jsonResponse({ status: "error", message: "Invalid order ID in list" }, 400);
+    const orders = await getOrdersByIds(env.DB, ids, { orgId: org });
+    return jsonResponse({ status: "ok", orders: orderCostsFor_(orders), max: ORDERS_BY_IDS_MAX });
   }
 
   // ---- getOrdersAllShops — the "All shops" Orders page in ONE request ----
@@ -2384,7 +2404,8 @@ async function handleOrdersPost_(context) {
     await setOrderRushFee(env.DB, orderId, { requested, cents, pending, taxable, payBy });
     if (dueDate !== undefined && dueDate !== (before.dueDate || "")) await setOrderDueDate(env.DB, orderId, dueDate || null);
     const updated = await getOrderById(env.DB, orderId);
-    return jsonResponse({ status: "ok", orderId, order: updated });
+    // The order as the list shows it (admin.js redraws its row from it), costs left out as in getOrders.
+    return jsonResponse({ status: "ok", orderId, order: updated ? orderCostsFor_([updated])[0] : null });
   }
 
   // ---- voidOrder / deleteOrder ------------------------------------------------

@@ -927,8 +927,9 @@ async function blankShippedFlow_(orgId, orders){
     }
     const changed = (res.add || []).length + (res.update || []).length + (res.remove || []).length;
     showToast("Blank shipment" + (changed === 1 ? "" : "s") + " saved.");
-    const oo = (adminOrgs || []).find(x => x.orgId === orgId);
-    if(oo) refreshOrdersInPlace_(oo);
+    // Only the orders in the window (and any a shipment's lines belong to) are drawn again.
+    const ids = orders.map(o => o.orderId).concat([...(res.add || []), ...(res.update || [])].flatMap(s => (s.items || []).map(x => x.orderId)));
+    refreshOrderRows_(orgId, ids);
   }catch(e){ showToast("Could not reach the server.", true); }
 }
 
@@ -2628,8 +2629,8 @@ async function completeOrders(orgId, orderIds, completed, at){
   const skipped = r.replies.flatMap(d => d.skipped || []).map(x => x.orderId + " (" + x.reason + ")");
   showToast(`${word} ${updated} order${updated === 1 ? "" : "s"}` + (skipped.length ? ` — skipped ${skipped.join(", ")}` : "") + "." + (r.error ? bulkStoppedNote_(r, orderIds.length) : ""),
     !!r.error || (!updated && skipped.length > 0));
-  const orgObj = (adminOrgs || []).find(x => x.orgId === orgId);
-  if(orgObj) refreshOrdersInPlace_(orgObj);
+  // Those orders are drawn again: a completed one leaves the list unless "Include completed" is ticked.
+  await refreshOrderRows_(orgId, orderIds);
   return true;
 }
 // The order row's Mark completed: asks when (default now), then completes.
@@ -2785,10 +2786,10 @@ async function bulkSetFulfillmentStage(orgId, stage){
     if(errs.length) msg += " — skipped " + errs.length + ": " + errs.slice(0, 3).join("; ") + (errs.length > 3 ? "; …" : "");
     showToast(msg + "." + (r.error ? bulkStoppedNote_(r, orderIds.length) : ""), !!r.error || (!data.updated && errs.length > 0));
     const orgObj = (adminOrgs || []).find(x => x.orgId === orgId);
-    // Blank stages are per-line-item now (migrations/0039) + roll up to order summaries, so re-fetch
+    // Blank stages are per-line-item now (migrations/0039) + roll up to order summaries, so re-fetch those orders
     // rather than patching cells in place (a partial receive mustn't flip the whole-order cell). Stopped partway:
     // re-fetch too, so the list shows exactly which orders changed.
-    if(/^blank/.test(stage) || r.error){ if(orgObj) refreshOrdersInPlace_(orgObj); return; }
+    if(/^blank/.test(stage) || r.error){ await refreshOrderRows_(orgId, orderIds); return; }
     if(orgObj){
       // Errors read "<orderId>: why".
       const errorIds = new Set((data.errors || []).map(e => String(e.orderId || e).split(":")[0].trim()));
@@ -2814,7 +2815,7 @@ async function bulkSetFulfillmentStage(orgId, stage){
         }
         if(!applyOrderUpdate(orgId, id, updates, orgObj)) anyMiss = true;
       }
-      if(anyMiss) refreshOrdersInPlace_(orgObj);
+      if(anyMiss) await refreshOrderRows_(orgId, orderIds);
       if(stage === "delivered") await offerToComplete(orgId, orderIds.filter(id => !errorIds.has(id)), extraFields.at);
     }
   }catch(e){
@@ -2867,8 +2868,7 @@ async function bulkCancelLineItems(orgId){
   if(lateCancels) msg += " ⚠ " + lateCancels + " late cancel(s) — manual reconciliation needed.";
   if(r.error) msg += ` It stopped after ${r.done} of ${sheetRows.length} items (${r.error}) — the others were not cancelled. Select them and try again.`;
   showToast(msg, lateCancels > 0 || !!r.error);
-  const org = (adminOrgs || []).find(o => o.orgId === orgId);
-  if(org) refreshOrdersInPlace_(org);
+  refreshOrderRows_(orgId, orderIds);
 }
 
 // Adds a tracking number to all selected orders in bulk.
@@ -4079,8 +4079,7 @@ async function bulkAddTracking(orgId){
     if(data.skipped) msg += ", " + data.skipped + " not found (deleted?)";
     if(data.errors && data.errors.length) msg += ", " + data.errors.length + " error" + (data.errors.length === 1 ? "" : "s");
     showToast(msg + ".");
-    const org = (adminOrgs || []).find(o => o.orgId === orgId);
-    if(org) refreshOrdersInPlace_(org);
+    refreshOrderRows_(orgId, orderIds);
   }catch(e){
     showToast("Could not reach the server.", true);
   }
@@ -4120,8 +4119,16 @@ async function bulkSetDueDate(orgId){
   if(!r.done){ showToast(r.unreachable ? r.error : "Could not set due date: " + r.error, true); return; }
   const updated = r.replies.reduce((n, d) => n + (Number(d.updated) || 0), 0);
   showToast((result.dueDate ? "Due date set for " : "Due date cleared on ") + updated + " order" + (updated === 1 ? "" : "s") + "." + (r.error ? bulkStoppedNote_(r, orderIds.length) : ""), !!r.error);
-  const org = (adminOrgs || []).find(o => o.orgId === orgId);
-  if(org) refreshOrdersInPlace_(org);
+  // The page knows the new date: those orders' rows are drawn with it, no reload (only the groups that went through).
+  patchKnownOrders_(orgId, orderIds.slice(0, r.done), o => { o.dueDate = result.dueDate || null; });
+}
+
+// After an action on one line (cancel, refund): its order's rows are drawn again; a line not in the loaded list
+// means a full reload.
+function refreshLineRows_(orgId, sheetRow){
+  const at = orderOfLine_(sheetRow, orgId), org = (adminOrgs || []).find(o => o.orgId === orgId);
+  if(at) return refreshOrderRows_(orgId, [at.orderId]);
+  if(org) return refreshOrdersInPlace_(org);
 }
 
 // Cancel a single line item. sheetRow is the line item's id (as returned
@@ -4154,7 +4161,7 @@ async function cancelLineItem(orgId, sheetRow, itemName, lineTotal){
     } else {
       showToast("Item canceled." + (data.emailSent ? " Customer notified by email." : ""));
     }
-    refreshAdminOrders(orgId);
+    refreshLineRows_(orgId, sheetRow);
   }catch(e){
     showToast("Could not reach the server.", true);
   }
@@ -4223,7 +4230,7 @@ async function setLineItemRefund(orgId, sheetRow, defaultAmount, paymentMethod){
     showToast(data.ledger ? "Refund of $" + amount.toFixed(2) + " recorded — it's in 💰 Payments."
       : got.method === "card" ? "Refund noted on the line. The Stripe refund shows in 💰 Payments once it's made."
       : "Refund noted on the line.");
-    refreshAdminOrders(orgId);
+    refreshLineRows_(orgId, sheetRow);
   }catch(e){
     showToast("Could not reach the server.", true);
   }
@@ -4438,12 +4445,13 @@ function showRushFeeModal_(orgId, orderId){
     if(on.checked && (payBy || "") !== (o.rushPayBy || "")) req.payBy = payBy;
     btn.disabled = true; err.textContent = "";
     try{
-      await hoopApi_(req);
+      const saved = await hoopApi_(req);
       const invoice = on.checked && ov.querySelector("#rfInvoice").checked;
       close();
       showToast(on.checked ? (pending ? `${orderId} is a rush order — set the fee once you know it.` : `Rush fee saved for ${orderId}.`) : `${orderId} is no longer a rush order.`);
-      const orgObj = (adminOrgs || []).find(x => x.orgId === orgId);
-      if(orgObj) await refreshOrdersInPlace_(orgObj);
+      // The reply carries the order as it is now: its rows are drawn from it, no request.
+      if(saved && saved.order) await replaceOrderRows_(orgId, [saved.order]);
+      else await refreshOrderRows_(orgId, [orderId]);
       if(invoice) showSendInvoiceModal(orgId, orderId);
     }catch(e){ err.textContent = e.message || "Couldn't save the rush fee."; btn.disabled = false; }
   };
@@ -4597,8 +4605,8 @@ async function deleteTransaction(orgId, orderId){
       return;
     }
     showToast("Order " + orderId + " voided — kept on record, excluded from reports.");
-    const org = (adminOrgs || []).find(o => o.orgId === orgId);
-    if(org) refreshOrdersInPlace_(org);
+    // Voided now, with this reason: it leaves the list unless "Include cancelled" is ticked. No reload.
+    patchKnownOrders_(orgId, [orderId], o => { o.voidedAt = new Date().toISOString(); o.voidReason = reason; });
   }catch(e){
     showToast("Could not reach the server.", true);
   }
@@ -5117,7 +5125,10 @@ async function shipOrder(orgId, orderId){
       if(!another){
         if(btn){ btn.disabled = false; btn.textContent = "Ship"; }
         showToast("No label bought. The order's Label button opens the one it already has.");
-        refreshAdminOrders(orgId);
+        // Nothing changed. Only when this row didn't know about that label (bought from another tab) is the order
+        // asked for again, so its Label button shows.
+        const known = ((window._ordersCache || {})[orgId] || []).find(o => o.orderId === orderId);
+        if(!known || !(known.labels || []).some(l => !l.voidedAt)) refreshOrderRows_(orgId, [orderId]);
         return;
       }
       purchaseData = await buy(true);
@@ -5155,8 +5166,7 @@ async function shipOrder(orgId, orderId){
   showToast("Label purchased. Tracking: " + purchaseData.trackingNumber);
   // The label is bought and charged even if the site couldn't record it — surface that instead of hiding it.
   if(purchaseData.warning) showToast(purchaseData.warning, true);
-  const org = (adminOrgs || []).find(o => o.orgId === orgId);
-  if(org) refreshOrdersInPlace_(org);
+  refreshOrderRows_(orgId, [orderId]);
 }
 
 // Per-item cancel column: Cancel button while blank not yet ordered; locked
@@ -5245,7 +5255,7 @@ function ordersRenderSlice_(shown){
 // The note above a list that wasn't drawn in full. single: one shop's list (it has the bulk bar).
 function ordersCapNote_(drawn, total, single){
   if(drawn >= total) return "";
-  return `<div class="admin-note" style="margin-bottom:10px;color:#b45309;">Showing the ${drawn} most recent of ${total} matching orders — narrow the date range${single ? "" : " or pick a shop"} to see the rest.
+  return `<div class="admin-note orders-cap-note" style="margin-bottom:10px;color:#b45309;">Showing the ${drawn} most recent of ${total} matching orders — narrow the date range${single ? "" : " or pick a shop"} to see the rest.
     <button type="button" class="admin-btn" style="padding:1px 8px;font-size:12px;margin-left:4px;" onclick="ordersShowMore_()">Show ${Math.min(ORDERS_RENDER_STEP_, total - drawn)} more</button>${single ? `<br>"Select all" ticks only the orders shown.` : ""}</div>`;
 }
 function ordersShowMore_(){
@@ -5348,6 +5358,158 @@ async function refreshOrdersInPlace_(org){
   const after = snap();
   const changed = [...after.keys()].filter(id => before.size && before.get(id) !== after.get(id));
   flashRows_(changed.flatMap(id => [`tr[data-order="${attrSel_(id)}"]`, `.order-card[data-order-card="${attrSel_(id)}"]`]));
+}
+
+// ---- Redrawing only the orders an action changed (review #62) ----
+// An action on one order (or a few) used to reload the whole list: every order of the shop, its proofs, blank
+// links and stock, then the whole table drawn again. Now the page asks for just those orders (getOrdersByIds) —
+// or, when it already knows what changed, uses that — and redraws only their rows. Anything it can't do that
+// way falls back to the full reload (refreshOrdersInPlace_), so the list is never left wrong.
+// The most orders one getOrdersByIds asks for (functions/api/orders.js ORDERS_BY_IDS_MAX); more is a full reload.
+const ORDERS_BY_IDS_MAX_ = 100;
+
+// Is this shop's orders list on screen, drawn from the orders loaded for it (renderAdminOrders / renderOrdersPage)?
+function ordersListShowing_(orgId){
+  const v = window._ordersShown_, m = location.hash.replace(/^#\/?/, "").match(/^orders\/([^/]+)$/);
+  if(!v || !m || !document.getElementById("adminPanel") || !Array.isArray((window._ordersCache || {})[orgId])) return false;
+  return m[1] === "all" ? !!v.all && (v.orgIds || []).includes(orgId) : !v.all && v.orgId === orgId && decodeURIComponent(m[1]) === orgId;
+}
+
+// After an action on these orders of one shop: asks the server for just them and redraws their rows. Falls back
+// to reloading the whole list when the list isn't on screen, there are too many, or the answer isn't usable.
+async function refreshOrderRows_(orgId, orderIds){
+  const org = (adminOrgs || []).find(o => o.orgId === orgId);
+  if(!org) return;
+  const ids = [...new Set((orderIds || []).filter(Boolean).map(String))];
+  if(!ids.length || ids.length > ORDERS_BY_IDS_MAX_ || !ordersListShowing_(orgId)) return refreshOrdersInPlace_(org);
+  let data = null;
+  try{
+    const res = await fetch("/api/orders", { method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ action: "getOrdersByIds", org: orgId, orderIds: ids, key: adminKey }) });
+    data = await res.json().catch(() => null);
+    if(!res.ok) data = null;
+  }catch(e){ data = null; }
+  const got = data && data.status === "ok" && Array.isArray(data.orders) ? data.orders : null;
+  // Every order asked for must be in the answer (one gone — removed, or not this shop's — is a full reload).
+  if(!got || !ids.every(id => got.some(o => o && o.orderId === id))) return refreshOrdersInPlace_(org);
+  return replaceOrderRows_(orgId, got);
+}
+
+// Redraws these orders' rows (cards on a phone) from the given orders and puts them in the loaded list, so later
+// filters, sorts and bulk selections see them: an order already on screen is redrawn where it sorts; one that no
+// longer passes the include boxes or the dates is taken out; a new one (a Local sale) goes in at its place. The
+// counts and totals above follow, and the redrawn rows flash. Falls back to the full reload (refreshOrdersInPlace_)
+// whenever it can't — returns true when the rows were redrawn, false when it fell back.
+async function replaceOrderRows_(orgId, orders){
+  let done = false;
+  try{ done = patchOrderRows_(orgId, orders); }
+  catch(e){ console.error("Couldn't redraw the order rows; reloading the list:", e); done = false; }
+  if(done) return true;
+  const org = (adminOrgs || []).find(o => o.orgId === orgId);
+  if(org) await refreshOrdersInPlace_(org);
+  return false;
+}
+// The work of replaceOrderRows_: false = it couldn't, and nothing on screen was changed (the loaded list may have
+// been, which the fallback reloads anyway).
+function patchOrderRows_(orgId, fresh){
+  if(!ordersListShowing_(orgId) || !Array.isArray(fresh) || !fresh.length) return false;
+  if(!fresh.every(o => o && typeof o === "object" && typeof o.orderId === "string" && Array.isArray(o.items) && o.placedAt && (!o.orgId || o.orgId === orgId))) return false;
+  const v = window._ordersShown_, panel = document.getElementById("adminPanel");
+  const cards = panel.querySelector(".order-cards"), tbody = panel.querySelector(".orders-table-wrap tbody");
+  const box = cards || tbody;
+  if(!box) return false;   // an empty list ("No orders match…") has nothing to patch
+  const org = (adminOrgs || []).find(o => o.orgId === orgId) || { orgId, name: orgId };
+
+  // The loaded list: each order updated where it is (the same object, so anything holding it sees the change),
+  // or added; then sorted newest first again, as fetchOrders leaves it.
+  const cache = window._ordersCache[orgId];
+  const changed = [];
+  for(const o of fresh){
+    const old = cache.find(x => x.orderId === o.orderId);
+    if(old){
+      Object.keys(old).forEach(k => { if(!(k in o) && k.charAt(0) !== "_") delete old[k]; });
+      Object.assign(old, o);
+      changed.push(old);
+    } else {
+      cache.push(o);
+      changed.push(o);
+    }
+  }
+  if(v.all) changed.forEach(o => { o._org = o._org || org; });
+  cache.sort((a, b) => new Date(b.placedAt) - new Date(a.placedAt));
+
+  // What the list should show now, the same way it was drawn (drawShopOrders_ / drawAllShopsOrders_).
+  let all = cache;
+  if(v.all){ all = []; v.orgIds.forEach(id => { all = all.concat((window._ordersCache || {})[id] || []); }); all.sort((a, b) => new Date(b.placedAt) - new Date(a.placedAt)); }
+  const shown = orderViewFilter_(ordersDateFilter_(all));
+  if(!shown.length) return false;   // the list empties: its "No orders match" note is drawn by the full redraw
+  const toDraw = ordersRenderSlice_(shown);
+  const capNote = panel.querySelector(".orders-cap-note"), capHtml = ordersCapNote_(toDraw.length, shown.length, !v.all);
+  if(!capNote && capHtml) return false;   // the list just grew past what's drawn: the full redraw adds the note
+
+  // An order id is unique across shops (orders.orderId), so the All-shops list keys its rows by it too.
+  const keyOf = (el) => cards ? el.dataset.orderCard : el.dataset.order;
+  const changedIds = new Set(changed.map(o => o.orderId));
+  const want = new Set(toDraw.map(o => o.orderId));
+  // What's on screen, by order: a table order is one row per line, a phone order one card.
+  const onScreen = new Map();
+  [...box.children].forEach(el => { const id = keyOf(el); if(id != null) (onScreen.get(id) || onScreen.set(id, []).get(id)).push(el); });
+  // Taken off: the changed orders (drawn again below) and any the list no longer shows. Their ticks are kept.
+  const wasTicked = new Set();
+  for(const [id, els] of onScreen){
+    if(want.has(id) && !changedIds.has(id)) continue;
+    if(els.some(el => el.querySelector(".order-select:checked"))) wasTicked.add(id);
+    els.forEach(el => el.remove());
+    onScreen.delete(id);
+  }
+  const getOrg = (o) => v.all ? (o._org || org) : org;
+  const getVerif = (o) => v.all ? (v.verifByOrder || {})[getOrg(o).orgId + "|" + o.orderId] : (v.verifMap || {})[o.orderId];
+  const build = (o) => {
+    const holder = document.createElement(cards ? "div" : "tbody");
+    holder.innerHTML = cards ? orderCardHtml_(o, getOrg(o), getVerif(o), !!v.all) : orderRowsHtml_([o], getOrg, getVerif, !!v.all);
+    const els = [...holder.children];
+    if(wasTicked.has(o.orderId)) els.forEach(el => el.querySelectorAll(".order-select").forEach(cb => { cb.checked = true; }));
+    return els;
+  };
+  // From the bottom up, each order goes in just above the next one drawn: the ones left alone are already in order.
+  let next = null;
+  for(let i = toDraw.length - 1; i >= 0; i--){
+    const o = toDraw[i];
+    let els = onScreen.get(o.orderId);
+    if(!els){
+      els = build(o);
+      els.forEach(el => box.insertBefore(el, next));
+    }
+    next = els[0] || next;
+  }
+
+  // The counts, totals, notes and bulk bar above and below the list.
+  if(capNote){ if(capHtml) capNote.outerHTML = capHtml; else capNote.remove(); }
+  if(v.all){ const sum = document.getElementById("ordAllSummary"); if(sum) sum.innerHTML = allShopsSummaryHtml_(shown); }
+  else if(window._refreshOrderFinancials) window._refreshOrderFinancials();
+  if(!v.all && document.getElementById("bulkBar")) updateBulkBar(orgId);
+  flashRows_([...changedIds].filter(id => want.has(id)).flatMap(id => [`tr[data-order="${attrSel_(id)}"]`, `.order-card[data-order-card="${attrSel_(id)}"]`]));
+  return true;
+}
+// For a change the page already knows the result of (a due date, customer details, a void): these cached orders
+// with the change made — each order's copy passed to `change(o)` — redrawn by replaceOrderRows_. An order that
+// isn't loaded means a full reload.
+function patchKnownOrders_(orgId, orderIds, change){
+  const cache = (window._ordersCache || {})[orgId] || [];
+  const copies = (orderIds || []).map(id => cache.find(o => o.orderId === id)).map(o => o ? JSON.parse(JSON.stringify(Object.assign({}, o, { _org: undefined }))) : null);
+  if(!copies.length || copies.some(c => !c)) return replaceOrderRows_(orgId, null);
+  copies.forEach(c => change(c));
+  return replaceOrderRows_(orgId, copies);
+}
+// The order (and shop) a line belongs to, from the loaded lists: a line's own actions (cancel, refund, design
+// files) know only its id. null when it isn't loaded.
+function orderOfLine_(itemId, orgId){
+  const lists = orgId ? [[orgId, (window._ordersCache || {})[orgId] || []]] : Object.entries(window._ordersCache || {});
+  for(const [oid, list] of lists){
+    const o = (list || []).find(x => (x.items || []).some(it => String(it.sheetRow) === String(itemId)));
+    if(o) return { orgId: oid, orderId: o.orderId };
+  }
+  return null;
 }
 
 // Builds the <tbody> rows. getOrg(o) → the order's org {orgId,name}; getVerif(o) → its verification
@@ -5577,26 +5739,31 @@ async function renderOrdersPage(app, opts){
 function drawAllShopsOrders_(){
   const v = window._ordersShown_, panel = document.getElementById("adminPanel");
   if(!v || !v.all || !panel) return;
-  const orgs = adminOrgs || [];
   let merged = [];
   v.orgIds.forEach(id => { merged = merged.concat((window._ordersCache || {})[id] || []); });
   merged.sort((a, b) => new Date(b.placedAt) - new Date(a.placedAt));
   const shown = orderViewFilter_(ordersDateFilter_(merged));
   if(!merged.length){ panel.innerHTML = `<div class="admin-empty">No orders yet.</div>`; return; }
   if(!shown.length){ panel.innerHTML = `<div class="admin-empty">No orders match the current filter. Widen the date range or tick "Include completed/cancelled".</div>`; return; }
-  const activeOrders = shown.filter(o => !o.voidedAt && o.items.some(it => !it.cancelDate));
-  const grandTotal = activeOrders.reduce((s, o) => s + orderActiveTotal_(o), 0);
-  const balanceDue = activeOrders.reduce((s, o) => s + (o.balanceDue || 0), 0);
   // Render cap: the table isn't virtualized, so only the newest few hundred are drawn (ordersRenderSlice_); the
   // totals above still cover every matching order.
   const toRender = ordersRenderSlice_(shown);
   panel.innerHTML = `
-    <div class="admin-summary"><strong>${activeOrders.length}</strong> order${activeOrders.length===1?"":"s"} across ${orgs.length} shop${orgs.length===1?"":"s"} &middot; <strong>$${grandTotal.toFixed(2)}</strong> active total &middot; <strong style="color:${balanceDue>0.005?"#b03a2e":"var(--ink-soft)"};">$${balanceDue.toFixed(2)}</strong> balance due</div>
+    <div class="admin-summary" id="ordAllSummary">${allShopsSummaryHtml_(shown)}</div>
     <div class="admin-note" style="margin-bottom:10px;">Pick a single shop above to enable bulk actions, packing/mailing labels, the spreadsheet export, and the blank-order breakdown.</div>
     ${v.more ? `<div class="admin-note" style="margin-bottom:10px;color:#b45309;">Only the newest ${v.more.toLocaleString()} orders across all shops were loaded for these dates. Narrow the date range or pick a shop to see older ones.</div>` : ordersMoreNote_(v.orgIds)}
     ${ordersCapNote_(toRender.length, shown.length, false)}
     ${ordersListHtml_(toRender, (o) => o._org, (o) => v.verifByOrder[o._org.orgId + "|" + o.orderId], true)}`;
   window._refreshOrderFinancials = null;
+}
+
+// The All-shops list's line of counts and totals, over every matching order (shown), not only those drawn.
+function allShopsSummaryHtml_(shown){
+  const orgs = adminOrgs || [];
+  const activeOrders = shown.filter(o => !o.voidedAt && o.items.some(it => !it.cancelDate));
+  const grandTotal = activeOrders.reduce((s, o) => s + orderActiveTotal_(o), 0);
+  const balanceDue = activeOrders.reduce((s, o) => s + (o.balanceDue || 0), 0);
+  return `<strong>${activeOrders.length}</strong> order${activeOrders.length===1?"":"s"} across ${orgs.length} shop${orgs.length===1?"":"s"} &middot; <strong>$${grandTotal.toFixed(2)}</strong> active total &middot; <strong style="color:${balanceDue>0.005?"#b03a2e":"var(--ink-soft)"};">$${balanceDue.toFixed(2)}</strong> balance due`;
 }
 
 // opts.soft: refill the list in place (refreshOrdersInPlace_) — the filter bar, scroll and ticks stay. Returns a
@@ -5721,7 +5888,7 @@ function drawShopOrders_(org){
       const freshOrders = orderViewFilter_(ordersDateFilter_((window._ordersCache && window._ordersCache[org.orgId]) || []));
       const summaryEl = document.getElementById("ordSummaryBar");
       if(summaryEl){
-        const ao = freshOrders.filter(o => o.items.some(it => !it.cancelDate));
+        const ao = freshOrders.filter(o => !o.voidedAt && o.items.some(it => !it.cancelDate));
         const gt = ao.reduce((s, o) => s + orderActiveTotal_(o), 0);
         const bd = ao.reduce((s, o) => s + (o.balanceDue || 0), 0);
         summaryEl.innerHTML = `<strong>${ao.length}</strong> order${ao.length===1?"":"s"} &middot; <strong>$${gt.toFixed(2)}</strong> active total &middot; <strong style="color:${bd>0.005?"#b03a2e":"var(--ink-soft)"};">$${bd.toFixed(2)}</strong> balance due`;
@@ -5896,8 +6063,7 @@ async function markOrderPaidOnce_(orgId, orderId){
     // came in at that moment and changed the balance, so look again before marking it.
     if(data.alreadyPaid) showToast("This order was already paid — nothing more was recorded and no email was sent.");
     else if(data.amountRecorded === 0) showToast("A payment came in on this order just now — check its balance before marking it paid.", true);
-    const org = (adminOrgs || []).find(o => o.orgId === orgId);
-    if(org) refreshOrdersInPlace_(org);
+    refreshOrderRows_(orgId, [orderId]);
   }catch(e){
     showToast("Could not reach the server.", true);
   }
@@ -5935,10 +6101,7 @@ async function setFulfillmentStage(orgId, orderId, stage){
   const label = stageLabels[stage] || stage;
 
   if(stage === "blanksFromStock"){
-    if(await useBlanksFromStock_(orgId, orderId)){
-      const orgObj = (adminOrgs || []).find(x => x.orgId === orgId);
-      if(orgObj) refreshOrdersInPlace_(orgObj);
-    }
+    if(await useBlanksFromStock_(orgId, orderId)) await refreshOrderRows_(orgId, [orderId]);
     return;
   }
   let extraFields = {};
@@ -5984,8 +6147,8 @@ async function setFulfillmentStage(orgId, orderId, stage){
       return;
     }
     const orgObj = (adminOrgs || []).find(x => x.orgId === orgId);
-    // Per-item blank stages (migrations/0039) roll up to summaries — re-fetch instead of patching.
-    if(/^blank/.test(stage)){ if(orgObj) refreshOrdersInPlace_(orgObj); return; }
+    // Per-item blank stages (migrations/0039) roll up to summaries — re-fetch the order instead of patching.
+    if(/^blank/.test(stage)){ await refreshOrderRows_(orgId, [orderId]); return; }
     if(orgObj){
       const updates = { [FULFILLMENT_FIELD[stage]]: data.timestamp || new Date().toISOString() };
       if(stage === "shipped" && extraFields.trackingNumber) updates.trackingNumber = extraFields.trackingNumber;
@@ -6003,7 +6166,7 @@ async function setFulfillmentStage(orgId, orderId, stage){
         }
       }
       if(!applyOrderUpdate(orgId, orderId, updates, orgObj)){
-        refreshOrdersInPlace_(orgObj);
+        await refreshOrderRows_(orgId, [orderId]);
       }
       if(stage === "delivered") await offerToComplete(orgId, [orderId], extraFields.at);
     }
@@ -6509,8 +6672,9 @@ async function showOrderDates_(orgId, orderId){
       const r = await hoopApi_(body);
       close();
       showToast(`Dates saved for ${orderId}.`);
-      const orgObj = (adminOrgs || []).find(x => x.orgId === orgId);
-      if (orgObj) refreshOrdersInPlace_(orgObj);
+      // The reply carries the order with its new dates: its rows are drawn from it (moved if the order date did).
+      if (r && r.order) replaceOrderRows_(orgId, [r.order]);
+      else refreshOrderRows_(orgId, [orderId]);
       return r;
     } catch (e) { err.textContent = e.message || "Couldn't save the dates."; btn.disabled = false; }
   };
@@ -6567,8 +6731,17 @@ async function bulkEditCustomerInfo(orgId){
   const r = await postOrdersInGroups_({action:"updateCustomerInfo", org:orgId, ...updates}, orderIds, BULK_ORDERS_GROUP_);
   if(!r.done){ showToast(r.unreachable ? r.error : "Could not update customer info: " + r.error, true); return; }
   showToast("Customer info updated for " + r.done + " order" + (r.done === 1 ? "" : "s") + "." + (r.error ? bulkStoppedNote_(r, orderIds.length) : ""), !!r.error);
-  const org = (adminOrgs || []).find(o => o.orgId === orgId);
-  if(org) refreshOrdersInPlace_(org);
+  // The page knows what was saved (as db.js updateOrderCustomerInfo writes it): those rows are drawn with it, no reload.
+  const cut = (v, n) => v == null ? "" : String(v).slice(0, n);
+  patchKnownOrders_(orgId, orderIds.slice(0, r.done), o => {
+    if(updates.customerName !== undefined) o.customerName = cut(updates.customerName, 200);
+    if(updates.contact !== undefined) o.contact = cut(updates.contact, 200);
+    if(updates.phone !== undefined || updates.addressLine !== undefined){
+      o.shippingAddress = Object.assign({}, o.shippingAddress || {});
+      if(updates.phone !== undefined) o.shippingAddress.phone = cut(updates.phone, 50);
+      if(updates.addressLine !== undefined) o.shippingAddress.line1 = cut(updates.addressLine, 300);
+    }
+  });
 }
 
 function showEditCustomerModal(orders){
@@ -6747,8 +6920,8 @@ async function createLocalSaleOnce_(orgId){
         : " — but the invoice wasn't sent: " + inv.message;
     }
     showToast((data.repeated ? "Local sale already recorded — " : "Local sale recorded — ") + (data.orderId || "") + invoiceNote, /but the invoice/.test(invoiceNote));
-    const org = (adminOrgs || []).find(o => o.orgId === orgId);
-    if(org) refreshOrdersInPlace_(org);
+    // Only the new order is asked for, and put into the list where it sorts.
+    refreshOrderRows_(orgId, [data.orderId]);
   }catch(e){
     showToast("Could not reach the server.", true);
   }
@@ -24215,8 +24388,8 @@ async function showOrderItemFilesModal_(itemId, itemLabel, onCountChange, slots)
         const slot = slots[Number(b.dataset.i)];
         let threads = [];
         try { threads = (await threadApi_({ action: "listThreads" })).threads || []; } catch (e) { showToast(e.message, true); return; }
-        // Refresh the Orders page behind the window too — Digitizing / Design approved may now be allowed.
-        showDesignVersionUploadModal_(null, () => { loadDesign(); if (/^#orders/.test(location.hash) && typeof rerenderOrdersView === "function") rerenderOrdersView(); },
+        // Redraw the order's rows behind the window too — Digitizing / Design approved may now be allowed.
+        showDesignVersionUploadModal_(null, () => { loadDesign(); if (/^#orders/.test(location.hash)) { const at = orderOfLine_(itemId); if (at) refreshOrderRows_(at.orgId, [at.orderId]); else rerenderOrdersView(); } },
           { itemId, threads, location: slot.location, title: "Order design — " + itemLabel + (slot.label ? " · " + slot.label : "") });
       });
     } catch (e) { el.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; }
@@ -25979,8 +26152,7 @@ async function editOrder(orgId, orderId){
       msg = "Order updated. Total decreased by $" + Math.abs(data.priceDiff).toFixed(2) + ".";
     }
     showToast(msg);
-    const org = (adminOrgs || []).find(o => o.orgId === orgId);
-    if(org) refreshOrdersInPlace_(org);
+    refreshOrderRows_(orgId, [orderId]);
   }catch(e){
     showToast("Could not reach the server.", true);
   }

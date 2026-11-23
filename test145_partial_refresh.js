@@ -102,6 +102,107 @@ const wait = async (cond, n = 300) => { for (let i = 0; i < n && !cond(); i++) a
   ok("…the order that changed is highlighted, the other isn't", !!d.querySelector('tr[data-order="R2"].row-flash') && !d.querySelector('tr[data-order="R1"].row-flash'));
   ok("no action rebuilds the Orders page any more (only opening a shop does)", (adminJs.match(/renderAdminOrders\(document\.getElementById\("app"\)/g) || []).length === 1);
 
+  console.log("\n=== Orders: an action on one order redraws only its rows (review #62) ===");
+  const LIST_READS = ["getOrders", "getOrdersAllShops", "listDesignVerifications", "getBlankLinks", "getBlanks"];
+  const listReads = () => sent.filter(b => LIST_READS.includes(b.action)).length;
+  const row = (id) => d.querySelector(`tr[data-order="${id}"]`);
+  // R1 unpaid on the server, and the list loaded that way.
+  d1._raw.run("UPDATE orders SET paid=0, paidAt=NULL WHERE orderId='R1'");
+  await w.refreshOrdersInPlace_(org);
+  const r1Before = row("R1"), r2Before = row("R2");
+  ok("(R1 is shown unpaid, still ticked)", /Unpaid/.test(r1Before.querySelector("td[data-paid-td]").textContent) && r1Before.querySelector(".order-select").checked);
+  sent.length = 0;
+  await w.markOrderPaid("acme", "R1");
+  await wait(() => sent.some(b => b.action === "getOrdersByIds") && row("R1") !== r1Before);
+  ok("Mark as paid sends the payment, then asks for that one order — no list reload", JSON.stringify(sent.map(b => b.action)) === '["markPaidManual","getOrdersByIds"]' &&
+    JSON.stringify(sent[1].orderIds) === '["R1"]' && sent[1].org === "acme" && listReads() === 0);
+  ok("…its row is redrawn Paid and flashes; the other order's row is the same element, not flashed", /^Paid$/.test(row("R1").querySelector("td[data-paid-td]").textContent.trim()) &&
+    row("R1").classList.contains("row-flash") && row("R2") === r2Before && !row("R2").classList.contains("row-flash"));
+  ok("…the filter bar stays, the tick on it stays, and so does the bulk bar", d.querySelector(".orders-filter-bar") === filterBar && row("R1").querySelector(".order-select").checked &&
+    d.getElementById("bulkBar").style.display !== "none");
+  ok("…and the loaded list has it paid (later filters and bulk actions see it)", w._ordersCache.acme.find(o => o.orderId === "R1").paid === true &&
+    w._ordersCache.acme.length === 2);
+  ok("…the order stays in its place, newest first", [...new Set([...d.querySelectorAll("#adminPanel tbody tr[data-order]")].map(tr => tr.dataset.order))].join() ===
+    w._ordersCache.acme.map(o => o.orderId).join());
+
+  // A new order (as a Local sale makes): asked for alone, and drawn at the top — it's the newest.
+  await lib.insertOrder(d1, { orderId: "R3", orgId: "acme", customerName: "Cust R3", contact: "r3@x.com", placedAt: new Date().toISOString() }, [{ productId: "tee", name: "Tee", type: "shirt", size: "M", qty: 2, unitPrice: 18 }]);
+  sent.length = 0;
+  await w.refreshOrderRows_("acme", ["R3"]);
+  const order = () => [...new Set([...d.querySelectorAll("#adminPanel tbody tr[data-order]")].map(tr => tr.dataset.order))].join();
+  ok("a new order is asked for alone and put in at its place (the top), the others untouched", JSON.stringify(sent.map(b => b.action)) === '["getOrdersByIds"]' &&
+    order() === "R3,R1,R2" && row("R2") === r2Before && row("R3").classList.contains("row-flash"));
+  ok("…the totals count it ($76.00 over 3 orders)", /^3 orders/.test(d.getElementById("ordSummaryBar").textContent.trim()) && /\$76\.00 active total/.test(d.getElementById("ordSummaryBar").textContent));
+  ok("…and it's in the loaded list, newest first", w._ordersCache.acme.map(o => o.orderId).join() === "R3,R1,R2");
+
+  // Completing an order takes it out of the default view (completed hidden).
+  d1._raw.run("UPDATE orders SET paid=1, shippedAt=?, deliveredAt=? WHERE orderId='R3'", [recent, recent]);
+  sent.length = 0;
+  const r3Old = row("R3");
+  await w.refreshOrderRows_("acme", ["R3"]);
+  ok("(R3 redrawn delivered: a new row in the same place)", row("R3") !== r3Old && order() === "R3,R1,R2");
+  sent.length = 0;
+  await w.completeOrders("acme", ["R3"], true, new Date().toISOString());
+  ok("Mark completed: the change, then that order alone — and it leaves the list (completed are hidden)", JSON.stringify(sent.map(b => b.action)) === '["setOrderCompleted","getOrdersByIds"]' &&
+    !row("R3") && order() === "R1,R2" && row("R2") === r2Before && /^2 orders/.test(d.getElementById("ordSummaryBar").textContent.trim()));
+  ok("…still in the loaded list, completed, for Include completed", !!w._ordersCache.acme.find(o => o.orderId === "R3" && o.completedAt));
+  sent.length = 0;
+  d.getElementById("ordIncludeCompleted").click();
+  await wait(() => row("R3"));
+  ok("…ticking Include completed shows it again without asking the server", !!row("R3") && !sent.length);
+  d.getElementById("ordIncludeCompleted").click();
+  await wait(() => !row("R3"));
+
+  // A change the page already knows (the due date): no request at all.
+  const tickR2 = row("R2").querySelector(".order-select"); tickR2.checked = true;
+  sent.length = 0;
+  w.patchKnownOrders_("acme", ["R2"], (o) => { o.dueDate = "2031-05-06"; });
+  await wait(() => row("R2") !== r2Before);
+  ok("a change the page knows (a due date) redraws the row with it — no request", !sent.length && row("R2") !== r2Before &&
+    /2031|5\/6|6\/5/.test(row("R2").querySelector("td[data-due-td]").textContent) && row("R2").querySelector(".order-select").checked);
+
+  // A miss: an order the server doesn't give back (another shop's, or gone) — the whole list is reloaded.
+  d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt) VALUES ('other','other','Other','t','t');`);
+  await lib.insertOrder(d1, { orderId: "O1", orgId: "other", customerName: "Elsewhere", contact: "o1@x.com", placedAt: recent }, [{ productId: "cap", name: "Cap", type: "cap", size: "OSFA", qty: 1, unitPrice: 20 }]);
+  sent.length = 0;
+  await w.refreshOrderRows_("acme", ["O1"]);
+  ok("asking for an order the shop doesn't have falls back to the full reload (and never shows it)", sent[0].action === "getOrdersByIds" && sent.some(b => b.action === "getOrders") && !row("O1"));
+  sent.length = 0;
+  ok("an answer of the wrong shape falls back too", await w.replaceOrderRows_("acme", [{ orderId: "R1" }]) === false && sent.some(b => b.action === "getOrders"));
+  sent.length = 0;
+  await w.refreshOrderRows_("acme", Array.from({ length: 101 }, (_, i) => "R" + i));
+  ok("more orders than one request takes is a full reload, not a getOrdersByIds", !sent.some(b => b.action === "getOrdersByIds") && sent.some(b => b.action === "getOrders"));
+
+  console.log("\n=== Orders: All shops patches its rows too ===");
+  await w.renderOrdersPage(app);
+  await wait(() => row("R1") && row("O1"));
+  const allR2 = row("R2"), allO1 = row("O1");
+  d1._raw.run("UPDATE orders SET manufacturedAt=? WHERE orderId='R1'", [recent]);
+  sent.length = 0;
+  await w.refreshOrderRows_("acme", ["R1"]);
+  ok("on All shops: that order alone is asked for, its row redrawn with its Shop cell, the other shops' rows untouched",
+    JSON.stringify(sent.map(b => b.action)) === '["getOrdersByIds"]' && row("R2") === allR2 && row("O1") === allO1 &&
+    row("R1").firstElementChild.textContent.trim() === "Acme" && !!row("R1").querySelector('td[data-stage-td="manufacturedAt"]').textContent.match(/\d/));
+  d1._raw.run("UPDATE orders SET voidedAt=? WHERE orderId='R1'", [recent]);
+  await w.refreshOrderRows_("acme", ["R1"]);
+  ok("…and the All-shops totals follow (a voided order leaves the list and the count)", !row("R1") && /^2 orders across/.test(d.getElementById("ordAllSummary").textContent.trim()) && row("O1") === allO1);
+  d1._raw.run("UPDATE orders SET voidedAt=NULL WHERE orderId='R1'");
+  await w.renderAdminOrders(app, org);
+  await wait(() => row("R1"));
+
+  console.log("\n=== Which actions patch, which reload ===");
+  const body = (name) => { const i = adminJs.indexOf("function " + name + "("); const j = adminJs.indexOf("\nfunction ", i + 10), k = adminJs.indexOf("\nasync function ", i + 10); return adminJs.slice(i, Math.min(j < 0 ? 1e9 : j, k < 0 ? 1e9 : k)); };
+  const patches = ["blankShippedFlow_", "completeOrders", "bulkSetFulfillmentStage", "bulkCancelLineItems", "bulkAddTracking", "bulkSetDueDate", "cancelLineItem",
+    "setLineItemRefund", "showRushFeeModal_", "deleteTransaction", "shipOrder", "markOrderPaidOnce_", "setFulfillmentStage", "showOrderDates_", "bulkEditCustomerInfo",
+    "createLocalSaleOnce_", "editOrder"];
+  const noFull = patches.filter(f => /refreshOrdersInPlace_\(|refreshAdminOrders\(|rerenderOrdersView\(/.test(body(f)));
+  ok("every single-order action patches its rows instead of reloading the list" + (noFull.length ? " — still reloading: " + noFull.join(", ") : ""), noFull.length === 0 &&
+    patches.every(f => /refreshOrderRows_\(|replaceOrderRows_\(|patchKnownOrders_\(|refreshLineRows_\(/.test(body(f))));
+  ok("rush fee and order dates draw from the order in the reply", /replaceOrderRows_\(orgId, \[saved\.order\]\)/.test(body("showRushFeeModal_")) && /replaceOrderRows_\(orgId, \[r\.order\]\)/.test(body("showOrderDates_")));
+  ok("the due date, customer details and a void are drawn from what the page knows", ["bulkSetDueDate", "bulkEditCustomerInfo", "deleteTransaction"].every(f => /patchKnownOrders_\(/.test(body(f))));
+  ok("the CSV import, the delivery check and Refresh still reload the whole list, on purpose", /showOrderCsvImportModal_\(orgId, f, \(\) => rerenderOrdersView\(\)\)/.test(adminJs) &&
+    /refreshOrdersInPlace_\(org\)/.test(body("ordersCheckTracking_")) && /onclick="rerenderOrdersView\(\)">Refresh/.test(adminJs) && /rerenderOrdersView\(\)/.test(body("onOrdersDateChange")));
+
   console.log("\n=== Products: show / hide refills the table in place; saving returns to the same place ===");
   await w.renderProductList(app, "acme");
   await wait(() => d.querySelector('tr[data-product-row="tee"]'));

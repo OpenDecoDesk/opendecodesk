@@ -129,6 +129,51 @@ test("an order walks every fulfillment step to completed", async ({ page, api })
   await expect(actionCell(page, id).getByRole("button", { name: "Reopen" })).toBeVisible();
 });
 
+// Review #62: an action on one order redraws only that order's rows. It asks for that order alone (getOrdersByIds),
+// never the whole list again (getOrders), and the other orders' rows are left as they are on the page.
+test("Mark as paid and a blank step redraw only that order's rows, without reloading the list", async ({ page, api }) => {
+  const vendor = uniq("Test Blank Co");
+  await api("saveVendor", { vendor: { name: vendor, forBlanks: true } });
+  const { shop, order } = await shopWithOrder(api, page);
+  const other = await placeOrder(page, shop, { customer: uniq("Other Customer") });
+  const id = order.orderId;
+  await ordersPage(page, shop);
+  await expect(orderRow(page, other.orderId)).toBeVisible();
+  // Every /api/orders request from here on, by action.
+  const actions = [];
+  page.on("request", (req) => {
+    if (req.method() !== "POST" || !/\/api\/orders(\?|$)/.test(req.url())) return;
+    try { const b = JSON.parse(req.postData() || "{}"); actions.push({ action: b.action, orderIds: b.orderIds }); } catch (e) { /* not JSON */ }
+  });
+  // A mark on the other order's row element: a redrawn row would lose it.
+  await orderRow(page, other.orderId).evaluate((el) => { el.dataset.e2eKept = "1"; });
+
+  await markPaidThroughPage(page, id);
+  await expect.poll(() => actions.map(a => a.action)).toContain("getOrdersByIds");
+  expect(actions.map(a => a.action)).toContain("markPaidManual");
+  expect(actions.map(a => a.action)).not.toContain("getOrders");
+  expect(actions.find(a => a.action === "getOrdersByIds").orderIds).toEqual([id]);
+  await expect(orderRow(page, other.orderId)).toHaveAttribute("data-e2e-kept", "1");
+
+  // Blank ordered: a blank step (per line, rolled up) is read back from the server — that order alone.
+  actions.length = 0;
+  await stageSelect(page, id).selectOption({ label: "blank ordered" });
+  const form = page.locator("#blankOrderForm");
+  await form.locator("#blankVendorSelect").selectOption({ label: vendor });
+  await form.getByRole("button", { name: "Mark blank ordered" }).click();
+  await expect(form).toHaveCount(0);
+  await expect(stageCell(page, id, "blankOrderedAt")).toContainText(vendor);
+  await expect.poll(() => actions.map(a => a.action)).toContain("getOrdersByIds");
+  expect(actions.map(a => a.action)).toContain("setFulfillmentStage");
+  expect(actions.map(a => a.action)).not.toContain("getOrders");
+  await expect(orderRow(page, other.orderId)).toHaveAttribute("data-e2e-kept", "1");
+  // The redrawn row is in the page's own list too: Refresh (the full reload, on purpose) shows the same.
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => actions.map(a => a.action)).toContain("getOrders");
+  await expect(stageCell(page, id, "blankOrderedAt")).toContainText(vendor);
+  await expect(orderRow(page, id)).toContainText(PAID);
+});
+
 // ---- payments --------------------------------------------------------------------------------------------
 test("Payments: a partial Venmo payment, the rest by Zelle, then a cash refund", async ({ page, api }) => {
   const { shop, order } = await shopWithOrder(api, page, { items: [{ name: "Sample Tee", qty: 2 }] });

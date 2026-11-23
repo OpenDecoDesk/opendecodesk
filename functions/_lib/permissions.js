@@ -90,7 +90,7 @@ const BY_FN = {
   "home.counts": { read: ["getDashboard"] },
   "costs.view": { read: ["analyzePricing", "getPricingSettings"] },
   "orders.details": {
-    read: ["getOrders", "getOrdersAllShops", "getOpenOrders", "getOrderItemFiles", "getOrderItemDesigns", "listDesignVerifications"],
+    read: ["getOrders", "getOrdersByIds", "getOrdersAllShops", "getOpenOrders", "getOrderItemFiles", "getOrderItemDesigns", "listDesignVerifications"],
     edit: ["updateCustomerInfo", "editOrder", "updateOrderDate", "setOrderDates", "setOrderDueDate", "bulkSetDueDate", "refreshOrderFromCatalog",
       "saveOrderItemFile", "saveOrderItemDesign", "createLocalSale", "sendDesignVerification"],
     full: ["deleteOrderItemFile", "cancelLineItem", "bulkCancelLineItems", "deleteOrder", "voidOrder"] },

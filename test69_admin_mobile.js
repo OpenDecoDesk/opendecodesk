@@ -17,7 +17,7 @@ const order = (orderId, cust, d, items, extra) => Object.assign({ orderId, custo
 
 async function boot(width){
   const adminJs = read("public/admin.js");
-  const listeners = [];
+  const listeners = [], sent = [];
   const orders = [
     order("PRIME-2", "Sam <b>Gamgee</b>", 1, [item(1, "Polo", "shirt", "L", 2, 32), item(2, "Cap", "cap", "", 1, 24, { personalized: true, persName: "SAM" })], { paid: false, paymentMethod: "Venmo", balanceDue: 88, amountReceived: 0 }),
     order("PRIME-1", "Frodo", 3, [item(3, "Quarter-zip", "sweatshirt", "M", 1, 48), item(4, "Cap", "cap", "", 1, 24, { cancelDate: iso(2), cancelReason: "Changed mind" })],
@@ -32,10 +32,12 @@ async function boot(width){
         addEventListener: (_, fn) => listeners.push(fn), removeEventListener(){} }; };
       win.fetch = async (url, opts) => {
         const b = opts && opts.body ? JSON.parse(opts.body) : {};
+        if (b.action) sent.push(b);
         const ok = (o) => ({ ok: true, status: 200, json: async () => Object.assign({ status: "ok" }, o) });
         if (String(url).includes("/api/catalog")) return ok({ status: "admin" });
         switch (b.action) {
           case "getOrders": return ok({ orders: JSON.parse(JSON.stringify(b.org === "prime" ? orders : [])) });
+          case "getOrdersByIds": return ok({ orders: JSON.parse(JSON.stringify(b.org === "prime" ? orders.filter(o => b.orderIds.includes(o.orderId)) : [])) });
           case "getOrdersAllShops": return ok({ shops: [{ orgId: "prime", name: "Example League", orders: JSON.parse(JSON.stringify(orders)), verifications: [] }] });
           case "listDesignVerifications": return ok({ verifications: [] });
           case "getBlanks": return ok({ blanks: [{ id: 1, name: "ST520", productType: "shirt", sizes: [{ size: "L", quantity: 2 }] }] });
@@ -54,7 +56,7 @@ async function boot(width){
   await new Promise(res => setTimeout(res, 150));
   await w.loadAdminScript();
   w.eval('adminKey = "cookie"; adminOrgs = [{orgId:"prime", name:"Example League"}, {orgId:"rec", name:"REC"}]; window._ordersFilter = {from:"", to:""};');
-  return { w, app: w.document.getElementById("app"), listeners, tick: (ms = 40) => new Promise(res => setTimeout(res, ms)) };
+  return { w, app: w.document.getElementById("app"), listeners, orders, sent, tick: (ms = 40) => new Promise(res => setTimeout(res, ms)) };
 }
 
 (async () => {
@@ -62,7 +64,7 @@ async function boot(width){
     const css = read("public/index.html");
 
     console.log("=== Orders on a phone: cards, not the table ===");
-    let { w, app, listeners, tick } = await boot(375);
+    let { w, app, listeners, orders, sent, tick } = await boot(375);
     w.renderAdminOrders(app, { orgId: "prime", name: "Example League" });
     await tick(80);
     const cards = () => [...app.querySelectorAll(".order-card")];
@@ -98,6 +100,39 @@ async function boot(width){
     w.updateOrderCache("prime", "PRIME-2", Object.assign({}, cached, { discountAmount: 3, discountNote: "Loyalty" }));
     w.updateOrderTableRow("prime", "PRIME-2", w._ordersCache.prime.find(o => o.orderId === "PRIME-2"));
     console.log("updateOrderTableRow (payments/discount) refreshes the card too:", /Loyalty/.test(cards().find(c => c.dataset.orderCard === "PRIME-2").textContent));
+
+    console.log("\n=== An action on one order redraws only its card (review #62) ===");
+    const card = (id) => cards().find(c => c.dataset.orderCard === id);
+    const p1 = card("PRIME-1"), p2 = card("PRIME-2");
+    console.log("(PRIME-2 still ticked):", p2.querySelector(".order-select").checked === true);
+    Object.assign(orders[0], { discountAmount: 4, discountNote: "Team rate", balanceDue: 84 });
+    sent.length = 0;
+    await w.refreshOrderRows_("prime", ["PRIME-2"]);
+    console.log("one request, for that order alone (no list reload):", JSON.stringify(sent.map(b => b.action)) === '["getOrdersByIds"]' && JSON.stringify(sent[0].orderIds) === '["PRIME-2"]');
+    console.log("…its card is rebuilt with the change, still ticked, and flashes; the other card is the same element:",
+      card("PRIME-2") !== p2 && /Team rate/.test(card("PRIME-2").textContent) && card("PRIME-2").querySelector(".order-select").checked === true &&
+      card("PRIME-2").classList.contains("row-flash") && card("PRIME-1") === p1 && !p1.classList.contains("row-flash"));
+    console.log("…the bulk bar still counts both ticked orders:", w.document.getElementById("bulkBar").style.display === "" && w.getSelectedOrderIds().slice().sort().join() === "PRIME-1,PRIME-2" &&
+      /2 orders selected/.test(w.document.getElementById("bulkBarCount").textContent));
+    // A new order, the newest: its card goes in first.
+    orders.unshift(order("PRIME-3", "Merry", 0, [item(5, "Beanie", "cap", "", 1, 20)]));
+    sent.length = 0;
+    await w.refreshOrderRows_("prime", ["PRIME-3"]);
+    console.log("a new order's card goes in first, the others untouched:", cards().map(c => c.dataset.orderCard).join() === "PRIME-3,PRIME-2,PRIME-1" &&
+      card("PRIME-1") === p1 && sent.length === 1 && w._ordersCache.prime.length === 3);
+    // Voided: the order now counts as cancelled, hidden unless "Include cancelled" is ticked.
+    orders.find(o => o.orderId === "PRIME-1").voidedAt = new Date().toISOString();
+    await w.refreshOrderRows_("prime", ["PRIME-1"]);
+    console.log("a voided order's card leaves the list (cancelled are hidden), the cache keeps it:", !card("PRIME-1") && cards().length === 2 &&
+      !!w._ordersCache.prime.find(o => o.orderId === "PRIME-1").voidedAt);
+    // A miss: the server doesn't give the order back — the whole list is reloaded.
+    sent.length = 0;
+    await w.refreshOrderRows_("prime", ["PRIME-404"]);
+    await tick(80);
+    console.log("an order the server doesn't give back falls back to reloading the list:", sent[0].action === "getOrdersByIds" && sent.some(b => b.action === "getOrders") && cards().length === 2);
+    orders.shift(); delete orders.find(o => o.orderId === "PRIME-1").voidedAt;
+    Object.assign(orders[0], { discountAmount: 0, discountNote: "", balanceDue: 88 });
+    await w.refreshOrdersInPlace_({ orgId: "prime", name: "Example League" });
 
     console.log("\n=== All shops on a phone ===");
     await w.renderOrdersPage(app);

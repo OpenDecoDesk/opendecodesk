@@ -14,15 +14,14 @@
  *
  * ---- TRANSPORT ----
  * The image bytes are the raw POST body (Content-Type = the image type);
- * metadata rides in headers/query (admin passphrase in X-Admin-Key, org in
- * ?org=). Deliberately NOT multipart/form-data — multipart file parsing on
+ * metadata rides in headers/query (org in ?org=). Deliberately NOT multipart/form-data — multipart file parsing on
  * the Workers runtime proved unreliable, and a raw body streams to R2 with
  * no parsing ambiguity.
  *
  * ---- AUTH ----
  * Same gate as every other admin write action: must arrive on the admin
- * subdomain (see hostConfig.js) AND pass requireAdmin (the session cookie,
- * or the passphrase in the X-Admin-Key header).
+ * subdomain (see hostConfig.js) AND pass requireAdmin (the session cookie;
+ * the setup passphrase is no key here).
  *
  * ---- SETUP ----
  * 1. Create an R2 bucket (e.g. `opendecodesk-images`).

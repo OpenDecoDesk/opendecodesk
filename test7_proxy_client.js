@@ -101,6 +101,7 @@ function lastToastText(win){
   // ---- Admin subdomain: org picker -> per-org orders table ----
   const adminCalls = [];
   const paidOrderIds = new Set();
+  let signedIn = false;
   const adminDom = new JSDOM(html, {
     runScripts: "dangerously", resources: new AdminResourceLoader(),
     url: "https://admin.example.com/x.html", pretendToBeVisual:true,
@@ -115,8 +116,18 @@ function lastToastText(win){
           return { ok: true, json: async () => ({status:"admin"}) };
         }
 
+        // Sign-in, as admin-session.js answers it: the right password gives a session cookie (HttpOnly, so the page
+        // only hears "cookie"); every later request is let through by that cookie, never by a key in its body.
+        if(url === "/api/admin-session"){
+          if(body && body.key === "proxy-passphrase"){
+            signedIn = true;
+            return { ok: true, json: async () => ({status:"ok", session:"cookie", expires:new Date(Date.now() + 3600e3).toISOString(), pending:null, user:{name:"Owner", email:"owner@example.test", role:"admin"}}) };
+          }
+          return { ok: false, status: 401, json: async () => ({status:"error", message:"Unauthorized"}) };
+        }
+
         if(body && body.action === "listOrgs"){
-          if(body.key !== "proxy-passphrase") return { ok: true, json: async () => ({status:"error", message:"Unauthorized"}) };
+          if(!signedIn) return { ok: true, json: async () => ({status:"error", message:"Unauthorized"}) };
           return { ok: true, json: async () => ({status:"ok", orgs:[
             {orgId:"league-101", name:"Example League 101"},
             {orgId:"rec", name:"Example Crew Co"}
@@ -124,7 +135,7 @@ function lastToastText(win){
         }
 
         if(body && body.action === "getOrders"){
-          if(body.key !== "proxy-passphrase") return { ok: true, json: async () => ({status:"error", message:"Unauthorized"}) };
+          if(!signedIn) return { ok: true, json: async () => ({status:"error", message:"Unauthorized"}) };
           return { ok: true, json: async () => ([
             {orderId:"X1", orgId:body.org, customerName:"Proxy Test", contact:"p@example.com", placedAt:new Date().toISOString(), total:27, paid:paidOrderIds.has("X1"), receivedEmailAt:"2026-07-16T12:00:00.000Z", confirmedEmailAt: paidOrderIds.has("X1") ? "2026-07-17T09:00:00.000Z" : "", items:[{name:"Option C — Premium Performance", type:"shirt", size:"L", qty:1, unitPrice:27, personalized:false, persName:"", lineTotal:27}]},
             // Simulates a malicious orderId — real orders can never actually
@@ -136,18 +147,18 @@ function lastToastText(win){
         }
 
         if(body && body.action === "markPaidManual"){
-          if(body.key !== "proxy-passphrase") return { ok: true, json: async () => ({status:"error", message:"Unauthorized"}) };
+          if(!signedIn) return { ok: true, json: async () => ({status:"error", message:"Unauthorized"}) };
           paidOrderIds.add(body.orderId);
           return { ok: true, json: async () => ({status:"ok", rowsUpdated:1}) };
         }
 
         if(body && body.action === "createTestTransaction"){
-          if(body.key !== "proxy-passphrase") return { ok: true, json: async () => ({status:"error", message:"Unauthorized"}) };
+          if(!signedIn) return { ok: true, json: async () => ({status:"error", message:"Unauthorized"}) };
           return { ok: true, json: async () => ({status:"ok", orderId:"TEST-999", checkoutUrl:"https://checkout.stripe.com/pay/cs_test_admintxn"}) };
         }
 
         if(body && body.action === "resendEmail"){
-          if(body.key !== "proxy-passphrase") return { ok: true, json: async () => ({status:"error", message:"Unauthorized"}) };
+          if(!signedIn) return { ok: true, json: async () => ({status:"error", message:"Unauthorized"}) };
           return { ok: true, json: async () => ({status:"ok", resent: paidOrderIds.has(body.orderId) ? "confirmed" : "received"}) };
         }
 
@@ -179,7 +190,8 @@ function lastToastText(win){
   const pickerHtml = adminWindow.document.body.innerHTML;
   console.log("Catalog endpoint called with no org data returned to the picker (no client list leaked before auth):", adminCalls.some(c => c.url.startsWith("/api/catalog")));
   console.log("Signing in opens Home with both shops loaded, gated behind the passphrase prompt:", pickerHtml.includes("home-tile") && adminWindow.eval("adminOrgs.map(o => o.name).join()").includes("Example League 101") && adminWindow.eval("adminOrgs.map(o => o.name).join()").includes("Example Crew Co"));
-  console.log("Client sent the admin passphrase to listOrgs:", adminCalls.some(c => c.body && c.body.action === "listOrgs" && c.body.key === "proxy-passphrase"));
+  console.log("The password went to the sign-in endpoint only; listOrgs carried no password:", adminCalls.some(c => c.url === "/api/admin-session" && c.body.key === "proxy-passphrase") &&
+    adminCalls.some(c => c.body && c.body.action === "listOrgs") && !adminCalls.some(c => c.url === "/api/orders" && c.body && c.body.key === "proxy-passphrase"));
 
   console.log("\n=== Admin subdomain: selecting a shop reuses the passphrase and shows its orders ===");
   adminWindow.selectAdminOrg("league-101");
@@ -188,7 +200,7 @@ function lastToastText(win){
   console.log("Admin shows Proxy Test customer for the selected shop:", ordersHtml.includes("Proxy Test"));
   const getOrdersCall = adminCalls.find(c => c.body && c.body.action === "getOrders");
   console.log("getOrders call scoped to the selected org:", getOrdersCall.body.org === "league-101");
-  console.log("Client sent the admin passphrase:", getOrdersCall.body.key === "proxy-passphrase");
+  console.log("Client never sends the password with it (the session cookie signs it in):", getOrdersCall.body.key !== "proxy-passphrase");
   console.log("'Mark as paid' button shown for the unpaid order:", ordersHtml.includes("Mark as paid") && ordersHtml.includes("Unpaid"));
   console.log("Received-email column shows a checkmark + date for X1 (it was sent):", ordersHtml.includes("✓ 7/16/2026"));
   console.log("Confirmed-email column shows '—' for X1 (not paid yet, never sent):", />—<\/td>/.test(ordersHtml));
@@ -204,7 +216,7 @@ function lastToastText(win){
   await new Promise(r=>setTimeout(r,150));
   const markPaidCall = adminCalls.find(c => c.body && c.body.action === "markPaidManual");
   console.log("markPaidManual call sent the right org and orderId:", markPaidCall.body.org === "league-101" && markPaidCall.body.orderId === "X1");
-  console.log("Client sent the admin passphrase:", markPaidCall.body.key === "proxy-passphrase");
+  console.log("Client never sends the password with it (the session cookie signs it in):", markPaidCall.body.key !== "proxy-passphrase");
   const afterHtml = adminWindow.document.getElementById("app").innerHTML;
   console.log("Table re-rendered to show Paid:", afterHtml.includes(">Paid<"));
   console.log("Confirmed-email column now shows a checkmark + date (mock reflects the new paid status):", afterHtml.includes("✓ 7/17/2026"));
@@ -226,7 +238,7 @@ function lastToastText(win){
   await new Promise(r=>setTimeout(r,50));
   const testTxnCall = adminCalls.find(c => c.body && c.body.action === "createTestTransaction");
   console.log("createTestTransaction call sent the right org and amount:", testTxnCall.body.org === "league-101" && testTxnCall.body.amount === 5);
-  console.log("Client sent the admin passphrase:", testTxnCall.body.key === "proxy-passphrase");
+  console.log("Client never sends the password with it (the session cookie signs it in):", testTxnCall.body.key !== "proxy-passphrase");
   console.log("Opened the real Stripe checkout URL returned by the server:", openedUrls.includes("https://checkout.stripe.com/pay/cs_test_admintxn"));
 
   console.log("\n=== Admin subdomain: button says Send vs Resend based on whether that email was ever actually sent ===");
@@ -239,7 +251,7 @@ function lastToastText(win){
   await adminWindow.resendEmail("league-101", "X1");
   const resendCallPaid = adminCalls.filter(c => c.body && c.body.action === "resendEmail").pop();
   console.log("Resend for the paid order sent the right org/orderId:", resendCallPaid.body.org === "league-101" && resendCallPaid.body.orderId === "X1");
-  console.log("Client sent the admin passphrase:", resendCallPaid.body.key === "proxy-passphrase");
+  console.log("Client never sends the password with it (the session cookie signs it in):", resendCallPaid.body.key !== "proxy-passphrase");
   console.log("Confirms the 'confirmed' email was sent (server decided based on X1's real paid status):", lastToastText(adminWindow) === "“Payment received” email sent.");
 
   await adminWindow.resendEmail("league-101", "X2");

@@ -115,10 +115,16 @@ const BASE_ENV = {
   PROXY_ADMIN_PASSPHRASE: "proxy-passphrase",
   STRIPE_SECRET_KEY: "sk_test_fake"
 };
-// These tests authenticate with the passphrase and carry a stub DB; no 2FA secret is stored.
+// These tests carry a stub DB; no 2FA secret is stored.
 global.getSettingRaw = async () => null;
-// …and no users yet, so the installer's passphrase is the way in.
 global.getBootstrapState = async () => ({ userCount: 0, admins: [] });
+// Every request comes from a signed-in admin's page: the session cookie is the only credential the admin API takes
+// (the setup passphrase still sent as `key` below opens nothing on its own). A request whose key is "wrong-guess"
+// comes with no session at all: someone who isn't signed in.
+const SESSION_TOKEN = "sess_" + "cd".repeat(24);
+const SESSION_HASH = require("crypto").createHash("sha256").update(SESSION_TOKEN).digest("hex");
+global.getAdminSession = async (db, hash) => hash === SESSION_HASH
+  ? { expiresAt: new Date(Date.now() + 3600e3).toISOString(), userId: 1, pending: null, user: { id: 1, email: "owner@example.test", name: "Owner", role: "admin", status: "active" } } : null;
 
 let _ctxIp = 0;
 function makeContext(bodyObj, env, url){
@@ -129,7 +135,7 @@ function makeContext(bodyObj, env, url){
     request: {
       json: async () => bodyObj,
       url: url || "https://example.com/api/orders",
-      headers: { get: () => ip }
+      headers: { get: (h) => ({ "cf-connecting-ip": ip, cookie: bodyObj && bodyObj.key === "wrong-guess" ? "" : "__Host-odd_admin=" + SESSION_TOKEN, origin: new URL(url || "https://example.com/api/orders").origin })[String(h).toLowerCase()] || null }
     },
     env: env || BASE_ENV,
     waitUntil: (p) => { if (p && typeof p.catch === "function") p.catch(() => {}); },

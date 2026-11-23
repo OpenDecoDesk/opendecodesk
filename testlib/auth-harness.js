@@ -24,7 +24,8 @@ const ORIGIN = "https://admin.example.com";
 const prelude = (realLimits, realDomains) => strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/db.js")) + "\n" + strip(read("functions/_lib/totp.js")) + "\n" +
   (realLimits ? strip(read("functions/_lib/rateLimit.js")) + "\n" :
   "const rateLimitCheck = async () => ({ blocked: false }), rateLimited = async () => ({ blocked: false }), rateLimitResponse = () => null, rateLimitHit = async (env, bucket, request, windowSeconds) => { if (!windowSeconds) __hits.push(bucket); return 0; };\n" +
-  "const rateLimitCheckGlobal = async () => ({ blocked: false }), rateLimitHitGlobal = async () => {};\n") +
+  "const rateLimitCheckGlobal = async () => ({ blocked: false }), rateLimitHitGlobal = async () => {}, rateLimitMark = async () => {}, rateLimitMarked = async () => false;\n") +
+  strip(read("functions/_lib/turnstile.js")) + "\n" +
   "const accessEnabled = () => false, verifyAccess = async () => ({ ok: true }); const getCatalogData = async () => ({ subdomainMap: {}, business: {} });\n" +
   strip(read("functions/_lib/permissions.js")) + "\n" + strip(read("functions/_lib/adminAuth.js")) + "\n" + strip(read("functions/_lib/cloudflareSetup.js")) + "\n" +
   (realDomains ? strip(read("functions/_lib/customDomain.js")) + "\n" : "const ensureWorkerHostname = async () => ({ steps: [] }), ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({});\n");
@@ -66,7 +67,7 @@ async function makeAuth({ d1, passphrase = "abcd-efgh-jkmn-pqrs-tuvw-xyz2", real
   let ordersPost = null;
   const orders = async (body, cookie, opts) => {
     if (!ordersPost) ordersPost = new Function("__hits", prelude(realLimits, realDomains) + strip(read("functions/_lib/catalogValidation.js")) + "\n" + strip(read("functions/_lib/quoteToken.js")) + "\n" +
-      "const verifyTurnstile = async () => ({ ok: true }); const invalidateCatalogVersionCache = () => {}; const selectBox = () => null;\n" +
+      "const invalidateCatalogVersionCache = () => {}; const selectBox = () => null;\n" +
       strip(read("functions/_lib/setupStatus.js")) + "\n" + strip(read("functions/_lib/vendorCredentials.js")) + "\n" + strip(read("functions/_lib/smtp.js")) + "\n" +
       strip(read("functions/_lib/email.js")) + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")(hits);
     try { return await answer(await ordersPost({ request: request("/api/orders", body, Object.assign({ cookie }, opts)), env, waitUntil: (p) => Promise.resolve(p).catch(() => {}) })); }

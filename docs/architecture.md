@@ -170,7 +170,9 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
   very little CPU per request); the key is what protects them.
 - **The installer's passphrase** (`PROXY_ADMIN_PASSPHRASE`) opens the admin only while no active
   admin has a usable password: on a new install, where it creates the first admin, and after the
-  secret has been replaced to recover a locked-out install, which voids every stored password.
+  secret has been replaced to recover a locked-out install, which voids every stored password. It
+  works only on the sign-in page, which gives a session that must set up the account first; sent
+  with an API request it opens nothing.
 - **A session cookie.** Sign-in sets `__Host-odd_admin`: HttpOnly, Secure, SameSite=Strict, 24
   hours. The token is never returned to page JavaScript; the database stores only its SHA-256,
   with the user it belongs to. Requests using the cookie must also carry a same-origin `Origin`

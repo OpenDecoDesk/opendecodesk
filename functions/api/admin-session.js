@@ -21,6 +21,11 @@
  * recovery case that admin's two-step sign-in is cleared too and every session is revoked.
  * Either way the session is pending "account": a name, an email and a new password come first.
  *
+ * Too many failed sign-ins (adminAuth.js signInBudgetBlocked): one address is refused past its share; past the
+ * whole site's budget, or one account's, an address that hasn't signed in here in the last 30 days is asked for a
+ * Turnstile check first — { status:"error", code:"turnstile_required", siteKey } (429), answered by posting again
+ * with { turnstileToken } — or, on a site without Turnstile keys, refused until the window ends.
+ *
  * Two-step flow:
  *   1. POST { email, key } — if a code is needed, the server answers { status:"totp_required" }.
  *   2. POST { email, key, totpCode } — both are checked and the session is issued.
@@ -43,7 +48,7 @@ import {
   sessionCookieHeader, clearSessionCookieHeader, SESSION_COOKIE, SESSION_TTL_SEC, readSessionCookie,
   bootstrapState, rememberSecret, verifyUserPassword, pendingFor, revokeAllSessions, weakSetupPassword,
   looksLikeRecoveryCode, spendRecoveryCode, revokeUserSessionsFor, sessionUserId,
-  signInBudgetBlocked, countSignInFailure,
+  signInBudgetBlocked, countSignInFailure, noteSignInAddress,
 } from "../_lib/adminAuth.js";
 import { accessEnabled, verifyAccess } from "../_lib/access.js";
 import { verifyTOTP }         from "../_lib/totp.js";
@@ -78,17 +83,20 @@ export async function onRequestPost(context){
 
   const rl = await rateLimited(env, "admin_auth", request, 10);
   if(rl.blocked) return rateLimitResponse(rl.retryAfter);
-  // …this address's share of the install-wide budget of FAILED sign-ins, and that budget (adminAuth.js).
-  const spent = await signInBudgetBlocked(env, request);
+
+  let body;
+  try{ body = await request.json(); }
+  catch(e){ return jsonResponse({status:"error", message:"Bad request"}, 400); }
+  if(!body || typeof body !== "object") return jsonResponse({status:"error", message:"Bad request"}, 400);
+
+  // …this address's share of the install-wide budget of FAILED sign-ins, that budget and this account's
+  // (adminAuth.js): past them, a Turnstile check — unless this address signed in here lately.
+  const spent = await signInBudgetBlocked(env, request, { email: body.email, turnstileToken: body.turnstileToken });
   if(spent) return spent;
   if(accessEnabled(env)){
     const acc = await verifyAccess(env, request);
     if(!acc.ok) return jsonResponse({status:"error", message:acc.reason}, 403);
   }
-
-  let body;
-  try{ body = await request.json(); }
-  catch(e){ return jsonResponse({status:"error", message:"Bad request"}, 400); }
 
   const email = String(body.email || "").trim().toLowerCase();
   const key   = String(body.key || "");
@@ -100,7 +108,7 @@ export async function onRequestPost(context){
   };
   const refuse = async (reason, message) => {
     await noteFailure(env, reason, request);
-    await countSignInFailure(env, request);
+    await countSignInFailure(env, request, email);
     return jsonResponse({status:"error", message: message || "Unauthorized"}, 401);
   };
 
@@ -195,6 +203,10 @@ export async function onRequestPost(context){
     console.error("admin-session: could not issue a session:", e);
     return jsonResponse({status:"error", message:"Session storage unavailable — try again."}, 503);
   }
+  // This address got in: for 30 days it isn't asked for a check when the site's failure budget is spent. Never a
+  // reason to refuse the sign-in.
+  try{ await noteSignInAddress(env, request); }
+  catch(e){ console.error("admin-session: could not note the address:", e); }
 
   // A sign-in on admin.<root domain> (not the workers.dev address) proves the domain works: noted
   // once, so the next deploy may switch workers.dev off. Never a reason to refuse the sign-in.

@@ -931,6 +931,64 @@ async function blankShippedFlow_(orgId, orders){
   }catch(e){ showToast("Could not reach the server.", true); }
 }
 
+// ---- The bot check at sign-in (review #1) ----
+// After many failed sign-ins on the site (or on one account), the server asks for a Turnstile check before it looks
+// at a password — unless this address signed in here in the last 30 days (adminAuth.js signInBudgetBlocked). It
+// answers { code: "turnstile_required", siteKey }; the check is shown in a window of its own and the sign-in is sent
+// again with its token. The script loads only when asked for.
+let _adminTurnstileLoad = null;
+function adminLoadTurnstile_(){
+  if(_adminTurnstileLoad) return _adminTurnstileLoad;
+  _adminTurnstileLoad = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+    s.async = true;
+    s.onload = () => resolve(window.turnstile);
+    s.onerror = () => { _adminTurnstileLoad = null; reject(new Error("The check couldn't load.")); };
+    document.head.appendChild(s);
+  });
+  return _adminTurnstileLoad;
+}
+// Shows the check; resolves its token, or "" on Cancel.
+function adminTurnstileCheck_(siteKey, message){
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "admin-pass-overlay";
+    overlay.innerHTML = `
+      <div class="admin-pass-box">
+        <div data-dialog-title style="font-weight:700;font-size:16px;margin-bottom:6px;">One more step to sign in</div>
+        <p style="font-size:13px;margin:4px 0 12px;color:#666;">${escapeHtml(message || "Complete the check to go on.")}</p>
+        <div class="admin-ts-box" style="min-height:70px;"></div>
+        <div class="admin-ts-err" role="alert" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:6px;"></div>
+        <div class="admin-pass-actions"><button type="button" class="admin-pass-cancel">Cancel</button></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    let done = false;
+    const finish = (value) => { if(done) return; done = true; overlay.remove(); resolve(value); };
+    const err = (text) => { overlay.querySelector(".admin-ts-err").textContent = text; };
+    overlay.querySelector(".admin-pass-cancel").addEventListener("click", () => finish(""));
+    dialogize_(overlay, { onEscape: () => finish("") });
+    adminLoadTurnstile_().then(ts => ts.render(overlay.querySelector(".admin-ts-box"), {
+      sitekey: siteKey,
+      callback: (token) => finish(token),
+      "error-callback": () => err("The check didn't work. Cancel, then sign in again."),
+      "expired-callback": () => err("The check ran out of time. Cancel, then sign in again."),
+    })).catch(() => err("The check couldn't load. Check the connection, then Cancel and sign in again."));
+  });
+}
+// POST /api/admin-session, passing the bot check when the server asks for one (twice at most). Answers what the
+// server said, or { code: "cancelled" } when the check was cancelled. Throws when the server can't be reached.
+async function adminSessionPost_(body){
+  for(let tries = 0; ; tries++){
+    const res = await fetch("/api/admin-session", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({ status: "error", message: "Server error (HTTP " + res.status + ")" }));
+    if(!(data && data.code === "turnstile_required" && data.siteKey) || tries >= 2) return data;
+    const token = await adminTurnstileCheck_(data.siteKey, data.message);
+    if(!token) return { status: "error", code: "cancelled", message: "" };
+    body = Object.assign({}, body, { turnstileToken: token });
+  }
+}
+
 // 6-digit TOTP prompt — same overlay style as promptAdminPassphrase().
 // Shown by adminLogin() when the server responds {status:"totp_required"}.
 function promptTOTPCode(){
@@ -973,10 +1031,7 @@ function promptTOTPCode(){
 // confirmed. A session that has already ended falls back to the ordinary sign-in.
 async function adminConfirmIdentity_(heading){
   if(!adminKey){ adminKey = (await adminLogin()) || ""; return !!adminKey; }
-  const post = async (body) => {
-    const res = await fetch("/api/admin-session", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(Object.assign({ verify: true }, body)) });
-    return res.json().catch(() => ({ status: "error", message: "Server error (HTTP " + res.status + ")" }));
-  };
+  const post = (body) => adminSessionPost_(Object.assign({ verify: true }, body));
   let error = "";
   for(let tries = 0; tries < 5; tries++){
     const key = await promptAdminPassphrase({ heading: heading || "Confirm it's you", error,
@@ -993,6 +1048,7 @@ async function adminConfirmIdentity_(heading){
       }
     }catch(e){ showToast("Could not reach the server.", true); return false; }
     if(data && data.status === "ok" && data.verified) return true;
+    if(data && data.code === "cancelled") return false;
     if(data && data.code === "no_session"){
       clearAdminAuth();
       showToast("Your session ended — sign in again.", true);
@@ -1030,32 +1086,24 @@ async function adminLoginOnce_(){
   // 3. POST to /api/admin-session (email + password first)
   let data;
   try{
-    const res = await fetch("/api/admin-session", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({email, key})
-    });
-    data = await res.json();
+    data = await adminSessionPost_({email, key});
   }catch(e){
     showToast("Login request failed — check your connection.", true);
     return "";
   }
+  if(data && data.code === "cancelled") return "";
 
   // 4. Two-step sign-in — prompt for the code and retry
   if(data && data.status === "totp_required"){
     const totpCode = await promptTOTPCode();
     if(!totpCode) return "";
     try{
-      const res2 = await fetch("/api/admin-session", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({email, key, totpCode})
-      });
-      data = await res2.json();
+      data = await adminSessionPost_({email, key, totpCode});
     }catch(e){
       showToast("Login request failed — check your connection.", true);
       return "";
     }
+    if(data && data.code === "cancelled") return "";
   }
 
   if(data && data.status === "ok"){
@@ -1068,8 +1116,9 @@ async function adminLoginOnce_(){
       saveAdminSession("cookie", data.expires);
       return "cookie";
     }
-    // Fallback: server accepted passphrase but issued no token (shouldn't happen)
-    return key;
+    // A session is the only way in (the server never takes a password as a key).
+    showToast("Sign-in didn't complete — try again.", true);
+    return "";
   }
 
   showToast(data && data.message === "Unauthorized" ? "That email and password don't match." : ((data && data.message) || "Login failed."), true);
@@ -11694,8 +11743,8 @@ function stockNewComboHtml_(f) {
       <input type="number" min="1" step="1" id="fsNewQty" placeholder="Qty" style="width:64px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;text-align:right;" aria-label="How many made">
       <button type="button" class="admin-btn" id="fsNewMake" style="padding:3px 8px;font-size:12px;">Make for stock</button>
       <span style="color:#999;">or</span>
-      <input type="number" min="0" step="1" id="fsNewCount" placeholder="Count" style="width:64px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;text-align:right;" aria-label="Counted on hand">
-      <button type="button" class="admin-btn" id="fsNewCorrect" style="padding:3px 8px;font-size:12px;background:#fff;color:#333;border:1px solid #ccc;">Enter count</button>
+      <input type="number" min="0" step="1" id="fsNewCount" placeholder="Count" style="width:64px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;text-align:right;" aria-label="Counted on hand" data-need-form="inventory.blanks:full">
+      <button type="button" class="admin-btn" id="fsNewCorrect" data-need="inventory.blanks:full" style="padding:3px 8px;font-size:12px;background:#fff;color:#333;border:1px solid #ccc;">Enter count</button>
     </div></div>`;
 }
 function wireStockNewCombo_(ov, f, { orgId, productId, err, money, reload }) {
@@ -11760,7 +11809,8 @@ function wireStockNewCombo_(ov, f, { orgId, productId, err, money, reload }) {
 async function showStockModal(orgId, productId, productName, pricingMode, sizePricing) {
   const td = "padding:6px 8px;border-bottom:1px solid #eee;font-size:13px;vertical-align:top;", num = "text-align:right;font-variant-numeric:tabular-nums;";
   const inp = "width:64px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;text-align:right;";
-  const money = (n) => "$" + Number(n || 0).toFixed(2);
+  // A cost the server leaves out (a role without costs.view that can only look: orders.js stripCosts_) shows as —.
+  const money = (n) => n == null ? "—" : "$" + Number(n).toFixed(2);
   const { ov, close } = inventoryModal_("Finished stock — " + escapeHtml(productName || productId), `
     <div style="font-size:12px;color:#666;margin-bottom:10px;">Pieces already decorated for this shop, ready to sell. <b>Make for stock</b> takes the blanks out of blank inventory — and the transfers each piece carries (printed transfers, the reorder QR, a picked transfer graphic) out of transfer stock — at their cost;
       an order for a stocked size is filled from here automatically (no blanks or making steps), and the pieces are <b>set aside</b> until the order is made.</div>
@@ -11802,8 +11852,8 @@ async function showStockModal(orgId, productId, productName, pricingMode, sizePr
         <td style="${td}white-space:nowrap;">
           <div style="margin-bottom:4px;"><input type="number" min="1" step="1" class="fsMakeQty" placeholder="Qty" style="${inp}" ${r.blank ? "" : "disabled"} aria-label="How many made, ${escapeHtml(aria)}">
             <button type="button" class="admin-btn fsMake" data-need="inventory.blanks:edit" style="padding:3px 8px;font-size:12px;" ${r.blank ? "" : "disabled title=\"Link this size to a blank on the product first\""}>Make for stock</button></div>
-          <div><input type="number" min="0" step="1" class="fsCount" value="${r.onHand}" style="${inp}" aria-label="Counted on hand, ${escapeHtml(aria)}">
-            <button type="button" class="admin-btn fsCorrect" data-need="inventory.blanks:edit" style="padding:3px 8px;font-size:12px;background:#fff;color:#333;border:1px solid #ccc;">Correct count</button></div>
+          <div><input type="number" min="0" step="1" class="fsCount" value="${r.onHand}" style="${inp}" aria-label="Counted on hand, ${escapeHtml(aria)}" data-need-form="inventory.blanks:full">
+            <button type="button" class="admin-btn fsCorrect" data-need="inventory.blanks:full" style="padding:3px 8px;font-size:12px;background:#fff;color:#333;border:1px solid #ccc;">Correct count</button></div>
         </td></tr>`;
     };
     const head = `<thead><tr style="text-align:left;background:#f3f4f6;font-size:12px;">${f.configurable ? `<th style="padding:6px 8px;">Combination</th>` : ""}<th style="padding:6px 8px;">Size</th><th style="padding:6px 8px;${num}">On hand</th><th style="padding:6px 8px;${num}">Set aside</th>
@@ -13692,6 +13742,10 @@ async function loadBlankLinksSection(orgId, product) {
     const blankOpt = (b) => escapeHtml(b.name || [b.brand, b.sku].filter(Boolean).join(" ") || "Blank #" + b.id);
     const optList = (opts, pick) => `<option value="">—</option>` + opts.map(o => `<option value="${escapeHtml(String(o))}"${String(o) === String(pick) ? " selected" : ""}>${escapeHtml(String(o) || "(no color)")}</option>`).join("");
     const findBlank = (id) => allBlanks.find(x => x.id === Number(id)) || null;
+    // Removing a saved link is a deletion: Full on Blanks (orders.js saveBlankLinks). Without it a saved link can be
+    // moved to another blank but not set to None, and the save sends no removals (a color no longer offered keeps
+    // its links until someone with Full saves the product).
+    const canUnlink = adminCan_("inventory.blanks", "full");
     const sel3 = (cls, pc, ps) => section.querySelector(`.${cls}[data-pc="${CSS.escape(pc)}"][data-ps="${CSS.escape(ps)}"]`);
     const readDom = () => section.querySelectorAll(".bl-blank").forEach(sel => {
       const pc = sel.dataset.pc, ps = sel.dataset.ps;
@@ -13739,7 +13793,7 @@ async function loadBlankLinksSection(orgId, product) {
           return `
           <tr>
             <td style="padding:5px 8px;font-weight:600;white-space:nowrap;">${escapeHtml(size)}</td>
-            <td style="padding:5px 8px;"><select data-pc="${escapeHtml(pc)}" data-ps="${escapeHtml(size)}" class="bl-blank" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;min-width:180px;"><option value="">— None —</option>${rowBlanks(link.blankId).map(x => `<option value="${x.id}"${x.id === Number(link.blankId) ? " selected" : ""}>${blankOpt(x)}</option>`).join("")}</select></td>
+            <td style="padding:5px 8px;"><select data-pc="${escapeHtml(pc)}" data-ps="${escapeHtml(size)}" class="bl-blank" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;min-width:180px;"><option value=""${!canUnlink && linkMap[pc + "|" + size] ? " disabled" : ""}>— None —</option>${rowBlanks(link.blankId).map(x => `<option value="${x.id}"${x.id === Number(link.blankId) ? " selected" : ""}>${blankOpt(x)}</option>`).join("")}</select></td>
             <td style="padding:5px 8px;"><select data-pc="${escapeHtml(pc)}" data-ps="${escapeHtml(size)}" class="bl-color" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;min-width:90px;">${colorOpts}</select></td>
             <td style="padding:5px 8px;"><select data-pc="${escapeHtml(pc)}" data-ps="${escapeHtml(size)}" class="bl-size" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;min-width:70px;">${sizeOpts}</select></td>
           </tr>`;
@@ -13875,6 +13929,7 @@ async function loadBlankLinksSection(orgId, product) {
           const i = key.indexOf("|"), pc = key.slice(0, i), size = key.slice(i + 1);
           if (!productColors.includes(pc) && !remove.some(r => r.productColor === pc && r.productSize === size)) remove.push({ productColor: pc, productSize: size });
         });
+        if (!canUnlink) remove.length = 0;
         if (!set.length && !remove.length) return "";
         const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: adminKey, action: "saveBlankLinks", org: orgId, productId: product.productId, set, remove }) });
         const d = await r.json().catch(() => ({ status: "error", message: "Network error" }));
@@ -22633,7 +22688,7 @@ async function renderTransfers(app){
       <tbody>${transfers.map(t => `<tr style="border-bottom:1px solid #eee;">
         <td style="padding:5px 6px;font-weight:600;">${escapeHtml(t.name)}${t.description ? `<br><span style="font-size:11px;color:#777;">${escapeHtml(t.description)}</span>` : ""}</td>
         <td style="padding:5px 6px;">${t.quantity}</td>
-        <td style="padding:5px 6px;">$${Number(t.purchasePrice).toFixed(2)}</td>
+        <td style="padding:5px 6px;">${t.purchasePrice == null ? "—" : "$" + Number(t.purchasePrice).toFixed(2)}</td>
         <td style="padding:5px 6px;text-align:right;white-space:nowrap;">
           <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="inventory.transfers:edit" onclick="transferEdit_(this.dataset.tid)">Edit</button>
           <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" onclick="transferHistory_(this.dataset.tid)">History</button>
@@ -22702,7 +22757,7 @@ async function renderTransfers(app){
       <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:4px 6px;">Date</th><th style="padding:4px 6px;">Kind</th><th style="padding:4px 6px;">Qty</th><th style="padding:4px 6px;">Unit</th><th style="padding:4px 6px;">Sheet / order</th><th style="padding:4px 6px;"></th></tr></thead>
       <tbody>${moves.map(m => `<tr style="border-bottom:1px solid #eee;${m.voidedAt ? "text-decoration:line-through;color:#999;" : ""}"${m.voidedAt && m.voidReason ? ` title="${escapeHtml("Voided: " + m.voidReason)}"` : ""}>
         <td style="padding:4px 6px;">${escapeHtml(adminDay_(m.occurredAt))}</td><td style="padding:4px 6px;">${escapeHtml(m.kind)}</td>
-        <td style="padding:4px 6px;">${m.qtyDelta}</td><td style="padding:4px 6px;">$${Number(m.unitCost).toFixed(2)}</td>
+        <td style="padding:4px 6px;">${m.qtyDelta}</td><td style="padding:4px 6px;">${m.unitCost == null ? "—" : "$" + Number(m.unitCost).toFixed(2)}</td>
         <td style="padding:4px 6px;">${where(m)}</td>
         <td style="padding:4px 6px;white-space:nowrap;">${!m.voidedAt && (["purchase", "adjust", "writeoff"].includes(m.kind) || (m.kind === "consume" && m.itemId && m.reason !== "finished")) ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.transfers:full" onclick="transferVoid_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && m.kind === "consume" ? `<span style="font-size:11px;color:#999;" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : ""))}">voided</span>` : ""}${m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) && m.voidReason !== "Sheet edited" ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : "") + " — click to make this entry count again")}" data-need="inventory.transfers:edit" onclick="transferRestore_(this.dataset.mid)">Undo void</button>` : ""}${m.voidedAt && m.voidReason === "Sheet edited" ? `<span style="font-size:11px;color:#999;">replaced by an edit</span>` : ""}</td>
       </tr>`).join("")}</tbody></table></div>`, 820);

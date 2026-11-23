@@ -112,7 +112,9 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   ok("two at once with blanks for only one: one is made, the other isn't", madeOk === 1 && rts("tee", "S").quantity === 2 && blankQty(gildan, "Navy", "S") === 1);
 
   console.log("\n=== Correct count ===");
-  r = await call({ action: "setReadyToShipQty", productId: "tee", size: "M", quantity: 7 }, { role: "staff" });
+  // A count changes stock and its value: Full on Blanks (Back office has Edit), as Count stock is for blanks.
+  ok("Back office can't enter a count", (await call({ action: "setReadyToShipQty", productId: "tee", size: "M", quantity: 7 }, { role: "staff" })).status === 403 && rts("tee", "M").quantity === 6);
+  r = await call({ action: "setReadyToShipQty", productId: "tee", size: "M", quantity: 7 }, { role: "manager" });
   ok("a counted number is recorded as a correction (+1 at the average cost)", r.status === 200 && r.body.delta === 1 && rts("tee", "M").quantity === 7 &&
     d1.q("SELECT qtyDelta, unitCostCents FROM finished_goods_movements WHERE kind='adjust'")[0].unitCostCents === 400);
 

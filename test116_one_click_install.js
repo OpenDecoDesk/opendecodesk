@@ -29,7 +29,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
     ok(`…nor does sending ${what} straight to the API as the key`, !!viaKey && viaKey.status === 401 && A.hits.length === 1);
   }
   const A = await makeAuth({ passphrase: "a long setup password" });
-  ok("a setup password of 12 characters or more opens the API before anyone has a password", (await A.lib.requireAdmin(A.env, { kind: "admin" }, "a long setup password", { headers: { get: () => null } }, "no", "staff")) === null);
+  ok("a setup password of 12 characters or more is still no API key, even before anyone has a password", (await A.lib.requireAdmin(A.env, { kind: "admin" }, "a long setup password", { headers: { get: () => null } }, "no", "staff")).status === 401);
   ok("a setup password of 12 characters or more does", (await A.signIn("", "a long setup password")).body.pending === "account");
 
   console.log("\n=== The site's own domain ===");

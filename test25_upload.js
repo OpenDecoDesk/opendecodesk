@@ -28,6 +28,14 @@ let uploadSrc = fs.readFileSync(__dirname + "/functions/_lib/fileUpload.js", "ut
   .replace(/export async function/g, "async function");
 eval(libSrc + "\n" + rateLimitSrc + "\n" + adminAuthSrc + "\n" + httpSrc + "\n" + uploadSrc);
 const uploadHandler = onRequestPost;
+// Signed in: the admin API takes only the session cookie (the setup passphrase is no key). A request below sent
+// with key "proxy-pass-for-tests" stands for the signed-in admin's page, so it also carries the cookie of a session
+// the stand-in lookup knows, from the admin page's own origin; any other key comes with no session.
+const SESSION_TOKEN = "sess_" + "ef".repeat(24);
+const SESSION_HASH = require("crypto").createHash("sha256").update(SESSION_TOKEN).digest("hex");
+global.getAdminSession = async (db, hash) => hash === SESSION_HASH
+  ? { expiresAt: new Date(Date.now() + 3600e3).toISOString(), userId: 1, pending: null, user: { id: 1, email: "owner@example.test", name: "Owner", role: "admin", status: "active" } } : null;
+const signIn_ = (headers, opts, base) => { if(opts.key === "proxy-pass-for-tests"){ headers.set("cookie", "__Host-odd_admin=" + SESSION_TOKEN); headers.set("origin", new URL(base).origin); } };
 
 // Records what got put into R2 so we can assert on the key/options.
 function makeEnv(overrides){
@@ -64,6 +72,7 @@ function ctx(opts, env){
   if(opts.contentType !== undefined) headers.set("content-type", opts.contentType);
   const org = opts.org !== undefined ? "?org=" + encodeURIComponent(opts.org) : "";
   const base = opts.url || "https://admin.example.com/api/upload";
+  signIn_(headers, opts, base);
   return {
     request: {
       url: base + org,
@@ -206,6 +215,7 @@ if(!global.crypto.randomUUID) global.crypto.randomUUID = () => "11111111-2222-33
     if(opts.contentLength !== undefined) headers.set("content-length", String(opts.contentLength));
     const org = opts.org !== undefined ? "?org=" + encodeURIComponent(opts.org) : "";
     const base = opts.url || "https://admin.example.com/api/upload";
+    signIn_(headers, opts, base);
     return {
       request: {
         url: base + org,

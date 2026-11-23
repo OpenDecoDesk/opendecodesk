@@ -67,8 +67,9 @@ To switch it off, remove the `[ai]` block from `wrangler.toml`.
 | `CF_ACCOUNT_ID` | with Cloudflare email or automatic hostnames | — | Your Cloudflare account id. |
 | `CF_ZONE_ID` | with automatic hostnames | — | The zone id of your domain. |
 | `CF_WORKER_NAME` | with automatic hostnames | — | This Worker's name (the `name` in `wrangler.toml`). |
-| `TURNSTILE_SITE_KEY` | with Turnstile | — | The public half of a Turnstile widget; sent to the storefront. |
-| `ADMIN_AUTH_GLOBAL_LIMIT` | no | `100` | Failed sign-ins allowed across the whole site, from any address, per 15 minutes; past it, new sign-ins wait for the window to end (people already signed in aren't affected). `0` turns it off. Each address also has its own limit of 10 a minute, and may use no more than a fifth of this budget (20 by default) before it is refused on its own, so one address can't lock everyone else out. |
+| `TURNSTILE_SITE_KEY` | with Turnstile | — | The public half of a Turnstile widget; sent to the storefront, and to the admin's sign-in page when it asks for the check. |
+| `ADMIN_AUTH_GLOBAL_LIMIT` | no | `100` | Failed sign-ins allowed across the whole site, from any address, per 15 minutes. Past it, a sign-in from an address that hasn't signed in here in the last 30 days must pass a Turnstile check first; on a site without the Turnstile keys it waits for the window to end (people already signed in aren't affected). `0` turns it off, with the per-account limit. Each address also has its own limit of 10 a minute, and may use no more than a fifth of this budget (20 by default) before it is refused on its own, so one address can't lock everyone else out. |
+| `ADMIN_AUTH_ACCOUNT_LIMIT` | no | `10` | Failed sign-ins allowed for one account (one email), from any address, per 15 minutes; past it, that account's sign-ins are held up the same way (a Turnstile check, or a wait). Counted under a hash of the email. |
 | `LEGACY_LABEL_PREFIX` | no | — | Only for a database made by an earlier copy of this code under another name. That copy signed passwords, admin sessions, shipping quotes, card-checkout tokens and draft previews with labels starting with its own name (e.g. `myshop-…`) instead of `odd-…`; set this to that name (letters and digits) and they keep working: nobody's password is voided and nobody is signed out. New ones are made with `odd-…`, and each password is re-marked the first time it's typed, so the setting can be removed once everyone has signed in. See [operations.md](operations.md), "A database from an earlier copy". |
 | `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` | with Cloudflare Access | — | Turn on Cloudflare Access checking for the admin. See the warning below. |
 | `EDITION` | no | — | Set to `desktop` **only by the desktop program** ([desktop.md](desktop.md)), never on a cloud install: `localhost` becomes the admin, the storefront, carrier shipping and design approval are locked off, and actions that need the internet are refused. There, `SHIPPO_API_KEY` is set by the program when the owner saves a Shippo key, and unlocks carrier shipping, `DESKTOP_SUPPLIERS` is `on` when the owner has turned on supplier connections (Vendor integrations), and `DESKTOP_EMAIL` is `on` when the owner has set up their mailbox (Global settings → Email): email then goes out through the `MAILER` binding, which the program answers by sending over SMTP (`desktop/mailer.js`), from `EMAIL_FROM`, the mailbox's address. `DESKTOP_VERSION` is the program's version (the release's date and build number, or `dev`), shown in the admin's header. (`functions/_lib/hostConfig.js`) |
@@ -110,7 +111,9 @@ when that install's owner becomes its first user, and each user's own secret is 
   that hostname needs its own exemption, and the send-agent relay can't sign in through Access
   either — see [accounts-and-keys.md](accounts-and-keys.md).
 - **Turnstile**: `TURNSTILE_SECRET_KEY` turns the check on. Without `TURNSTILE_SITE_KEY` the
-  storefront can't show the widget, so no order can pass.
+  storefront can't show the widget, so no order can pass. With both set, the admin's sign-in page
+  also asks for the check once failed sign-ins have used up the site's budget (instead of refusing
+  everyone until it runs out).
 
 ## Global settings (in the admin, stored in the database)
 

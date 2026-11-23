@@ -109,7 +109,7 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU";
   // An owner who never chose a password but did turn on two-step: the passphrase must NOT clear it.
   B = await makeAuth();
   B.d1._raw.exec(`INSERT INTO global_settings (key, value) VALUES ('totpSecret', '${SECRET2}')`);
-  ok("an owner still on the passphrase with two-step on is asked for the code, not let in without it", (a = await B.signIn("", B.PRINTED)).body.status === "totp_required" && (await B.users({ action: "me", key: B.PRINTED }, "")).status === 403);
+  ok("an owner still on the passphrase with two-step on is asked for the code, not let in without it", (a = await B.signIn("", B.PRINTED)).body.status === "totp_required" && (await B.users({ action: "me", key: B.PRINTED }, "")).status === 401);
   a = await B.signIn("", B.PRINTED, totpNow(SECRET2));
   ok("…and with it they are in, two-step still on", a.status === 200 && a.body.pending === "account" && B.d1.q("SELECT totpSecret FROM users")[0].totpSecret === SECRET2);
   // The oldest installs kept the secret in an environment variable.
@@ -122,7 +122,7 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU";
   const real = B.d1.prepare.bind(B.d1), loud = console.error;
   console.error = () => {};   // the refusals below are logged; that is expected
   B.d1.prepare = (sql) => { if (/\busers\b/.test(sql)) throw new Error("D1 is down"); return real(sql); };
-  ok("if users can't be read, sign-in is refused (503): an outage never brings the printed passphrase back", (await B.signIn("", B.PRINTED)).status === 503 && (await B.signIn("olive@myshop.com", "correct horse battery")).status === 503 && (await B.users({ action: "me", key: B.PRINTED }, "")).status === 503);
+  ok("if users can't be read, sign-in is refused (503): an outage never brings the printed passphrase back", (await B.signIn("", B.PRINTED)).status === 503 && (await B.signIn("olive@myshop.com", "correct horse battery")).status === 503 && (await B.users({ action: "me", key: B.PRINTED }, "")).status === 401);
   ok("…and a session can't be checked, so it is refused too (503, not let through)", (await B.users({ action: "me" }, bCookie)).status === 503);
   B.d1.prepare = real; console.error = loud;
   B.d1._raw.exec(`UPDATE users SET password = '{"hash":"00","salt":"00112233445566778899aabbccddeeff","iterations":900000000,"mark":"x"}'`);

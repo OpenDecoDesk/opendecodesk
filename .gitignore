@@ -32,3 +32,10 @@ desktop-data/
 
 # Scale test (npm run perf): its reports stay on this computer
 perf/results/
+
+# End-to-end suite (e2e/): generated local config, test secrets, signed-in states, results
+e2e/.auth/
+e2e/.results/
+e2e/.report/
+e2e/wrangler.e2e.toml
+e2e/.dev.vars

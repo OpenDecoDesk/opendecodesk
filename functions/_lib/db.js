@@ -150,6 +150,11 @@ function orderLinked_(m, kinds) {
   return `(${m}.orderId IS NOT NULL AND ${m}.kind IN (${kinds.map(k => `'${k}'`).join(", ")}) AND EXISTS (SELECT 1 FROM orders ox WHERE ox.orderId = ${m}.orderId))`;
 }
 
+// Did a guarded write (an UPDATE / INSERT … SELECT … WHERE <still as we read it>) take its row? D1 counts the rows a
+// statement's TRIGGERS change in meta.changes too (migrations/0102's list-cache versions, 0103's snapshot clean-up), so
+// one row taken can read 2 or more; a write that lost the race changes nothing, fires no trigger and reads 0. So the
+// test is "more than none", never "exactly one".
+function tookRow_(r) { return Number(r && r.meta && r.meta.changes) > 0; }
 // ---- What the customer owes --------------------------------------------------
 // THE formula, in integer cents: active items, plus shipping while anything is still on the order,
 // minus the discount — plus the sales tax when the order's prices don't include it (taxMode
@@ -4904,7 +4909,8 @@ export async function addBlankSizes(db, blankId, list) {
   }
   for (const w of want) stmts.push(db.prepare("INSERT OR IGNORE INTO blank_sizes (blankId, color, size, purchasePriceCents, quantity) VALUES (?, ?, ?, 0, 0)").bind(id, w.color, w.size));
   const res = await db.batch(stmts);
-  return res.slice(-want.length).reduce((n, r) => n + (Number(r && r.meta && r.meta.changes) || 0), 0);
+  // One row each (INSERT OR IGNORE): counted by tookRow_, because D1's meta.changes also counts the list-cache trigger's row.
+  return res.slice(-want.length).reduce((n, r) => n + (tookRow_(r) ? 1 : 0), 0);
 }
 
 
@@ -6630,7 +6636,7 @@ export async function setBlankCount(db, { blankId, color, size, counted, onHand,
         String(note ? "Stock count: " + note : "Stock count").slice(0, 300), at || now, now, ...gb),
     db.prepare(`UPDATE blank_sizes SET quantity = ? WHERE blankId=? AND color=? AND size=? AND quantity = ?`).bind(want, Number(blankId), clr, sz, shown),
   ]);
-  if (Number(res[0] && res[0].meta && res[0].meta.changes) !== 1) throw pricingError_("The stock changed while you were counting — count that row again.");
+  if (!tookRow_(res[0])) throw pricingError_("The stock changed while you were counting — count that row again.");
   if (!Number(cur.purchasePriceCents) && delta > 0 && unit) await db.prepare("UPDATE blank_sizes SET purchasePriceCents = ? WHERE blankId=? AND color=? AND size=? AND purchasePriceCents = 0").bind(unit, Number(blankId), clr, sz).run();
   return { delta };
 }
@@ -6680,7 +6686,7 @@ async function makeItemPieces_(db, item, fromQty, toQty, at = null) {
       .bind(pieces, now, ...ab, id, fromQty));
     stmts.push(db.prepare("UPDATE order_items SET manufacturedQty = ? WHERE id = ? AND cancelDate IS NULL AND COALESCE(manufacturedQty,0) = ?").bind(toQty, id, fromQty));
     const res = await db.batch(stmts);
-    const claimed = Number(res.at(-1) && res.at(-1).meta && res.at(-1).meta.changes) === 1;
+    const claimed = tookRow_(res.at(-1));
     return { claimed, consumed: claimed };
   }
   const linked = !!(link && link.blankId != null);
@@ -6704,7 +6710,7 @@ async function makeItemPieces_(db, item, fromQty, toQty, at = null) {
   stmts.push(db.prepare("UPDATE order_items SET manufacturedQty = ? WHERE id = ? AND cancelDate IS NULL AND COALESCE(manufacturedQty,0) = ?")
     .bind(toQty, id, fromQty));
   const res = await db.batch(stmts);
-  const claimed = Number(res.at(-1) && res.at(-1).meta && res.at(-1).meta.changes) === 1;
+  const claimed = tookRow_(res.at(-1));
   return { claimed, consumed: claimed && linked };
 }
 
@@ -7039,7 +7045,7 @@ export async function completeProductionRun(db, runId, opts = {}) {
   // "Mark done" (or two tabs) can't count one hooping — or one piece — twice.
   const flip = await db.prepare("UPDATE production_runs SET finishedAt=?, status='done', issuesJson=?, issueNote=? WHERE id=? AND status='running'")
     .bind(finishedAt, JSON.stringify(issues), note, Number(runId)).run();
-  if (Number(flip && flip.meta && flip.meta.changes) !== 1) throw new Error("That job is not running");
+  if (!tookRow_(flip)) throw new Error("That job is not running");
   // The run's stitches and time go on its machine's counters (migrations/0071) — only after the flip, so once.
   const counted = await countRunOnMachine_(db, run.id, { kind: "run", readStitches: opts.readStitches, actor: opts.actor });
   return Object.assign({ pieceNo: run.pieceNo == null ? null : Number(run.pieceNo), stepNo: run.stepNo == null ? null : Number(run.stepNo), issues, issueNote: note, finishedAt, counted },
@@ -7060,7 +7066,7 @@ export async function abortProductionRun(db, runId, { abortReasonId, abortNote, 
   const flip = await db.prepare("UPDATE production_runs SET finishedAt=?, status='aborted', abortReasonId=?, abortReasonLabel=?, abortNote=? WHERE id=? AND status='running'")
     .bind(new Date().toISOString(), abortReasonId != null && abortReasonId !== "" ? Number(abortReasonId) : null,
       label, String(abortNote || "").slice(0, 500), Number(runId)).run();
-  if (Number(flip && flip.meta && flip.meta.changes) !== 1) throw new Error("That job is not running");
+  if (!tookRow_(flip)) throw new Error("That job is not running");
   return { counted: await countRunOnMachine_(db, Number(runId), { kind: "abort", stitches: cleanStitchCount(stitchesRun) || 0, actor }) };
 }
 
@@ -8121,7 +8127,7 @@ export async function setTransferCount(db, { transferId, counted, onHand, note, 
         String(note ? "Stock count: " + note : "Stock count").slice(0, 300), at || now, now, ...gb),
     db.prepare("UPDATE transfers SET quantity = ?, updatedAt = ? WHERE id = ? AND quantity = ?").bind(want, now, Number(transferId), shown),
   ]);
-  if (Number(res[0] && res[0].meta && res[0].meta.changes) !== 1) throw pricingError_("The stock changed while you were counting — count that row again.");
+  if (!tookRow_(res[0])) throw pricingError_("The stock changed while you were counting — count that row again.");
   return { delta };
 }
 
@@ -14150,7 +14156,7 @@ export async function makeForStock(db, { orgId, productId, size, qty, occurredAt
       .bind(orgId, productId, sz, combo.key, combo.label, q, now, ...ab, ...gb),
     db.prepare(`UPDATE blank_sizes SET quantity = quantity - ? WHERE blankId = ? AND color = ? AND size = ? AND quantity >= ?`).bind(q, blankId, bColor, bSize, q + held),
   ]);
-  const claimed = Number(res.at(-1) && res.at(-1).meta && res.at(-1).meta.changes) === 1;
+  const claimed = tookRow_(res.at(-1));
   return { claimed, unitCost: fromCents((Number(link.avg) || 0) + transferCents), blank: { name: link.blankName || "", color: bColor, size: bSize }, variant: combo.key, variantLabel: combo.label,
     transfers: transfers.map(t => ({ transferId: t.transferId, name: t.name, used: q * t.n, unitCost: fromCents(t.cost), short: Math.max(0, q * t.n - Math.max(0, t.onHand)) })) };
 }
@@ -14184,7 +14190,7 @@ export async function setFinishedCount(db, { orgId, productId, size, quantity, n
       ON CONFLICT(orgId, productId, size, variant) DO UPDATE SET quantity = excluded.quantity, avgCostCents = excluded.avgCostCents, variantLabel = excluded.variantLabel, updatedAt = excluded.updatedAt`)
       .bind(orgId, productId, sz, v, combo.label, want, now, newAvg, ...gb),
   ]);
-  if (!(Number(res[0] && res[0].meta && res[0].meta.changes) === 1)) throw pricingError_("The count changed while you were editing — reopen the Stock window and try again.");
+  if (!tookRow_(res[0])) throw pricingError_("The count changed while you were editing — reopen the Stock window and try again.");
   return { delta, unitCost: fromCents(unit), variant: v, variantLabel: combo.label };
 }
 
@@ -14321,7 +14327,7 @@ async function returnFinishedStock_(db, orderId, itemId, at = null) {
         .bind(l.orgId, l.productId, sz, v, pieces, now, unit, ...gb),
       db.prepare("UPDATE order_items SET cogsCents = 0 WHERE id = ? AND COALESCE(cogsCents, 0) = ?").bind(Number(l.id), cents),
     ]);
-    if (Number(res.at(-1) && res.at(-1).meta && res.at(-1).meta.changes) === 1) n += pieces;
+    if (tookRow_(res.at(-1))) n += pieces;
   }
   return n;
 }

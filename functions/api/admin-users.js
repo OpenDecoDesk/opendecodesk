@@ -4,7 +4,8 @@
  * POST /api/admin-users
  *   { action: "me" }                       any signed-in user, even one with a step to finish:
  *                                          → { user: { id, name, email, role, roleName }, pending, require2fa,
- *                                              permissions: {fn: level}, areas }   (functions/_lib/permissions.js)
+ *                                              permissions: {fn: level}, areas, timeZone }   (functions/_lib/permissions.js;
+ *                                          timeZone: the business's — resolveTimeZone in functions/_lib/db.js)
  *   Everything else needs Users and roles (settings.users) on the caller's role — read to look, edit to change:
  *   { action: "savePrefs", prefs }         any signed-in user: their own settings (Home's hidden blocks), kept on
  *                                          the account → { prefs }. `me` returns them too.
@@ -47,7 +48,7 @@ import {
   require2fa, setRequire2fa, recoveryCodesLeft,
 } from "../_lib/adminAuth.js";
 import { insertAuditLog, listUsers, getUserById, getUserByEmail, insertUser, updateUser, setUserRoleAndStatus, deleteUserSessions,
-  listRoles, getRoleRow, insertRole, updateRole, deleteRole, roleInUse, getUserPrefs, saveUserPrefs } from "../_lib/db.js";
+  listRoles, getRoleRow, insertRole, updateRole, deleteRole, roleInUse, getUserPrefs, saveUserPrefs, resolveTimeZone } from "../_lib/db.js";
 import { resolveRole } from "../_lib/adminAuth.js";
 import { PERMISSION_AREAS, PERM_FUNCTIONS, DEFAULT_ROLES, normalizePermissions, effectivePermissions, effectiveLevel, permRank } from "../_lib/permissions.js";
 
@@ -98,7 +99,7 @@ export async function onRequestPost(context){
       return jsonResponse({status:"ok", user: me && me.id != null ? { id: me.id, name: me.name, email: me.email, role: me.role, roleName: ri ? ri.name : "" } : null,
         pending: (me && me.pending) || null, require2fa: await require2fa(env),
         permissions: ri ? effectivePermissions(ri) : {}, areas: PERMISSION_AREAS,
-        prefs: me && me.id != null ? await getUserPrefs(env.DB, me.id) : null});
+        prefs: me && me.id != null ? await getUserPrefs(env.DB, me.id) : null, timeZone: await resolveTimeZone(env)});
     }
     if(!me || me.id == null || me.bootstrap) return bad("Sign in through the admin page first.", 403);
 

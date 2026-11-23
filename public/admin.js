@@ -28,6 +28,18 @@ let adminMe = null;
 let adminPerms = null, adminAreas = null;
 // The signed-in user's own settings (admin-users "me" / savePrefs, kept on the account): { home: { hidden: [...] } }.
 let adminPrefs = null;
+// The business's time zone (Global settings → Region, else the TIMEZONE variable, else UTC), from the sign-in and
+// admin-users "me": every "today" and every date shown here is on its calendar (localToday_, adminDate_). "" while
+// not known — this computer's own zone stands in.
+let adminTimeZone = "";
+const _adminDtf = new Map();   // adminDtf_'s formatters
+// Keeps a time zone the server sent, when this browser knows it; anything else (missing, unknown) leaves it as it was.
+function setAdminTimeZone_(tz){
+  const z = typeof tz === "string" ? tz.trim() : "";
+  if (!z || z === adminTimeZone) return;
+  try { new Intl.DateTimeFormat("en-US", { timeZone: z }); } catch (e) { return; }
+  adminTimeZone = z;
+}
 const ADMIN_ROLE_LABELS = { staff: "Back office", manager: "Manager", admin: "Admin", production: "Production" };
 const ADMIN_LEVEL_RANK_ = { none: 0, read: 1, edit: 2, full: 3 };
 function adminLevel_(fn){ if (!adminPerms) return "full"; const l = Object.prototype.hasOwnProperty.call(adminPerms, fn) ? adminPerms[fn] : "none"; return ADMIN_LEVEL_RANK_[l] != null ? l : "none"; }
@@ -115,7 +127,7 @@ function loadStoredSession(){
 // The marker also remembers who signed in and any step they still owe, so a reload draws the
 // right menu and screen straight away. None of it is a credential.
 function saveAdminSession(token, expires){
-  try{ localStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify({token, expires, pending: adminPending || null, user: adminMe || null})); }catch(e){}
+  try{ localStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify({token, expires, pending: adminPending || null, user: adminMe || null, timeZone: adminTimeZone || null})); }catch(e){}
 }
 // After a step is finished (or the server says where we stand): keep the marker in line.
 function updateStoredSession_(){
@@ -1076,7 +1088,7 @@ async function adminLogin(){
 async function adminLoginOnce_(){
   // 1. Valid stored session — use it without prompting
   const stored = loadStoredSession();
-  if(stored){ adminPending = stored.pending || null; adminMe = stored.user || null; return stored.token; }
+  if(stored){ adminPending = stored.pending || null; adminMe = stored.user || null; setAdminTimeZone_(stored.timeZone); return stored.token; }
 
   // 2. Sign-in prompt — except the desktop program's very first start, which signs in with the
   // passphrase it made itself (desktop/preload.js) and goes straight to "Finish setting up".
@@ -1113,6 +1125,7 @@ async function adminLoginOnce_(){
       // The real credential is the HttpOnly cookie the server just set.
       adminPending = data.pending || null;
       adminMe = data.user || null;
+      setAdminTimeZone_(data.timeZone);
       _adminJustSignedIn = true;
       rememberAdminEmail_((data.user && data.user.email) || "");
       saveAdminSession("cookie", data.expires);
@@ -1195,6 +1208,7 @@ async function refreshAdminMe_(){
       if(data.permissions && typeof data.permissions === "object"){ adminPerms = data.permissions; adminApplyPerms_(document.body); }
       if(Array.isArray(data.areas)) adminAreas = data.areas;
       if(data.prefs && typeof data.prefs === "object") adminPrefs = data.prefs;
+      setAdminTimeZone_(data.timeZone);
       updateStoredSession_();
     }
   }catch(e){ /* keep what we had */ }
@@ -1340,7 +1354,7 @@ function drawOpenOrdersDashboard_(){
     const status = dashOrderStatus_(o);
     const due = Number(o.balanceDue) || 0;
     return `<tr class="dash-row" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" data-placed="${escapeHtml(o.placedAt || "")}" style="cursor:pointer;">
-      <td style="${td}white-space:nowrap;">${o.placedAt ? escapeHtml(new Date(o.placedAt).toLocaleDateString()) : ""}${days !== null ? `<br><span style="${sub}${days >= 21 ? "color:#b45309;font-weight:600;" : ""}">${days} day${days === 1 ? "" : "s"} ago</span>` : ""}</td>
+      <td style="${td}white-space:nowrap;">${o.placedAt ? escapeHtml(adminDate_(o.placedAt)) : ""}${days !== null ? `<br><span style="${sub}${days >= 21 ? "color:#b45309;font-weight:600;" : ""}">${days} day${days === 1 ? "" : "s"} ago</span>` : ""}</td>
       <td style="${td}white-space:nowrap;font-family:monospace;font-size:12px;">${dashOpenBtn_(o)}</td>
       <td style="${td}">${escapeHtml(o.orgName)}</td>
       <td style="${td}">${escapeHtml(o.customerName || "")}</td>
@@ -1369,7 +1383,7 @@ function drawOpenOrdersDashboard_(){
 async function openOrderFromDashboard_(orgId, orderId, placedAt){
   const f = window._ordersFilter = window._ordersFilter || ordersDefaultDates_();
   const t = placedAt ? new Date(placedAt) : null;
-  const day = t && !isNaN(t) ? ordersLocalDay_(t) : "";
+  const day = t && !isNaN(t) ? localDay_(t) : "";
   if (day && f.from && day < f.from) f.from = day;
   if (day && f.to && day > f.to) f.to = day;
   window._ordersFocus = orderId;   // drawn even when it's past the first lot of rows (ordersRenderSlice_)
@@ -1403,10 +1417,10 @@ const HOME_STAGES_ = [
   { key: "ship",   label: "Ready to ship",     hint: "Packed, not shipped or delivered" },
 ];
 const homeMoney_ = (n) => (Number(n) < 0 ? "−$" : "$") + Math.abs(Math.round(Number(n) || 0)).toLocaleString("en-US");
-// When Home's figures were worked out, as the admin's own date and time: "Tue, Nov 17, 2:05 PM".
+// When Home's figures were worked out, as the business's date and time: "Tue, Nov 17, 2:05 PM".
 function homeUpdatedAt_(iso){
-  const t = new Date(iso);
-  return isNaN(t) ? "" : t.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const t = adminWhen_(iso);
+  return isNaN(t) ? "" : adminDateTime_(t, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 // The figures come from getDashboard (db.js), which works them out at most once an hour and keeps the answer.
@@ -1433,7 +1447,7 @@ function homeShown_(){ const hidden = homeHidden_(); return homeAvailable_().map
 async function renderHome(app){
   adminSetHash("home");
   document.title = adminTitle_("Home");
-  const today = rushLocalToday_();
+  const today = localToday_();
   const shown = homeShown_();
   app.innerHTML = `
     ${adminPageHead_("Home")}
@@ -1441,7 +1455,7 @@ async function renderHome(app){
       <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;">
         <h2 style="font-size:20px;margin:0;">Dashboard</h2>
         <span style="display:flex;align-items:center;gap:10px;">
-          <span style="font-size:13px;color:var(--ink-soft,#666);">All shops · ${escapeHtml(new Date(today + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }))}</span>
+          <span style="font-size:13px;color:var(--ink-soft,#666);">All shops · ${escapeHtml(adminDate_(today, { weekday: "short", month: "short", day: "numeric", year: "numeric" }))}</span>
           <button type="button" class="home-cog" id="homeCog" aria-label="Choose what Home shows" title="Choose what Home shows">⚙</button>
         </span>
       </div>
@@ -1511,12 +1525,12 @@ async function loadHome_(fresh){
   btn.disabled = true;
   if (fresh) { btn.textContent = "Refreshing…"; upd.textContent = "Working the figures out again…"; }
   let d;
-  try { d = await hoopApi_({ action: "getDashboard", today: rushLocalToday_(), fresh, blocks: homeShown_() }); }
+  try { d = await hoopApi_({ action: "getDashboard", today: localToday_(), fresh, blocks: homeShown_() }); }
   catch (e) { upd.textContent = "Couldn't load the dashboard: " + (e.message || "unknown error"); return; }
   finally { if (document.body.contains(btn)) { btn.disabled = false; btn.textContent = "↻ Refresh data"; } }
   if (location.hash !== "#home" || !document.body.contains(upd)) return;   // gone to another page while it loaded
   upd.textContent = "Data last updated " + (homeUpdatedAt_(d.cachedAt) || homeUpdatedAt_(new Date().toISOString()));
-  upd.title = d.cachedAt ? new Date(d.cachedAt).toLocaleString() : "";
+  upd.title = d.cachedAt ? adminDateTime_(d.cachedAt) : "";
   document.querySelectorAll("#homeStages .home-tile").forEach(t => {
     const n = Number((d.stages || {})[t.dataset.stage]) || 0;
     t.querySelector(".home-num").textContent = n;
@@ -1604,7 +1618,7 @@ function homeInOut_(io){
   for (let v = 0; v <= max + 1e-9; v += step) {
     grid += `${v ? `<line x1="${x0}" x2="${W}" y1="${yOf(v).toFixed(1)}" y2="${yOf(v).toFixed(1)}" stroke="#e4e4e0"/>` : ""}<text x="${x0 - 6}" y="${(yOf(v) + 4).toFixed(1)}" text-anchor="end" class="home-inout-tick">${tick(v)}</text>`;
   }
-  const label = (mo) => new Date(mo.month + "-15T12:00:00").toLocaleDateString(undefined, { month: "short" });
+  const label = (mo) => adminDate_(mo.month, { month: "short" });
   const bar = (side, mo, x) => {
     const parts = HOME_INOUT_PARTS_[side].map(([k, name, color]) => ({ name, color, v: Number(mo[side][k]) || 0 })).filter(p => p.v);
     const total = side === "in" ? mo.totalIn : mo.totalOut;
@@ -1689,7 +1703,7 @@ function drawHomeMoney_(d){
   const y = d.year || {}, m = d.month || {};
   if ((needMoney && (!d.year || !d.month)) || (on("inout") && !d.inOut)) { el.innerHTML = `<div class="home-note">The money figures didn't come back — try Refresh.</div>`; return; }
   if (!needMoney) { el.innerHTML = on("inout") ? `<div data-home-block="inout"><h3 class="home-h">Money in and out</h3>${homeInOut_(d.inOut)}</div>` : ""; return; }
-  const monthName = new Date(d.monthFrom + "T12:00:00").toLocaleDateString(undefined, { month: "long" });
+  const monthName = adminDate_(d.monthFrom, { month: "long" });
   const card = (label, v, sub, title) => `<div class="home-card" title="${escapeHtml(title || "")}"><span class="home-lbl">${escapeHtml(label)}</span><span class="home-val">${homeMoney_(v)}</span><span class="home-hint">${escapeHtml(sub)}</span></div>`;
   // From the same reply as the figures (getDashboardMoney), so the label always matches what was added up.
   const books = d.bookkeeping !== false;
@@ -1784,8 +1798,8 @@ async function renderHomeStage(app, key){
     const days = o.placedAt ? Math.floor((now - new Date(o.placedAt).getTime()) / 86400000) : null;
     const due = Number(o.balanceDue) || 0;
     return `<tr class="dash-row" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" data-placed="${escapeHtml(o.placedAt || "")}" style="cursor:pointer;">
-      <td style="${td}white-space:nowrap;">${o.placedAt ? escapeHtml(new Date(o.placedAt).toLocaleDateString()) : ""}${days !== null ? `<br><span style="${sub}${days >= 21 ? "color:#b45309;font-weight:600;" : ""}">${days} day${days === 1 ? "" : "s"} ago</span>` : ""}</td>
-      <td style="${td}white-space:nowrap;font-family:monospace;font-size:12px;">${dashOpenBtn_(o)}${o.dueDate ? `<br><span style="${sub}">due ${escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString())}</span>` : ""}</td>
+      <td style="${td}white-space:nowrap;">${o.placedAt ? escapeHtml(adminDate_(o.placedAt)) : ""}${days !== null ? `<br><span style="${sub}${days >= 21 ? "color:#b45309;font-weight:600;" : ""}">${days} day${days === 1 ? "" : "s"} ago</span>` : ""}</td>
+      <td style="${td}white-space:nowrap;font-family:monospace;font-size:12px;">${dashOpenBtn_(o)}${o.dueDate ? `<br><span style="${sub}">due ${escapeHtml(adminDate_(o.dueDate))}</span>` : ""}</td>
       <td style="${td}">${escapeHtml(o.orgName)}</td>
       <td style="${td}">${escapeHtml(o.customerName || "")}${rushPill_(o)}</td>
       <td style="${td}font-size:13px;">${lines}</td>
@@ -2565,7 +2579,7 @@ async function shopBarDiscard_(orgId){
   let plan;
   try { plan = (await hoopApi_({ action: "previewDiscardShopChanges", org: orgId })).plan; } catch (e) { showToast(e.message, true); return; }
   if (!plan.anything) { showToast("Nothing to discard — the shop is as it was published."); return; }
-  const when = plan.publishedAt ? new Date(plan.publishedAt).toLocaleString() : "";
+  const when = plan.publishedAt ? adminDateTime_(plan.publishedAt) : "";
   const li = (x) => `<li>${x}</li>`;
   const fields = (f) => f.length ? ` <span style="color:#666;">(${escapeHtml(f.slice(0, 6).join(", "))}${f.length > 6 ? ` +${f.length - 6}` : ""})</span>` : "";
   const parts = [];
@@ -3024,7 +3038,7 @@ const vendorXmlPretty_ = (xml) => {
   }).join("\n");
 };
 const vendorLogSize_ = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : (n || 0) + " B";
-const vendorLogTime_ = (iso) => { const d = new Date(iso); return isNaN(d) ? String(iso || "") : d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" }); };
+const vendorLogTime_ = (iso) => adminDateTime_(iso, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" }) || String(iso || "");
 async function showVendorLog_(conn){
   const { ov } = inventoryModal_(`Web-service log — ${escapeHtml(conn.name)}`, `
     <div style="font-size:12px;color:#666;margin-bottom:8px;">Every call this connection made to ${escapeHtml(conn.name)}'s web services, newest first, with the full request (the password is blanked) and ${escapeHtml(conn.name)}'s full response. Kept 30 days. Times are your computer's time.</div>
@@ -3111,7 +3125,7 @@ async function mountVendorConnections_(root){
     let r;
     try { r = await hoopApi_({ action: "listVendorConnections" }); } catch (e) { body.textContent = e.message; return; }
     window._vendorConnections = r.connections || [];
-    const day = (iso) => iso ? new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "never";
+    const day = (iso) => iso ? adminDateTime_(iso, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }, "en-US") : "never";
     body.innerHTML = (r.credentialsReady ? "" : `<div style="border:1px solid #f59e0b;background:#fffbeb;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:#92400e;"><b>One-time setup:</b> add an encrypted variable <code>VENDOR_CREDENTIALS_KEY</code> (any long random string) to this site in the Cloudflare dashboard. Vendor logins are stored encrypted with it.</div>`) +
       ((r.connections || []).length ? (r.connections || []).map(c => `<div class="vc-card" data-id="${c.id}" style="border:1px solid var(--card-line,#ddd);border-radius:8px;padding:10px 12px;margin-bottom:10px;">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -3375,7 +3389,7 @@ async function renderOrphanImages(app){
           <td style="padding:4px 8px;">${o.url ? `<a href="${escapeHtml(o.url)}" target="_blank" rel="noopener"><img src="${escapeHtml(t && t.url ? t.url : o.url)}" alt="" loading="lazy" style="width:44px;height:44px;object-fit:cover;border-radius:3px;border:1px solid #ddd;"></a>` : ""}</td>
           <td style="padding:4px 8px;font-family:monospace;word-break:break-all;">${escapeHtml(o.key)}${t ? ` <span style="color:#888;font-family:inherit;">+ thumbnail</span>` : ""}</td>
           <td style="padding:4px 8px;text-align:right;white-space:nowrap;">${kb(o.size + (t ? t.size : 0))}</td>
-          <td style="padding:4px 8px;white-space:nowrap;color:#666;">${o.uploaded ? escapeHtml(new Date(o.uploaded).toLocaleDateString()) : ""}</td></tr>`; }).join("")}</tbody></table></div>`;
+          <td style="padding:4px 8px;white-space:nowrap;color:#666;">${o.uploaded ? escapeHtml(adminDate_(o.uploaded)) : ""}</td></tr>`; }).join("")}</tbody></table></div>`;
     const status = document.getElementById("orStatus");
     const picked = () => [...body.querySelectorAll(".orPick:checked")];
     document.getElementById("orAll").onchange = (e) => body.querySelectorAll(".orPick").forEach(cb => { cb.checked = e.target.checked; });
@@ -4317,7 +4331,7 @@ function adminActionCell(org, o){
   const editBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" onclick="editOrder(this.dataset.org,this.dataset.order)" style="margin-top:4px;">Edit items</button>`;
   const datesBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} onclick="showOrderDates_(this.dataset.org,this.dataset.order)" title="Every date on this order — change or clear any of them" style="margin-top:4px;">Dates…</button>`;
   const completeBtn = o.completedAt
-    ? `<div class="mono" style="font-size:11px;color:var(--ink-soft);margin-top:4px;">Completed ${escapeHtml(new Date(o.completedAt).toLocaleDateString())}</div><button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" onclick="completeOrders(this.dataset.org, [this.dataset.order], false)" style="margin-top:4px;">Reopen</button>`
+    ? `<div class="mono" style="font-size:11px;color:var(--ink-soft);margin-top:4px;">Completed ${escapeHtml(adminDate_(o.completedAt))}</div><button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" onclick="completeOrders(this.dataset.org, [this.dataset.order], false)" style="margin-top:4px;">Reopen</button>`
     : canCompleteOrder(o) && can("orders.stepsLate", "edit")
       ? `<button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" onclick="completeOrdersAsk_(this.dataset.org, [this.dataset.order])" title="${o.digitalOnly ? "Paid in full, and its downloads have gone out" : "Delivered and paid in full"} — close it out" style="margin-top:4px;background:#166534;color:#fff;border-color:#166534;">Mark completed</button>`
       : "";
@@ -4340,19 +4354,18 @@ async function resendDownloadsNow_(orgId, orderId){
 function rushPill_(o){
   if(!o || !o.rushRequested) return "";
   // The payment deadline (migrations/0083): passed with money still owed → the rush date isn't guaranteed any more.
-  const late = !!(o.rushPayBy && Number(o.balanceDue) > 0 && rushLocalToday_() > o.rushPayBy);
-  const bits = [o.dueDate ? "by " + new Date(o.dueDate + "T00:00:00").toLocaleDateString() : "",
-    o.rushPayBy && !(o.paid && !o.rushFeePending) ? (late ? "PAY-BY PASSED " : "pay by ") + new Date(o.rushPayBy + "T00:00:00").toLocaleDateString() : "",
+  const late = !!(o.rushPayBy && Number(o.balanceDue) > 0 && localToday_() > o.rushPayBy);
+  const bits = [o.dueDate ? "by " + adminDate_(o.dueDate) : "",
+    o.rushPayBy && !(o.paid && !o.rushFeePending) ? (late ? "PAY-BY PASSED " : "pay by ") + adminDate_(o.rushPayBy) : "",
     o.rushFeePending ? "fee to follow" : (Number(o.rushFee) > 0 ? "$" + Number(o.rushFee).toFixed(2) : "no fee")].filter(Boolean);
   const title = late ? "Full payment wasn't received by the pay-by date — the rush date isn't guaranteed" : o.rushFeePending ? "Rush — the fee is still to follow: set it with Rush…" : "Rush order";
   return ` <span class="rush-pill${late ? " rush-pill-late" : o.rushFeePending ? " rush-pill-pending" : ""}" title="${title}">⚡ RUSH · ${escapeHtml(bits.join(" · "))}</span>`;
 }
-function rushLocalToday_(){ return new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
 // The pay-by date `days` before a due date (YYYY-MM-DD), never before today — the server's rushPayByFor.
 function rushPayBySuggest_(due, days){
   if(!Number.isInteger(days) || !/^\d{4}-\d{2}-\d{2}$/.test(String(due || ""))) return "";
   const d = new Date(due + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - days);
-  const day = d.toISOString().slice(0, 10), today = rushLocalToday_();
+  const day = d.toISOString().slice(0, 10), today = localToday_();
   return day < today ? today : day;
 }
 
@@ -4363,7 +4376,7 @@ function rushPayBySuggest_(due, days){
 async function showDownloadsModal_(orgId, orderId){
   const { ov, close } = inventoryModal_("Downloads — " + escapeHtml(orderId), `<div id="dlBody" style="font-size:13px;color:#666;">Loading&hellip;</div>`, 640);
   const body = ov.querySelector("#dlBody");
-  const day = (iso) => iso ? new Date(iso).toLocaleDateString() : "";
+  const day = (iso) => iso ? adminDate_(iso) : "";
   const draw = (d, msg) => {
     const why = { revoked: "revoked", expired: "expired", used: "used up" };
     body.style.color = "var(--ink,#111)";
@@ -4461,7 +4474,8 @@ function showRushFeeModal_(orgId, orderId){
 // something is still owed — and, once sent, when it went out and what the customer has done with it.
 function invoiceCell_(org, o){
   const inv = o.invoice || null, owes = Number(o.balanceDue) > 0 && !o.voidedAt;
-  const day = (iso) => { const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${+m[2]}/${+m[3]}` : ""; };
+  // M/D on the business's calendar (the ISO text's own date is the UTC day: tomorrow, on a US evening).
+  const day = (iso) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso ? adminDay_(iso) : ""); return m ? `${+m[2]}/${+m[3]}` : ""; };
   // (The desktop program's invoice is the email itself, with no page to open: no "opened" to report.)
   const status = inv ? `<div class="mono invoice-status" style="font-size:11px;color:var(--ink-soft);margin-top:4px;line-height:1.35;">Invoice sent ${escapeHtml(day(inv.sentAt))}` +
     `${adminDesktop_() ? "" : inv.viewedAt ? " · opened" : " · not opened yet"}${inv.deliveryChosenAt ? " · delivery chosen" : ""}</div>` : "";
@@ -4523,8 +4537,8 @@ function showSendInvoiceModal(orgId, orderId){
     <div style="font-size:13px;color:#555;margin-bottom:12px;">${adminDesktop_()
       ? `Emails ${escapeHtml(o.customerName && o.customerName !== "Local Sale" ? o.customerName : "the customer")} the invoice for order <b>${escapeHtml(o.orderId)}</b>, with a PDF of it attached: what's owed (<b>$${Number(o.balanceDue).toFixed(2)}</b>) and how to pay, from your Business profile (Venmo, Zelle, a check by mail).`
       : `Emails ${escapeHtml(o.customerName && o.customerName !== "Local Sale" ? o.customerName : "the customer")} a link to a page showing order <b>${escapeHtml(o.orderId)}</b> and what's owed (<b>$${Number(o.balanceDue).toFixed(2)}</b>), where they can pay online.`}</div>
-    ${o.rushRequested ? `<div id="siRush" style="font-size:13px;border:1px solid #fdba74;background:#fff7ed;border-radius:6px;padding:8px 10px;margin-bottom:12px;">⚡ Rush order${o.dueDate ? " — due " + escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : ""}. ${o.rushPayBy
-      ? `The email and invoice page say full payment must be received by <b>${escapeHtml(new Date(o.rushPayBy + "T00:00:00").toLocaleDateString())}</b>, or the rush date can't be guaranteed.`
+    ${o.rushRequested ? `<div id="siRush" style="font-size:13px;border:1px solid #fdba74;background:#fff7ed;border-radius:6px;padding:8px 10px;margin-bottom:12px;">⚡ Rush order${o.dueDate ? " — due " + escapeHtml(adminDate_(o.dueDate)) : ""}. ${o.rushPayBy
+      ? `The email and invoice page say full payment must be received by <b>${escapeHtml(adminDate_(o.rushPayBy))}</b>, or the rush date can't be guaranteed.`
       : `No “full payment received by” date is set — set one with <b>Rush…</b> first if the rush date depends on being paid in time.`}</div>` : ""}
     <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Send to<br><input id="siEmail" type="email" value="${escapeHtml(o.contact && o.contact.includes("@") ? o.contact : "")}" placeholder="customer@example.com" style="${inp}"></label>
     <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Note to the customer <span style="font-weight:400;color:#666;">(optional)</span><br><textarea id="siMessage" rows="3" maxlength="3000" style="${inp}font-family:inherit;resize:vertical;"></textarea></label>
@@ -4660,7 +4674,7 @@ function showDeleteConfirmModal(orderId, order){
 // on a skip or failure), or "" if never sent.
 function emailBadge(dateStr){
   if(!dateStr) return "—";
-  return "✓ " + new Date(dateStr).toLocaleDateString();
+  return "✓ " + adminDate_(dateStr);
 }
 
 function verifSentCell(verif, rowspan){
@@ -5183,7 +5197,7 @@ function cancelCell(it, o, orgId){
     }
     return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(orgId)}" data-row="${it.sheetRow}" data-name="${escapeHtml(it.name)}" data-total="${Number(it.lineTotal).toFixed(2)}" data-need="orders.details:full" onclick="cancelLineItem(this.dataset.org,this.dataset.row,this.dataset.name,this.dataset.total)">Cancel</button>`;
   }
-  const d = new Date(it.cancelDate).toLocaleDateString();
+  const d = adminDate_(it.cancelDate);
   const reason = it.cancelReason ? `<br><span class="cancel-reason">${escapeHtml(it.cancelReason)}</span>` : "";
   const late = it.lateCancel ? `<br><span class="late-cancel-warn" title="Blank already ordered — manual reconciliation needed">⚠ Late cancel</span>` : "";
   return `<span class="canceled-badge">Canceled ${d}</span>${reason}${late}`;
@@ -5199,7 +5213,7 @@ function refundCell(it, o, orgId){
     return `<span class="late-cancel-warn" title="Blank was ordered before cancellation — refund and inventory need manual reconciliation">⚠ Reconcile</span>`;
   }
   if(it.refundDate){
-    return `<span class="refund-badge">$${Number(it.refundAmount).toFixed(2)}<br>${new Date(it.refundDate).toLocaleDateString()}</span>`;
+    return `<span class="refund-badge">$${Number(it.refundAmount).toFixed(2)}<br>${adminDate_(it.refundDate)}</span>`;
   }
   return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(orgId)}" data-row="${it.sheetRow}" data-amount="${Number(it.lineTotal).toFixed(2)}" data-pay="${escapeHtml(o.paymentMethod||"")}" data-need="orders.payments:full" onclick="setLineItemRefund(this.dataset.org,this.dataset.row,this.dataset.amount,this.dataset.pay)">Record refund</button>`;
 }
@@ -5209,18 +5223,15 @@ function refundCell(it, o, orgId){
 // a date range (last 30 days by default) and the two include-toggles drive it. "All shops" merges
 // every org into one table with per-row actions; picking a single shop shows that shop's full view
 // (bulk bar, blank-order breakdown, labels, export) via renderAdminOrders. Both share the filter bar.
-// A date as the admin's own calendar day, YYYY-MM-DD.
-function ordersLocalDay_(d){ return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
-function ordersDefaultDates_(){
-  const to = new Date(), from = new Date();
-  from.setDate(from.getDate() - 30);
-  return { from: ordersLocalDay_(from), to: ordersLocalDay_(to) };
-}
+// The default range: the business's last 30 days and today.
+function ordersDefaultDates_(){ return { from: localToday_(-30), to: localToday_() }; }
 window._ordersFilter = window._ordersFilter || ordersDefaultDates_();
 // The default range keeps following the calendar: a page left open overnight shows the new day's orders on the next
 // load or Refresh. `to` moves while it's still the day it was set to automatically, and `from` too while the whole
 // range is the default one; an end the admin changed stays put. _ordersFilterAuto_ holds the value each end was last
-// given automatically (null: the admin set it). Returns true when it moved the range.
+// given automatically (null: the admin set it). Returns true when it moved the range. The same move puts the range
+// set when this page loaded — before the business's time zone was known, so on this computer's calendar — on the
+// business's, so from a computer a day behind the business today's orders don't fall after "To".
 window._ordersFilterAuto_ = window._ordersFilterAuto_ || Object.assign({}, window._ordersFilter);
 function ordersRollDates_(){
   const f = window._ordersFilter, auto = window._ordersFilterAuto_ || {};
@@ -5274,8 +5285,9 @@ function ordersMoreNote_(orgIds){
 // Keep only orders whose placedAt falls in the filter's [from, to] (inclusive). Empty = unbounded.
 function ordersDateFilter_(orders){
   const f = window._ordersFilter || {};
-  const from = f.from ? new Date(f.from + "T00:00:00") : null;
-  const to = f.to ? new Date(f.to + "T23:59:59") : null;
+  // The From day's first moment to the To day's last, on the business's calendar.
+  const from = f.from ? new Date(localDayStartIso_(f.from)) : null;
+  const to = f.to ? new Date(localDayEndIso_(f.to)) : null;
   return orders.filter(o => { const d = new Date(o.placedAt); return (!from || d >= from) && (!to || d <= to); });
 }
 
@@ -5530,8 +5542,8 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         ${idx === 0 ? `<td rowspan="${o.items.length}" style="text-align:center;vertical-align:middle;padding:4px;">
           ${o.items.some(it => !it.cancelDate) ? `<input type="checkbox" class="order-select" data-order="${escapeHtml(o.orderId)}" data-org="${escapeHtml(org.orgId)}" data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" onchange="updateBulkBar(this.dataset.org)" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
         </td>` : ""}
-        <td data-date-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${new Date(o.placedAt).toLocaleDateString()} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" onclick="editOrderDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Edit date">✎</button></td>
-        <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" onclick="editOrderDueDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
+        <td data-date-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${adminDate_(o.placedAt)} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" onclick="editOrderDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Edit date">✎</button></td>
+        <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" onclick="editOrderDueDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
         <td>${escapeHtml(o.customerName)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</td>
         <td>${escapeHtml(o.orderId)}</td>
         <td>${escapeHtml(it.name)}</td>
@@ -5559,7 +5571,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
           <td rowspan="${o.items.length}" data-stage-td="qaPackedAt">${fulfillmentBadge(o.qaPackedAt)}</td>
           <td rowspan="${o.items.length}" data-stage-td="shippedAt">${fulfillmentBadge(o.shippedAt, o, "shipped")}</td>
           <td rowspan="${o.items.length}" data-stage-td="deliveredAt">${fulfillmentBadge(o.deliveredAt)}</td>
-          <td rowspan="${o.items.length}" data-completed-td>${o.completedAt ? `<span class="mono" style="font-size:12px;">✓ ${escapeHtml(new Date(o.completedAt).toLocaleDateString())}</span>` : `<span style="color:var(--ink-soft)">—</span>`}</td>
+          <td rowspan="${o.items.length}" data-completed-td>${o.completedAt ? `<span class="mono" style="font-size:12px;">✓ ${escapeHtml(adminDate_(o.completedAt))}</span>` : `<span style="color:var(--ink-soft)">—</span>`}</td>
           <td rowspan="${o.items.length}">${shippingMethodCell(o)}</td>
           <td rowspan="${o.items.length}" data-tracking-td>${trackingCell(org, o)}</td>
         ` : ""}
@@ -5603,7 +5615,7 @@ function orderActiveTotal_(o){
 }
 
 function orderCardHtml_(o, org, verif, showShop){
-  const money = (n) => "$" + Number(n || 0).toFixed(2);
+  const money = adminMoney_;
   const ids = `data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}"`;
   const active = o.items.filter(it => !it.cancelDate);
   const total = orderActiveTotal_(o);
@@ -5644,8 +5656,8 @@ function orderCardHtml_(o, org, verif, showShop){
       ${!showShop && active.length ? `<input type="checkbox" class="order-select" ${ids} data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" onchange="updateBulkBar(this.dataset.org)" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
       <div class="oc-who">
         <div class="oc-name">${escapeHtml(o.customerName)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</div>
-        <div class="oc-dim">${escapeHtml(o.orderId)} · ${new Date(o.placedAt).toLocaleDateString()} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" onclick="editOrderDate(this)" title="Edit date" aria-label="Edit order date">✎</button></div>
-        <div class="oc-dim">Due: ${o.dueDate ? escapeHtml(new Date(o.dueDate + "T00:00:00").toLocaleDateString()) : "—"} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" onclick="editOrderDueDate(this)" title="Set due date" aria-label="Set due date">✎</button></div>
+        <div class="oc-dim">${escapeHtml(o.orderId)} · ${adminDate_(o.placedAt)} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" onclick="editOrderDate(this)" title="Edit date" aria-label="Edit order date">✎</button></div>
+        <div class="oc-dim">Due: ${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "—"} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" onclick="editOrderDueDate(this)" title="Set due date" aria-label="Set due date">✎</button></div>
         ${showShop ? `<div class="oc-dim">${escapeHtml(org.name || org.orgId)}</div>` : ""}
       </div>
       <div class="oc-amt"><div class="oc-total">${money(total)}</div>
@@ -6213,7 +6225,7 @@ async function showPaymentsModal(orgId, orderId) {
       const defaultMethod  = (String(o.paymentMethod || "").toLowerCase() in METHOD_LABEL) ? String(o.paymentMethod).toLowerCase() : "other";
       const paymentRows = (o.payments || []).map(p => `
         <tr style="${p.voidedAt ? "opacity:.5;text-decoration:line-through;" : ""}">
-          <td style="padding:4px 8px;white-space:nowrap;">${new Date(p.receivedAt).toLocaleDateString()}${!p.voidedAt && !p.fromStripe
+          <td style="padding:4px 8px;white-space:nowrap;">${adminDate_(p.receivedAt)}${!p.voidedAt && !p.fromStripe
             ? ` <button type="button" data-pay-id="${p.id}" data-pay-date="${escapeHtml(String(p.receivedAt).slice(0, 10))}" data-need="orders.payments:edit" onclick="pmSetPaymentDate(this.dataset.payId, this.dataset.payDate)" title="Change the date this money was received" style="padding:0 4px;background:none;border:none;cursor:pointer;color:#1d4ed8;font-size:12px;">✎</button>` : ""}</td>
           <td style="padding:4px 8px;white-space:nowrap;${p.amount < 0 ? "color:#b03a2e;" : ""}">${p.amount < 0 ? "−$" + Math.abs(Number(p.amount)).toFixed(2) : "$" + Number(p.amount).toFixed(2)}${p.kind === "refund" ? " <span style=\"font-size:11px;\">refund</span>" : p.kind === "dispute" ? " <span style=\"font-size:11px;\">lost dispute</span>" : ""}${
             (p.kind === "refund" || p.kind === "dispute") && !p.voidedAt ? `<br><span class="pm-refund-ship" style="font-size:11px;color:#666;">${Number(p.shipping) > 0 ? `$${Number(p.shipping).toFixed(2)} of it shipping (no tax)` : "all goods (tax backed out)"}</span>
@@ -6647,7 +6659,7 @@ async function showOrderDates_(orgId, orderId){
     <table style="border-collapse:collapse;">${ORDER_DATE_ROWS_.map(([c, l]) => row(c, l)).join("")}
       <tr><td style="padding:5px 8px 5px 0;font-size:13px;font-weight:600;">Due</td><td style="padding:5px 0;"><input type="date" class="od-due" value="${escapeHtml(o.dueDate || "")}" style="font:inherit;font-size:13px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;">
         <button type="button" class="od-due-clear" title="No due date" style="background:none;border:none;color:#b03a2e;cursor:pointer;font-size:13px;">✕</button></td></tr>
-      <tr><td style="padding:5px 8px 5px 0;font-size:13px;font-weight:600;">Paid</td><td style="padding:5px 0;font-size:13px;color:#555;">${o.paidAt ? escapeHtml(new Date(o.paidAt).toLocaleString()) : "—"} <span style="font-size:12px;color:#888;">(each payment's own date — Payments…)</span></td></tr>
+      <tr><td style="padding:5px 8px 5px 0;font-size:13px;font-weight:600;">Paid</td><td style="padding:5px 0;font-size:13px;color:#555;">${o.paidAt ? escapeHtml(adminDateTime_(o.paidAt)) : "—"} <span style="font-size:12px;color:#888;">(each payment's own date — Payments…)</span></td></tr>
     </table>
     <div id="odErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;"><button type="button" class="admin-btn admin-btn-secondary" id="odCancel">Cancel</button><button data-need="orders.details:edit" type="button" class="admin-btn" id="odSave">Save</button></div>`, 520);
@@ -6659,7 +6671,7 @@ async function showOrderDates_(orgId, orderId){
     for (const inp of ov.querySelectorAll(".od-input")) {
       if (inp.value === inp.dataset.shown) continue;   // unchanged (the box only shows minutes)
       if (!inp.value) { dates[inp.dataset.col] = null; continue; }
-      const d = new Date(inp.value);
+      const d = localDateTimeToDate_(inp.value);
       if (isNaN(d)) { err.textContent = "One of the dates isn't valid."; return; }
       dates[inp.dataset.col] = d.toISOString();
     }
@@ -7403,16 +7415,16 @@ function exportCsv(orgId){
     const verif = verifMap[o.orderId];
     o.items.forEach(it=>{
       out += [
-        new Date(o.placedAt).toLocaleDateString(),
+        adminDate_(o.placedAt),
         csvSafe(o.customerName), csvSafe(o.contact||""), csvSafe(o.orderId), csvSafe(it.name),
         itemHasSize_(it) ?it.size:"OSFA", it.qty,
         it.personalized ? csvSafe(it.persName||"yes") : "",
         it.lineTotal.toFixed(2),
         Number(it.tax || 0).toFixed(2),
         Number(it.netAmount ?? it.lineTotal).toFixed(2),
-        it.cancelDate ? new Date(it.cancelDate).toLocaleDateString() : "",
+        it.cancelDate ? adminDate_(it.cancelDate) : "",
         it.cancelReason ? csvSafe(it.cancelReason) : "",
-        it.refundDate ? new Date(it.refundDate).toLocaleDateString() : "",
+        it.refundDate ? adminDate_(it.refundDate) : "",
         it.refundAmount !== null && it.refundAmount !== undefined ? Number(it.refundAmount).toFixed(2) : "",
         csvSafe(o.paymentMethod||""), Number(o.effectiveTotal ?? o.total).toFixed(2), o.rushRequested ? (o.rushFeePending ? "to follow" : Number(o.rushFee || 0).toFixed(2)) : "", o.paid ? "Y":"N",
         o.receivedEmailAt||"", o.confirmedEmailAt||"",
@@ -8056,7 +8068,7 @@ async function fetchPricing_(params){
   if (!r.ok || d.status === "error") throw new Error((d && d.message) || "Could not run the price analysis.");
   return d;
 }
-const pricingMoney_ = (v) => v == null ? "—" : (v < 0 ? "−$" : "$") + Math.abs(Number(v)).toFixed(2);
+const pricingMoney_ = (v) => adminMoneyOr_(v);
 // One product's costs table: a row per price (size / color group), a column per cost, then income and $/hr.
 function pricingTableHtml_(a, settings){
   if (!a || !a.rows.length) return `<div class="admin-note">No prices to analyse yet.</div>`;
@@ -9457,7 +9469,7 @@ function readRushRule_(prefix){
   return { rule };
 }
 function rushExampleText_(rule){
-  const m = (n) => "$" + Number(n || 0).toFixed(2);
+  const m = adminMoney_;
   if(!rule || rule.mode === "off") return "Customers aren't offered rush.";
   if(rule.mode === "follow") return "The customer asks for rush with no fee yet; you set it on the order." +
     (rule.estLow != null || rule.estHigh != null ? ` They're told it's usually ${rule.estLow != null ? m(rule.estLow) : ""}${rule.estLow != null && rule.estHigh != null ? "–" : ""}${rule.estHigh != null ? m(rule.estHigh) : ""}.` : "") + rushPayByExample_(rule);
@@ -10036,6 +10048,7 @@ async function submitGlobalSettings(){
       if(!locRes.ok || locData.status === "error"){ stop("Region", locData && locData.message); return; }
       done.push("Region");
       if(typeof applyCountry_ === "function") applyCountry_(locData.locale && locData.locale.country);
+      setAdminTimeZone_(locData.effectiveTimeZone);   // a new Region time zone: today and every date follow it at once
     }
     // Features next, with Shipping's ship-from address in the same request when Shipping is ticked:
     // the server saves the two together, or neither (orders.js updateFeatures). The Machine Files
@@ -10713,7 +10726,7 @@ async function loadUsers_(){
   const beyondMine = (key) => { const r = _rolesData && (_rolesData.roles || []).find(x => x.key === key); return !!r && r.withinMine === false; };
   // The roles you may give: those ranked below yours (an admin may also make an admin), and no more than yours.
   const givable = ((_rolesData && _rolesData.roles) || []).filter(r => (r.rank < myRank || (iAmAdmin && r.key === "admin")) && r.withinMine !== false);
-  const when = (iso) => { if(!iso) return "never"; const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleString(); };
+  const when = (iso) => { if(!iso) return "never"; const d = adminWhen_(iso); return isNaN(d) ? "" : adminDateTime_(d); };
   const roleOptions = (sel) => givable.map(r => `<option value="${escapeHtml(r.key)}" ${r.key === sel ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("");
   const canEdit = adminCan_("settings.users", "edit");
   const row = (u) => {
@@ -12001,7 +12014,7 @@ async function showStockModal(orgId, productId, productName, pricingMode, sizePr
   const td = "padding:6px 8px;border-bottom:1px solid #eee;font-size:13px;vertical-align:top;", num = "text-align:right;font-variant-numeric:tabular-nums;";
   const inp = "width:64px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;text-align:right;";
   // A cost the server leaves out (a role without costs.view that can only look: orders.js stripCosts_) shows as —.
-  const money = (n) => n == null ? "—" : "$" + Number(n).toFixed(2);
+  const money = (n) => adminMoneyOr_(n);
   const { ov, close } = inventoryModal_("Finished stock — " + escapeHtml(productName || productId), `
     <div style="font-size:12px;color:#666;margin-bottom:10px;">Pieces already decorated for this shop, ready to sell. <b>Make for stock</b> takes the blanks out of blank inventory — and the transfers each piece carries (printed transfers, the reorder QR, a picked transfer graphic) out of transfer stock — at their cost;
       an order for a stocked size is filled from here automatically (no blanks or making steps), and the pieces are <b>set aside</b> until the order is made.</div>
@@ -12987,7 +13000,7 @@ function loadPriceCalc_(product){
   const draw = (note) => {
     const w = work();
     if (w.none) { el.innerHTML = `<div class="admin-note">Link the product's sizes to a blank (Blank links, below) and Save changes — the prices are worked out from the blank's vendor price, average cost or MAP.</div>`; return; }
-    const r = w.res, money = (v) => v == null ? "—" : "$" + Number(v).toFixed(2);
+    const r = w.res, money = (v) => adminMoneyOr_(v);
     const line = r.pricingMode === "flat" ? money(r.flatPrice) : w.sizes.map(z => `${escapeHtml(z)} ${money(r.sizePricing[z])}`).join(" · ");
     el.innerHTML = `${w.rule ? `<div class="admin-note" style="margin:0;">Your price rule${w.rule.brand ? ` for ${escapeHtml(w.rule.brand)}` : ""}: ${escapeHtml(priceRuleText_(w.rule))} (Catalog → Brand rules)</div>` : ""}${priceMethodHtml_(pr, "pfc")}
       <div class="price-calc-preview">${r.colorGroups.length ? "Standard: " : ""}${line}${r.colorGroups.length ? `<br>${r.colorGroups.length} color group${r.colorGroups.length === 1 ? "" : "s"} for colors whose blank costs differently` : ""}</div>
@@ -14151,7 +14164,7 @@ async function renderRevenueReport(app) {
   adminSetHash("revenue");
   document.title = adminTitle_("Revenue report");
 
-  const thisYear  = new Date().getFullYear();
+  const thisYear  = adminYear_();
   const defaultFrom = thisYear + "-01-01";
   const defaultTo   = reportToDay_();
 
@@ -14192,7 +14205,7 @@ async function renderRevenueReport(app) {
     </div>
   `;
 
-  function fmt(n) { return "$" + Number(n).toFixed(2); }
+  const fmt = adminMoney_;
 
   // Cash basis: what actually came in / went back out, by the date it moved.
   function renderCashTable(d) {
@@ -14202,7 +14215,7 @@ async function renderRevenueReport(app) {
     const LABEL = { card: "Card (Stripe)", venmo: "Venmo", zelle: "Zelle", check: "Check", cash: "Cash", other: "Other" };
     const t = d.total;
     return `
-      <div style="font-size:13px;color:#555;margin-bottom:10px;">Money received and refunded between ${escapeHtml(new Date(d.dateFrom + "T12:00:00").toLocaleDateString())} and ${escapeHtml(new Date(d.dateTo + "T12:00:00").toLocaleDateString())}, by the date it moved. Voided entries and test orders excluded.</div>
+      <div style="font-size:13px;color:#555;margin-bottom:10px;">Money received and refunded between ${escapeHtml(adminDate_(d.dateFrom))} and ${escapeHtml(adminDate_(d.dateTo))}, by the date it moved. Voided entries and test orders excluded.</div>
       <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;margin-bottom:16px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
         <thead><tr><th style="${th}text-align:left;">Shop</th><th style="${th}">Payments</th><th style="${th}">Received</th><th style="${th}">Refunded</th><th style="${th}">Stripe fees</th><th style="${th}">Net received</th></tr></thead>
         <tbody>${d.orgs.map(o => `<tr><td style="${td}text-align:left;font-weight:600;">${escapeHtml(o.name)}</td><td style="${td}">${o.payments}</td><td style="${td}">${fmt(o.received)}</td><td style="${td}">${o.refunded > 0 ? "−" + fmt(o.refunded) : "—"}</td><td style="${td}">${o.fees > 0 ? fmt(o.fees) : "—"}</td><td style="${td}font-weight:600;">${fmt(o.net)}</td></tr>`).join("")
@@ -14227,7 +14240,7 @@ async function renderRevenueReport(app) {
     const thL   = "padding:9px 14px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
     const foot  = "padding:10px 14px;text-align:right;background:#f0f0f0;color:#111;font-weight:700;border-top:2px solid #aaa;";
     const footL = "padding:10px 14px;text-align:left;background:#f0f0f0;color:#111;font-weight:700;border-top:2px solid #aaa;font-size:15px;";
-    const dLabel = `${new Date(dateFrom + "T12:00:00").toLocaleDateString()} – ${new Date(dateTo + "T12:00:00").toLocaleDateString()}`;
+    const dLabel = `${adminDate_(dateFrom)} – ${adminDate_(dateTo)}`;
     return `
       <div style="font-size:13px;color:#555;margin-bottom:10px;">${dLabel} · ${escapeHtml(saleDateNote_(data.saleDate))}</div>
       <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;">
@@ -14398,34 +14411,34 @@ function auditDetailSummary(action, detail) {
       case "product.hidden":
       case "product.shown":       return escapeHtml(detail.productId || "");
       case "order.shipped_auto":  return escapeHtml(detail.carrier || "") + " " + escapeHtml(detail.tracking || "") + (detail.customerEmailed === false ? " · customer email not sent" : "");
-      case "order.marked_paid":   return detail.paidAt ? new Date(detail.paidAt).toLocaleDateString() : "";
-      case "order.date_changed":  return (detail.from ? new Date(detail.from).toLocaleDateString() : "?") + " → " + (detail.to ? new Date(detail.to).toLocaleDateString() : "?");
-      case "order.deleted":       return escapeHtml(detail.customerName || "") + (detail.total != null ? " · $" + Number(detail.total).toFixed(2) : "") + (detail.paid ? " · Paid" : " · Unpaid");
-      case "order.voided":        return escapeHtml(detail.customerName || "") + (detail.total != null ? " · $" + Number(detail.total).toFixed(2) : "") + (detail.reason ? " · " + escapeHtml(detail.reason) : "");
-      case "payment.voided":      return "$" + Number(detail.amount || 0).toFixed(2) + " " + escapeHtml(detail.method || "") + (detail.reason ? " · " + escapeHtml(detail.reason) : "");
-      case "payment.refunded":    return "−$" + Number(detail.amount || 0).toFixed(2) + " " + escapeHtml(detail.method || "") + (detail.reference ? " #" + escapeHtml(detail.reference) : "");
+      case "order.marked_paid":   return detail.paidAt ? adminDate_(detail.paidAt) : "";
+      case "order.date_changed":  return (detail.from ? adminDate_(detail.from) : "?") + " → " + (detail.to ? adminDate_(detail.to) : "?");
+      case "order.deleted":       return escapeHtml(detail.customerName || "") + (detail.total != null ? " · " + adminMoney_(detail.total) : "") + (detail.paid ? " · Paid" : " · Unpaid");
+      case "order.voided":        return escapeHtml(detail.customerName || "") + (detail.total != null ? " · " + adminMoney_(detail.total) : "") + (detail.reason ? " · " + escapeHtml(detail.reason) : "");
+      case "payment.voided":      return adminMoney_(detail.amount || 0) + " " + escapeHtml(detail.method || "") + (detail.reason ? " · " + escapeHtml(detail.reason) : "");
+      case "payment.refunded":    return adminMoney_(-Math.abs(Number(detail.amount || 0))) + " " + escapeHtml(detail.method || "") + (detail.reference ? " #" + escapeHtml(detail.reference) : "");
       case "period.closed":
       case "period.reopened":     return escapeHtml(detail.month || "");
-      case "order.discount_set":  return "$" + Number(detail.amount || 0).toFixed(2) + (detail.note ? " — " + escapeHtml(detail.note) : "");
+      case "order.discount_set":  return adminMoney_(detail.amount || 0) + (detail.note ? " — " + escapeHtml(detail.note) : "");
       case "order.customer_updated": return escapeHtml((detail.fields || []).join(", ")) + (detail.orderIds && detail.orderIds.length > 1 ? ` (${detail.orderIds.length} orders)` : "");
-      case "order.created_local_sale": return escapeHtml(detail.customerName || "") + " · $" + Number(detail.total || 0).toFixed(2) + " · " + (detail.items || 0) + " item(s)" + (detail.paid ? " · Paid" : "");
+      case "order.created_local_sale": return escapeHtml(detail.customerName || "") + " · " + adminMoney_(detail.total || 0) + " · " + (detail.items || 0) + " item(s)" + (detail.paid ? " · Paid" : "");
       case "order.fulfillment_stage": return escapeHtml(detail.stage || "");
       case "order.bulk_fulfillment_stage": return escapeHtml(detail.stage || "") + " · " + (detail.updated || 0) + " orders";
-      case "order.edited":        return [detail.removals && `−${detail.removals} removed`, detail.additions && `+${detail.additions} added`, detail.updates && `${detail.updates} updated`, detail.priceDiff ? `Δ$${Number(detail.priceDiff).toFixed(2)}` : null].filter(Boolean).join(" · ");
+      case "order.edited":        return [detail.removals && `−${detail.removals} removed`, detail.additions && `+${detail.additions} added`, detail.updates && `${detail.updates} updated`, detail.priceDiff ? `Δ${adminMoney_(detail.priceDiff)}` : null].filter(Boolean).join(" · ");
       case "order.tracking_set":  return escapeHtml(detail.trackingNumber || "—");
       case "order.bulk_tracking_set": return (detail.count || 0) + " orders · " + escapeHtml(detail.trackingNumber || "—");
-      case "order.shipping_set":  return (detail.shippingCost != null ? "$" + Number(detail.shippingCost).toFixed(2) : "") + (detail.shippingMethod ? " · " + escapeHtml(detail.shippingMethod) : "") + (detail.city ? " · " + escapeHtml(detail.city) + ", " + escapeHtml(detail.state || "") : "");
-      case "payment.added":       return "$" + Number(detail.amount || 0).toFixed(2) + (detail.note ? " — " + escapeHtml(detail.note) : "")
-        + (detail.discountTo != null ? "; rest waived — discount $" + Number(detail.discountFrom || 0).toFixed(2) + " → $" + Number(detail.discountTo).toFixed(2) : "");
+      case "order.shipping_set":  return (detail.shippingCost != null ? adminMoney_(detail.shippingCost) : "") + (detail.shippingMethod ? " · " + escapeHtml(detail.shippingMethod) : "") + (detail.city ? " · " + escapeHtml(detail.city) + ", " + escapeHtml(detail.state || "") : "");
+      case "payment.added":       return adminMoney_(detail.amount || 0) + (detail.note ? " — " + escapeHtml(detail.note) : "")
+        + (detail.discountTo != null ? "; rest waived — discount " + adminMoney_(detail.discountFrom || 0) + " → " + adminMoney_(detail.discountTo) : "");
       case "payment.deleted":     return "Payment #" + (detail.paymentId || "?");
       case "item.cancelled":      return escapeHtml(detail.name || "") + (detail.size ? " / " + escapeHtml(detail.size) : "") + (detail.reason ? " — " + escapeHtml(detail.reason) : "");
       case "item.bulk_cancelled": return (detail.count || 0) + " items" + (detail.reason ? " — " + escapeHtml(detail.reason) : "");
-      case "item.refund_set":     return "$" + Number(detail.refundAmount || 0).toFixed(2) + (detail.name ? " · " + escapeHtml(detail.name) : "");
-      case "payment.date_changed": return "$" + Number(detail.amount || 0).toFixed(2) + " " + escapeHtml(detail.method || "") + " · " + (detail.from ? new Date(detail.from).toLocaleDateString() : "?") + " → " + (detail.to ? new Date(detail.to).toLocaleDateString() : "?");
-      case "expense.created":     return escapeHtml(detail.description || "") + " · $" + Number(detail.amount || 0).toFixed(2) + (detail.category ? " · " + escapeHtml(detail.category) : "");
-      case "expense.updated":     return escapeHtml((detail.to && detail.to.description) || (detail.from && detail.from.description) || "") + (detail.to ? " · $" + Number(detail.to.amount || 0).toFixed(2) : "");
-      case "expense.deleted":     return escapeHtml(detail.description || "") + " · $" + Number(detail.amount || 0).toFixed(2);
-      case "expense.imported":    return Number(detail.count || 0) + " expense(s) · $" + Number(detail.total || 0).toFixed(2);
+      case "item.refund_set":     return adminMoney_(detail.refundAmount || 0) + (detail.name ? " · " + escapeHtml(detail.name) : "");
+      case "payment.date_changed": return adminMoney_(detail.amount || 0) + " " + escapeHtml(detail.method || "") + " · " + (detail.from ? adminDate_(detail.from) : "?") + " → " + (detail.to ? adminDate_(detail.to) : "?");
+      case "expense.created":     return escapeHtml(detail.description || "") + " · " + adminMoney_(detail.amount || 0) + (detail.category ? " · " + escapeHtml(detail.category) : "");
+      case "expense.updated":     return escapeHtml((detail.to && detail.to.description) || (detail.from && detail.from.description) || "") + (detail.to ? " · " + adminMoney_(detail.to.amount || 0) : "");
+      case "expense.deleted":     return escapeHtml(detail.description || "") + " · " + adminMoney_(detail.amount || 0);
+      case "expense.imported":    return Number(detail.count || 0) + " expense(s) · " + adminMoney_(detail.total || 0);
       case "blanks.imported":
       case "products.imported":   return Number(detail.created || 0) + " new, " + Number(detail.updated || 0) + " updated" + (detail.skipped ? ", " + Number(detail.skipped) + " skipped" : "") +
         (detail.linked ? " · " + Number(detail.linked) + " size links" : "");
@@ -14456,7 +14469,7 @@ function auditDetailSummary(action, detail) {
 async function renderSalesTaxReport(app) {
   adminSetHash("salestax");
   document.title = adminTitle_("Sales tax report");
-  const y = new Date().getFullYear();
+  const y = adminYear_();
   const q = (n) => [y + "-" + ["01","04","07","10"][n] + "-01", y + "-" + ["03-31","06-30","09-30","12-31"][n]];
   app.innerHTML = `
     <div class="org-hero admin-hero" style="--org-accent:var(--accent);">
@@ -14478,7 +14491,7 @@ async function renderSalesTaxReport(app) {
     </div>`;
 
   const fmt = adminMoney_;
-  const monthLabel = (m) => new Date(m + "-15T12:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
+  const monthLabel = (m) => adminDate_(m, { month: "short", year: "numeric" });
   const cell = "padding:9px 12px;text-align:right;border-bottom:1px solid #ddd;color:#111;background:#fff;";
   const cellL = "padding:9px 12px;text-align:left;border-bottom:1px solid #ddd;color:#111;background:#fff;";
   const th = "padding:9px 12px;text-align:right;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;white-space:nowrap;border-bottom:2px solid #ccc;";
@@ -14552,7 +14565,7 @@ async function renderSalesTaxReport(app) {
                 <td style="${cell}font-weight:600;">${r.exempt ? "—" : fmt(r.taxCollected)}</td>
                 <td style="${cell}">${fmt(r.netSales)}</td>
                 <td style="${cell}">${r.shipping > 0 ? fmt(r.shipping) : "—"}</td>
-                <td style="${cell}" title="${r.rushTax > 0 ? "Includes $" + Number(r.rushTax).toFixed(2) + " sales tax" : "Not taxed"}">${r.rushFees > 0 ? fmt(r.rushFees) : "—"}</td>
+                <td style="${cell}" title="${r.rushTax > 0 ? "Includes " + adminMoney_(r.rushTax) + " sales tax" : "Not taxed"}">${r.rushFees > 0 ? fmt(r.rushFees) : "—"}</td>
               </tr>`).join("") : `<tr><td colspan="9" style="${cellL}color:#888;">No orders in this period.</td></tr>`}
             </tbody>
             <tfoot><tr>
@@ -14811,46 +14824,143 @@ if (typeof MutationObserver !== "undefined" && !window._stackLabelsObserver) {
 // be styled or explain much). Resolves {ok, reason}. reason: "required" keeps the confirm button off until something
 // is typed; "optional" shows the box; omitted = no box. Words: "Delete" removes a record, "Void" keeps money or stock
 // on record but stops it counting, "Remove" takes something off a list.
-// ---- When it happened (2026-10) ---------------------------------------------------------------------------------
-// Most steps are recorded after the fact, so each asks "when did this happen?" — a date-and-time box defaulting to
-// now in the admin's own time, never later than now. The server checks the time fits the order's other dates.
-// The admin's "today" as YYYY-MM-DD in this computer's own time — never the UTC day, which on a US evening is already
-// tomorrow (a receipt dated tomorrow, a delivery due today shown late). dayOffset moves it by whole days.
+// ---- The business's calendar (2026-11) ---------------------------------------------------------------------------
+// Every "today", every day a time falls on and every date and time shown here is on the business's own calendar: the
+// time zone in Global settings → Region, else the TIMEZONE variable, else UTC (resolveTimeZone in functions/_lib/db.js)
+// — the same one the reports, emails and the server's own "today" use. The server sends it with the sign-in and with
+// "me" (adminTimeZone). Someone working from another zone, or on a computer set to the wrong one, still sees the
+// business's days. Until it is known (an older server, a page not yet signed in), this computer's own zone stands in.
+// Formatters for the zone, made once each (_adminDtf, at the top): building one is slow, and a list formats hundreds.
+// `zone` is for a plain day, formatted in UTC so it never moves; left out, the business's.
+function adminDtf_(opts, locale, zone){
+  zone = zone || adminTimeZone || undefined;
+  const key = (locale || "") + "|" + (zone || "") + "|" + JSON.stringify(opts);
+  let f = _adminDtf.get(key);
+  if (!f) { f = new Intl.DateTimeFormat(locale, { ...opts, timeZone: zone }); _adminDtf.set(key, f); }
+  return f;
+}
+// A stored time as a Date. A database time written without a zone ("2026-11-04 21:30:00", SQLite's datetime()) is UTC.
+function adminWhen_(v){
+  if (v instanceof Date) return v;
+  if (typeof v === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(v)) return new Date(v.replace(" ", "T") + "Z");
+  return new Date(v);
+}
+// A moment's wall-clock time on the business's calendar: { y, m, d, h, mi } (numbers), or null for no valid time.
+function zonedParts_(when){
+  const x = adminWhen_(when);
+  if (isNaN(x)) return null;
+  const parts = adminDtf_({ year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }, "en-US").formatToParts(x);
+  const get = (t) => Number((parts.find(p => p.type === t) || {}).value);
+  return { y: get("year"), m: get("month"), d: get("day"), h: get("hour") % 24, mi: get("minute") };
+}
+// The moment (ms) a wall-clock time on the business's calendar stands for. Days, hours and minutes past the end of
+// their month or day roll over (d + 1 on the 31st is the 1st). A time a clock change skips (2:30 on the night the
+// clocks go forward) comes out an hour to one side of it.
+function zonedTime_(y, m, d, h, mi){
+  if (!adminTimeZone) return new Date(y, m - 1, d, h || 0, mi || 0).getTime();
+  const want = Date.UTC(y, m - 1, d, h || 0, mi || 0);
+  const offsetAt = (t) => { const p = zonedParts_(new Date(t)); return Date.UTC(p.y, p.m - 1, p.d, p.h, p.mi) - Math.floor(t / 60000) * 60000; };
+  const first = want - offsetAt(want);
+  return want - offsetAt(first);
+}
+function pad2_(n){ return String(n).padStart(2, "0"); }
+function ymd_(y, m, d){ return `${String(y).padStart(4, "0")}-${pad2_(m)}-${pad2_(d)}`; }
 // The default "To" of a report's date range. The server counts report days in UTC (a plain To date runs to the
-// end of that UTC day), so in the evening west of UTC the local day is a day behind and would leave out what
+// end of that UTC day), so in the evening west of UTC the business's day is a day behind and would leave out what
 // happened since UTC midnight: this evening's runs, sales and stock moves. The later of the two days never does.
 function reportToDay_(){ const local = localToday_(), utc = new Date().toISOString().slice(0, 10); return utc > local ? utc : local; }
-function localToday_(dayOffset){ const d = new Date(); if (dayOffset) d.setDate(d.getDate() + dayOffset); return localDay_(d); }
-// A moment's calendar day (YYYY-MM-DD) in this computer's own time.
-function localDay_(when){
-  const x = new Date(when), p = (n) => String(n).padStart(2, "0");
-  return isNaN(x) ? "" : `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`;
+// The business's "today" as YYYY-MM-DD — never the UTC day, which on a US evening is already tomorrow (a receipt
+// dated tomorrow, a delivery due today shown late). dayOffset moves it by whole calendar days.
+function localToday_(dayOffset){ const today = localDay_(new Date()); return dayOffset ? addDays_(today, dayOffset) : today; }
+// A YYYY-MM-DD day moved by whole calendar days (or a YYYY-MM month by whole months): plain calendar arithmetic, so
+// no clock change or zone can make it skip or repeat a day.
+function addDays_(day, n){
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || "");
+  if (!m) return "";
+  const x = new Date(Date.UTC(+m[1], m[2] - 1, +m[3] + (Number(n) || 0)));
+  return ymd_(x.getUTCFullYear(), x.getUTCMonth() + 1, x.getUTCDate());
 }
-// Money for display, the way Money and Expenses write it: thousands separated, a true minus sign before the dollar
-// sign ("−$1,234.56", never "$-1234.56").
+function addMonths_(month, n){
+  const m = /^(\d{4})-(\d{2})/.exec(month || "");
+  if (!m) return "";
+  const x = new Date(Date.UTC(+m[1], m[2] - 1 + (Number(n) || 0), 1));
+  return ymd_(x.getUTCFullYear(), x.getUTCMonth() + 1, 1).slice(0, 7);
+}
+// Whole calendar days from one YYYY-MM-DD day to another (negative when `to` is earlier); NaN for anything else.
+function daysBetween_(from, to){
+  const a = /^(\d{4})-(\d{2})-(\d{2})/.exec(from || ""), b = /^(\d{4})-(\d{2})-(\d{2})/.exec(to || "");
+  return a && b ? Math.round((Date.UTC(+b[1], b[2] - 1, +b[3]) - Date.UTC(+a[1], a[2] - 1, +a[3])) / 86400000) : NaN;
+}
+// The business's year (a number): where "this year" starts a report or a list.
+function adminYear_(){ return Number(localToday_().slice(0, 4)); }
+// A moment's calendar day (YYYY-MM-DD) on the business's calendar.
+function localDay_(when){
+  const p = zonedParts_(when);
+  return p ? ymd_(p.y, p.m, p.d) : "";
+}
+// Money for display, the one style everywhere in the admin: thousands separated, a true minus sign before the dollar
+// sign ("−$1,234.56", never "$-1234.56"). (The storefront's own `money` in index.html is shoppers' and stays as it is.)
 function adminMoney_(n){
   const x = Number(n) || 0;
   return (x < 0 ? "−$" : "$") + Math.abs(x).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
-// A stored date for display. A plain day (YYYY-MM-DD) is shown as written; a full time (ISO) as the day it was here,
-// in this computer's own time — slicing the ISO text would give the UTC day, a day late for a step recorded on a US
-// evening. adminDay_ keeps the YYYY-MM-DD form; adminShortDate_ writes M/D/YYYY, as the order steps show dates.
+// adminMoney_ that writes an empty amount (null, undefined) as `none` ("—" unless given) instead of $0.00.
+function adminMoneyOr_(n, none){ return n == null || n === "" ? (none === undefined ? "—" : none) : adminMoney_(n); }
+// A stored date for display. A plain day (YYYY-MM-DD) is shown as written; a full time (ISO) as the day it was at the
+// business — slicing the ISO text would give the UTC day, a day late for a step recorded on a US evening.
+// adminDay_ keeps the YYYY-MM-DD form; adminShortDate_ writes M/D/YYYY, as the order steps show dates.
 function adminDay_(v){
   const t = String(v == null ? "" : v);
   if (!t || /^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
-  return localDay_(t) || t.slice(0, 10);
+  return localDay_(v) || t.slice(0, 10);
 }
 function adminShortDate_(v){
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(adminDay_(v));
   return m ? `${+m[2]}/${+m[3]}/${m[1]}` : String(v == null ? "" : v);
 }
-// The first and last moment of a local day, as ISO times — for a From / To filter on stored timestamps (UTC), so a
-// search for one day finds that day's evening too, and not the evening before.
-function localDayStartIso_(day){ const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || ""); return m ? new Date(+m[1], m[2] - 1, +m[3]).toISOString() : ""; }
-function localDayEndIso_(day){ const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || ""); return m ? new Date(new Date(+m[1], m[2] - 1, +m[3] + 1).getTime() - 1).toISOString() : ""; }
+// THE date for display: "11/4/2026" in this browser's own date style, or with `opts` any Intl date style
+// ({ month: "short", day: "numeric" }, { month: "long", year: "numeric" }…). A full time shows the day it was at the
+// business. A plain day (YYYY-MM-DD) — a due date, an expense's date, a report's From — is that calendar day wherever
+// it is shown and never moves a day; a month (YYYY-MM) is that month. `locale` is for a screen that always writes
+// US English ("en-US"); left out, it is the browser's.
+function adminDate_(v, opts, locale){
+  if (v == null || v === "") return "";
+  const o = opts || { year: "numeric", month: "numeric", day: "numeric" };
+  const plain = typeof v === "string" && /^(\d{4})-(\d{2})(?:-(\d{2}))?$/.exec(v);
+  if (plain) return adminDtf_(o, locale, "UTC").format(new Date(Date.UTC(+plain[1], plain[2] - 1, plain[3] ? +plain[3] : 15, 12)));
+  const x = adminWhen_(v);
+  return isNaN(x) ? String(v) : adminDtf_(o, locale).format(x);
+}
+// A date and time for display, at the business: "11/4/2026, 9:30:00 PM" in this browser's style, or `opts`.
+function adminDateTime_(v, opts, locale){
+  if (v == null || v === "") return "";
+  const x = adminWhen_(v);
+  return isNaN(x) ? String(v) : adminDtf_(opts || { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" }, locale).format(x);
+}
+// A time of day for display, at the business ("9:30 PM").
+function adminTime_(v, opts){
+  const x = adminWhen_(v);
+  return v == null || v === "" || isNaN(x) ? "" : adminDtf_(opts || { hour: "numeric", minute: "2-digit" }).format(x);
+}
+// The first and last moment of a business day, as ISO times — for a From / To filter on stored timestamps (UTC), so
+// a search for one day finds that day's evening too, and not the evening before.
+function localDayStartIso_(day){ const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || ""); return m ? new Date(zonedTime_(+m[1], +m[2], +m[3], 0, 0)).toISOString() : ""; }
+function localDayEndIso_(day){ const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || ""); return m ? new Date(zonedTime_(+m[1], +m[2], +m[3] + 1, 0, 0) - 1).toISOString() : ""; }
+// Noon of a business day as an ISO time: a step recorded with only a day lands on that day wherever it is read.
+function localNoonIso_(day){ const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || ""); return m ? new Date(zonedTime_(+m[1], +m[2], +m[3], 12, 0)).toISOString() : ""; }
+// ---- When it happened (2026-10) ---------------------------------------------------------------------------------
+// Most steps are recorded after the fact, so each asks "when did this happen?" — a date-and-time box defaulting to
+// now on the business's clock, never later than now. The server checks the time fits the order's other dates.
+// A moment as a date-and-time box's value ("YYYY-MM-DDTHH:MM") on the business's clock; now when left out.
 function localDateTime_(d){
-  const x = d ? new Date(d) : new Date(), p = (n) => String(n).padStart(2, "0");
-  return isNaN(x) ? "" : `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}T${p(x.getHours())}:${p(x.getMinutes())}`;
+  const p = zonedParts_(d ? d : new Date());
+  return p ? `${ymd_(p.y, p.m, p.d)}T${pad2_(p.h)}:${pad2_(p.mi)}` : "";
+}
+// A date-and-time box's value ("YYYY-MM-DDTHH:MM", on the business's clock) as the moment it stands for — an
+// invalid Date for anything else. new Date(value) would read it on this computer's clock instead.
+function localDateTimeToDate_(v){
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/.exec(String(v || ""));
+  return m ? new Date(zonedTime_(+m[1], +m[2], +m[3], +m[4], +m[5])) : new Date(NaN);
 }
 // Left unchanged, the box stands for exactly the moment it was set to (it only shows minutes): data-iso keeps it, or
 // "now" — so a step recorded seconds after the one before it never lands before it.
@@ -14865,7 +14975,7 @@ function readWhen_(input){
   const v = input && input.value;
   if (!v) return { error: "Pick when it happened." };
   if (input.dataset && v === input.dataset.shown) return { at: input.dataset.iso || new Date().toISOString() };
-  const d = new Date(v);
+  const d = localDateTimeToDate_(v);
   if (isNaN(d)) return { error: "That date and time isn't valid." };
   if (d.getTime() > Date.now() + 2 * 60000) return { error: "That's in the future — pick when it happened." };
   return { at: d.toISOString() };
@@ -15173,7 +15283,7 @@ function showWriteOffModal_(blank, onDone){
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
       <label style="font-size:12px;font-weight:600;">Color / size<br><select id="woSize" style="${inp}">${sizeOpts}</select></label>
       <label style="font-size:12px;font-weight:600;">Qty<br><input type="number" min="1" id="woQty" placeholder="1" style="${inp}width:70px;"></label>
-      <label style="font-size:12px;font-weight:600;">Date<br><input type="date" id="woDate" value="${new Date().toLocaleDateString("en-CA")}" max="${new Date().toLocaleDateString("en-CA")}" style="${inp}"></label>
+      <label style="font-size:12px;font-weight:600;">Date<br><input type="date" id="woDate" value="${localToday_()}" max="${localToday_()}" style="${inp}"></label>
     </div>
     <label style="display:block;font-size:12px;font-weight:600;margin-bottom:10px;">Reason<br>
       <select id="woReason" style="${inp}">${Object.entries(WRITEOFF_REASONS_).map(([k, v]) => `<option value="${k}">${escapeHtml(v)}</option>`).join("")}</select></label>
@@ -15386,7 +15496,7 @@ function showStockCount_(kind, onDone){
     });
     if (!got) return;
     try {
-      if (isB) await hoopApi_({ action: "writeOffBlanks", blankId: r.blankId, color: r.color, size: r.size, qty: got.qty, note: got.note, reason: got.reason, occurredAt: new Date(at).toLocaleDateString("en-CA") });
+      if (isB) await hoopApi_({ action: "writeOffBlanks", blankId: r.blankId, color: r.color, size: r.size, qty: got.qty, note: got.note, reason: got.reason, occurredAt: localDay_(at) });
       else await hoopApi_({ action: "writeOffTransfers", transferId: r.transferId, qty: got.qty, note: got.note, occurredAt: at });
       showToast("Written off.");
       await load();
@@ -15880,7 +15990,7 @@ async function showReceiveOrderModal(onDone, prefill){
   const { ov, close } = inventoryModal_("Receive a blank order", `
     <div style="font-size:12px;color:#666;margin-bottom:10px;">Record a whole vendor order at once — every blank type on the invoice, the shipping, and anything bought for R&amp;D / testing or personal use.</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-      <label style="font-size:12px;font-weight:600;">Date received<br><input id="roDate" type="date" value="${escapeHtml(prefill && prefill.receivedAt || new Date().toLocaleDateString("en-CA"))}" max="${new Date().toLocaleDateString("en-CA")}" style="${inp}"></label>
+      <label style="font-size:12px;font-weight:600;">Date received<br><input id="roDate" type="date" value="${escapeHtml(prefill && prefill.receivedAt || localToday_())}" max="${localToday_()}" style="${inp}"></label>
       <label style="font-size:12px;font-weight:600;">Paid from<br><select id="roPaidFrom" style="${inp}"><option value="">Loading…</option></select></label>
       <label style="font-size:12px;font-weight:600;">Order total (optional)<br>$<input id="roTotal" type="number" min="0" step="0.01" placeholder="0.00" style="${inp}width:96px;"></label>
     </div>
@@ -15945,7 +16055,7 @@ async function showBlankHistoryModal(blank, onDone){
       body.innerHTML = d.movements.length ? `<table style="border-collapse:collapse;width:100%;font-size:12px;color:#1a1a1a;">
         <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:4px 6px;">Date</th><th style="padding:4px 6px;">Color / size</th><th style="padding:4px 6px;">Type</th><th style="padding:4px 6px;text-align:right;">Qty</th><th style="padding:4px 6px;text-align:right;">Unit cost</th><th style="padding:4px 6px;">Details</th><th style="padding:4px 6px;"></th></tr></thead>
         <tbody>${d.movements.map(m => { const dim = m.voidedAt ? "opacity:.5;text-decoration:line-through;" : ""; return `<tr style="border-bottom:1px solid #eee;">
-          <td style="${dim}padding:4px 6px;white-space:nowrap;">${new Date(m.occurredAt).toLocaleDateString()}</td>
+          <td style="${dim}padding:4px 6px;white-space:nowrap;">${adminDate_(m.occurredAt)}</td>
           <td style="${dim}padding:4px 6px;">${m.color ? escapeHtml(m.color) + " · " : ""}${escapeHtml(m.size || "—")}</td>
           <td style="${dim}padding:4px 6px;">${KIND[m.kind] || escapeHtml(m.kind)}</td>
           <td style="${dim}padding:4px 6px;text-align:right;color:${m.qtyDelta < 0 ? "#b03a2e" : "#166534"};">${m.qtyDelta > 0 ? "+" : ""}${m.qtyDelta}</td>
@@ -16073,7 +16183,7 @@ async function renderBlanksToOrder(app){
   let report = null;
   // Ordering through a supplier's web service (migrations/0072) — admin only; null for everyone else.
   let supplier = null;
-  const money = (n) => "$" + Number(n || 0).toFixed(2);
+  const money = adminMoney_;
   // The rows of a supplier block that can be ordered electronically: their blank is linked to a connection whose
   // company has a connection that takes orders.
   const orderableRows_ = (s) => supplierOrderableRows_(s.rows, supplier);
@@ -16204,7 +16314,7 @@ async function renderBlanksToOrder(app){
 // ---- Free shipping per vendor + "Get me to free shipping" (2026-10) ----
 // A vendor ships free over a dollar amount (SanMar, S&S: $200; 0 = every order) or at a piece count — set on the
 // vendor in the vendor list (Manage vendors; migrations/0084), so it works with or without a vendor connection.
-const fsDollars_ = (cents) => "$" + (Number(cents) % 100 ? (Number(cents) / 100).toFixed(2) : String(Number(cents) / 100));
+const fsDollars_ = (cents) => Number(cents) % 100 ? adminMoney_(Number(cents) / 100) : adminMoney_(Number(cents) / 100).slice(0, -3);   // "$50", "$49.50"
 function freeShipText_(fs){
   if (!fs) return "";
   if (fs.overCents === 0) return "on every order";
@@ -16301,7 +16411,7 @@ async function showFreeShipping_(vendor, baseRows, ctx = {}){
   try { data = await hoopApi_({ action: "freeShippingSuggestions", vendor }); }
   catch (e) { $("fsBody").innerHTML = `<div class="admin-empty">${escapeHtml(e.message || "Couldn't load the suggestions.")}</div>`; return; }
   const fs = data.freeShipping, cands = data.candidates || [];
-  const money = (n) => "$" + (Number(n) || 0).toFixed(2);
+  const money = adminMoney_;
   const priceOf = (r) => Number(r.vendorPrice != null ? r.vendorPrice : r.price) || 0;
   const base = (baseRows || []).filter(r => r.toOrder > 0).map(r => ({ kind: "base", r, blankId: r.blankId, blank: r.blank, sku: r.sku, color: r.color || "", size: r.size || "",
     qty: r.toOrder, price: priceOf(r), on: true, reason: r.needed ? `For ${r.orders && r.orders.length ? r.orders.length + " order" + (r.orders.length === 1 ? "" : "s") : "orders"}${r.restock ? ` + ${r.restock} restock` : ""}` : r.restock ? `Restock (keep ${r.reorderPoint})` : "" }));
@@ -16629,7 +16739,7 @@ async function showPriceImpact_(rules, opts){
   const canApply = adminCan_("catalog.brandApprovals", "edit");
   let rounding = "none";
   const brands = [...new Set([...rows.map(r => r.brand).filter(Boolean), ...edit.brandPrices.map(b => b.brand)])].sort((a, b) => a.localeCompare(b));
-  const money = (v) => v == null ? "—" : "$" + Number(v).toFixed(2);
+  const money = (v) => adminMoneyOr_(v);
   // MAP + the rule, rounded up as chosen (rounding only ever goes up, so it never lands under the rule).
   const after = (r) => {
     const rule = priceRuleFor_(edit, r.brand); if (!rule) return null;
@@ -16866,7 +16976,7 @@ function supplierOrderReceivePrefill_(o){
     if (!groups.has(l.blankId)) groups.set(l.blankId, { blankId: l.blankId, lines: [] });
     groups.get(l.blankId).lines.push({ color: l.color || "", size: l.size || "", qty: Number(l.qty) || 0, total: Math.round((Number(l.unitCents) || 0) * (Number(l.qty) || 0)) / 100 });
   }
-  return { groups: [...groups.values()], vendor: o.vendor || "", vendorRef: o.poNumber || "", receivedAt: new Date().toLocaleDateString("en-CA") };
+  return { groups: [...groups.values()], vendor: o.vendor || "", vendorRef: o.poNumber || "", receivedAt: localToday_() };
 }
 function wireSupplierOrders_(root, ctx, reload){
   if (!ctx) return;
@@ -16950,7 +17060,7 @@ function showSupplierOrder_(vendor, rows, ctx, onDone, opts = {}){
   const $ = (id) => ov.querySelector("#" + id);
   let plan = null, stale = true, busy = false;
   const conn = () => conns.find(c => String(c.id) === $("soConn").value) || conns[0];
-  const money = (c) => "$" + ((Number(c) || 0) / 100).toFixed(2);
+  const money = (c) => adminMoney_((Number(c) || 0) / 100);
   const keyOf = (o) => o.blankId + "|" + o.color + "|" + o.size;
   // This line's entry in the checked plan, at the quantity it was checked for (else null).
   const planFor = (l) => { const p = plan && (plan.lines || []).find(x => keyOf(x) === keyOf({ blankId: l.r.blankId, color: l.r.color || "", size: l.r.size || "" })); return p && p.qty === l.qty ? p : null; };
@@ -17124,7 +17234,7 @@ function showSupplierOrder_(vendor, rows, ctx, onDone, opts = {}){
 async function renderInventoryReport(app){
   adminSetHash("cogs");
   document.title = adminTitle_("Inventory & COGS");
-  const y = new Date().getFullYear();
+  const y = adminYear_();
   app.innerHTML = `
     ${adminPageHead_("Inventory & COGS")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:980px;margin:8px auto 60px;">
@@ -17142,7 +17252,7 @@ async function renderInventoryReport(app){
       <div id="cogsResults"></div>
     </div>`;
   const fmt = adminMoney_;
-  const monthLabel = (m) => new Date(m + "-15T12:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
+  const monthLabel = (m) => adminDate_(m, { month: "short", year: "numeric" });
   const card = (k, v, sub) => `<div style="border:1px solid #ddd;border-radius:6px;padding:10px 14px;min-width:170px;background:#fff;"><div style="font-size:12px;color:#555;">${k}</div><div style="font-size:20px;font-weight:700;color:#111;">${v}</div>${sub ? `<div style="font-size:11px;color:#777;">${sub}</div>` : ""}</div>`;
   const th = "padding:8px 10px;text-align:right;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
   const td = "padding:8px 10px;text-align:right;border-bottom:1px solid #ddd;color:#111;background:#fff;";
@@ -17212,9 +17322,9 @@ async function renderInventoryReport(app){
         </table></div>
         ${(d.taxedResale || []).length ? `<div style="border:1px solid #fcd34d;background:#fffbeb;border-radius:6px;padding:10px 14px;font-size:13px;color:#78350f;margin-bottom:18px;">
           <strong>Sales tax was paid on ${d.taxedResale.length} blank purchase${d.taxedResale.length === 1 ? "" : "s"}</strong> — blanks you resell should be bought tax-free with a resale certificate. Give the vendor your certificate and ask about a refund:
-          <ul style="margin:6px 0 0 18px;">${d.taxedResale.slice(0, 20).map(t => `<li>${escapeHtml(String(t.date).slice(0, 10))} — ${escapeHtml(t.vendor || "vendor?")}${t.invoice ? " #" + escapeHtml(t.invoice) : ""}: ${escapeHtml(t.blank)}${t.size ? " (" + escapeHtml(t.size) + ")" : ""} × ${t.qty}, $${Number(t.cost).toFixed(2)}</li>`).join("")}</ul></div>` : ""}
+          <ul style="margin:6px 0 0 18px;">${d.taxedResale.slice(0, 20).map(t => `<li>${escapeHtml(String(t.date).slice(0, 10))} — ${escapeHtml(t.vendor || "vendor?")}${t.invoice ? " #" + escapeHtml(t.invoice) : ""}: ${escapeHtml(t.blank)}${t.size ? " (" + escapeHtml(t.size) + ")" : ""} × ${t.qty}, ${adminMoney_(t.cost)}</li>`).join("")}</ul></div>` : ""}
         ${missingCostHtml_(d.cogs.missingCost)}
-        <div style="font-size:13px;color:#555;margin:18px 0 0;">Ending inventory — ${escapeHtml(new Date(d.dateTo + "T12:00:00").toLocaleDateString())}</div>
+        <div style="font-size:13px;color:#555;margin:18px 0 0;">Ending inventory — ${escapeHtml(adminDate_(d.dateTo))}</div>
         ${stockTable("Blanks for sale", d.ending.rows.filter(r => !r.forTesting), "cogs-end-sale")}
         ${stockTable("Blanks for testing / shop use", d.ending.rows.filter(r => r.forTesting), "cogs-end-testing")}
         <h3 style="margin:18px 0 8px;font-size:15px;">Finished stock</h3>
@@ -17279,7 +17389,7 @@ function accountForMethod_(accounts, method){
 async function renderMoney(app){
   adminSetHash("money");
   document.title = adminTitle_("Accounts & money");
-  const y = new Date().getFullYear();
+  const y = adminYear_();
   const inp = "font-size:13px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
   const lbl = "display:block;font-size:12px;font-weight:600;margin-bottom:3px;";
   app.innerHTML = `
@@ -17306,12 +17416,12 @@ async function mnLoad_(){
   } catch (e) { el.textContent = e.message; return; }
   const accounts = acc.accounts, types = acc.accountTypes, incomeTypes = d.otherIncomeTypes;
   const name = (id) => (accounts.find(a => a.id === Number(id)) || {}).name || "—";
-  const fmt = (n) => (n < 0 ? "−$" : "$") + Math.abs(Number(n || 0)).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmt = adminMoney_;
   const inp = "font-size:13px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
   const lbl = "display:block;font-size:12px;font-weight:600;margin-bottom:3px;";
   const th = "padding:7px 10px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
   const td = "padding:7px 10px;border-bottom:1px solid #e5e7eb;vertical-align:middle;color:#111;background:#fff;";
-  const today = new Date().toLocaleDateString("en-CA");
+  const today = localToday_();
   const s = d.summary;
   const del = (kind, id) => `<button type="button" data-need="finance.money:full" data-kind="${kind}" data-id="${id}" class="mn-del admin-btn-danger" style="padding:2px 8px;font-size:12px;border-radius:4px;cursor:pointer;">Delete</button>`;
   const table = (heads, rows, empty) => `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
@@ -17468,7 +17578,7 @@ async function mnLoad_(){
 async function mnChangeReceiptAccount_(kind, movementId){
   const { ov, close } = inventoryModal_("Change account — whole receipt", `<div id="rcaBody" style="font-size:13px;color:#777;">Loading…</div>`, 560);
   const body = ov.querySelector("#rcaBody");
-  const fmt = (n) => "$" + Math.abs(Number(n || 0)).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmt = (n) => adminMoney_(Math.abs(Number(n || 0)));
   let acc, pv;
   try { acc = await loadAccounts_(true); pv = await mnApi_({ action: "previewReceiptAccountChange", kind, movementId }); }
   catch (e) { body.textContent = e.message; return; }
@@ -17512,7 +17622,7 @@ async function mnChangeReceiptAccount_(kind, movementId){
     } catch (e) { problem.textContent = e.message; save.disabled = false; }
   };
 }
-function yearStartOrToday_(){ return new Date().getFullYear() + "-01-01"; }
+function yearStartOrToday_(){ return adminYear_() + "-01-01"; }
 
 // ---- Reconcile: statement CSV import + monthly reconciliation (migrations/0015) --
 // Minimal RFC-4180 CSV parser (quotes, doubled quotes, commas/newlines in quotes).
@@ -17567,7 +17677,7 @@ function mapStatementRows_(rows, mp){
 // What an hour of production costs: a year of running costs from the expenses, equipment spread over its life, your
 // pay and profit, divided by the hours you work. Every figure can be changed; the server works the numbers out
 // (getShopRate, with the page's choices) so they always match what pricing uses once saved (saveShopRate).
-const srMoney_ = (v) => v == null ? "—" : "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const srMoney_ = (v) => adminMoneyOr_(v);
 async function renderShopRate(app){
   adminSetHash("shoprate");
   document.title = adminTitle_("Shop rate");
@@ -17602,7 +17712,7 @@ function shopRateDraw_(){
   const inp = "font-size:13px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
   const th = "text-align:left;font-size:12px;color:#555;font-weight:700;padding:4px 6px;border-bottom:1px solid #ddd;";
   const td = "padding:4px 6px;font-size:13px;border-bottom:1px solid #f0f0f0;";
-  const year = new Date().getFullYear();
+  const year = adminYear_();
   const periods = [["last12", "Last 12 months"], [String(year), String(year)], [String(year - 1), String(year - 1)], [String(year - 2), String(year - 2)]];
   const sec = (t) => `<h3 style="margin:20px 0 6px;font-size:15px;">${t}</h3>`;
   panel.innerHTML = `
@@ -17646,7 +17756,7 @@ function shopRateDraw_(){
     <div id="srError" class="admin-error"></div>
     <div class="admin-actions" style="margin-top:14px;align-items:center;">
       <button type="button" class="admin-btn" id="srSave" data-need="finance.shoprate:edit">Save shop rate</button>
-      <span id="srSaved" style="font-size:12px;color:#666;">${v.saved ? `Saved ${escapeHtml(new Date(v.saved.savedAt).toLocaleDateString())}: ${srMoney_(v.saved.rate)}/hour` : "Not saved yet: price analysis doesn't use it."}</span>
+      <span id="srSaved" style="font-size:12px;color:#666;">${v.saved ? `Saved ${escapeHtml(adminDate_(v.saved.savedAt))}: ${srMoney_(v.saved.rate)}/hour` : "Not saved yet: price analysis doesn't use it."}</span>
     </div>`;
   shopRateWire_();
 }
@@ -17713,8 +17823,8 @@ async function renderAccountViewer(app){
   adminSetHash("accountviewer");
   document.title = adminTitle_("Account viewer");
   const inp = "font-size:13px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
-  const today = new Date().toLocaleDateString("en-CA");
-  const fromDefault = (() => { const d = new Date(); d.setDate(d.getDate() - 31); return d.toLocaleDateString("en-CA"); })();   // today + the 31 days before = 32 days
+  const today = localToday_();
+  const fromDefault = localToday_(-31);   // today + the 31 days before = 32 days
   app.innerHTML = `
     ${adminPageHead_("Account viewer")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:1080px;margin:8px auto 60px;">
@@ -17759,7 +17869,7 @@ async function avSearch_(again){
   catch (e) { list.innerHTML = `<div style="padding:14px;color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
   av.last = q;
   document.getElementById("avHint").textContent = "";
-  const fmt = (n) => (n < 0 ? "−$" : "$") + Math.abs(Number(n || 0)).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmt = adminMoney_;
   sum.innerHTML = `<strong>${escapeHtml(d.account.name)}</strong> · ${escapeHtml(d.dateFrom)} to ${escapeHtml(d.dateTo)} · started at ${fmt(d.startBalance)} · in ${fmt(d.totalIn)} · out ${fmt(d.totalOut)} · ended at <strong>${fmt(d.endBalance)}</strong> · ${d.count} transaction${d.count === 1 ? "" : "s"}${d.truncated ? " (showing the newest 3,000)" : ""}`;
   const th = "padding:6px 9px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;position:sticky;top:0;z-index:1;";
   const td = "padding:6px 9px;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#111;background:#fff;";
@@ -17813,7 +17923,7 @@ async function renderReconcile(app){
   adminSetHash("reconcile");
   document.title = adminTitle_("Reconcile");
   const inp = "font-size:13px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
-  const lastMonth = (() => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1); return d.toLocaleDateString("en-CA").slice(0, 7); })();
+  const lastMonth = addMonths_(localToday_(), -1);
   app.innerHTML = `
     ${adminPageHead_("Reconcile")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:1080px;margin:8px auto 60px;">
@@ -17839,7 +17949,7 @@ async function rcLoad_(data){
   if (!accountId || !month) return;
   let d = data;
   if (!d) { try { d = await mnApi_({ action: "getReconciliation", accountId, month }); } catch (e) { el.textContent = e.message; return; } }
-  const fmt = (n) => (n < 0 ? "−$" : "$") + Math.abs(Number(n || 0)).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmt = adminMoney_;
   const isCard = d.account.type === "credit_card";
   const inp = "font-size:13px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
   const th = "padding:6px 9px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
@@ -17863,7 +17973,7 @@ async function rcLoad_(data){
         <div style="font-size:13px;">Book balance: <strong>${fmt(d.bookBalance)}</strong><br>
           <span style="color:#555;">− not yet on a statement ${fmt(d.uncleared)} + ignored lines ${fmt(d.ignored)} = expected <strong>${fmt(isCard ? -d.expectedStatementBalance : d.expectedStatementBalance)}</strong>${isCard ? " owed" : ""}</span></div>
         <div id="rcDiff" style="font-size:14px;font-weight:700;"></div>
-        ${locked ? `<div style="font-size:13px;color:#15803d;font-weight:600;">✓ Reconciled ${escapeHtml(new Date(d.reconciled.at).toLocaleDateString())}</div>
+        ${locked ? `<div style="font-size:13px;color:#15803d;font-weight:600;">✓ Reconciled ${escapeHtml(adminDate_(d.reconciled.at))}</div>
             <button type="button" id="rcReopen" data-need="finance.reconcile:full" class="admin-btn" style="padding:4px 10px;font-size:12px;">Reopen month</button>`
           : `<button type="button" id="rcReconcile" data-need="finance.reconcile:full" class="admin-pass-submit" style="padding:6px 14px;font-size:13px;">Mark reconciled</button>`}
       </div>
@@ -17921,7 +18031,7 @@ async function rcLoad_(data){
 }
 
 function rcMatchModal_(d, line, act){
-  const fmt = (n) => (n < 0 ? "−$" : "$") + Math.abs(Number(n || 0)).toFixed(2);
+  const fmt = adminMoney_;
   const near = d.candidates.slice().sort((a, b) => Math.abs(Date.parse(a.date) - Date.parse(line.date)) - Math.abs(Date.parse(b.date) - Date.parse(line.date)));
   const { ov, close } = inventoryModal_("Match statement line", `
     <div style="font-size:14px;margin-bottom:8px;"><strong>${escapeHtml(line.date)}</strong> — ${escapeHtml(line.description)} — <strong>${fmt(line.amount)}</strong></div>
@@ -17994,7 +18104,7 @@ function blankOrderForm_(el, opts){
     extraCost: parseFloat(el.querySelector("#rccShip").value) || 0,
   });
   const groupsEl = el.querySelector("#rccGroups");
-  const $ = (x) => "$" + (x / 100).toFixed(2);
+  const $ = (x) => adminMoney_(x / 100);
   // One box per blank type on the invoice: its sizes, qty and total cost.
   const groupStats = () => [...groupsEl.querySelectorAll(".rcc-group")].map(g => {
     const b = blanks.find(x => String(x.id) === g.querySelector(".rcc-blank").value);
@@ -18112,8 +18222,8 @@ function rcRefundForm_(el, { cats, line, onChange }){
     if(o){
       if(o.categoryId) catEl.value = String(o.categoryId);
       const left = Math.round(o.amount * 100) - Math.round(o.refunded * 100);
-      note = `Original: ${escapeHtml(o.date)}, $${o.amount.toFixed(2)}${o.refunded ? ` ($${o.refunded.toFixed(2)} already refunded)` : ""}.` +
-        (refundCents > left ? ` <strong style="color:#b03a2e;">This refund is more than what's left ($${(left / 100).toFixed(2)}).</strong>` : "");
+      note = `Original: ${escapeHtml(o.date)}, ${adminMoney_(o.amount)}${o.refunded ? ` (${adminMoney_(o.refunded)} already refunded)` : ""}.` +
+        (refundCents > left ? ` <strong style="color:#b03a2e;">This refund is more than what's left (${adminMoney_(left / 100)}).</strong>` : "");
       if(o.date.slice(0, 4) !== String(line.date).slice(0, 4)){
         note += ` <strong style="color:#92400e;">That purchase was in ${escapeHtml(o.date.slice(0, 4))}. A refund in a later tax year is normally reported as other income (you're recovering an earlier deduction) — ask your CPA, or record it as Other income instead.</strong>`;
       }
@@ -18126,8 +18236,8 @@ function rcRefundForm_(el, { cats, line, onChange }){
   // Purchases from the last two years, best guesses first (shared words with the bank's description, same amount).
   (async () => {
     try{
-      const to = localToday_(), fromD = new Date(); fromD.setFullYear(fromD.getFullYear() - 2);
-      const d = await mnApi_({ action: "listExpenses", dateFrom: localDay_(fromD), dateTo: to });
+      const to = localToday_(), from = addDays_(to, -730);
+      const d = await mnApi_({ action: "listExpenses", dateFrom: from, dateTo: to });
       const refunded = {};
       (d.expenses || []).filter(x => x.isRefund && x.refundOfId).forEach(x => { refunded[x.refundOfId] = (refunded[x.refundOfId] || 0) + Math.abs(x.amount); });
       const words = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(w => w.length >= 4);
@@ -18137,7 +18247,7 @@ function rcRefundForm_(el, { cats, line, onChange }){
         return { ...x, refunded: refunded[x.id] || 0, score: shared * 10 + (Math.round(x.amount * 100) === refundCents ? 5 : 0) };
       }).sort((a, b) => b.score - a.score || b.date.localeCompare(a.date)).slice(0, 60);
       origEl.innerHTML = `<option value="">— Not sure / not listed (just pick the category) —</option>` + list.map(x =>
-        `<option value="${x.id}">${escapeHtml(x.date)} · ${escapeHtml(x.description)}${x.vendor ? " · " + escapeHtml(x.vendor) : ""} — $${x.amount.toFixed(2)} (${escapeHtml(x.category)})</option>`).join("");
+        `<option value="${x.id}">${escapeHtml(x.date)} · ${escapeHtml(x.description)}${x.vendor ? " · " + escapeHtml(x.vendor) : ""} — ${adminMoney_(x.amount)} (${escapeHtml(x.category)})</option>`).join("");
       if(list[0] && list[0].score >= 10){ origEl.value = String(list[0].id); changed(); }   // a strong match is preselected — easy to change
     }catch(e){ origEl.innerHTML = `<option value="">— Couldn't load purchases; pick the category —</option>`; }
   })();
@@ -18152,7 +18262,7 @@ function rcRefundForm_(el, { cats, line, onChange }){
 function rcDepositForm_(el, { cats, line, accountId, onChange }){
   const inp = "font-size:13px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
   const depositCents = Math.round(Math.abs(line.amount) * 100);
-  const $ = (c) => (c < 0 ? "−$" : "$") + (Math.abs(c) / 100).toFixed(2);
+  const $ = (c) => adminMoney_(c / 100);
   const cents = (v) => Math.round((parseFloat(v) || 0) * 100);
   const METHOD = { venmo: "Venmo", cash: "Cash", check: "Check", zelle: "Zelle", card: "Stripe" };
   const feeGuess = cats.find(c => /bank|fee/i.test(c.name) && c.deductionType === "deductible") || cats.find(c => c.deductionType === "deductible");
@@ -18250,12 +18360,12 @@ async function rcCreateModal_(d, line, act){
                         ["deposit", "Deposit — Stripe payout, Venmo, Zelle, cash or checks (map to orders)"], ["owner", "Owner put money in"], ["transfer", "Transfer from another account"]]
                      : [["expense", "Business expense"], ["blanks", "Blank purchase (inventory, R&D, personal)"], ["owner", "Owner took money out"], ["transfer", "Transfer to another account"]];
   const { ov, close } = inventoryModal_("Record this statement line", `
-    <div style="font-size:14px;margin-bottom:10px;"><strong>${escapeHtml(line.date)}</strong> — ${escapeHtml(line.description)} — <strong>${line.amount < 0 ? "−" : ""}$${Math.abs(line.amount).toFixed(2)}</strong></div>
+    <div style="font-size:14px;margin-bottom:10px;"><strong>${escapeHtml(line.date)}</strong> — ${escapeHtml(line.description)} — <strong>${adminMoney_(line.amount)}</strong></div>
     <label style="font-size:12px;font-weight:600;display:block;margin-bottom:8px;">It's a<br><select id="rccKind" style="${inp}">${kinds.map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></label>
     <div id="rccHint" style="font-size:12px;color:#555;margin:-2px 0 10px;"></div>
     <label id="rccDescWrap" style="font-size:12px;font-weight:600;display:block;margin-bottom:8px;">Description<br><input id="rccDesc" value="${escapeHtml(line.description)}" maxlength="300" style="${inp}width:100%;"></label>
     <div id="rccExtra"></div>
-    <div id="rccNote" style="font-size:12px;color:#555;margin:6px 0 10px;">Dated ${escapeHtml(line.date)}, $${Math.abs(line.amount).toFixed(2)}, in ${escapeHtml(d.account.name)} — and matched to this line. Edit details (receipt, vendor, business-use %) afterwards on the Expenses or Accounts &amp; money screen.</div>
+    <div id="rccNote" style="font-size:12px;color:#555;margin:6px 0 10px;">Dated ${escapeHtml(line.date)}, ${adminMoney_(Math.abs(line.amount))}, in ${escapeHtml(d.account.name)} — and matched to this line. Edit details (receipt, vendor, business-use %) afterwards on the Expenses or Accounts &amp; money screen.</div>
     <div style="display:flex;justify-content:flex-end;gap:8px;"><button type="button" id="rccCancel" style="padding:6px 12px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;">Cancel</button>
       <button type="button" id="rccOk" class="admin-btn" style="padding:6px 12px;">Create &amp; match</button></div>`, 620);
   const extra = ov.querySelector("#rccExtra"), kindEl = ov.querySelector("#rccKind");
@@ -18293,7 +18403,7 @@ async function rcCreateModal_(d, line, act){
     } else if (k === "blanks" && blanks.length) {
       const okBtn = ov.querySelector("#rccOk");
       blankForm = blankOrderForm_(ov.querySelector("#rccBlankForm"), { blanks, cats, target: () => Math.round(Math.abs(line.amount) * 100),
-        hint: `Everything must add up to exactly $${Math.abs(line.amount).toFixed(2)}.`,
+        hint: `Everything must add up to exactly ${adminMoney_(Math.abs(line.amount))}.`,
         onChange: (ok) => { okBtn.disabled = !ok; okBtn.style.opacity = ok ? "" : ".5"; } });
     } else { const okBtn = ov.querySelector("#rccOk"); if (okBtn) { okBtn.disabled = false; okBtn.style.opacity = ""; } }
   };
@@ -18352,7 +18462,7 @@ function rcImportPreview_(d, file){
           <label style="display:flex;gap:4px;align-items:center;"><input type="checkbox" data-k="flip" ${mp.flip ? "checked" : ""}> Flip signs</label>
         </div>
         <div style="font-size:12px;color:#555;margin:8px 0 4px;">Preview — money <strong>into</strong> ${escapeHtml(d.account.name)} should be positive, money out negative${d.account.type === "credit_card" ? " (a card charge is money out)" : ""}. ${lines.length} line${lines.length === 1 ? "" : "s"} (${inMonth} in ${escapeHtml(d.month)})${errors.length ? `, <span style="color:#b03a2e;">${errors.length} unreadable (rows ${errors.slice(0, 5).join(", ")}${errors.length > 5 ? "…" : ""})</span>` : ""}.</div>
-        <table style="border-collapse:collapse;font-size:12px;margin-bottom:8px;">${lines.slice(0, 5).map(l => `<tr><td style="padding:2px 8px;">${escapeHtml(l.date)}</td><td style="padding:2px 8px;">${escapeHtml(l.description)}</td><td style="padding:2px 8px;text-align:right;color:${l.amount < 0 ? "#b03a2e" : "#15803d"};">${l.amount < 0 ? "−" : ""}$${Math.abs(l.amount).toFixed(2)}</td></tr>`).join("")}</table>
+        <table style="border-collapse:collapse;font-size:12px;margin-bottom:8px;">${lines.slice(0, 5).map(l => `<tr><td style="padding:2px 8px;">${escapeHtml(l.date)}</td><td style="padding:2px 8px;">${escapeHtml(l.description)}</td><td style="padding:2px 8px;text-align:right;color:${l.amount < 0 ? "#b03a2e" : "#15803d"};">${adminMoney_(l.amount)}</td></tr>`).join("")}</table>
         <button type="button" id="rcImport" class="admin-btn" style="padding:5px 12px;font-size:12px;" ${lines.length ? "" : "disabled"}>Import ${lines.length} line${lines.length === 1 ? "" : "s"}</button>`;
       mapEl.querySelectorAll("[data-k]").forEach(x => x.onchange = () => { const k = x.dataset.k; mp[k] = k === "flip" ? x.checked : k === "mode" ? x.value : Number(x.value); draw(); });
       mapEl.querySelector("#rcImport").onclick = async () => {
@@ -18373,7 +18483,7 @@ function rcImportPreview_(d, file){
 const _exp = { categories: [], lines: {}, methods: {}, editing: null, receipt: null, recurring: [] };
 // Recurring expenses (migrations/0085) — the server's RECURRING_FREQUENCIES, in the same order.
 const EXP_FREQUENCIES_ = { weekly: "Weekly", biweekly: "Every 2 weeks", monthly: "Monthly", quarterly: "Every 3 months", semiannual: "Every 6 months", yearly: "Yearly" };
-const expYearAhead_ = () => { const d = new Date(Date.parse(expToday_() + "T12:00:00Z") + 365 * 86400000); return d.toISOString().slice(0, 10); };
+const expYearAhead_ = () => addDays_(localToday_(), 365);
 // Repeating: the date is the FIRST one (may be ahead, up to a year), an end date is offered, and the receipt and refund
 // boxes go (a receipt belongs to each recorded expense; a refund doesn't repeat). Editing one expense never repeats.
 function expOnRepeatChange_(){
@@ -18386,20 +18496,19 @@ function expOnRepeatChange_(){
   document.getElementById("expRefundWrap").style.display = on ? "none" : "flex";
   document.getElementById("expDateLbl").textContent = on ? "First date" : "Date";
   const date = document.getElementById("expDate");
-  date.max = on ? expYearAhead_() : expToday_();
+  date.max = on ? expYearAhead_() : localToday_();
   if (on) document.getElementById("expRefund").checked = false;
-  else if (date.value > expToday_()) date.value = expToday_();
+  else if (date.value > localToday_()) date.value = localToday_();
 }
 
 async function expApi_(body){ return adminApi_(body); }
-const expMoney_ = (n) => (Number(n) < 0 ? "−$" : "$") + Math.abs(Number(n || 0)).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const expToday_ = () => new Date().toLocaleDateString("en-CA");
+const expMoney_ = (n) => adminMoney_(n);
 const EXP_TYPE_LABEL = { depreciation: "Depreciation", deductible: "Deductible", none: "None" };
 
 async function renderExpenses(app){
   adminSetHash("expenses");
   document.title = adminTitle_("Expenses");
-  const y = new Date().getFullYear();
+  const y = adminYear_();
   const inp = "font-size:13px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
   const lbl = "display:block;font-size:12px;font-weight:600;margin-bottom:3px;";
   app.innerHTML = `
@@ -18411,7 +18520,7 @@ async function renderExpenses(app){
           <button type="button" class="admin-btn" id="expImportBtn" data-need="finance.expenses:edit" style="padding:4px 12px;font-size:12px;" title="Import expenses from a card/bank statement or spreadsheet CSV">Import CSV</button>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
-          <div><label style="${lbl}" for="expDate" id="expDateLbl">Date</label><input id="expDate" type="date" max="${expToday_()}" value="${expToday_()}" style="${inp}"></div>
+          <div><label style="${lbl}" for="expDate" id="expDateLbl">Date</label><input id="expDate" type="date" max="${localToday_()}" value="${localToday_()}" style="${inp}"></div>
           <div style="flex:2;min-width:200px;"><label style="${lbl}" for="expDesc">Description</label><input id="expDesc" type="text" maxlength="300" placeholder="e.g. Embroidery machine" style="${inp}width:100%;"></div>
           <div><label style="${lbl}" for="expCat">Category</label>
             <div style="display:flex;gap:4px;"><select id="expCat" style="${inp}max-width:260px;"></select>
@@ -18504,7 +18613,7 @@ function expResetForm_(){
   document.getElementById("expFormTitle").textContent = "Add expense";
   document.getElementById("expSave").textContent = "Save expense";
   document.getElementById("expCancel").style.display = "none";
-  document.getElementById("expDate").value = expToday_();
+  document.getElementById("expDate").value = localToday_();
   ["expDesc", "expAmount", "expPIS"].forEach(id => { document.getElementById(id).value = ""; });
   setVendorPick_(document.getElementById("expVendor"), "");
   document.getElementById("expBiz").value = "100";
@@ -18642,8 +18751,7 @@ async function expSave_(){
 // "Nov 5" (or "Nov 5, 2027" when not this year) for a YYYY-MM-DD.
 function expShortDate_(ymd){
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ymd || ""))) return String(ymd || "");
-  const d = new Date(ymd + "T12:00:00Z");
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", ...(ymd.slice(0, 4) !== expToday_().slice(0, 4) ? { year: "numeric" } : {}), timeZone: "UTC" });
+  return adminDate_(ymd, { month: "short", day: "numeric", ...(ymd.slice(0, 4) !== localToday_().slice(0, 4) ? { year: "numeric" } : {}) }, "en-US");
 }
 function expRecurringTag_(ruleId){
   const r = (_exp.recurring || []).find(x => x.id === Number(ruleId));
@@ -18900,7 +19008,7 @@ function showExpenseImportModal_(){
           <td style="${td}white-space:nowrap;">${escapeHtml(r.date)}</td>
           <td style="${td}"><input class="ei-desc" value="${escapeHtml(r.description)}" maxlength="300" style="${inp}width:100%;min-width:180px;"></td>
           <td style="${td}"><select class="ei-vendor" style="${inp}max-width:130px;">${vendorOptionsHtml_(r.vendor, { placeholder: "— none —" })}</select></td>
-          <td style="${td}text-align:right;white-space:nowrap;">$${r.amount.toFixed(2)}</td>
+          <td style="${td}text-align:right;white-space:nowrap;">${adminMoney_(r.amount)}</td>
           <td style="${td}"><select class="ei-cat" style="${inp}max-width:190px;">${catOpts(r.categoryId)}</select></td>
           <td style="${td}font-size:11px;color:#b45309;">${[r.duplicate ? "Looks already recorded" : "", r.vendorNotListed ? `“${escapeHtml(r.vendorNotListed)}” isn't in the vendor list — add it with Manage vendors, or pick one` : ""].filter(Boolean).join("<br>")}</td></tr>`).join("")}</tbody></table></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;">
@@ -18910,7 +19018,7 @@ function showExpenseImportModal_(){
     const trs = () => [...reviewEl.querySelectorAll("tbody tr")];
     const count = () => { const on = trs().filter(tr => tr.querySelector(".ei-on").checked);
       const total = on.reduce((a, tr) => a + rows[Number(tr.dataset.i)].amount, 0);
-      reviewEl.querySelector("#eiCount").textContent = `${on.length} expense${on.length === 1 ? "" : "s"}, $${total.toFixed(2)}`;
+      reviewEl.querySelector("#eiCount").textContent = `${on.length} expense${on.length === 1 ? "" : "s"}, ${adminMoney_(total)}`;
       reviewEl.querySelector("#eiGo").textContent = `Import ${on.length}`; };
     reviewEl.querySelectorAll(".ei-on").forEach(x => x.onchange = count);
     reviewEl.querySelector("#eiAll").onchange = (e) => { trs().forEach(tr => { tr.querySelector(".ei-on").checked = e.target.checked; }); count(); };
@@ -18923,7 +19031,7 @@ function showExpenseImportModal_(){
           categoryId: Number(tr.querySelector(".ei-cat").value) || 0 }; });
       if (!chosen.length) { err.textContent = "Tick at least one row."; return; }
       const missing = chosen.findIndex(r => !r.categoryId || !r.description);
-      if (missing >= 0) { err.textContent = `Every ticked row needs a description and a category (row dated ${chosen[missing].date}, $${chosen[missing].amount.toFixed(2)}).`; return; }
+      if (missing >= 0) { err.textContent = `Every ticked row needs a description and a category (row dated ${chosen[missing].date}, ${adminMoney_(chosen[missing].amount)}).`; return; }
       const paid = paidEl.value;
       const payload = { action: "importExpenses", rows: chosen,
         mapping: { date: header[mp.date], desc: header[mp.desc], mode: mp.mode, amount: header[mp.amount], debit: header[mp.debit], credit: header[mp.credit],
@@ -19081,8 +19189,8 @@ async function renderCommunications(app, opts){
     if (!r.ok || d.status === "error") { el.textContent = (d && d.message) || "Could not load."; return; }
   } catch (e) { el.textContent = "Could not reach the server."; return; }
 
-  const fmt = (n) => "$" + Number(n || 0).toFixed(2);
-  const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+  const fmt = adminMoney_;
+  const when = (iso) => iso ? adminDateTime_(iso, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
   const th = "padding:7px 10px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
   const td = "padding:8px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#111;background:#fff;";
   const sub = "color:#666;font-size:12px;";
@@ -19155,7 +19263,7 @@ async function renderCommunications(app, opts){
 
   // Blanks (garments) ordered from a vendor, not yet received — with each shipment's live carrier
   // status (migrations/0039), mirroring the customer "shipped — waiting on delivery" section.
-  const dayShort = (s) => { const m = String(s || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${+m[2]}/${+m[3]}/${m[1]}` : ""; };
+  const dayShort = (s) => s ? adminShortDate_(s) : "";   // a time on the business's calendar, a plain day as written
   const todayStr = localToday_();
   const blanksHtml = awaitingBlanks.length ? `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
       <thead><tr><th style="${th}">Order</th><th style="${th}">Shop</th><th style="${th}">Customer</th><th style="${th}">Vendor / ordered</th><th style="${th}">Items</th><th style="${th}">Shipments / status</th></tr></thead>
@@ -19226,11 +19334,11 @@ async function refreshPriceReminderFromVendors_(){
 // The roll-up's 30-day vendor-price reminder (migrations/0062), as it stands today.
 function priceReminderHtml_(pr) {
   if (!pr) return "";
-  const day = (iso) => iso ? new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "";
+  const day = (iso) => iso ? adminDate_(iso, { month: "short", day: "numeric", year: "numeric" }, "en-US") : "";
   const blanks = pr.blanks || [], products = pr.products || [];
   const when = !blanks.length && !products.length ? "Nothing to check right now."
     : pr.due ? "In the next roll-up." : `Next in the roll-up on ${escapeHtml(day(pr.nextDueAt))}.`;
-  const money = (v) => v == null ? "not entered" : "$" + Number(v).toFixed(2);
+  const money = (v) => adminMoneyOr_(v, "not entered");
   return `<h2 style="font-size:17px;margin:22px 0 8px;">💲 Blank prices to check${blanks.length + products.length ? ` — ${blanks.length} blank${blanks.length === 1 ? "" : "s"}, ${products.length} product${products.length === 1 ? "" : "s"} to re-price` : ""}</h2>
     <div style="font-size:13px;color:#555;margin:0 0 8px;">Every 30 days the roll-up lists blanks used by products on sale whose vendor prices haven't been checked in 30 days, and products priced on blank prices that have since changed. ${when}${pr.lastSentAt ? ` Last sent ${escapeHtml(day(pr.lastSentAt))}.` : ""}
       ${blanks.length ? `<button type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;margin-left:6px;" data-need="inventory.blanks:edit" onclick="refreshPriceReminderFromVendors_()">Refresh all from connected vendors</button>` : ""}</div>
@@ -19319,8 +19427,8 @@ function downloadCsv_(filename, rows, columns){
 async function renderBooks(app){
   adminSetHash("books");
   document.title = adminTitle_("Periods & export");
-  const y = new Date().getFullYear();
-  const lastMonth = (() => { const d = new Date(); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - 1); return d.toISOString().slice(0, 7); })();
+  const y = adminYear_();
+  const lastMonth = addMonths_(localToday_(), -1);
   const inp = "font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;";
   app.innerHTML = `
     ${adminPageHead_("Periods & export")}
@@ -19363,12 +19471,12 @@ async function renderBooks(app){
     if (!r.ok || d.status === "error") throw new Error((d && d.message) || "Request failed");
     return d;
   };
-  const monthName = (m) => new Date(m + "-15T12:00:00Z").toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+  const monthName = (m) => adminDate_(m, { month: "long", year: "numeric" });
   const renderPeriods = (periods) => {
     const el = document.getElementById("periodsList");
     el.innerHTML = periods.length ? `<table style="border-collapse:collapse;font-size:14px;color:var(--ink,#111);">${periods.map(p => `<tr>
       <td style="padding:5px 12px 5px 0;font-weight:600;">${escapeHtml(monthName(p.month))}</td>
-      <td style="padding:5px 12px;color:#777;font-size:12px;">closed ${escapeHtml(new Date(p.closedAt).toLocaleDateString())}${p.closedBy ? " by " + escapeHtml(p.closedBy) : ""}</td>
+      <td style="padding:5px 12px;color:#777;font-size:12px;">closed ${escapeHtml(adminDate_(p.closedAt))}${p.closedBy ? " by " + escapeHtml(p.closedBy) : ""}</td>
       <td style="padding:5px 0;"><button type="button" class="admin-btn" style="padding:3px 10px;font-size:12px;" data-reopen="${escapeHtml(p.month)}" data-need="reports.books:full">Reopen</button></td></tr>`).join("")}</table>`
       : `<span style="color:#888;">No months closed yet.</span>`;
     el.querySelectorAll("[data-reopen]").forEach(b => b.onclick = async () => {
@@ -19541,9 +19649,8 @@ async function renderAuditLog(app) {
           </thead>
           <tbody>
             ${entries.map((e, i) => {
-              const dt = new Date(e.createdAt);
-              const dateStr = dt.toLocaleDateString();
-              const timeStr = dt.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+              const dateStr = adminDate_(e.createdAt);
+              const timeStr = adminTime_(e.createdAt, {hour:"2-digit",minute:"2-digit"});
               const label = AUDIT_ACTION_LABELS[e.action] || e.action;
               const summary = auditDetailSummary(e.action, e.detail);
               const rowBg = i % 2 === 0 ? "" : "background:var(--surface-alt,#f9f9f9);";
@@ -20125,8 +20232,7 @@ const BLANK_PRICES_STALE_MS = 30 * 86400000;
 function blankPricesStale_(b) { return !b || !b.pricesCheckedAt || (Date.now() - Date.parse(b.pricesCheckedAt)) > BLANK_PRICES_STALE_MS; }
 function blankPricesCheckedLabel_(b) {
   if (!b || !b.pricesCheckedAt) return "Vendor prices never checked";
-  const d = new Date(b.pricesCheckedAt);
-  return "Vendor prices checked " + d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) + (blankPricesStale_(b) ? " — over 30 days ago" : "");
+  return "Vendor prices checked " + adminDate_(b.pricesCheckedAt, { month: "short", day: "numeric", year: "numeric" }, "en-US") + (blankPricesStale_(b) ? " — over 30 days ago" : "");
 }
 
 async function showBlankPriceHistory_(blank) {
@@ -20135,12 +20241,12 @@ async function showBlankPriceHistory_(blank) {
   ov.querySelector("#bphClose").onclick = close;
   try {
     const r = await hoopApi_({ action: "getBlankVendorPriceHistory", blankId: blank.id });
-    const money = (v) => v == null ? `<span style="color:#999;">not entered</span>` : "$" + Number(v).toFixed(2);
+    const money = (v) => adminMoneyOr_(v, `<span style="color:#999;">not entered</span>`);
     ov.querySelector("#bphBody").innerHTML = (r.history || []).length
       ? `<div style="max-height:56vh;overflow:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead><tr style="text-align:left;background:#f5f5f5;"><th style="padding:4px 6px;">When</th><th style="padding:4px 6px;">Color</th><th style="padding:4px 6px;">Size</th><th style="padding:4px 6px;">From</th><th style="padding:4px 6px;">To</th><th style="padding:4px 6px;">By</th></tr></thead>
           <tbody>${r.history.map(h => `<tr style="border-top:1px solid #eee;">
-            <td style="padding:4px 6px;white-space:nowrap;">${escapeHtml(new Date(h.enteredAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }))}</td>
+            <td style="padding:4px 6px;white-space:nowrap;">${escapeHtml(adminDate_(h.enteredAt, { month: "short", day: "numeric", year: "numeric" }, "en-US"))}</td>
             <td style="padding:4px 6px;">${escapeHtml(h.color || "—")}</td><td style="padding:4px 6px;">${escapeHtml(h.size)}</td>
             <td style="padding:4px 6px;">${money(h.previous)}</td><td style="padding:4px 6px;font-weight:600;">${money(h.price)}</td>
             <td style="padding:4px 6px;color:#666;">${escapeHtml([h.note, h.actor].filter(Boolean).join(" · "))}</td></tr>`).join("")}</tbody></table></div>`
@@ -21461,7 +21567,7 @@ async function showVendorBlankReview_(products, opts){
   };
   // Always matched, even with no folder: then every vendor image is "missing" and can be downloaded from the vendor.
   useFolder(opts.files || []);
-  const money = (v) => v == null ? "—" : "$" + Number(v).toFixed(2);
+  const money = (v) => adminMoneyOr_(v);
   const priceLine = (c) => c.prices.map(z => z.change ? `<span title="was ${money(z.current)}">${escapeHtml(z.size)} <s style="color:#999;">${money(z.current)}</s> <b>${money(z.price)}</b></span>`
     : `<span style="color:${z.onBlank || !c.onBlank ? "#555" : "#15803d"};">${escapeHtml(z.size)} ${money(z.price)}${c.onBlank && !z.onBlank ? " (new size)" : ""}</span>`).join(" · ");
   // The vendor's minimum advertised price from the file (migrations/0070), when it gives one — a product's price can't
@@ -22590,7 +22696,7 @@ function showCategoryFormModal_(category, onSaved){
 async function renderRunReport(app){
   adminSetHash("runreport");
   document.title = adminTitle_("Run times");
-  const y = new Date().getFullYear();
+  const y = adminYear_();
   app.innerHTML = `
     ${adminPageHead_("Run times")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:1240px;margin:8px auto 60px;">
@@ -22641,7 +22747,7 @@ async function renderRunReport(app){
         <table style="width:100%;border-collapse:collapse;">
           <thead><tr><th style="${thL}">Started</th><th style="${thL}">Design</th><th style="${thL}">Machine</th><th style="${thL}">Order</th><th style="${th}">Duration</th><th style="${th}">Stitches</th><th style="${thL}">Status</th><th style="${thL}">Issues</th></tr></thead>
           <tbody>${rep.detail.map(x => `<tr>
-            <td style="${cellL}">${escapeHtml(x.startedAt ? new Date(x.startedAt).toLocaleString() : "")}</td>
+            <td style="${cellL}">${escapeHtml(x.startedAt ? adminDateTime_(x.startedAt) : "")}</td>
             <td style="${cellL}">${escapeHtml(x.designName)}</td>
             <td style="${cellL}">${escapeHtml(x.machineName)}</td>
             <td style="${cellL}">${escapeHtml(x.orgName)} · ${escapeHtml(x.orderId)}</td>
@@ -22657,7 +22763,7 @@ async function renderRunReport(app){
         <div style="overflow-x:auto;"><table id="rrOtherNotes" style="width:100%;border-collapse:collapse;">
           <thead><tr><th style="${thL}">Started</th><th style="${thL}">Design</th><th style="${thL}">Machine</th><th style="${thL}">Order</th><th style="${thL}">Details</th></tr></thead>
           <tbody>${notes.map(x => `<tr>
-            <td style="${cellL}white-space:nowrap;">${escapeHtml(x.startedAt ? new Date(x.startedAt).toLocaleString() : "")}</td>
+            <td style="${cellL}white-space:nowrap;">${escapeHtml(x.startedAt ? adminDateTime_(x.startedAt) : "")}</td>
             <td style="${cellL}">${escapeHtml(x.designName)}${x.stepLabel ? ` <span style="color:#888;">· ${escapeHtml(x.stepLabel)}</span>` : ""}</td>
             <td style="${cellL}">${escapeHtml(x.machineName)}</td>
             <td style="${cellL}">${escapeHtml(x.orgName)} · ${escapeHtml(x.orderId)}</td>
@@ -23034,7 +23140,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
     <td style="padding:3px 4px;" class="trRowDollars">—</td>
     <td style="padding:3px 4px;" class="trRowPer">—</td>
     <td style="padding:3px 4px;"><button type="button" class="admin-btn trRm admin-btn-danger" style="padding:1px 7px;">✕</button></td></tr>`;
-  const today = new Date().toLocaleDateString("en-CA");
+  const today = localToday_();
   const lockNote = ed && (ed.matched || ed.reconciled)
     ? `<div style="border:1px solid #fcd34d;background:#fffbeb;border-radius:6px;padding:7px 10px;margin-bottom:10px;font-size:12px;color:#78350f;">${ed.matched ? "Part of this sheet is matched to a bank-statement line" : "This sheet's month is reconciled"}. You can change the rows (items, counts, % of sheet), but the total, date, paid-from and the written-off / personal amounts have to stay the same — ${ed.matched ? "unmatch it on Reconcile" : "reopen the month on Reconcile"} first to change those.</div>` : "";
   const { ov, close } = inventoryModal_(ed ? "Edit transfer sheet" : "Receive a transfer sheet", `
@@ -23224,7 +23330,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
 // What an edited sheet changes, from editTransferSheet's preview: each row's per-item price before → after, each
 // transfer's average cost, the order lines re-costed, what's left alone, and whether the sheet's money changed.
 function transferSheetPreviewHtml_(p){
-  const $ = (n) => (Number(n) < 0 ? "−$" : "$") + Math.abs(Number(n || 0)).toFixed(2);
+  const $ = adminMoney_;
   const signed = (n) => (Number(n) > 0 ? "+" : "") + $(n);
   const td = "padding:3px 6px;border-bottom:1px solid #e0e7ff;";
   const avg = (p.transfers || []).filter(t => t.avgBefore !== t.avgAfter || t.qtyBefore !== t.qtyAfter);
@@ -24546,7 +24652,7 @@ function machineCounterHtml_(m){
     <div style="display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;">
       <span><b>Stitch counter:</b> <span class="mch-stitches">${(Number(m.stitchCount) || 0).toLocaleString()}</span></span>
       <span><b>Run time:</b> ${fmtHours_(m.runSeconds)}</span>
-      <span style="color:#888;font-size:12px;">${m.counterUpdatedAt ? "updated " + escapeHtml(new Date(m.counterUpdatedAt).toLocaleDateString()) : "no reading entered yet"}</span>
+      <span style="color:#888;font-size:12px;">${m.counterUpdatedAt ? "updated " + escapeHtml(adminDate_(m.counterUpdatedAt)) : "no reading entered yet"}</span>
       <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-need="production.machines:edit" onclick="machineReading_(this.dataset.mid)">Enter machine reading&hellip;</button>
     </div>
     <div style="margin-top:8px;"><b>Maintenance</b>
@@ -24680,7 +24786,7 @@ function showMaintenanceDoneModal_(m, task, onDone){
     const date = ov.querySelector("#mdDate").value;
     try {
       const d = await machineApi_({ action: "recordMaintenance", machineId: m.id, taskId: task ? task.id : null, name: task ? "" : ov.querySelector("#mdName").value,
-        note: ov.querySelector("#mdNote").value.trim(), doneAt: date && date !== today ? date + "T12:00:00" : "" });
+        note: ov.querySelector("#mdNote").value.trim(), doneAt: date && date !== today ? localNoonIso_(date) : "" });
       close(); showToast("Logged."); onDone && onDone(d);
     } catch (e) { ov.querySelector("#mdErr").textContent = e.message; }
   };
@@ -24726,12 +24832,12 @@ async function renderMaintenance(app, machineIdStr){
     const body = document.getElementById("mntBody");
     body.innerHTML = "Loading&hellip;";
     let d;
-    // The dates are days on this computer's clock; the server stores UTC times, so send the exact instants.
+    // The dates are days on the business's calendar; the server stores UTC times, so send the exact instants.
     const fromDay = document.getElementById("mntFrom").value, toDay = document.getElementById("mntTo").value;
-    const fromAt = fromDay ? new Date(fromDay + "T00:00:00").toISOString() : "", toAt = toDay ? new Date(toDay + "T23:59:59.999").toISOString() : "";
+    const fromAt = localDayStartIso_(fromDay), toAt = localDayEndIso_(toDay);
     try { d = await machineApi_({ action: "getMaintenanceLog", machineId: sel.value ? Number(sel.value) : null, from: fromAt, to: toAt }); }
     catch (e) { body.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
-    const day = (iso) => new Date(iso).toLocaleDateString();
+    const day = (iso) => adminDate_(iso);
     // Runs summed per machine per day; readings listed one by one.
     const usage = new Map();
     for (const e of d.events) {
@@ -24994,7 +25100,7 @@ function machineVerifiedLabel_(machine){
   if (!machine || !machine.verifiedAt) return "Not yet verified";
   const t = Date.parse(machine.verifiedAt);
   if (isNaN(t)) return "Not yet verified";
-  const when = new Date(t).toLocaleString();
+  const when = adminDateTime_(t);
   return machineIsFresh_(machine) ? `Verified ${escapeHtml(when)}` : `Verified ${escapeHtml(when)} (stale — will rescan before use)`;
 }
 async function ensureMachineFresh_(machine){
@@ -25243,8 +25349,7 @@ function blankStatusLabel_(s){
 // A tracking event's date/time, e.g. "Oct 8, 2:14 PM". Falls back to the raw string if unparseable.
 function shipEventWhen_(iso){
   if(!iso) return "";
-  const d = new Date(iso);
-  return isNaN(d) ? String(iso) : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return adminDateTime_(iso, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 // The carrier's own latest wording — e.g. UPS "Loaded on Delivery Vehicle" — preferred over the
 // coarse normalized status ("In transit"); falls back to the normalized label when no detail exists.
@@ -25323,7 +25428,7 @@ async function paidUnrunUseStock_(btn){
 }
 function waitingOnBlanksHtml_(orders){
   if (!orders || !orders.length) return "";
-  const day = (s) => { const m = String(s || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${+m[2]}/${+m[3]}/${m[1]}` : ""; };
+  const day = (s) => s ? adminShortDate_(s) : "";   // a time on the business's calendar, a plain day as written
   const today = localToday_();
   const orgName = (id) => ((adminOrgs || []).find(o => o.orgId === id) || {}).name || id;
   const sizeOf = (it) => itemHasSize_(it) ? " · " + it.size : "";
@@ -25354,7 +25459,7 @@ function paidUnrunHtml_(orders){
     const items = o.items.map(it => `${it.qty} × ${escapeHtml(it.name)}${it.size && it.size !== "OSFA" ? " · " + escapeHtml(it.size) : ""}`).join(", ");
     return `<tr style="border-bottom:1px solid #eee;">
       <td style="padding:5px 8px;white-space:nowrap;">${o.dueDate ? dueBadge_(o.dueDate) : `<span style="color:#999;">—</span>`}</td>
-      <td style="padding:5px 8px;white-space:nowrap;color:#777;">${escapeHtml(new Date(o.placedAt).toLocaleDateString())}</td>
+      <td style="padding:5px 8px;white-space:nowrap;color:#777;">${escapeHtml(adminDate_(o.placedAt))}</td>
       <td style="padding:5px 8px;"><b>${escapeHtml(o.customerName)}</b> <a href="#orders/${encodeURIComponent(o.orgId)}" style="color:inherit;font-size:12px;">${escapeHtml(o.orderId)}</a><div style="font-size:12px;color:#777;">${escapeHtml(o.orgName)}</div></td>
       <td style="padding:5px 8px;font-size:13px;">${items}</td>
       <td style="padding:5px 8px;white-space:nowrap;font-size:12px;">${o.needsBlanks === false ? (o.allFromStock ? `<span style="color:#166534;">From stock</span>` : `<span style="color:#666;">No blank needed</span>`) : o.blankReceived ? `<span style="color:#166534;">Blanks in</span>` : o.blankOrdered ? `<span style="color:#b45309;">Blanks ordered</span>`
@@ -25371,9 +25476,7 @@ function paidUnrunHtml_(orders){
 // A due-date chip for the run queues (migrations/0038): red when overdue, amber within 3 days.
 function dueBadge_(dueDate){
   if(!dueDate) return "";
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const d = new Date(dueDate + "T00:00:00");
-  const days = Math.round((d - today) / 86400000);
+  const days = daysBetween_(localToday_(), dueDate);
   const color = days < 0 ? "#b03a2e" : days <= 3 ? "#b45309" : "#2563eb";
   const txt = days < 0 ? `${-days} day${days === -1 ? "" : "s"} overdue` : days === 0 ? "due today" : `due in ${days} day${days === 1 ? "" : "s"}`;
   return `<span style="display:inline-block;margin-top:4px;font-size:12px;font-weight:700;color:${color};">⏱ Due ${escapeHtml(dueDate)} · ${txt}</span>`;
@@ -25468,7 +25571,7 @@ async function renderRunOrder(app, opts){
     let machine, machineBox, actions;
     if (run) {
       machine = machines.find(m => m.id === run.machineId) || null;
-      const since = run.startedAt ? new Date(run.startedAt).toLocaleString() : "";
+      const since = run.startedAt ? adminDateTime_(run.startedAt) : "";
       const hoopNow = run.hoopId && hoopsById[run.hoopId] ? ` · ${escapeHtml(hoopsById[run.hoopId].name)}` : "";
       machineBox = `<div style="text-align:right;min-width:180px;">
           <label style="font-size:11px;font-weight:600;color:#888;display:block;">Machine</label>

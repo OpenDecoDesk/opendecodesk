@@ -107,7 +107,9 @@ const role = (key, fns) => ({ key, name: key, rank: 10, locked: false, builtIn: 
 
   console.log("\n=== #22 The screens show a dash for a cost that isn't sent ===");
   const adminJs = read("public/admin.js");
-  ok("finished stock and its history write a missing cost as —", /const money = \(n\) => n == null \? "—" : "\$" \+ Number\(n\)\.toFixed\(2\);/.test(adminJs.slice(adminJs.indexOf("async function showStockModal")))
+  // adminMoneyOr_: the admin's one money style, with a dash for an amount not given.
+  ok("finished stock and its history write a missing cost as —", /const money = \(n\) => adminMoneyOr_\(n\);/.test(adminJs.slice(adminJs.indexOf("async function showStockModal"))) &&
+    /function adminMoneyOr_\(n, none\)\{ return n == null \|\| n === "" \? \(none === undefined \? "—" : none\)/.test(adminJs)
     && /money\(r\.avgCost\)/.test(adminJs) && /money\(m\.unitCost\)/.test(adminJs));
   ok("transfers' average cost and history unit cost too", /\$\{t\.purchasePrice == null \? "—" : "\$" \+ Number\(t\.purchasePrice\)\.toFixed\(2\)\}/.test(adminJs) &&
     /\$\{m\.unitCost == null \? "—" : "\$" \+ Number\(m\.unitCost\)\.toFixed\(2\)\}/.test(adminJs));

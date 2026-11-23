@@ -16,7 +16,7 @@ const NAMES = [
   "claimTotpCounter", "insertAdminSession", "getAdminSessionExpiry", "deleteAdminSession",
   "getAdminSession", "setAdminSessionPending", "deleteUserSessions", "deleteAllAdminSessions",
   "getUserById", "getUserByEmail", "listUsers", "getBootstrapState", "insertUser", "insertFirstAdmin", "updateUser",
-  "setUserRoleAndStatus", "claimUserTotpCounter", "replaceRecoveryCodes", "insertAuditLog", "recordFailedAdminLogin",
+  "setUserRoleAndStatus", "claimUserTotpCounter", "replaceRecoveryCodes", "insertAuditLog", "recordFailedAdminLogin", "resolveTimeZone",
 ];
 
 let _fns = null;

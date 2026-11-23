@@ -182,8 +182,10 @@ const quiet = () => { const vc = new VirtualConsole(); vc.on("jsdomError", (e) =
     rushPayByDate_({ rush: M.rushRuleView(R({ mode: "fixed", amount: 1, payByDays: 30 })) }, due, today) === today && rushPayByDate_({ rush: M.rushRuleView(R({ mode: "fixed", amount: 1 })) }, due, today) === "");
   ok("…and tells the customer before they order", /Full payment must be received by \$\{escapeHtml\(nice\)\}\. If it isn't, we can't guarantee this date\./.test(html));
   const adminSrc = read("public/admin.js");
-  const helpers = new Function("escapeHtml", adminSrc.slice(adminSrc.indexOf("function rushPill_("), adminSrc.indexOf("function showRushFeeModal_(")) + "\nreturn { rushPill_, rushPayBySuggest_, rushLocalToday_ };")(s => String(s));
-  const lt = helpers.rushLocalToday_();
+  // "Today" is the admin's localToday_ (the business's calendar day), given here as this computer's own day; adminDate_
+  // (the admin's date for display) is left out: these checks don't read the date's wording.
+  const lt = new Date().toLocaleDateString("en-CA");
+  const helpers = new Function("escapeHtml", "localToday_", "adminDate_", adminSrc.slice(adminSrc.indexOf("function rushPill_("), adminSrc.indexOf("function showRushFeeModal_(")) + "\nreturn { rushPill_, rushPayBySuggest_ };")(s => String(s), () => lt, (v) => String(v));
   ok("the Rush… window suggests the date from the rule's days, never before today", helpers.rushPayBySuggest_(addDays(lt, 10), 3) === addDays(lt, 7) && helpers.rushPayBySuggest_(addDays(lt, 1), 5) === lt && helpers.rushPayBySuggest_("", 3) === "");
   ok("the Orders pill shows the pay-by date, and flags it once it's passed unpaid", /pay by/.test(helpers.rushPill_({ rushRequested: true, rushPayBy: addDays(lt, 3), balanceDue: 10 })) &&
     /rush-pill-late/.test(helpers.rushPill_({ rushRequested: true, rushPayBy: addDays(lt, -1), balanceDue: 10 })) && !/rush-pill-late/.test(helpers.rushPill_({ rushRequested: true, rushPayBy: addDays(lt, -1), balanceDue: 0, paid: true })));

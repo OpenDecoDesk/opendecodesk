@@ -13,7 +13,8 @@
  *
  * The reply says who signed in ({ user: { name, email, role } }) and, when there is one, the
  * step they must finish before anything else answers ({ pending: "account" | "password" |
- * "2fa" } — functions/_lib/adminAuth.js).
+ * "2fa" } — functions/_lib/adminAuth.js). It also carries the business's time zone ({ timeZone },
+ * resolveTimeZone in functions/_lib/db.js): the admin page shows every date and "today" on that calendar.
  *
  * THE INSTALLER'S PASSPHRASE signs in as the first admin — whatever is typed as the email — but
  * only while no active admin has a usable password: a new install, or one locked out and
@@ -55,7 +56,7 @@ import { verifyTOTP }         from "../_lib/totp.js";
 import { disableWorkersDev }  from "../_lib/cloudflareSetup.js";
 import {
   recordFailedAdminLogin, insertAuditLog, getUserByEmail, getUserById, insertFirstAdmin, insertUser, getBootstrapState,
-  updateUser, setUserRoleAndStatus, claimUserTotpCounter, noteAdminHostSeen, getSiteSetting, noteWorkersDevOff,
+  updateUser, setUserRoleAndStatus, claimUserTotpCounter, noteAdminHostSeen, getSiteSetting, noteWorkersDevOff, resolveTimeZone,
 } from "../_lib/db.js";
 
 async function getHost(env, request){
@@ -227,9 +228,9 @@ export async function onRequestPost(context){
   }
 
   // `session:"cookie"` tells admin.js the credential lives in the cookie; the
-  // token itself never appears in the body.
+  // token itself never appears in the body. timeZone: the business's (resolveTimeZone never throws).
   const res = jsonResponse({status:"ok", session:"cookie", expires: session.expires, pending: pending || null,
-    user: { name: user.name, email: user.email, role: user.role }});
+    user: { name: user.name, email: user.email, role: user.role }, timeZone: await resolveTimeZone(env)});
   res.headers.append("Set-Cookie", sessionCookieHeader(session.token, SESSION_TTL_SEC));
   res.headers.set("Cache-Control", "no-store");
   return res;

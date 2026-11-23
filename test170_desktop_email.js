@@ -299,7 +299,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); };
 
   console.log("\n=== E. The admin ===");
   const catalog = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/db.js")) + "\n" +
-    "const getCatalogData = async (env) => ({ subdomainMap: {}, ...(await getPublicCatalogData(env.DB)) });\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
+    "const getCatalogData = async (env) => ({ subdomainMap: {}, ...(await getPublicCatalogMeta(env.DB)) });\n" + "const getCatalogShop = async (env, orgId) => getPublicCatalogShop(env.DB, orgId);\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
   const adminAnswer = async (env) => JSON.parse(await (await catalog({ request: { url: "http://localhost:47830/api/catalog" }, env })).text());
   ok("the admin is told when email is set up, and not otherwise", (await adminAnswer(on)).desktopEmail === true && !("desktopEmail" in (await adminAnswer(off))));
   const adminJs = read("public/admin.js");

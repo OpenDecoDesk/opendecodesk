@@ -11041,7 +11041,7 @@ export async function getOrderTotal(db, orderId) {
   return row ? fromCents(row.totalCents) : null;
 }
 
-// ---- Catalog data for getCatalogData() --------------------------------
+// ---- Catalog data for getCatalogData() / getCatalogShop() (catalogCache.js) ----------------------------
 
 // One shop as the storefront needs it, from its rows (published, or live for a draft preview). `pre`: the whole
 // install's lookups (catalogPrefetch_) when every shop is being built at once; without it the shop reads its own.
@@ -11124,9 +11124,10 @@ async function catalogPrefetch_(db) {
     designsFor: (orgId) => (designs || []).filter(d => d.orgId === orgId || !!Number(d.isGlobal)).map(d => ({ id: Number(d.id), name: d.name || "" })),
   } };
 }
-export async function getPublicCatalogData(db) {
-  // Each shop as PUBLISHED (migrations/0076): its snapshot rows, or its live rows if never published.
-  const { shopRows, pre } = await catalogPrefetch_(db);
+// What every storefront answer needs besides a shop: the global settings (with the sales tax and the rush fee), the
+// business shown to visitors, the region, the features and the sections. Shared by the whole-install build below and
+// the catalog's meta entry (getPublicCatalogMeta), so the two can't drift apart.
+async function catalogSiteParts_(db) {
   const [baseSettings, salesTax, business, locale, features, categories, rushFee] = await Promise.all([
     getGlobalSettings(db),
     getSalesTaxSettings(db),
@@ -11136,11 +11137,26 @@ export async function getPublicCatalogData(db) {
     listProductCategories(db),
     getRushSettings(db),
   ]);
-  const globalSettings = { ...baseSettings, salesTax, rushFee };
+  return {
+    globalSettings: { ...baseSettings, salesTax, rushFee },
+    business: publicBusinessProfile(business),   // name, contact and payment details shown to visitors
+    locale: { country: locale.country },         // address format the storefront's forms use (Region)
+    features,                                    // which optional parts of the site are on (Features)
+    // The storefront's sections, in order (migrations/0056): key + heading only.
+    categories: categories.map(c => ({ key: c.key, label: c.plural || c.name })),
+  };
+}
+// The whole install's catalog in one object: every shop with its products, plus the settings. The request path no
+// longer uses it (catalogCache.js caches the meta part and each shop apart — getPublicCatalogMeta and
+// getPublicCatalogShop below); it stays for the local admin script and the tests, and it is what those two must match.
+export async function getPublicCatalogData(db) {
+  // Each shop as PUBLISHED (migrations/0076): its snapshot rows, or its live rows if never published.
+  const { shopRows, pre } = await catalogPrefetch_(db);
+  const site = await catalogSiteParts_(db);
 
   // Each shop with its visible products; configurable products also need the shop's visible graphics (option
   // tiles, with the tier add-on resolved) + tier prices (migrations/0036), blank color images (0037) and mockups.
-  const orgsWithProducts = await Promise.all(shopRows.map(rows => catalogShopFromRows_(db, rows, rushFee, pre)));
+  const orgsWithProducts = await Promise.all(shopRows.map(rows => catalogShopFromRows_(db, rows, site.globalSettings.rushFee, pre)));
   // Build subdomainMap: { [subdomain]: orgId } — the published address.
   const subdomainMap = {};
   for (const org of orgsWithProducts) subdomainMap[org.subdomain] = org.orgId;
@@ -11149,14 +11165,68 @@ export async function getPublicCatalogData(db) {
     status: "ok",
     subdomainMap,
     orgs: Object.fromEntries(orgsWithProducts.map((o) => [o.orgId, o])),
-    globalSettings,
-    business: publicBusinessProfile(business),   // name, contact and payment details shown to visitors
-    locale: { country: locale.country },         // address format the storefront's forms use (Region)
-    features,                                    // which optional parts of the site are on (Features)
-    // The storefront's sections, in order (migrations/0056): key + heading only.
-    categories: categories.map(c => ({ key: c.key, label: c.plural || c.name })),
+    globalSettings: site.globalSettings,
+    business: site.business,
+    locale: site.locale,
+    features: site.features,
+    categories: site.categories,
     version: "d1", // static — the cache is keyed by global_settings.catalogVersion
   };
+}
+// Whether a catalog_snapshots row's head is a snapshot, decided as snapshotRows_ decides it, and if so the subdomain
+// in its orgs row — from the JSON functions' answers in publishedSubdomainMap_ (each value with its json_type, so
+// null, true and a missing key stay apart). null = not a snapshot: the shop's live row is used.
+function snapshotHeadSubdomain_(h) {
+  if (!h) return null;
+  const val = (type, v) => type == null ? undefined : type === "null" ? null : type === "true" ? true : type === "false" ? false
+    : type === "object" || type === "array" ? JSON.parse(v) : v;
+  // The org must be truthy (an object or array always is; the scalar itself comes back otherwise).
+  const org = h.orgType === "object" || h.orgType === "array" || val(h.orgType, h.orgScalar);
+  if (!org) return null;
+  if (h.productsType !== "array") {
+    const n = Number(val(h.partsType, h.parts));
+    if (!Number.isInteger(n) || n < 0) return null;
+  }
+  return { subdomain: h.orgType === "object" ? val(h.subdomainType, h.subdomain) : undefined };
+}
+// { [published subdomain]: orgId } for every shop, by the rule catalogPrefetch_ and publishedShopRows_ use: the orgs
+// row in the shop's snapshot when it has been published, else its live row. Only the subdomain is taken out of each
+// snapshot's json (SQLite's JSON functions, in the query), so no shop's products are read — not even a snapshot
+// from before migrations/0101 that still holds them. Shops in orgId order, so two shops with one subdomain resolve
+// as the whole-install build resolves them (the later one).
+async function publishedSubdomainMap_(db) {
+  const all = (sql) => db.prepare(sql).all().then(r => r.results || []);
+  const [orgRows, heads] = await Promise.all([
+    all("SELECT orgId, subdomain FROM orgs ORDER BY orgId"),
+    all(`SELECT orgId, json_type(json, '$.org') AS orgType,
+        CASE WHEN json_type(json, '$.org') IN ('object', 'array') THEN NULL ELSE json_extract(json, '$.org') END AS orgScalar,
+        json_type(json, '$.org.subdomain') AS subdomainType, json_extract(json, '$.org.subdomain') AS subdomain,
+        json_type(json, '$.products') AS productsType, json_type(json, '$.parts') AS partsType, json_extract(json, '$.parts') AS parts
+      FROM catalog_snapshots WHERE json_valid(json)`).catch(() => []),   // before 0076: none
+  ]);
+  const headOf = new Map(heads.map(h => [h.orgId, h]));
+  const map = {};
+  for (const row of orgRows) map[(snapshotHeadSubdomain_(headOf.get(row.orgId)) || row).subdomain] = row.orgId;
+  return map;
+}
+// The catalog's meta part (catalogCache.js): everything getPublicCatalogData answers except the shops themselves.
+// The same fields in the same order, without `orgs` — the shop addresses and the settings, and no shop's products.
+export async function getPublicCatalogMeta(db) {
+  const [subdomainMap, site] = await Promise.all([publishedSubdomainMap_(db), catalogSiteParts_(db)]);
+  return { status: "ok", subdomainMap, ...site, version: "d1" };
+}
+// One shop as published (catalogCache.js caches each apart): the same object getPublicCatalogData gives for it,
+// built from that shop's rows alone. null = no such shop (as the whole-install build, which only has the orgs rows'
+// shops, a snapshot left behind by a deleted shop doesn't count).
+export async function getPublicCatalogShop(db, orgId) {
+  const id = String(orgId == null ? "" : orgId);
+  if (!id) return null;
+  const [known, rows] = await Promise.all([
+    db.prepare("SELECT 1 AS ok FROM orgs WHERE orgId=?").bind(id).first(),
+    publishedShopRows_(db, id),
+  ]);
+  if (!known || !rows) return null;
+  return catalogShopFromRows_(db, rows, await getRushSettings(db));
 }
 
 // Attaches `colorImages` { <productColor>: [imageUrls] } to each product, resolved from its blank

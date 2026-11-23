@@ -69,7 +69,7 @@ const buildHandler = () => new Function("sendTestEmail",
   "const requireAdmin = async () => null; const adminActor = () => 'local';\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
-  "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async (env) => ({ subdomainMap: " + SHOP_MAP + ", orgs: {}, features: await getFeatures(env.DB) });\n" +
+  "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async (env) => ({ subdomainMap: " + SHOP_MAP + ", features: await getFeatures(env.DB) });\n" +
   "const sendInvoiceEmail = async () => false;\n" +
   "const sendOrderReceivedEmail = async () => false, sendOrderNotificationEmail = async () => false, sendPaymentConfirmedEmail = async () => false, sendCancellationEmail = async () => false, sendDesignVerificationEmail = async () => false, sendShippingPaymentEmail = async () => false, sendShippedEmail = async () => false;\n" +
   "const ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({ configured: false }), ensureWorkerHostname = async () => ({ steps: ['custom domain added'] });\n" +
@@ -84,14 +84,15 @@ const buildHandler = () => new Function("sendTestEmail",
 // The shop page's catalog (functions/api/catalog.js) on the published catalog, as demo.example.com sees it.
 const buildCatalog = () => new Function(
   strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/db.js")) + "\n" +
-  "const getCatalogData = async (env) => ({ ...(await getPublicCatalogData(env.DB)), subdomainMap: " + SHOP_MAP + " });\n" +
+  "const getCatalogData = async (env) => ({ ...(await getPublicCatalogMeta(env.DB)), subdomainMap: " + SHOP_MAP + " });\n" +
+  "const getCatalogShop = async (env, orgId) => getPublicCatalogShop(env.DB, orgId);\n" +
   strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
 // The customer's design upload (functions/api/customer-design.js), Turnstile and the rate limit off.
 const buildCustomerDesign = () => new Function(
   strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/fileUpload.js")) + "\n" +
   strip(read("functions/_lib/imageInfo.js")) + "\n" + strip(read("functions/_lib/db.js")) + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null; const verifyTurnstile = async () => ({ ok: true });\n" +
-  "const getCatalogData = async (env) => ({ subdomainMap: " + SHOP_MAP + ", orgs: {}, features: await getFeatures(env.DB) });\n" +
+  "const getCatalogData = async (env) => ({ subdomainMap: " + SHOP_MAP + ", features: await getFeatures(env.DB) });\n" +
   strip(read("functions/api/customer-design.js")) + "\nreturn onRequestPost;")();
 // The admin's private-file endpoint (functions/api/design.js): uploads, signed links, downloads — and a digital
 // product's files (migrations/0086), which it records with db.js.

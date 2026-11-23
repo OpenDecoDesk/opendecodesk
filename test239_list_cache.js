@@ -24,7 +24,7 @@ const loadApi = () => new Function(strip(read("functions/_lib/hostConfig.js")) +
   "const adminUser = () => __user; const adminCan = (req, fn, lvl) => __can(fn, lvl);\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
-  "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +
+  "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {} });\n" +
   dbSrc + "\n" + strip(read("functions/api/orders.js")) +
   "\nreturn { post: onRequestPost, setUser: (u, can) => { __user = u; __can = can || (() => true); }, resetMemory: _resetListCacheMemory };")();
 let failed = 0;

@@ -53,7 +53,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   const admin = (body) => post("admin", Object.assign({ key: "x" }, body));
   const setF = async (features) => { const r = await admin({ action: "updateFeatures", features }); await tick(20); return r; };
   const place = (id, host) => post(host || "acme", { orderId: id, orgId: "acme", customerName: "Cust", contact: "c@x.com", paymentMethod: "Venmo", items: [{ productId: "tee", size: "M", qty: 1 }] });
-  const catalog = new Function(hostSrc + "\n" + httpSrc + "\nconst getReadyToShipByOrg = async () => []; const getBlankReadyByOrg = async () => ({});\nlet getCatalogData;\n" + strip(read("functions/api/catalog.js")) + "\nreturn { get: onRequestGet, set: (f) => { getCatalogData = f; } };")();
+  const catalog = new Function(hostSrc + "\n" + httpSrc + "\nconst getReadyToShipByOrg = async () => []; const getBlankReadyByOrg = async () => ({});\nlet getCatalogData;\n" + "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn { get: onRequestGet, set: (f) => { getCatalogData = f; } };")();
   catalog.set(catalogData);
   const cat = async (host) => { const res = await catalog.get({ request: { url: `https://${hostname(host)}/api/catalog` }, env }); return { status: res.status, text: await res.text() }; };
   const catJ = async (host) => JSON.parse((await cat(host)).text);

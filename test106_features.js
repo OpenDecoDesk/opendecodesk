@@ -94,7 +94,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   ok("nothing in the schema changed for this: it is one global_settings row", d1.q("SELECT count(*) n FROM global_settings WHERE key='features'")[0].n === 1);
 
   console.log("\n=== /api/catalog tells every page ===");
-  const catalog = new Function(hostSrc + "\n" + httpSrc + "\nconst getReadyToShipByOrg = async () => []; const getBlankReadyByOrg = async () => ({});\nlet getCatalogData;\n" + strip(read("functions/api/catalog.js")) + "\nreturn { get: onRequestGet, set: (f) => { getCatalogData = f; } };")();
+  const catalog = new Function(hostSrc + "\n" + httpSrc + "\nconst getReadyToShipByOrg = async () => []; const getBlankReadyByOrg = async () => ({});\nlet getCatalogData;\n" + "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn { get: onRequestGet, set: (f) => { getCatalogData = f; } };")();
   catalog.set(async () => lib.getPublicCatalogData(d1));
   const cat = async (host) => { const res = await catalog.get({ request: { url: `https://${host}.example.com/api/catalog` }, env }); return JSON.parse(await res.text()); };
   await admin({ action: "updateOrg", orgId: "acme", subdomain: "acme", name: "Acme", ready: true, deliveryOptions: [{ type: "pickup" }, { type: "shipping" }, { type: "custom", label: "Hand delivery", fee: 5 }] });

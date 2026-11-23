@@ -61,9 +61,12 @@ global.getCatalogData = async () => ({
   }
 });
 
+// getCatalogShop(env, orgId) mock — one shop's entry (catalogCache.js keeps each shop apart), taken
+// from the orgs of the getCatalogData mock above.
+global.getCatalogShop = async (env, orgId) => ((await global.getCatalogData(env)).orgs || {})[orgId] || null;
 let catalogSrc = fs.readFileSync(__dirname + "/functions/api/catalog.js", "utf8")
   .replace(/import \{ classifyHost \} from ["'].*["'];\n?/, "")
-  .replace(/import \{ getCatalogData \} from ["'].*["'];\n?/, "")
+  .replace(/import \{ getCatalogData, getCatalogShop \} from ["'].*["'];\n?/, "")
   .replace(/import \{ getReadyToShipByOrg[^}]*\} from ["'].*["'];\n?/, "")
   .replace(/export const CATALOGS/, "var CATALOGS")
   .replace(/import \{ jsonResponse \} from ["'].*["'];\n?/, "")

@@ -24,7 +24,7 @@ There is no other server, queue or cache service.
 1. A browser opens `https://league.myshop.com/`. Cloudflare serves `public/index.html` directly.
 2. The page calls `GET /api/catalog` with **no shop named in the request**.
 3. The Worker's router (`src/worker.js`, `ROUTES`) hands it to `functions/api/catalog.js`.
-4. `catalog.js` loads the catalog (`functions/_lib/catalogCache.js`) and classifies the request's
+4. `catalog.js` loads the cached catalog (`functions/_lib/catalogCache.js`) and classifies the request's
    **hostname** (`functions/_lib/hostConfig.js`, `classifyHost`): the admin host, a shop
    (`locked` to one shop id), the root domain, or unknown.
 5. It answers with that one shop's name, products and prices — or "admin", or an error for an
@@ -38,15 +38,17 @@ upload and sign-in flows have their own endpoints).
 
 ### The catalog cache
 
-Reading shops and products from the database on every page view would be wasteful, so
-`getCatalogData(env)` caches the whole public catalog with the Cache API under a key that contains
-a **version number** kept in the database. **Publish** adds one to the version, so every later
-request uses a new key — nothing has to be purged. The version itself is held in memory for 30
-seconds, and a cached catalog expires after 5 minutes regardless. If the database can't be read,
-the last cached catalog is served.
+Reading shops and products from the database on every page view would be wasteful, so the public
+catalog is cached with the Cache API, in two kinds of entry: `getCatalogData(env)` gives the small
+**meta** entry (each shop's published address, the settings, the feature switches — what nearly every
+request needs) and `getCatalogShop(env, orgId)` gives **one shop** with its products, built from that
+shop alone the first time it's asked for. Every key contains a **version number** kept in the
+database. **Publish** adds one to the version, so every later request uses new keys — nothing has to
+be purged. The version itself is held in memory for 30 seconds, and a cached entry expires after 5
+minutes regardless. If the database can't be read, the last cached copy of that entry is served.
 
 Settings that the storefront needs (business profile, region, sales tax, feature switches) travel
-in the same cached catalog, and saving them bumps the version, which is why they don't need Publish.
+in the cached meta entry, and saving them bumps the version, which is why they don't need Publish.
 
 Orders are **not** priced from the cache's prices as shown in a browser: `priceItem()` in
 `functions/_lib/db.js` prices each line on the server when the order is placed.

@@ -153,7 +153,7 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
   ok("…while email stays refused", r.status === 403 && /Email isn't set up/.test(r.body.message));
   global.fetch = fetch0;
   const catalogFor = async (e) => { const fn = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/db.js")) + "\n" +
-    "const getCatalogData = async (env) => ({ subdomainMap: {}, ...(await getPublicCatalogData(env.DB)) });\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
+    "const getCatalogData = async (env) => ({ subdomainMap: {}, ...(await getPublicCatalogMeta(env.DB)) });\n" + "const getCatalogShop = async (env, orgId) => getPublicCatalogShop(env.DB, orgId);\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
     return JSON.parse(await (await fn({ request: { url: "http://localhost:47830/api/catalog" }, env: e })).text()); };
   ok("the admin page is told when they are on (and not otherwise)", (await catalogFor(suppliersEnv)).desktopSuppliers === true && (await catalogFor(env)).desktopSuppliers === undefined);
 
@@ -313,7 +313,7 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
   console.log("\n=== G. The admin page in the desktop program ===");
   // The real page and admin.js in jsdom, talking to the real catalog.js and orders.js above.
   const catalog = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/db.js")) + "\n" +
-    "const getCatalogData = async (env) => ({ subdomainMap: {}, ...(await getPublicCatalogData(env.DB)) });\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
+    "const getCatalogData = async (env) => ({ subdomainMap: {}, ...(await getPublicCatalogMeta(env.DB)) });\n" + "const getCatalogShop = async (env, orgId) => getPublicCatalogShop(env.DB, orgId);\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){
     if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs));

@@ -24,7 +24,7 @@ const api = new Function(common +
   "const ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({ configured: false });\n" +
   dbSrc + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")();
 const catalogGet = new Function(common + dbSrc +
-  "\nconst getCatalogData = async (env) => getPublicCatalogData(env.DB);\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
+  "\nconst getCatalogData = async (env) => getPublicCatalogMeta(env.DB);\n" + "const getCatalogShop = async (env, orgId) => getPublicCatalogShop(env.DB, orgId);\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 

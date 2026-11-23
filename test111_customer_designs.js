@@ -44,7 +44,7 @@ const upload = new Function("gate", hostSrc + "\n" + httpSrc + "\n" + strip(read
   strip(read("functions/api/customer-design.js")) + "\nreturn { post: onRequestPost, cleanUp: cleanUpCustomerDesigns };")(gate);
 const catalogApi = new Function("lib", hostSrc + "\n" + httpSrc + "\nconst getReadyToShipByOrg = async () => []; const getBlankReadyByOrg = async () => ({});\nlet DB_;\n" +
   "const getCatalogData = async (env) => ({ ...(await lib.getPublicCatalogData(env.DB)), subdomainMap: " + JSON.stringify(SUBS) + " });\n" +
-  strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")(lib);
+  "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")(lib);
 
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };

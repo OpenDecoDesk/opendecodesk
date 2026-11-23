@@ -31,7 +31,7 @@ const download = new Function(hostSrc + "\n" + httpSrc + "\n" + dbSrc + "\n" + e
   strip(read("functions/api/download.js")) + "\nreturn onRequestGet;")();
 const catalog = new Function(hostSrc + "\n" + httpSrc + "\nconst getReadyToShipByOrg = async () => []; const getBlankReadyByOrg = async () => ({});\n" +
   "const getDraftCatalogShop = async () => null; const verifyPreviewToken = async () => false;\nlet getCatalogData;\n" +
-  strip(read("functions/api/catalog.js")) + "\nreturn { get: onRequestGet, set: (f) => { getCatalogData = f; } };")();
+  "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn { get: onRequestGet, set: (f) => { getCatalogData = f; } };")();
 
 // The admin's order cell, from public/admin.js, with what it calls stubbed.
 const adminSrc = read("public/admin.js");

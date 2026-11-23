@@ -86,7 +86,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const d1 = await createD1();
   await migrate(d1, readSources(__dirname));
   const catalog = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/db.js")) + "\n" +
-    "const getCatalogData = async (env) => ({ subdomainMap: {}, ...(await getPublicCatalogData(env.DB)) });\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
+    "const getCatalogData = async (env) => ({ subdomainMap: {}, ...(await getPublicCatalogMeta(env.DB)) });\n" + "const getCatalogShop = async (env, orgId) => getPublicCatalogShop(env.DB, orgId);\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
   const answer = async (env, origin) => JSON.parse(await (await catalog({ request: { url: origin + "/api/catalog" }, env })).text());
   const desk = { DB: d1, EDITION: "desktop", DESKTOP_VERSION: "2026.11.01.01" };
   let a = await answer(desk, "http://localhost:47830");

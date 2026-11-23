@@ -209,7 +209,7 @@ test("the Read only role sees the products but can't add or change one", async (
   expect(status).toBe(403);
 });
 
-// KNOWN BUG (reported, minor): after a product is saved, the shop bar above the Products page keeps showing
+// Fixed (was a minor bug): after a product is saved, the shop bar above the Products page kept showing
 // "✓ Published" (disabled) — the shop bar re-reads the publish state at most every 15 seconds
 // (loadShopBarData_), and saving doesn't ask it to — while the same page's own line says "Unpublished changes".
 // (Last in the file: a failed test, even an expected one, can restart the worker.)
@@ -221,6 +221,5 @@ test("after a product is changed, the shop bar offers Publish straight away", as
   await expect(page).toHaveURL(new RegExp("#catalog/orgs/" + shop.orgId + "/products$"));
   await expect(page.locator("main")).toContainText("Unpublished changes");
   await waitIdle(page);
-  test.fail(true, "Known bug: the shop bar's Publish button stays '✓ Published' for up to 15 s after a product is saved");
   await expect(page.getByRole("navigation", { name: "Shop" }).locator("button.shop-bar-pub")).toBeEnabled({ timeout: 3000 });
 });

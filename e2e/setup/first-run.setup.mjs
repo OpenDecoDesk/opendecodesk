@@ -97,39 +97,8 @@ test("the owner signs in and lands on Global settings while setup is incomplete"
   await page.context().storageState({ path: stateFile("owner") });
 });
 
-// KNOWN BUG (reported): "Add role" always answers "No such role." The page's users helper (public/admin.js
-// usersCall_) sends { key: adminKey } — "cookie" — with every call, and saveRole reads `key` as the key of the
-// role to change. Marked as an expected failure so the suite notices when it is fixed.
-test("the owner adds a read-only role under Roles and permissions", async ({ browser }) => {
-  test.fail(true, "Known bug: Roles and permissions → Add role answers 'No such role.' (usersCall_ sends key: 'cookie')");
-  const context = await browser.newContext({ storageState: stateFile("owner") });
-  const page = await context.newPage();
-  await page.goto(ADMIN + "/#users");
-  await page.getByRole("tab", { name: "Roles and permissions" }).click();
-  await page.getByRole("button", { name: "＋ Add role" }).click();
-  await page.getByLabel("Name").fill("Read only");
-  await page.getByLabel(/^Rank/).fill("10");
-  // A new role starts from Production's permissions: switch every menu off, then on again — switching a
-  // menu on opens each of its pages at Read.
-  const menus = page.locator(".perm-menu-head input[type=checkbox]");
-  const n = await menus.count();
-  expect(n).toBeGreaterThan(5);
-  for (let i = 0; i < n; i++) {
-    const box = page.locator(".perm-menu-head input[type=checkbox]").nth(i);
-    if (await box.isChecked()) await box.uncheck();
-    await page.locator(".perm-menu-head input[type=checkbox]").nth(i).check();
-  }
-  // Nothing above Read anywhere.
-  await expect(page.locator(".perm-seg input[value=edit]:checked, .perm-seg input[value=full]:checked")).toHaveCount(0);
-  expect(await page.locator(".perm-seg input[value=read]:checked").count()).toBeGreaterThan(20);
-  await page.getByRole("button", { name: "Add role" }).last().click();
-  await expect(toast(page)).toContainText("Role added.", { timeout: 4000 });
-  await expect(page.locator(".role-chip", { hasText: "Read only" })).toBeVisible();
-  await context.close();
-});
-
-// Until that is fixed, the same request the page means to send — without the stray key — through the owner's
-// session, and the Roles screen then shows the role at Read everywhere.
+// The Read only role the other specs use, made through the owner's session (the Add role button itself is checked
+// in auth.spec), and the Roles screen then shows it at Read everywhere.
 test("a read-only role exists and Roles and permissions shows it at Read everywhere", async ({ browser }) => {
   const ctx = await apiContext("owner");
   const roles = await callApi(ctx, "listRoles", {}, { path: "/api/admin-users" });

@@ -25,10 +25,6 @@ const GROUPS = {
     ["orphans", "Orphaned images", "Orphaned images"], ["users", "Users", "Users"], ["security", "Security (2FA)", "Security"], ["password", "Change password", "Change password"]],
 };
 
-// KNOWN BUG (reported): Catalog → Shop setup / Designs / Graphics, chosen from the menu while a shop exists, throw
-// "TypeError: Assignment to constant variable" (public/admin.js adminRoute assigns to `const raw`): the address
-// changes but the page before stays on screen until a reload.
-const KNOWN_BROKEN = new Set(["setup", "designs", "graphics"]);
 
 // Run Order and Machine files look for the optional send-agent: on this computer (http://127.0.0.1:8787/ping,
 // which the browser reports as a CORS / ERR_FAILED error when no agent is running) and through the relay
@@ -77,7 +73,6 @@ const PAGES = [...TOP.map(([h, l, t]) => ({ hash: h, menu: null, label: l, title
 
 for (const p of PAGES) {
   test(`${p.menu ? p.menu + " → " : ""}${p.label}: reached by keyboard, draws its page, no console errors`, async ({ page }) => {
-    if (KNOWN_BROKEN.has(p.hash)) test.fail(true, "Known bug: adminRoute assigns to const raw for #" + p.hash + " (TypeError: Assignment to constant variable)");
     const errors = collectErrors(page);
     // Start somewhere else, so arriving is a change of page.
     const start = p.hash === "home" ? "users" : "home";

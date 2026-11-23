@@ -316,7 +316,8 @@ function adminLastShop_(){
 function adminNoteShop_(orgId){ if (orgId && orgId !== "all") window._adminLastShop = orgId; }
 async function adminRoute() {
   const app = document.getElementById("app");
-  const raw = location.hash.replace(/^#\/?/, "");
+  // `let`: the menu's Designs / Graphics / Shop setup add the shop to it below (a const threw there).
+  let raw = location.hash.replace(/^#\/?/, "");
   renderAdminNav();
 
   // Not authed yet? Show the picker shell WITHOUT changing the hash — loadAdminOrgList() reads
@@ -2081,16 +2082,19 @@ function globalSettingsProblem_(){
   const problems = [], flagged = [];
   const need = (what, missing, bad) => { if (missing.length || bad.length) problems.push(`${what} needs ${[missing.length ? missing.map(m => m[1]).join(", ") : "", ...bad.map(b => b[1])].filter(Boolean).join("; ")}`); flagged.push(...missing.map(m => m[0]), ...bad.map(b => b[0])); };
   if (ticked("shipping")) {
+    // Switching Shipping on needs it all; while it stays on (a new install starts that way) only what's typed is checked.
+    const turningOn = !(c.features && c.features.shipping);
     const us = (val("gLocaleCountry") || (adminIsUS_() ? "US" : "OTHER")) !== "OTHER";
     const fields = [["gShipName", "Name"], ["gShipStreet1", "Street address"], ["gShipCity", "City"], ["gShipState", us ? "State" : "State / region"], ["gShipZip", us ? "ZIP" : "Postal code"], ["gShipPhone", "Phone"], ["gShipEmail", "Email"]];
-    const missing = fields.filter(([id]) => !val(id)).map(([id, l]) => [id, "the ship-from " + (l === "ZIP" ? l : l.toLowerCase())]);
+    const missing = !turningOn ? [] : fields.filter(([id]) => !val(id)).map(([id, l]) => [id, "the ship-from " + (l === "ZIP" ? l : l.toLowerCase())]);
     const bad = [];
     if (us && val("gShipZip") && !/^\d{5}(-\d{4})?$/.test(val("gShipZip"))) bad.push(["gShipZip", "a 5-digit ZIP (or ZIP+4)"]);
     if (us && val("gShipState") && !/^[A-Za-z]{2}$/.test(val("gShipState"))) bad.push(["gShipState", "a 2-letter state"]);
     if (val("gShipEmail") && !/^\S+@\S+\.\S+$/.test(val("gShipEmail"))) bad.push(["gShipEmail", "a ship-from email that looks like one"]);
     const removing = $("gShippoRemove") && $("gShippoRemove").dataset.remove === "1";
     const hasKey = c.desktop ? (!!val("gShippoKey") || (c.keySet && !removing)) : window._gShippoKey !== false;
-    if (!hasKey) { missing.unshift([c.desktop ? "gShippoKey" : "", "a Shippo key"]); }
+    // A key is needed to switch Shipping on, and can't be removed while it stays on.
+    if (!hasKey && (turningOn || removing)) { missing.unshift([c.desktop ? "gShippoKey" : "", "a Shippo key"]); }
     need("Shipping", missing, bad);
   }
   if (c.desktop && ticked("email")) {
@@ -5377,7 +5381,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         <td>${refundCol}</td>
         ${idx === 0 ? `
           <td rowspan="${o.items.length}">${escapeHtml(o.paymentMethod || "—")}</td>
-          <td rowspan="${o.items.length}">${o.paid ? "Paid" : "Unpaid"}</td>
+          <td rowspan="${o.items.length}" data-paid-td>${o.paid ? "Paid" : "Unpaid"}</td>
           <td rowspan="${o.items.length}" data-discount-td style="text-align:right;white-space:nowrap;">${o.discountAmount > 0 ? `<span style="color:#166534;">−$${Number(o.discountAmount).toFixed(2)}</span>${o.discountNote ? `<br><span style="font-size:11px;color:var(--ink-soft);">${escapeHtml(o.discountNote)}</span>` : ""}` : "—"}</td>
           <td rowspan="${o.items.length}" data-balance-td style="text-align:right;white-space:nowrap;font-weight:600;color:${o.balanceDue > 0.005 ? "#b03a2e" : "var(--ink-soft)"};">${o.balanceDue > 0.005 ? `$${Number(o.balanceDue).toFixed(2)}` : o.amountReceived > 0 ? "Settled" : "—"}</td>
           <td rowspan="${o.items.length}">${emailBadge(o.receivedEmailAt)}</td>
@@ -6218,7 +6222,7 @@ async function showPaymentsModal(orgId, orderId) {
             body: JSON.stringify({action:"voidPayment", key:adminKey, paymentId:Number(idStr), orderId, reason})});
           const d = await r.json();
           if (!r.ok || d.status === "error") { showToast("Void failed: " + ((d&&d.message)||"Unknown"), true); return; }
-          const updated = Object.assign({}, order, {
+          const updated = Object.assign({}, order, paidOf_(d), {
             payments: d.payments || order.payments,
             amountReceived: d.amountReceived, balanceDue: d.balanceDue,
           });
@@ -6238,7 +6242,7 @@ async function showPaymentsModal(orgId, orderId) {
             body: JSON.stringify({action:"setPaymentDate", key:adminKey, paymentId:Number(idStr), orderId, org: orgId, at})});
           const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
           if (!r.ok || d.status === "error") { showToast("Date not changed: " + ((d&&d.message)||"Unknown"), true); return; }
-          const updated = Object.assign({}, order, { payments: d.payments || order.payments });
+          const updated = Object.assign({}, order, paidOf_(d), { payments: d.payments || order.payments });
           updateOrderCache(orgId, orderId, updated);
           openModal(updated);
           showToast("Date updated.");
@@ -6258,7 +6262,7 @@ async function showPaymentsModal(orgId, orderId) {
             body: JSON.stringify({action:"setRefundShipping", key:adminKey, paymentId:Number(idStr), shippingAmount: amt, orderId, org: orgId})});
           const d = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
           if (!r.ok || d.status === "error") { showToast("Not changed: " + ((d&&d.message)||"Unknown"), true); return; }
-          const updated = Object.assign({}, order, { payments: d.payments || order.payments });
+          const updated = Object.assign({}, order, paidOf_(d), { payments: d.payments || order.payments });
           updateOrderCache(orgId, orderId, updated);
           openModal(updated);
           showToast(amt > 0 ? `$${amt.toFixed(2)} of the refund marked as shipping.` : "Refund marked as all goods.");
@@ -6290,7 +6294,7 @@ async function showPaymentsModal(orgId, orderId) {
                 note: noteEl.value.trim(), discountRemainder: !!discountRemainder, discountNote: discountNote || ""})});
             const d = await r.json();
             if (!r.ok || d.status === "error") { ov.querySelector("#pmError").textContent = (d&&d.message)||"Save failed."; return; }
-            const updated = Object.assign({}, order, {
+            const updated = Object.assign({}, order, paidOf_(d), {
               payments: d.payments, amountReceived: d.amountReceived, balanceDue: d.balanceDue,
               // The server's figures (db.js orderAmounts) — order.total is the price when placed, and
               // goes stale once a line is cancelled or shipping is added.
@@ -6337,7 +6341,7 @@ async function showPaymentsModal(orgId, orderId) {
               note: ov.querySelector("#pmRefundNote").value.trim() || "Refund"})});
           const d = await r.json();
           if (!r.ok || d.status === "error") { errEl.textContent = (d && d.message) || "Refund failed."; return; }
-          const updated = Object.assign({}, order, { payments: d.payments, amountReceived: d.amountReceived,
+          const updated = Object.assign({}, order, paidOf_(d), { payments: d.payments, amountReceived: d.amountReceived,
             refundedAmount: d.refundedAmount, netReceived: d.netReceived, balanceDue: d.balanceDue });
           updateOrderCache(orgId, orderId, updated);
           updateOrderTableRow(orgId, orderId, updated);
@@ -6357,7 +6361,7 @@ async function showPaymentsModal(orgId, orderId) {
             body: JSON.stringify({action:"setDiscount", key:adminKey, orderId, amount, note})});
           const d = await r.json();
           if (!r.ok || d.status === "error") { errEl.textContent = (d&&d.message)||"Save failed."; return; }
-          const updated = Object.assign({}, order, {
+          const updated = Object.assign({}, order, paidOf_(d), {
             discountAmount: d.discountAmount, discountNote: d.discountNote,
             effectiveTotal: d.effectiveTotal, balanceDue: d.balanceDue,
           });
@@ -6421,6 +6425,8 @@ function showBalanceMismatchPrompt(paymentAmount, remainder, doSave, errEl) {
   ov.querySelector("#balCancel").onclick = close;
 }
 
+// The order's paid state from a money action's reply (orders.js paidState_), when it has one.
+function paidOf_(d){ return d && typeof d.paid === "boolean" ? { paid: d.paid, paidForWork: !!d.paidForWork, paidAt: d.paidAt || null } : {}; }
 function updateOrderCache(orgId, orderId, updated) {
   if (!window._ordersCache) window._ordersCache = {};
   if (!window._ordersCache[orgId]) return;
@@ -6442,6 +6448,8 @@ function updateOrderTableRow(orgId, orderId, updated) {
       ? `<span style="color:#166534;">−$${Number(updated.discountAmount).toFixed(2)}</span>${updated.discountNote ? `<br><span style="font-size:11px;color:var(--ink-soft);">${escapeHtml(updated.discountNote)}</span>` : ""}`
       : "—";
   });
+  // The Paid / Unpaid cell, from the server's paid flag (a payment that settles the order shows it at once).
+  if (typeof updated.paid === "boolean") document.querySelectorAll(`tr[data-order="${CSS.escape(orderId)}"] td[data-paid-td]`).forEach(td => { td.textContent = updated.paid ? "Paid" : "Unpaid"; });
   // Update balance cell
   document.querySelectorAll(`tr[data-order="${CSS.escape(orderId)}"] td[data-balance-td]`).forEach(td => {
     const b = updated.balanceDue;
@@ -8088,7 +8096,16 @@ function drawPublishStates_(){
   document.querySelectorAll("[data-publish-state]").forEach(el => { el.innerHTML = publishStateHtml_(all[el.dataset.publishState]); });
 }
 async function loadPublishStates_(){
-  try { window._publishState = (await hoopApi_({ action: "getPublishState" })).publishState || {}; drawPublishStates_(); } catch (e) {}
+  try {
+    const st = (await hoopApi_({ action: "getPublishState" })).publishState || {};
+    window._publishState = st; drawPublishStates_();
+    // The shop bar's Publish button reads the same state: it follows at once (on its own it re-reads only every 15 s,
+    // so after a save it said "✓ Published" while this page said "Unpublished changes").
+    const d = window._shopBarData;
+    if (d) { d.publish = st; d.at = Date.now(); }
+    const bar = document.getElementById("shopBar");
+    if (bar && window._shopBarCtx) bar.innerHTML = shopBarHtml_(window._shopBarCtx);
+  } catch (e) {}
 }
 // Opens the shop's page as it will look after Publish (a signed link, good for an hour).
 async function previewShop_(orgId){
@@ -10698,8 +10715,9 @@ async function roleSave_(){
   if(!draft) return;
   const name = String(draft.name || "").trim();
   if(!name){ showToast("Give the role a name.", true); return; }
+  // roleKey, not key: usersCall_ sends the signed-in credential as `key` with every request.
   const body = { action: "saveRole", name, rank: Number(draft.rank), permissions: draft.permissions };
-  if(draft.key) body.key = draft.key;
+  if(draft.key) body.roleKey = draft.key;
   const data = await usersCall_(body);
   if(!data) return;
   showToast(draft.key ? "Role saved. It applies at once to everyone who has it." : "Role added.");
@@ -10710,7 +10728,7 @@ async function roleDelete_(){
   const draft = _roleDraft;
   if(!draft || !draft.key) return;
   if(!await askConfirm_("Delete the role " + draft.name + "? This can't be undone.", { confirmLabel: "Delete role" })) return;
-  if(await usersCall_({ action: "deleteRole", key: draft.key })){ showToast("Role deleted."); _roleDraft = null; await loadRoles_(); }
+  if(await usersCall_({ action: "deleteRole", roleKey: draft.key })){ showToast("Role deleted."); _roleDraft = null; await loadRoles_(); }
 }
 function usersEdit_(id){
   const u = id == null ? null : _usersList.find(x => x.id === id);

@@ -3726,6 +3726,8 @@ async function placeOrder(orgId){
     lastShipAddr_ = null;   // and the address box starts empty for it
     // Tax added on top: the confirmation (and the Venmo/Zelle amount) uses the recorded total.
     if(saved && typeof saved.total === "number"){ order.total = saved.total; order.salesTax = saved.salesTax; }
+    // No email set up on this install: the confirmation doesn't promise a copy by email.
+    if(saved && saved.emailOn === false) order.noEmail = true;
   }catch(err){
     // No confirmation page (and no hand-off to Stripe) without the server's word that the order exists.
     // The cart is left intact for a retry, which resends the same order id (orderIdForAttempt_), so trying
@@ -3907,7 +3909,8 @@ function showConfirmation(orgId, order){
       ${confirmationSummaryHtml_(order)}
       ${order.cardStartFailed && unpaidCardNotice ? unpaidCardBannerHtml_() : ""}
       ${paymentHtml}
-      <p style="font-size:13px;opacity:.8;">A copy of your order was emailed to ${escapeHtml(order.contact)}.</p>
+      ${order.noEmail ? `<p style="font-size:13px;opacity:.8;">Keep your order number for any question about this order.</p>`
+        : `<p style="font-size:13px;opacity:.8;">A copy of your order was emailed to ${escapeHtml(order.contact)}.</p>`}
       <br>
       <button class="confirmation-back" data-action="go-org" data-org="${orgId}" style="background:none; border:none; margin-top:12px;">&larr; Back to ${escapeHtml(org.name)}</button>
     </div>

@@ -235,7 +235,7 @@ test("the Live switch puts the shop on Coming soon and opens it again (with Publ
   await expect(shopper.getByRole("button", { name: "Place order" })).toBeVisible();
 });
 
-// KNOWN BUG (reported): on a shop that has been published, the Live switch changes only the draft. Its
+// Fixed bug: on a shop that had been published, the Live switch changed only the draft. Its
 // confirmation says "Shoppers can't order until you open it again", but shoppers keep seeing the shop and can
 // still order (the published copy says ready) until someone publishes; getPublishState reports the shop as
 // "changed". setOrgReady updates only the live orgs row (functions/_lib/db.js), while the shop page and order
@@ -247,13 +247,12 @@ test("Show coming soon stops orders at once, as its confirmation says", async ({
   await confirmDialog(page, "Show coming soon");
   await expect(toast(page)).toContainText("now shows “Coming soon”");
   // Everything above must work; only what the shopper sees is the known bug.
-  test.fail(true, "Known bug: the Live switch only changes the draft of a published shop; shoppers can still order until Publish");
   const shopper = await context.newPage();
   await openShop(shopper, own);
   await expect(shopper.getByRole("heading", { name: "Catalog coming soon" })).toBeVisible({ timeout: 3000 });
 });
 
-// KNOWN BUG (reported): a shop just made (New shop setup's first screen, or createOrg) isn't known at its own address
+// Fixed bug: a shop just made (New shop setup's first screen, or createOrg) wasn't known at its own address
 // until the catalog version next changes — someone's Publish, or the cached catalog expiring (up to 5 minutes).
 // Until then <shop>.<domain> answers 404 and shows the generic "Looking for your organization's order page? … the
 // link may be mistyped" page instead of "Catalog coming soon", and the wizard's own "Preview the shop" link (a signed
@@ -263,7 +262,6 @@ test("a shop just made answers at its own address straight away (coming soon, an
   const id = ("fresh" + uniq("x").split(" ")[1]).toLowerCase();
   // Made and asked for back to back, so no other test's Publish can land in between and hide the problem.
   await api("createOrg", { orgId: id, subdomain: id, name: uniq("Example Club"), ready: false, deliveryOptions: [{ type: "pickup" }] });
-  test.fail(true, "Known bug: a new shop's address is 404 until the next catalog version bump (createOrg doesn't bump it)");
   const res = await request.get(shopUrl(id) + "/api/catalog");
   expect(res.status()).toBe(200);
   const body = await res.json();

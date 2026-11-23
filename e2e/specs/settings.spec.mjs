@@ -5,12 +5,11 @@
 // (UTC), only the Digital products feature is switched (no other spec uses it), and the brief sales-tax rate
 // doesn't touch makeShop() shops (tax-exempt).
 //
-// KNOWN BUG (reported): on an install without a Shippo key — this one, like any new install that skipped
-// carrier shipping — "Save global settings" saves nothing until Shipping is unticked, because the Shipping
-// feature starts switched on but can't be on without a key. Unticking it is permanent (it can't be switched on
-// again without a key) and other specs share this install, so the first test below asserts the correct
-// behaviour as an expected failure, and the others make each change with the request that section of the
-// page sends on Save (the owner's API) and check what the page and the shop then show.
+// An install without a Shippo key (this one, like any new install that skipped carrier shipping) starts with Shipping
+// switched on. Save global settings saves the other sections all the same (it saved nothing until Shipping was
+// unticked, for good, before the fix); only switching Shipping on needs the key and the ship-from address. The
+// first test saves through the page; the others make each change with the request that section of the page sends
+// on Save (the owner's API) and check what the page and the shop then show.
 import { test, expect, openAdmin, waitIdle, toast, uniq, user, shopUrl } from "../fixtures.mjs";
 import { makeShop } from "../lib/data.mjs";
 import { freshAdmin } from "../lib/money.mjs";
@@ -22,7 +21,6 @@ const setupRow = (page, name) => page.locator("#app tr").filter({ has: page.getB
 let bizName;
 
 test("Save global settings saves a business-name change on an install without carrier shipping", async ({ page, api }) => {
-  test.fail(true, "Known bug: a new install without a Shippo key can't save Global settings unless Shipping is unticked for good");
   const { business: before } = await api("getBusinessProfile");
   try {
     await freshAdmin(page, "settings");
@@ -105,11 +103,15 @@ test("Features: with Digital products off, its settings leave Global settings; o
   }
 });
 
-test("Features: Shipping can't be switched on without a Shippo key (the clear error, nothing changed)", async ({ api }) => {
-  const r = await api("updateFeatures", { features: { shipping: true } }, { allowError: true });
-  expect(r.status).toBe("error");
-  expect(r.message).toContain("Shipping needs a Shippo key");
-  expect((await api("getFeatures")).features).toMatchObject({ storefront: true, digital: true });
+// Switching Shipping ON without a key is refused (test106_features.js checks that on a database where it starts off;
+// here it can't be switched off and on again without breaking the specs beside this one). Already on — as on every
+// new install — saving it on is accepted and changes nothing else.
+test("Features: Shipping already on stays on without a Shippo key, and nothing else changes", async ({ api }) => {
+  const before = (await api("getFeatures")).features;
+  expect(before.shipping).toBe(true);
+  const r = await api("updateFeatures", { features: { shipping: true } });
+  expect(r.status).toBe("ok");
+  expect((await api("getFeatures")).features).toMatchObject({ ...before, shipping: true });
 });
 
 test("Sales tax: a rate shows in Global settings and Setup status says what is still missing; then none again", async ({ page, api }) => {

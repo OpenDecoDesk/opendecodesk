@@ -11,6 +11,7 @@
 //   * The audit log keeps only real order IDs, and its order links carry the ID as data, not code.
 // Real sign-in (testlib/auth-harness), real SQL and the real endpoints; jsdom with the real admin page.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { makeAuth, prelude, strip, read } = require("./testlib/auth-harness");
 const { may, asRole } = require("./testlib/roles");
@@ -185,7 +186,7 @@ const ok = (m, c) => console.log(m + ":", !!c);
 
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win) {
       win.fetch = async (u, opt) => {
         const b = (() => { try { return JSON.parse((opt && opt.body) || "{}"); } catch (e) { return {}; } })();
@@ -207,8 +208,8 @@ const ok = (m, c) => console.log(m + ":", !!c);
   if (link) link.click();
   await tick();
   ok("…clicking it filters by that ID and runs nothing in it", d.getElementById("afOrder").value === evil && w.__pwned === undefined);
-  ok("design file downloads carry their key as data too", /data-key="\$\{escapeHtml\(v\.designFileKey\)\}" onclick="downloadDesignFile_\(this\.dataset\.key\)"/.test(adminJs) &&
-    /data-key="\$\{escapeHtml\(v\.machineFileKey\)\}" onclick="downloadDesignFile_\(this\.dataset\.key\)"/.test(adminJs));
+  ok("design file downloads carry their key as data too", /data-key="\$\{escapeHtml\(v\.designFileKey\)\}" data-admin-action="downloadDesignFile_"/.test(adminJs) && /downloadDesignFile_\(\)\{ downloadDesignFile_\(this\.dataset\.key\); \}/.test(adminJs) &&
+    /data-key="\$\{escapeHtml\(v\.machineFileKey\)\}" data-admin-action="downloadDesignFile_"/.test(adminJs));
 
   console.log("=== The page offers only what the server allows ===");
   const order = { orderId: "TST-1001", customerName: "Alex Sample", total: 40, shippingCost: 0, items: [
@@ -245,7 +246,7 @@ const ok = (m, c) => console.log(m + ":", !!c);
     /<label data-need="orders\.stepsLate:edit"[^>]*>\s*<input type="checkbox" id="lsDelivered"/.test(adminJs));
   ok("Shipping: rates, shipping paid and the payment link need Payments", /id="getRatesBtn" type="button" data-need="orders\.payments:edit"/.test(adminJs) &&
     /id="shipSendPayment" data-need="orders\.payments:edit"/.test(adminJs) && /<div data-need="orders\.payments:edit">\s*<label[^>]*>Shipping paid/.test(adminJs));
-  ok("Blanks: Merge needs Full; an existing blank's counts are locked without Full", /data-need="inventory\.blanks:full" onclick="blankMerge\(/.test(adminJs) &&
+  ok("Blanks: Merge needs Full; an existing blank's counts are locked without Full", /data-need="inventory\.blanks:full" data-admin-action="blankMerge"/.test(adminJs) &&
     /data-sf="quantity"\$\{isNew \? "" : ' data-need-form="inventory\.blanks:full"'\}/.test(adminJs));
   ok("Users: a role beyond the caller's isn't offered, and its users can't be changed", /r\.withinMine !== false\);/.test(adminJs) && /\|\| beyondMine\(u\.role\);/.test(adminJs));
   dom.window.close();

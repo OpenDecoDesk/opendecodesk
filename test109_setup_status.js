@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 
@@ -119,7 +120,7 @@ const FULL_SETTINGS = { business: { name: "Thread & Needle", ownerEmail: "owner@
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   let statusFails = false;
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.myshop.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.myshop.com/", pretendToBeVisual: true,
     beforeParse(win){
       win.fetch = async (url, opts) => {
         if (String(url).includes("/api/orders") && opts && opts.body) {

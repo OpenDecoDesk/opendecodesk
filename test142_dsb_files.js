@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
 // Barudan .dsb machine files (2026-10), everywhere a Tajima .dst works: accepted as a design version's machine
@@ -21,7 +22,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const draws = [];
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){
       win.TextDecoder = TextDecoder;
       win.HTMLCanvasElement.prototype.getContext = () => ({ clearRect(){}, beginPath(){}, moveTo(){}, lineTo(x, y){ draws.push([x, y]); }, stroke(){}, fillText(){}, set strokeStyle(v){ draws.push(v); } });

@@ -1,5 +1,6 @@
 // Admin consistency (2026-10 usability round): the menus (Catalog / Production / Inventory / Finance / Reports /
 const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
+const { storefrontPage } = require("./testlib/storefront-page");
 // Settings, with Designs and Graphics reachable from the menu), one page heading (adminPageHead_) and one tab-title
 // format (adminTitle_), "shop" not "org" in what the admin reads, one danger-button style, the shared confirm window
 // (confirmModal_) for Void / Cancel / Revoke / Ignore, one stacking order for windows with toasts above them, and
@@ -10,7 +11,7 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const ok = (m, c) => console.log(m + ":", !!c);
 
 (async () => {
-  const adminJs = read("public/admin.js"), indexHtml = read("public/index.html");
+  const adminJs = read("public/admin.js"), indexHtml = storefrontPage();
   class L extends ResourceLoader { fetch(url, o) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const dom = new JSDOM(indexHtml, { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win) { win.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "error", message: "n/a" }) }); } });
@@ -69,7 +70,7 @@ const ok = (m, c) => console.log(m + ":", !!c);
   w.eval(`window._shopBarCtx = { shop: null, page: "categories" };`); w.shopBarPick_("acme");
   ok("…from a catalog-wide list it opens that shop's products", w.location.hash === "#catalog/orgs/acme/products");
   ok("the old per-page back buttons and shop switches are gone from Products, Designs, Graphics and the shop form",
-    !/adminShopSwitch_/.test(adminJs) && !/&larr; All shops/.test(adminJs) && !/onclick="location\.hash='#catalog'">&larr; Manage catalog/.test(adminJs));
+    !/adminShopSwitch_/.test(adminJs) && !/&larr; All shops/.test(adminJs) && !/data-admin-action="goCatalog_">&larr; Manage catalog/.test(adminJs));
   ok("catalog screens are one max-width light column under a black bar", /#shopBar\{[^}]*background:#000/.test(indexHtml) && /body\.shop-mgmt #app\{max-width:1200px;[^}]*background:var\(--card\)/.test(indexHtml));
   ok("a page inside a menu entry lights up that entry (#designs/<shop>/3 → Designs)", (() => { w.location.hash = "#designs/acme/3"; return w.adminNavActive_() === "designs"; })());
 

@@ -1,11 +1,12 @@
 const { JSDOM, VirtualConsole } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
 
 // Storefront usability round (2026-10): the cart survives a refresh and the trip to Stripe, Cancel on Stripe
 // shows a banner with Pay by card for the SAME order, card success doesn't claim "marked paid", the phone
 // cart bar and item count, +/− on cart lines, the same card layout for every product, inline errors, the
 // confirmation's summary and wording, and shopper-facing words / phone sizing.
-const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+const html = storefrontPage();
 const catalog = { status: "ok", orgId: "o1", catalog: { name: "Acme", eyebrow: "", accent: "#123456", ready: true, desc: "", designImages: { shirt: "", cap: "", detail: "" },
   enabledPayments: ["Card", "Check"], salesTaxRate: 0,
   graphics: [{ id: 1, name: "Logo", kind: "embroidery", imageUrl: "", thumbUrl: "", addOnCents: 0, inkColors: ["Gold", "White"], allowedLocations: [], allowedGarmentColors: [] }],

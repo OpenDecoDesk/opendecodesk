@@ -1,7 +1,8 @@
 const { JSDOM, ResourceLoader } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const fs = require("fs");
-let html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+let html = storefrontPage();
 html = html.replace("const PROXY_MODE = false;", "const PROXY_MODE = true;");
 
 // index.html lazily loads admin.js via a real <script src="admin.js">
@@ -220,9 +221,9 @@ function lastToastText(win){
   const afterHtml = adminWindow.document.getElementById("app").innerHTML;
   console.log("Table re-rendered to show Paid:", afterHtml.includes(">Paid<"));
   console.log("Confirmed-email column now shows a checkmark + date (mock reflects the new paid status):", afterHtml.includes("✓ 7/17/2026"));
-  console.log("X1's 'Mark as paid' button is gone now that it's paid:", !adminWindow.document.querySelector('button[data-order="X1"][onclick^="markOrderPaid"]'));
-  console.log("X1 now shows 'Resend confirmation' instead:", !!adminWindow.document.querySelector('button[data-order="X1"][onclick^="resendEmail"]'));
-  console.log("X2 (still unpaid) still has its Mark-as-paid button — only X1 changed:", !!adminWindow.document.querySelector('button[data-order^="X2"][onclick^="markOrderPaid"]'));
+  console.log("X1's 'Mark as paid' button is gone now that it's paid:", !adminWindow.document.querySelector('button[data-order="X1"][data-admin-action="markOrderPaid"]'));
+  console.log("X1 now shows 'Resend confirmation' instead:", !!adminWindow.document.querySelector('button[data-order="X1"][data-admin-action="resendEmail"]'));
+  console.log("X2 (still unpaid) still has its Mark-as-paid button — only X1 changed:", !!adminWindow.document.querySelector('button[data-order^="X2"][data-admin-action="markOrderPaid"]'));
 
   console.log("\n=== Admin subdomain: 'Refresh' button re-fetches this org's orders ===");
   console.log("Refresh button is present:", afterHtml.includes(">Refresh<"));

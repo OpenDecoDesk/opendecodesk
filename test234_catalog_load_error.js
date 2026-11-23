@@ -2,8 +2,9 @@
 // sees "We couldn't load this page" with a Try again button, not the "your link may be mistyped" page.
 // That page is kept for the server's real "no shop at this address" answer (404). Invented data only.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, VirtualConsole } = require("jsdom");
-const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+const html = storefrontPage();
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 const wait = (ms) => new Promise(r => setTimeout(r, ms));

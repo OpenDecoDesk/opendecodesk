@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
@@ -94,7 +95,7 @@ const NAMES = ["toString", "constructor", "valueOf", "hasOwnProperty", "isProtot
     d1.q("SELECT count(*) n FROM orders")[0].n === before && (await saved("ORD-OK")).items.length === 1);
   r = await place("ORD-OK", [{ productId: "tee", size: "M", qty: 1 }], { customerName: "Someone Else", contact: "other@x.com" });
   ok("…but someone else's details under that id are still refused", r.status === 409);
-  const store = read("public/index.html");
+  const store = storefrontPage();
   ok("the storefront keeps one order id per checkout until it's saved, and doesn't claim 'nothing was recorded' without the server's word",
     /orderId: orderIdForAttempt_\(_orderPrefix, _attemptSig\)/.test(store) && /clearOrderAttempt_\(\);\s+\/\/ saved/.test(store) &&
     /err && err\.refused\s*\n?\s*\?/.test(store) && /won't be placed twice/.test(store));
@@ -102,7 +103,7 @@ const NAMES = ["toString", "constructor", "valueOf", "hasOwnProperty", "isProtot
   console.log("\n=== The admin's Designs screen ===");
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win) {
       win.CSS = win.CSS || { escape: (v) => String(v).replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c) };
       win.fetch = async (url, opts) => {
@@ -141,15 +142,16 @@ const NAMES = ["toString", "constructor", "valueOf", "hasOwnProperty", "isProtot
   ok("a shop made this session (not yet in the cached list) still opens", !!doc.getElementById("dsgList"));
   w.location.hash = "#designs/acme/1";
   await w.adminRoute(); await tick(150);
-  const handlers = [...doc.querySelectorAll("#app [onclick]")].filter(b => b.dataset.org !== undefined);
+  const handlers = [...doc.querySelectorAll("#app [data-admin-action]")].filter(b => b.dataset.org !== undefined);
+  const actionSrc = (b) => String(w.eval("ADMIN_ACTIONS_")[b.dataset.adminAction] || "");
   ok("for a shop it has, the screen opens with the list and the design", !!doc.getElementById("dsgList") && doc.querySelectorAll("#dsgList button[data-did]").length === 2 && /Front logo/.test(doc.getElementById("dsgDetail").textContent));
-  ok("its buttons carry the shop as data and read it back; none has the shop written into its script", handlers.length >= 4 && handlers.every(b => b.dataset.org === "acme" && /this\.dataset\.org/.test(b.getAttribute("onclick")) && !/acme/.test(b.getAttribute("onclick"))));
+  ok("its buttons carry the shop as data and read it back; none has the shop written into its script", handlers.length >= 4 && handlers.every(b => b.dataset.org === "acme" && /^[\w$]+$/.test(b.dataset.adminAction) && /this\.dataset\.org/.test(actionSrc(b))));
   // Even handed such a shop id directly (past the router), the screen writes it as data, never as markup or script.
   await w.renderDesigns(doc.getElementById("app"), HOSTILE, 1); await tick(150);
   const after = [...doc.querySelectorAll("#app [data-org]")];
   ok("drawn with a hostile shop id, it stays text: no element made from it, no script run",
     after.length >= 4 && after.every(b => b.dataset.org === HOSTILE) && doc.querySelectorAll('#app img[src="x"]').length === 0 && w.__xss === undefined &&
-    [...doc.querySelectorAll("#app [onclick]")].every(b => !/onerror|__xss/.test(b.getAttribute("onclick"))));
+    [...doc.querySelectorAll("#app *")].every(el => ![...el.attributes].some(a => /^on/i.test(a.name))));
   ok("no handler in admin.js is built by quoting a shop id into script any more", !/onclick="[^"]*'\$\{orgId\.replace\(/.test(adminJs) && !/onclick="[^"]*'\$\{escapeHtml\(orgId\)\}'/.test(adminJs));
 
   console.log(`\n${pass} passed, ${fail} failed`);

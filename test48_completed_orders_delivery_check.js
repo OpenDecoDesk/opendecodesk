@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -257,7 +258,7 @@ const setState = (d1, orderId, s) => {
   apiEnv = { DB: d1, SHIPPO_API_KEY: "shippo_key" };
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win) { win.fetch = async (u, init) => { const b = init && typeof init.body === "string" ? JSON.parse(init.body) : {}; const x = await call(b);
       return { ok: x.status < 400, status: x.status, json: async () => x.body, text: async () => JSON.stringify(x.body) }; }; } });
   const w = dom.window;

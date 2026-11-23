@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -32,7 +33,7 @@ const wait = async (cond, n = 300) => { for (let i = 0; i < n && !cond(); i++) a
   class Ld extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   let call;
   const sent = [];
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new Ld(), url: "https://admin.example.com/#catalog", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new Ld(), url: "https://admin.example.com/#catalog", pretendToBeVisual: true,
     beforeParse(win){ autoConfirm(win, () => true); win.CSS = win.CSS || { escape: (x) => String(x) }; win.fetch = async (url, init) => {
       if (String(url).includes("/api/orders")) { const b = JSON.parse(init.body); sent.push(b); const x = await call(b); return { ok: x.status < 400, status: x.status, json: async () => x.body }; }
       return { ok: false, status: 404, json: async () => ({ status: "error" }) }; }; } });

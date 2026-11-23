@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { ADMIN_ORIGIN } = require("./testlib/hosts.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -191,7 +192,7 @@ const hoursAgo = (h) => new Date(Date.now() - h * 3600000).toISOString();
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o2){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o2); } }
   const sent = [];
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/#orders/acme", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/#orders/acme", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async (url, init) => {
       if (String(url).includes("/api/orders")) { const b = JSON.parse(init.body); sent.push(b); const x = await call(b); return { ok: x.status < 400, status: x.status, json: async () => x.body }; }
       return { ok: true, status: 200, json: async () => ({ status: "admin" }) }; }; } });
@@ -238,7 +239,7 @@ const hoursAgo = (h) => new Date(Date.now() - h * 3600000).toISOString();
   ok("…Save sends only what changed", sd && Object.keys(sd.dates).join() === "deliveredAt" && !("dueDate" in sd));
   await wait(() => col(e1, "deliveredAt"));
   ok("…and it's saved", Math.abs(Date.parse(col(e1, "deliveredAt")) - Date.parse(hoursAgo(30))) < 61000);
-  ok("each order has one Dates… button, and the ✎ by its order and due dates open the same window", /onclick="showOrderDates_\(this\.dataset\.org,this\.dataset\.order\)"[^>]*>Dates…</.test(adminJs) &&
+  ok("each order has one Dates… button, and the ✎ by its order and due dates open the same window", /data-admin-action="showOrderDates_"[^>]*>Dates…</.test(adminJs) &&
     /async function editOrderDate\(btn\)\{ return showOrderDates_/.test(adminJs) && /async function editOrderDueDate\(btn\)\{ return showOrderDates_/.test(adminJs));
   ok("the receive, tracking and blank-ordered windows ask when too", /whenFieldHtml_\("blankReceivedWhen"/.test(adminJs) && /whenFieldHtml_\("trackWhen"/.test(adminJs) && /whenFieldHtml_\("blankOrderWhen"/.test(adminJs));
 

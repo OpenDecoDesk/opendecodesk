@@ -1,6 +1,7 @@
 const { JSDOM, ResourceLoader } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
-let html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+let html = storefrontPage();
 
 // Accessibility: showToast()/announceStatus() (in place of alert()), the
 // cart aria-live announcements, and the labels on two form controls

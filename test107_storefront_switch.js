@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
@@ -148,7 +149,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
 
   console.log("\n=== Off: what a customer sees ===");
   const page = async (url, answers) => {
-    const d = new JSDOM(read("public/index.html"), { runScripts: "dangerously", url, pretendToBeVisual: true,
+    const d = new JSDOM(storefrontPage(), { runScripts: "dangerously", url, pretendToBeVisual: true,
       beforeParse(win){ win.__calls = []; win.fetch = async (u) => { win.__calls.push(String(u)); const a = answers(String(u)); return { ok: (a.http || 200) < 400, status: a.http || 200, json: async () => a.body }; }; } });
     await tick(180); return d.window; };
   const closedAnswer = await catJ("acme");

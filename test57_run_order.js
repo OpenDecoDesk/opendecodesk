@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
@@ -125,7 +126,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   console.log("\n=== Client-side pure functions: hoopChangeCost_ / needleReadiness_ / proposeMachine_ ===");
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "error", message: "n/a" }) }); } });
   const w = dom.window;
   await new Promise(res => setTimeout(res, 150));
@@ -165,7 +166,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
 
   console.log("\n=== Screen wiring ===");
   console.log("Run Order is a top-level header button (right of Orders) and routed:",
-    /const top = \[\["home", "Home"\], \["orders", "Orders"\], \["runorder", "Run Order"\]/.test(adminJs) && /\$\{top\.map\(\(\[h, label\]\) => `<button type="button" class="admin-nav-btn[^`]*onclick="navGo\(this\.dataset\.h\)"/.test(adminJs) && /renderRunOrder\(app\)/.test(adminJs));
+    /const top = \[\["home", "Home"\], \["orders", "Orders"\], \["runorder", "Run Order"\]/.test(adminJs) && /\$\{top\.map\(\(\[h, label\]\) => `<button type="button" class="admin-nav-btn[^`]*data-admin-action="navGo"/.test(adminJs) && /renderRunOrder\(app\)/.test(adminJs));
   console.log("Mark done (no timing) button + its per-hooping action exist:", /class="run-btn"/.test(adminJs) && /action: "markHoopingDone"/.test(adminJs));
   console.log("qty>1 lines split into per-piece cards (pkey, piece label, per-piece itemId sent):",
     /data-pkey=/.test(adminJs) && /Piece \$\{pieceNoShown\} of \$\{job\.qty\}/.test(adminJs) && /itemId: card\.job\.itemId/.test(adminJs));
@@ -262,5 +263,5 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   console.log("clearing works too:", bd.body.updated === 1 && (await lib.getOrderById(d1, "NODUE")).dueDate === "");
   console.log("a bad date is refused (400):", (await call({ action: "bulkSetDueDate", org: "acme", orderIds: ["DUEA"], dueDate: "nope" })).status === 400);
   console.log("the bulk bar wires a Set-due-date button + handler:",
-    /onclick="bulkSetDueDate\(this\.dataset\.org\)"/.test(adminJs) && /async function bulkSetDueDate\(orgId\)/.test(adminJs) && /action: "bulkSetDueDate"/.test(adminJs));
+    /data-admin-action="bulkSetDueDate"/.test(adminJs) && /bulkSetDueDate\(\)\{ bulkSetDueDate\(this\.dataset\.org\); \}/.test(adminJs) && /async function bulkSetDueDate\(orgId\)/.test(adminJs) && /action: "bulkSetDueDate"/.test(adminJs));
 })();

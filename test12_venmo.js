@@ -1,4 +1,5 @@
 const { JSDOM } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
 
 let libSrc = fs.readFileSync(__dirname + "/functions/_lib/hostConfig.js", "utf8")
@@ -61,7 +62,7 @@ let catalogSrc = fs.readFileSync(__dirname + "/functions/api/catalog.js", "utf8"
 eval(libSrc + "\n" + httpSrc + "\n" + catalogSrc);
 const REAL_CATALOG_RESPONSE = onRequestGet;
 
-let html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+let html = storefrontPage();
 // The Venmo username comes from the Business profile, delivered with the catalog answer.
 
 function makeStorageMock(){
@@ -131,7 +132,7 @@ function mockCatalogFetch(win, venmo = "ExampleStitchCo"){
   console.log("No Venmo link rendered:", !wCash.document.querySelector(".confirmation a"));
 
   console.log("\n=== Venmo selected but VENMO_USERNAME blank -> graceful fallback text, no broken link ===");
-  let html2 = fs.readFileSync(__dirname + "/public/index.html", "utf8");   // same page; the profile has no Venmo name
+  let html2 = storefrontPage();   // same page; the profile has no Venmo name
   const dom2 = new JSDOM(html2, {
     runScripts: "dangerously", resources: "usable",
     url: "https://league101.example.com/y.html", pretendToBeVisual:true,

@@ -4,6 +4,7 @@
 // (toolbar inside the page, with a search). jsdom with the real index.html +
 // admin.js; fetch is mocked per action.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 
@@ -17,7 +18,7 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
       { key: "big", name: "Big", length: 12, width: 12, height: 12, packingCost: 2.5, boxWeightOz: 12, maxShirts: null, maxCaps: null, maxSweatshirts: null, maxWeightOz: null },
     ];
     class L extends ResourceLoader { fetch(url, o) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-    const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+    const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
       beforeParse(win) {
         win.fetch = async (url, opts) => {
           const body = opts && opts.body ? JSON.parse(opts.body) : {};

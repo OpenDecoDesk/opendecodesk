@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { ADMIN_ORIGIN, shopOrigin, ROOT } = require("./testlib/hosts.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -59,7 +60,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   console.log("=== Prices from a blank (wizardPrices_) ===");
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/#catalog", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/#catalog", pretendToBeVisual: true,
     beforeParse(win){ autoConfirm(win, () => true); win.open = () => null; win.scrollTo = () => {}; win.fetch = async (url, init) => {
       if (String(url).includes("/api/orders")) { const b = JSON.parse(init.body); const x = await call(b); return { ok: x.status < 400, status: x.status, json: async () => x.body }; }
       return { ok: true, status: 200, json: async () => ({ status: "admin", site: { rootDomain: ROOT } }) }; }; } });
@@ -248,8 +249,8 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("Resume opens where it was left, with every product and answer kept", /open/.test(q(".wiz-q").textContent) && d.querySelectorAll(".wiz-step.wiz-sub").length === 12);
   await w.renderShopWizard(d.getElementById("app"), "lakeside-club", { products: true });
   ok("“Add products from blanks” opens the same wizard at Which blanks?", /Which blanks/.test(q(".wiz-q").textContent));
-  ok("the Products page offers “Add products from blanks”", /onclick="location\.hash='#wizard\/'\+encodeURIComponent\(this\.dataset\.org\)\+'\/products'"[^>]*>＋ Add products from blanks/.test(adminJs));
-  ok("a box shown only when its choice is ticked stays hidden until then (the flex rule doesn't override hidden)", /\.wiz-inline\[hidden\]\{display:none;\}/.test(read("public/index.html")));
+  ok("the Products page offers “Add products from blanks”", /data-admin-action="goWizardProducts_"[^>]*>＋ Add products from blanks/.test(adminJs) && /goWizardProducts_\(\)\{ location\.hash='#wizard\/'\+encodeURIComponent\(this\.dataset\.org\)\+'\/products'; \}/.test(adminJs));
+  ok("a box shown only when its choice is ticked stays hidden until then (the flex rule doesn't override hidden)", /\.wiz-inline\[hidden\]\{display:none;\}/.test(storefrontPage()));
   // OpenDecoDesk: the wizard follows the Feature switches.
   w.eval(`siteFeatures = Object.assign({}, siteFeatures, { shipping: false });`);
   const del = w.wizScreen_({ id: "delivery" });

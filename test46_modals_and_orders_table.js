@@ -1,5 +1,6 @@
 
 // A cancelled order must still offer 💰 Payments (its recorded payment has to be voided before the order can be).
+const { storefrontPage } = require("./testlib/storefront-page");
 {
   const fs = require("fs");
   const src = fs.readFileSync(__dirname + "/public/admin.js", "utf8");
@@ -32,7 +33,7 @@
     /const top = \[\["home", "Home"\], \["orders", "Orders"\], \["runorder", "Run Order"\], \["runtransfer", "Run Transfer Sheets"\], \["catalog", "Manage catalog"\]\]/.test(src) && !groups.includes('["runorder"'));
   console.log("the menu groups are Catalog / Production / Inventory / Finance / Reports / Settings, in that order:",
     groups.indexOf('label: "Catalog"') >= 0 && ["Catalog", "Production", "Inventory", "Finance", "Reports", "Settings"].every((l, i, a) => groups.includes('label: "' + l + '"') && (i === 0 || groups.indexOf('label: "' + a[i - 1] + '"') < groups.indexOf('label: "' + l + '"'))));
-  console.log("Sign out lives in the Settings dropdown, not a top-level shops row:", /label: "Settings"[\s\S]*adminSignOut\(\)/.test(groups));
+  console.log("Sign out lives in the Settings dropdown, not a top-level shops row:", /label: "Settings"[\s\S]*action: "navSignOut_"/.test(groups));
 }
 
 // Edit items: personalization (customization text) can actually be changed, not just displayed.
@@ -42,7 +43,7 @@
   const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "error", message: "n/a" }) }); } });
   const w = dom.window;
   await new Promise(res => setTimeout(res, 150));
@@ -92,7 +93,7 @@
   const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "error", message: "n/a" }) }); } });
   const w = dom.window;
   await new Promise(res => setTimeout(res, 150));

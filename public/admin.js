@@ -1,17 +1,266 @@
 // admin.js v2 — the admin panel (order lookup, org/product management, image
 // uploads). Lazily loaded via a <script src="admin.js"> tag injected by
-// loadAdminScript() in index.html, ONLY when /api/catalog reports
+// loadAdminScript() in storefront.js, ONLY when /api/catalog reports
 // status:"admin" — i.e. only on the admin subdomain. Never shipped to a
 // storefront visitor.
 //
 // This is a classic (non-module) script, loaded as a sibling <script> tag
-// to index.html's own inline script — top-level `let`/`const`/function
+// to index.html's storefront.js — top-level `let`/`const`/function
 // declarations in one classic script are visible to code in any other
 // classic script tag in the same document (they share one global lexical
-// environment), so everything here can freely use index.html's shared
+// environment), so everything here can freely use storefront.js's shared
 // state (currentOrg, route, SIZE_ORDER) and
 // utilities (escapeHtml, showToast, announceStatus, promptAdminPassphrase,
-// thumbUrl, go) exactly as if this code were part of index.html.
+// thumbUrl, go) exactly as if this code were part of it.
+
+// ---- Page actions: no inline event handlers ---------------------------------------------------------------
+// The page's Content-Security-Policy (public/_headers) runs no inline script, so nothing here writes an on…=""
+// attribute. An element names what it does instead, one attribute per kind of event:
+//   data-admin-action="name"   a click             data-admin-change="name"   a change
+//   data-admin-input="name"    an input            data-admin-submit="name"   a form's submit
+//   data-admin-keydown="name"  a key pressed
+// and one listener per kind of event, on the document, runs ADMIN_ACTIONS_[name] with `this` the element and the
+// event as its argument — the same as the inline handler did. Only the names listed here can run (nothing is looked
+// up on window by name). Each reads what it needs from the element's data-* attributes, this.value or this.checked.
+// Most are named after the function they call (inside one, that name is still the function, not the entry); the
+// others say what they do (goShopProducts_, auditReset_, …). A preventDefault an inline handler did with
+// "return false" is written out (event.preventDefault()).
+//
+// The listeners are in the capture phase, so an element's own action runs before any listener on the elements
+// around it (the order an inline handler had), and the walk goes from the element clicked outward: an element with
+// an action inside another runs first, then the outer one, unless it stopped the event (event.stopPropagation()).
+// test249_no_inline_scripts.js checks every name used is listed here and every name listed calls something that exists.
+const ADMIN_ACTIONS_ = {
+  loadAdminOrgList(){ loadAdminOrgList(); },
+  goOrders_(){ location.hash='#orders'; },
+  goSettings_(){ location.hash='#settings'; },
+  toggleAdminMenu_(){ toggleAdminMenu_(this); },
+  adminMenuKey_(event){ adminMenuKey_(event); },
+  navGo(){ navGo(this.dataset.h); },
+  toggleNavDropdown(){ toggleNavDropdown(this); },
+  // The two items of the Settings menu that aren't pages (ADMIN_NAV_GROUPS).
+  navSignOut_(){ closeNavDropdowns(); adminSignOut(); },
+  navSignOutEverywhere_(){ closeNavDropdowns(); adminSignOutEverywhere(); },
+  shopBarPublish_(){ shopBarPublish_(this.dataset.org); },
+  shopBarDiscard_(){ shopBarDiscard_(this.dataset.org); },
+  shopBarLive_(){ shopBarLive_(this.dataset.org, this.getAttribute('aria-checked') !== 'true'); },
+  shopBarPick_(){ shopBarPick_(this.value); },
+  handleDvImageUpload(){ handleDvImageUpload(this); },
+  removeRow_(){ this.closest("tr").remove(); },
+  deleteTransaction(){ deleteTransaction(this.dataset.org, this.dataset.order); },
+  showPaymentsModal(){ showPaymentsModal(this.dataset.org, this.dataset.order); },
+  showDownloadsModal_(){ showDownloadsModal_(this.dataset.org,this.dataset.order); },
+  resendDownloadsNow_(){ resendDownloadsNow_(this.dataset.org,this.dataset.order); },
+  showRushFeeModal_(){ showRushFeeModal_(this.dataset.org,this.dataset.order); },
+  markOrderPaid(){ markOrderPaid(this.dataset.org, this.dataset.order); },
+  resendEmail(){ resendEmail(this.dataset.org, this.dataset.order); },
+  editOrder(){ editOrder(this.dataset.org,this.dataset.order); },
+  pickFulfillmentStage_(){ if (this.value) { setFulfillmentStage(this.dataset.org, this.dataset.order, this.value); this.value = ""; } },
+  setShippingInfo(){ setShippingInfo(this.dataset.org,this.dataset.order); },
+  showOrderDates_(){ showOrderDates_(this.dataset.org,this.dataset.order); },
+  completeOrders(){ completeOrders(this.dataset.org, [this.dataset.order], false); },
+  completeOrdersAsk_(){ completeOrdersAsk_(this.dataset.org, [this.dataset.order]); },
+  showSendInvoiceModal(){ showSendInvoiceModal(this.dataset.org, this.dataset.order); },
+  saveInvoicePdf_(){ saveInvoicePdf_(this.dataset.org, this.dataset.order); },
+  downloadOrderPdf_(){ downloadOrderPdf_(this.dataset.org, this.dataset.order); },
+  reprintLabel(){ reprintLabel(this.dataset.org, this.dataset.order); },
+  shipOrder(){ shipOrder(this.dataset.org, this.dataset.order); },
+  cancelLineItem(){ cancelLineItem(this.dataset.org,this.dataset.row,this.dataset.name,this.dataset.total); },
+  setLineItemRefund(){ setLineItemRefund(this.dataset.org,this.dataset.row,this.dataset.amount,this.dataset.pay); },
+  ordersShowMore_(){ ordersShowMore_(); },
+  onOrdersOrgChange(){ onOrdersOrgChange(this.value); },
+  onOrdersDateChange(){ onOrdersDateChange(); },
+  ordersIncludeCompleted_(){ ordersSetInclude('completed', this.checked); },
+  ordersIncludeCancelled_(){ ordersSetInclude('cancelled', this.checked); },
+  rerenderOrdersView(){ rerenderOrdersView(); },
+  createLocalSale(){ createLocalSale(this.dataset.org); },
+  pickOrderImportFile_(){ pickOrderImportFile_(this.dataset.org); },
+  createTestTransaction(){ createTestTransaction(this.dataset.org); },
+  updateBulkBar(){ updateBulkBar(this.dataset.org); },
+  editOrderDate(){ editOrderDate(this); },
+  editOrderDueDate(){ editOrderDueDate(this); },
+  toggleSelectAllOrders(){ toggleSelectAllOrders(this); },
+  selectAdminOrg(){ selectAdminOrg(this.dataset.org); },
+  bulkSetFulfillmentStage(){ bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage); },
+  bulkSetDueDate(){ bulkSetDueDate(this.dataset.org); },
+  bulkAddTracking(){ bulkAddTracking(this.dataset.org); },
+  bulkSendDesignVerification(){ bulkSendDesignVerification(this.dataset.org); },
+  bulkEditCustomerInfo(){ bulkEditCustomerInfo(this.dataset.org); },
+  bulkCancelLineItems(){ bulkCancelLineItems(this.dataset.org); },
+  clearBulkSelection(){ clearBulkSelection(); },
+  exportCsv(){ exportCsv(this.dataset.org); },
+  renderPackingLabels(){ renderPackingLabels(this.dataset.org, getSelectedOrderIds()); },
+  renderBrandedLabels(){ renderBrandedLabels(this.dataset.org, getSelectedOrderIds()); },
+  renderMailingLabels(){ renderMailingLabels(this.dataset.org, getSelectedOrderIds()); },
+  ordersCheckTracking_(){ ordersCheckTracking_(this); },
+  pmSetPaymentDate(){ pmSetPaymentDate(this.dataset.payId, this.dataset.payDate); },
+  pmSetRefundShipping(){ pmSetRefundShipping(this.dataset.payId, this.dataset.ship, this.dataset.refund); },
+  pmDeletePayment(){ pmDeletePayment(this.dataset.payId); },
+  redrawPackingLabels_(){ document.getElementById('labelArea').innerHTML=window._buildPackingLabels(); },
+  printLabelsPopup(){ window.printLabelsPopup(); },
+  refreshAdminOrders(){ refreshAdminOrders(this.dataset.org); },
+  redrawBrandedLabels_(){ document.getElementById('blblArea').innerHTML=window.buildBrandedLabels(); },
+  openBrandedFontSettings(){ window.openBrandedFontSettings(); },
+  printBrandedPopup(){ window.printBrandedPopup(); },
+  redrawMailingLabels_(){ document.getElementById('labelArea').innerHTML=window._buildMailingLabels(); },
+  printMailingPopup(){ window.printMailingPopup(); },
+  handleImageUpload(){ handleImageUpload(this); },
+  renderAdminOrgList(){ renderAdminOrgList(document.getElementById('app')); },
+  goWizard_(){ location.hash='#wizard/'+encodeURIComponent(this.dataset.org); },
+  publishCatalog(){ publishCatalog(this.dataset.org); },
+  previewShop_(){ previewShop_(this.dataset.org); },
+  goShopEdit_(){ location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/edit'; },
+  goShopProducts_(){ location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products'; },
+  goShopDesigns_(){ location.hash='#designs/'+encodeURIComponent(this.dataset.org); },
+  goShopGraphics_(){ location.hash='#graphics/'+encodeURIComponent(this.dataset.org); },
+  goWizardNew_(){ location.hash='#wizard/new'; },
+  publishAllShops_(){ publishCatalog(); },
+  showPriceAnalysis_(){ showPriceAnalysis_({}, { title: 'Price analysis — every shop' }); },
+  connectDomain_(){ connectDomain_(); },
+  connectPickedDomain_(){ connectDomain_(document.getElementById('cfDomainPick').value); },
+  regionCountryChanged_(){ regionCountryChanged_(); },
+  submitGlobalSettings(){ submitGlobalSettings(); },
+  backfillStripeFees(){ backfillStripeFees(this); },
+  goCatalog_(){ location.hash='#catalog'; },
+  showEmailPreview_(){ showEmailPreview_(); },
+  showEmailPreviewPdf_(){ showEmailPreview_({ pdf: true }); },
+  submitAccountSetup(event){ submitAccountSetup(event); },
+  adminSignOut(){ adminSignOut(); },
+  submitChangePassword(event){ submitChangePassword(event); },
+  submit2FANewCodes(){ submit2FANewCodes(); },
+  submit2FADisable(){ submit2FADisable(); },
+  start2FASetup(){ start2FASetup(); },
+  copy2FACodes(){ copy2FACodes(); },
+  finish2FACodes(){ finish2FACodes(); },
+  copy2FAKey(){ copy2FAKey(); },
+  submit2FAActivate(){ submit2FAActivate(); },
+  usersShowTab_(){ usersShowTab_(this.dataset.tab); },
+  usersSetRole_(){ usersSetRole_(Number(this.dataset.uid), this.value); },
+  usersEdit_(){ usersEdit_(Number(this.dataset.uid)); },
+  usersResetPassword_(){ usersResetPassword_(Number(this.dataset.uid)); },
+  usersReset2fa_(){ usersReset2fa_(Number(this.dataset.uid)); },
+  usersSetStatus_(){ usersSetStatus_(Number(this.dataset.uid), this.dataset.status); },
+  usersShowRoles_(event){ event.preventDefault(); usersShowTab_("roles"); },
+  usersSave_(event){ usersSave_(event); },
+  usersAdd_(){ usersEdit_(null); },
+  usersSetRequire2fa_(){ usersSetRequire2fa_(this); },
+  roleSelect_(){ roleSelect_(this.dataset.key); },
+  roleSetLevel_(){ roleSetLevel_(this.dataset.fn, this.value); },
+  roleSetItem_(){ roleSetItem_(this.dataset.item, this.checked); },
+  roleSetMenu_(){ roleSetMenu_(this.dataset.menu, this.checked); },
+  roleNew_(){ roleNew_(null); },
+  roleCopy_(){ roleNew_(_roleDraft && _roleDraft.key); },
+  roleDraftName_(){ _roleDraft.name = this.value; },
+  roleDraftRank_(){ _roleDraft.rank = Number(this.value); },
+  roleSave_(){ roleSave_(); },
+  roleUndoChanges_(){ roleSelect_(_roleDraft.key); },
+  loadRoles_(){ loadRoles_(); },
+  roleDelete_(){ roleDelete_(); },
+  applyCloneOrg(){ applyCloneOrg(); },
+  submitOrgForm(){ submitOrgForm(this.dataset.edit === '1'); },
+  orgDomainSetup_(){ loadOrgDomainBox_(this.dataset.org, 'setupOrgDomain'); },
+  orgDomainCheck_(){ loadOrgDomainBox_(this.dataset.org, 'getOrgDomainStatus'); },
+  moveProduct_(){ moveProduct_(this.dataset.org, this.dataset.product, Number(this.dataset.dir)); },
+  goProductEdit_(){ location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products/'+encodeURIComponent(this.dataset.product)+'/edit'; },
+  toggleProductVisible(){ toggleProductVisible(this.dataset.org, this.dataset.product, this.dataset.visible === '1'); },
+  showStockModal(){ showStockModal(this.dataset.org, this.dataset.product, this.dataset.productName, this.dataset.pricingMode, JSON.parse(this.dataset.sizePricing)); },
+  goWizardProducts_(){ location.hash='#wizard/'+encodeURIComponent(this.dataset.org)+'/products'; },
+  goProductNew_(){ location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products/new'; },
+  drawProductPersSetup_(){ drawProductPersSetup_(); },
+  toggleProductPricingModeFields(){ toggleProductPricingModeFields(); },
+  submitProductForm(){ submitProductForm(this.dataset.org, this.dataset.edit === '1'); },
+  goProductDesigns_(){ location.hash='#designs/'+encodeURIComponent(window._productDesignCtx.orgId); },
+  showAddVersionModal_(){ showAddVersionModal_(this.dataset.org, this.dataset.product); },
+  versionGoTo_(){ versionGoTo_(this.dataset.org, this.dataset.product); },
+  copyVersionSettings_(){ copyVersionSettings_(this.dataset.org, this.dataset.product, this.dataset.from); },
+  separateVersion_(){ separateVersion_(this.dataset.org, this.dataset.product); },
+  revenueShowYear_(){
+    document.getElementById("revFrom").value = this.dataset.year + "-01-01";
+    document.getElementById("revTo").value = this.dataset.year + "-12-31";
+    document.getElementById("revFilters").dispatchEvent(new Event("submit"));
+  },
+  expViewReceipt_(){ expViewReceipt_(this.dataset.key); },
+  voidBlankMovement_(){ voidBlankMovement_(this.dataset.mid); },
+  restoreBlankMovement_(){ restoreBlankMovement_(this.dataset.mid); },
+  expEditRecurring_(){ expEditRecurring_(this.dataset.id); },
+  expStopRecurring_(){ expStopRecurring_(this.dataset.id); },
+  expDeleteRecurring_(){ expDeleteRecurring_(this.dataset.id); },
+  expEdit_(){ expEdit_(this.dataset.id); },
+  expDelete_(){ expDelete_(this.dataset.id); },
+  refreshComms_(){ refreshComms_(); },
+  commsSendTest_(){ commsSendTest_(); },
+  checkBlankShipmentsNow(){ checkBlankShipmentsNow(this); },
+  refreshPriceReminderFromVendors_(){ refreshPriceReminderFromVendors_(); },
+  auditReset_(){
+    document.getElementById("afOrg").value = ""; document.getElementById("afOrder").value = ""; document.getElementById("afAction").value = "";
+    document.getElementById("afFrom").value = this.dataset.from; document.getElementById("afTo").value = this.dataset.to;
+    document.getElementById("afLimit").value = "20";
+    document.getElementById("auditFilters").dispatchEvent(new Event("submit"));
+  },
+  auditShowSecurity_(){
+    document.getElementById("afOrg").value = ""; document.getElementById("afOrder").value = ""; document.getElementById("afAction").value = "security.";
+    document.getElementById("afLimit").value = "100";
+    document.getElementById("auditFilters").dispatchEvent(new Event("submit"));
+  },
+  auditFilterOrder_(event){
+    event.preventDefault();
+    document.getElementById("afOrder").value = this.dataset.order;
+    document.getElementById("auditFilters").dispatchEvent(new Event("submit"));
+  },
+  blankEdit(){ blankEdit(this.dataset.blankId); },
+  blankHistory(){ blankHistory(this.dataset.blankId); },
+  blankWriteOff(){ blankWriteOff(this.dataset.blankId); },
+  blankMerge(){ blankMerge(this.dataset.blankId); },
+  blankClone(){ blankClone(this.dataset.blankId); },
+  blankDelete(){ blankDelete(this.dataset.blankId, this.dataset.blankName); },
+  threadInventory_(){ threadInventory_(this.dataset.tid); },
+  threadEdit_(){ threadEdit_(this.dataset.tid); },
+  threadDelete_(){ threadDelete_(this.dataset.tid); },
+  hoopEdit_(){ hoopEdit_(this.dataset.hid); },
+  hoopDelete_(){ hoopDelete_(this.dataset.hid); },
+  abortReasonEdit_(){ abortReasonEdit_(this.dataset.rid); },
+  abortReasonDelete_(){ abortReasonDelete_(this.dataset.rid); },
+  graphicEdit_(){ graphicEdit_(this.dataset.gid); },
+  graphicDelete_(){ graphicDelete_(this.dataset.gid); },
+  transferEdit_(){ transferEdit_(this.dataset.tid); },
+  transferHistory_(){ transferHistory_(this.dataset.tid); },
+  transferWriteOff_(){ transferWriteOff_(this.dataset.tid); },
+  transferDelete_(){ transferDelete_(this.dataset.tid); },
+  transferOpenSheet_(){ transferOpenSheet_(this.dataset.mid); },
+  transferOpenOrder_(){ transferOpenOrder_(this.dataset.org, this.dataset.order); },
+  transferVoid_(){ transferVoid_(this.dataset.mid); },
+  transferRestore_(){ transferRestore_(this.dataset.mid); },
+  goDesign_(){ location.hash='#designs/'+encodeURIComponent(this.dataset.org)+'/'+this.dataset.did; },
+  editDesign_(){ const id = Number(this.dataset.did); showDesignFormModal_(this.dataset.org, window._dsgCtx.designs.find(d => d.id === id), window._dsgCtx.hoops, () => loadDesignDetail_(id)); },
+  deleteDesign_(){ deleteDesign_(Number(this.dataset.did), this.dataset.org); },
+  uploadDesignVersion_(){ const id = Number(this.dataset.did); showDesignVersionUploadModal_(id, () => loadDesignDetail_(id)); },
+  downloadDesignFile_(){ downloadDesignFile_(this.dataset.key); },
+  editVersionColors_(){ editVersionColors_(Number(this.dataset.vid)); },
+  setVersionStitches_(){ setVersionStitches_(this); },
+  machineEdit_(){ machineEdit_(this.dataset.mid); },
+  machineDelete_(){ machineDelete_(this.dataset.mid); },
+  machineReading_(){ machineReading_(this.dataset.mid); },
+  machineTasks_(){ machineTasks_(this.dataset.mid); },
+  machineLogOtherWork_(){ machineMaintDone_(this.dataset.mid, ''); },
+  machineTaskDone_(){ machineMaintDone_(this.dataset.mid, this.dataset.tid); },
+  showShipmentHistoryModal_(event){ event.preventDefault(); showShipmentHistoryModal_(Number(this.dataset.sid)); },
+  paidUnrunUseStock_(){ paidUnrunUseStock_(this); },
+};
+const ADMIN_EVENT_ATTRS_ = { click: "adminAction", change: "adminChange", input: "adminInput", submit: "adminSubmit", keydown: "adminKeydown" };
+function adminDispatch_(event){
+  const key = ADMIN_EVENT_ATTRS_[event.type];
+  for (let el = event.target; el && el.nodeType === 1; el = el.parentNode) {
+    const name = el.dataset && el.dataset[key];
+    if (!name) continue;
+    if (!Object.prototype.hasOwnProperty.call(ADMIN_ACTIONS_, name)) { console.error("No admin action named " + name); continue; }
+    ADMIN_ACTIONS_[name].call(el, event);
+    if (event.cancelBubble) break;
+  }
+}
+if (!window._adminActionsWired) {
+  window._adminActionsWired = true;
+  for (const type of Object.keys(ADMIN_EVENT_ATTRS_)) document.addEventListener(type, adminDispatch_, true);
+}
 
 let adminKey = null; // "cookie" when signed in via the HttpOnly session cookie, or the raw passphrase (TOTP off)
 // A step the signed-in user must finish before anything else is shown: "account" (a name, an
@@ -87,7 +336,7 @@ let _boxPresetsCache = null; // cached from DB; null = not yet loaded
 // every same-origin /api call automatically. localStorage only remembers a
 // non-secret marker ({token:"cookie", expires}) so we know not to re-prompt.
 // Sessions last 24 hours.
-// The install's root domain, from /api/catalog's admin answer (index.html keeps it in siteInfo_);
+// The install's root domain, from /api/catalog's admin answer (storefront.js keeps it in siteInfo_);
 // shops live at <subdomain>.<root domain>. "" while the site has no domain yet (a Deploy-button
 // install on its workers.dev address): never guessed from this page's own address.
 function siteRootDomain_(){ return String((typeof siteInfo_ !== "undefined" && siteInfo_ && siteInfo_.rootDomain) || ""); }
@@ -1221,7 +1470,7 @@ async function loadAdminOrgList(){
   if(!adminKey){
     panel.innerHTML = `
       <div class="admin-empty">Passphrase required.</div>
-      <div class="admin-actions"><button class="admin-btn" onclick="loadAdminOrgList()">Try again</button></div>
+      <div class="admin-actions"><button class="admin-btn" data-admin-action="loadAdminOrgList">Try again</button></div>
     `;
     return;
   }
@@ -1241,7 +1490,7 @@ async function loadAdminOrgList(){
       clearAdminAuth(); // not signed in any more — clear so it re-prompts next time
       panel.innerHTML = `
         <div class="admin-empty">${(data && data.message === "Unauthorized") ? "Not signed in." : escapeHtml((data && data.message) || "Could not load shops.")}</div>
-        <div class="admin-actions"><button class="admin-btn" onclick="loadAdminOrgList()">Try again</button></div>
+        <div class="admin-actions"><button class="admin-btn" data-admin-action="loadAdminOrgList">Try again</button></div>
       `;
       return;
     }
@@ -1265,7 +1514,7 @@ async function loadAdminOrgList(){
   }catch(e){
     panel.innerHTML = `
       <div class="admin-empty">Could not reach the server.</div>
-      <div class="admin-actions"><button class="admin-btn" onclick="loadAdminOrgList()">Try again</button></div>
+      <div class="admin-actions"><button class="admin-btn" data-admin-action="loadAdminOrgList">Try again</button></div>
     `;
   }
 }
@@ -1835,7 +2084,7 @@ const ADMIN_NAV_GROUPS = [
   { label: "Settings", items: [
     ["settings", "Global settings"], ["vendors", "Vendor integrations"], ["comms", "Communications"], ["orphans", "Orphaned images"],
     ["users", "Users"], ["security", "Security (2FA)"], ["password", "Change password"],
-    { action: "adminSignOut()", label: "Sign out" }, { action: "adminSignOutEverywhere()", label: "Sign out everywhere" },
+    { action: "navSignOut_", label: "Sign out" }, { action: "navSignOutEverywhere_", label: "Sign out everywhere" },
   ]},
 ];
 // Flat list of every page hash → label (derived from the groups), for code that enumerates tools.
@@ -1843,7 +2092,7 @@ const ADMIN_NAV_TOOLS = ADMIN_NAV_GROUPS.flatMap(g => g.items.filter(Array.isArr
 
 // ---- Features (Global settings → Features) -------------------------------------------------------
 // Which optional feature a page belongs to, by the first part of its hash. A page that isn't
-// listed is always there. The switches come with /api/catalog (index.html's siteFeatures /
+// listed is always there. The switches come with /api/catalog (storefront.js's siteFeatures /
 // featureOn_); the server refuses a switched-off feature's actions whatever this file shows.
 const ADMIN_PAGE_FEATURE = {
   runorder: "production", machines: "production", maintenance: "production", machinefiles: "production", hoops: "production", threads: "production",
@@ -2202,7 +2451,7 @@ function renderDesktopOff_(app, hash){
     </div>
     <div class="admin-panel" style="--org-accent:var(--accent);" id="desktopOffPanel">
       <div class="admin-empty">Communications is about email. Turn on <a href="#settings">Email under Global settings → Features</a> to send order emails, invoices and the morning roll-up.</div>
-      <div class="admin-actions" style="margin-top:14px;"><button class="admin-btn" onclick="location.hash='#orders'">Back to Orders</button></div>
+      <div class="admin-actions" style="margin-top:14px;"><button class="admin-btn" data-admin-action="goOrders_">Back to Orders</button></div>
     </div>`;
 }
 // Which menu item (permissions.js) a page belongs to: the first part of its hash, but a shop's settings,
@@ -2271,8 +2520,8 @@ function renderFeatureOff_(app, feature, hash){
       <div class="admin-empty"><strong>${escapeHtml(label)} is turned off.</strong> This feature is turned off — ${adminCanOpen_("settings") ? "turn it on under Global settings" : "an admin can turn it on"}.
         Nothing was deleted: everything comes back as it was when it's turned on again.</div>
       <div class="admin-actions" style="margin-top:14px;">
-        ${adminCanOpen_("settings") ? `<button class="admin-btn" onclick="location.hash='#settings'">Open Global settings</button>` : ""}
-        <button class="admin-btn" onclick="location.hash='#orders'">Back to Orders</button>
+        ${adminCanOpen_("settings") ? `<button class="admin-btn" data-admin-action="goSettings_">Open Global settings</button>` : ""}
+        <button class="admin-btn" data-admin-action="goOrders_">Back to Orders</button>
       </div>
     </div>`;
 }
@@ -2325,10 +2574,10 @@ function adminNavActive_(){
 function adminMenuHtml_(label, itemsHtml, opts){
   opts = opts || {};
   return `<div class="admin-menu${opts.dots ? " admin-menu-dots" : ""}"${opts.id ? ` id="${escapeHtml(opts.id)}"` : ""}${opts.hidden ? ' style="display:none;"' : ""}>`
-    + `<button type="button" class="admin-btn" style="${opts.btnStyle || ""}" aria-haspopup="menu" aria-expanded="false"${opts.title ? ` title="${escapeHtml(opts.title)}"` : ""}${opts.ariaLabel ? ` aria-label="${escapeHtml(opts.ariaLabel)}"` : ""} onclick="toggleAdminMenu_(this)" onkeydown="adminMenuKey_(event)">${label}</button>`
-    + `<div class="admin-menu-list" role="menu" onkeydown="adminMenuKey_(event)">${itemsHtml}</div></div>`;
+    + `<button type="button" class="admin-btn" style="${opts.btnStyle || ""}" aria-haspopup="menu" aria-expanded="false"${opts.title ? ` title="${escapeHtml(opts.title)}"` : ""}${opts.ariaLabel ? ` aria-label="${escapeHtml(opts.ariaLabel)}"` : ""} data-admin-action="toggleAdminMenu_" data-admin-keydown="adminMenuKey_">${label}</button>`
+    + `<div class="admin-menu-list" role="menu" data-admin-keydown="adminMenuKey_">${itemsHtml}</div></div>`;
 }
-// One item: `attrs` is its id / onclick / data- / title attributes, already escaped by the caller.
+// One item: `attrs` is its id / data-admin-action / data- / title attributes, already escaped by the caller.
 function adminMenuItem_(attrs, label, danger){
   return `<button type="button" role="menuitem" class="admin-menu-item${danger ? " danger" : ""}" ${attrs || ""}>${label}</button>`;
 }
@@ -2402,10 +2651,10 @@ function renderAdminNav(){
   const groupHtml = (g) => {
     const groupActive = g.items.some(it => Array.isArray(it) && it[0] === active);
     const itemHtml = (it) => Array.isArray(it)
-      ? `<button type="button" class="admin-nav-btn${active === it[0] ? " active" : ""}" data-h="${escapeHtml(it[0])}" onclick="navGo(this.dataset.h)">${escapeHtml(it[1])}</button>`
-      : `<button type="button" class="admin-nav-btn" onclick="closeNavDropdowns();${it.action}">${escapeHtml(it.label)}</button>`;
+      ? `<button type="button" class="admin-nav-btn${active === it[0] ? " active" : ""}" data-h="${escapeHtml(it[0])}" data-admin-action="navGo">${escapeHtml(it[1])}</button>`
+      : `<button type="button" class="admin-nav-btn" data-admin-action="${escapeHtml(it.action)}">${escapeHtml(it.label)}</button>`;
     return `<div class="admin-nav-group">
-      <button type="button" class="admin-nav-btn admin-nav-drop${groupActive ? " active" : ""}" onclick="toggleNavDropdown(this)">${escapeHtml(g.label)}</button>
+      <button type="button" class="admin-nav-btn admin-nav-drop${groupActive ? " active" : ""}" data-admin-action="toggleNavDropdown">${escapeHtml(g.label)}</button>
       <div class="admin-nav-menu">${g.items.map(itemHtml).join("")}</div>
     </div>`;
   };
@@ -2417,15 +2666,15 @@ function renderAdminNav(){
   const current = top.concat(...ADMIN_NAV_GROUPS.map(g => g.items.filter(Array.isArray))).find(it => it[0] === active);
   const currentLabel = current ? current[1] : "";
   const sheetItem = (it) => Array.isArray(it)
-    ? `<button type="button" class="admin-nav-btn${active === it[0] ? " active" : ""}" data-h="${escapeHtml(it[0])}" onclick="navGo(this.dataset.h)">${escapeHtml(it[1])}</button>`
-    : `<button type="button" class="admin-nav-btn" onclick="closeNavDropdowns();${it.action}">${escapeHtml(it.label)}</button>`;
+    ? `<button type="button" class="admin-nav-btn${active === it[0] ? " active" : ""}" data-h="${escapeHtml(it[0])}" data-admin-action="navGo">${escapeHtml(it[1])}</button>`
+    : `<button type="button" class="admin-nav-btn" data-admin-action="${escapeHtml(it.action)}">${escapeHtml(it.label)}</button>`;
   nav.innerHTML = `
     <div class="admin-nav-row">
-      ${top.map(([h, label]) => `<button type="button" class="admin-nav-btn${active === h ? " active" : ""}" data-h="${h}" onclick="navGo(this.dataset.h)">${escapeHtml(label)}</button>`).join("")}
+      ${top.map(([h, label]) => `<button type="button" class="admin-nav-btn${active === h ? " active" : ""}" data-h="${h}" data-admin-action="navGo">${escapeHtml(label)}</button>`).join("")}
       ${navGroups.map(groupHtml).join("")}
     </div>
     <div class="admin-nav-mobile admin-nav-group">
-      <button type="button" class="admin-nav-btn admin-nav-menu-btn" aria-label="Menu" onclick="toggleNavDropdown(this)">☰ Menu</button>
+      <button type="button" class="admin-nav-btn admin-nav-menu-btn" aria-label="Menu" data-admin-action="toggleNavDropdown">☰ Menu</button>
       <span class="admin-nav-current">${escapeHtml(currentLabel)}</span>
       <div class="admin-nav-menu admin-nav-sheet">
         <div class="admin-nav-sheet-top">${top.map(sheetItem).join("")}</div>
@@ -2491,18 +2740,18 @@ function shopBarHtml_(ctx){
   const pub = shop && d.publish ? d.publish[shop] : null;
   const pubBtn = !shop || !manager ? "" : pub && pub.state === "current"
     ? `<button type="button" class="shop-bar-pub done" disabled title="Shoppers see this shop as it is now">✓ Published</button>`
-    : `<button type="button" class="shop-bar-pub" data-org="${escapeHtml(shop)}" data-need="catalog.shops:edit" onclick="shopBarPublish_(this.dataset.org)" title="${pub && pub.state === "never" ? "Shoppers see this shop's current products and settings (until it's published once, changes show at once)" : "Shoppers see this shop's current products and settings"}">${pub && pub.state === "changed" ? "Publish changes" : "Publish"}</button>`;
+    : `<button type="button" class="shop-bar-pub" data-org="${escapeHtml(shop)}" data-need="catalog.shops:edit" data-admin-action="shopBarPublish_" title="${pub && pub.state === "never" ? "Shoppers see this shop's current products and settings (until it's published once, changes show at once)" : "Shoppers see this shop's current products and settings"}">${pub && pub.state === "changed" ? "Publish changes" : "Publish"}</button>`;
   // Unpublished changes can be thrown away: back to what was last published (shopBarDiscard_).
-  const discardBtn = shop && manager && pub && pub.state === "changed" ? `<button type="button" class="shop-bar-discard" data-org="${escapeHtml(shop)}" data-need="catalog.shops:full" onclick="shopBarDiscard_(this.dataset.org)" title="Put this shop back the way it was last published">Discard changes&hellip;</button>` : "";
+  const discardBtn = shop && manager && pub && pub.state === "changed" ? `<button type="button" class="shop-bar-discard" data-org="${escapeHtml(shop)}" data-need="catalog.shops:full" data-admin-action="shopBarDiscard_" title="Put this shop back the way it was last published">Discard changes&hellip;</button>` : "";
   // Open for orders, or "Coming soon" — a switch beside Publish (setOrgReady, asked first).
   const reg = shop && (window._adminOrgRegistry || []).find(o => o.orgId === shop);
   const liveBtn = !shop || !manager || !reg ? "" : `<button type="button" class="shop-bar-live${reg.ready ? " on" : ""}" role="switch" aria-checked="${reg.ready ? "true" : "false"}"
-      data-org="${escapeHtml(shop)}" onclick="shopBarLive_(this.dataset.org, this.getAttribute('aria-checked') !== 'true')"
+      data-org="${escapeHtml(shop)}" data-admin-action="shopBarLive_"
       title="${reg.ready ? "Open for orders — click to show “Coming soon” instead" : "Shoppers see “Coming soon” — click to open the shop for orders"}"><span class="shop-bar-knob"></span>${reg.ready ? "Live" : "Coming soon"}</button>`;
   return `
     ${adminCanOpen_("catalog") ? (ctx.page === "catalog" ? `<span class="shop-bar-title">Manage catalog</span>` : `<a class="shop-bar-back" href="#catalog">&larr; Manage catalog</a>`) : ""}
     <label class="shop-bar-pick"><span class="sr-only">Shop</span>
-      <select aria-label="Shop" onchange="shopBarPick_(this.value)">
+      <select aria-label="Shop" data-admin-change="shopBarPick_">
         ${shop ? "" : `<option value="" selected>Choose a shop&hellip;</option>`}
         ${orgs.map(o => `<option value="${escapeHtml(o.orgId)}"${o.orgId === shop ? " selected" : ""}>${escapeHtml(o.name || o.orgId)}</option>`).join("")}
       </select></label>
@@ -2902,7 +3151,7 @@ function showDesignVerifModal(){
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
               <input type="text" id="dvImg${i}" placeholder="https://..." style="flex:1;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;color:#1a1a1a;">
               <label style="cursor:pointer;font-size:12px;padding:5px 10px;background:#e5e7eb;border-radius:4px;white-space:nowrap;color:#1a1a1a;">
-                Upload <input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif" style="display:none;" data-target="dvImg${i}" data-need="catalog.products:edit" onchange="handleDvImageUpload(this)">
+                Upload <input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif" style="display:none;" data-target="dvImg${i}" data-need="catalog.products:edit" data-admin-change="handleDvImageUpload">
               </label>
               <span id="dvImg${i}Status" style="font-size:11px;color:#555;min-width:60px;"></span>
             </div>`).join("")}
@@ -3452,7 +3701,7 @@ async function renderPackageSizes(app){
       <td style="padding:4px 6px">${inp("pkg-max-caps", p.maxCaps, 50, 'min="0" step="1" placeholder="∞" aria-label="Max caps" title="Leave blank for unlimited"')}</td>
       <td style="padding:4px 6px">${inp("pkg-max-sw", p.maxSweatshirts, 50, 'min="0" step="1" placeholder="∞" aria-label="Max sweatshirts" title="Leave blank for unlimited"')}</td>
       <td style="padding:4px 6px">${inp("pkg-max-wt", p.maxWeightOz, 56, 'min="0" step="1" placeholder="∞" aria-label="Max weight (oz)" title="Leave blank for unlimited"')}</td>
-      <td style="padding:4px 0;text-align:right;"><button data-need="catalog.packages:edit" type="button" class="admin-btn admin-btn-danger" onclick="this.closest('tr').remove()" style="padding:2px 8px;font-size:11px;" title="Remove this size">Remove</button></td>
+      <td style="padding:4px 0;text-align:right;"><button data-need="catalog.packages:edit" type="button" class="admin-btn admin-btn-danger" data-admin-action="removeRow_" style="padding:2px 8px;font-size:11px;" title="Remove this size">Remove</button></td>
     </tr>`;
   }
   const th = (t, left) => `<th style="text-align:${left ? "left" : "center"};padding:5px 6px;">${t}</th>`;
@@ -4280,9 +4529,9 @@ function adminActionCell(org, o){
   const dataAttrs = `data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}"`;
   // Each button only for a role that may use it (Users → Roles and permissions); the server refuses the rest anyway.
   const can = (fn, lvl) => adminCan_(fn, lvl);
-  const deleteBtn = !can("orders.details", "full") ? "" : `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" ${dataAttrs} data-need="orders.details:full" onclick="deleteTransaction(this.dataset.org, this.dataset.order)" style="margin-top:6px;">Void…</button>`;
+  const deleteBtn = !can("orders.details", "full") ? "" : `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" ${dataAttrs} data-need="orders.details:full" data-admin-action="deleteTransaction" style="margin-top:6px;">Void…</button>`;
 
-  const paymentsBtn = !can("orders.payments", "read") ? "" : `<button class="admin-btn" ${dataAttrs} onclick="showPaymentsModal(this.dataset.org, this.dataset.order)" style="margin-top:4px;">💰 Payments</button>`;
+  const paymentsBtn = !can("orders.payments", "read") ? "" : `<button class="admin-btn" ${dataAttrs} data-admin-action="showPaymentsModal" style="margin-top:4px;">💰 Payments</button>`;
 
   if(o.items.every(it => it.cancelDate)){
     // Payments stays available: money recorded on a cancelled order must be voided/refunded before the order can be voided.
@@ -4294,18 +4543,18 @@ function adminActionCell(org, o){
   // Digital products (migrations/0086): the order's downloads — what's been used, Resend / Reset / Revoke — and, once
   // it's paid, Resend downloads straight from the row (a new link, emailed with the files when they fit).
   const digitalOn = featureOn_("digital");
-  const dlBtn = (o.hasDownloads || o.hasDigital) && digitalOn ? `<button class="admin-btn" ${dataAttrs} onclick="showDownloadsModal_(this.dataset.org,this.dataset.order)" title="The customer's download link and files: what's been used, Reset, Revoke" style="margin-top:4px;">Downloads…</button>` : "";
+  const dlBtn = (o.hasDownloads || o.hasDigital) && digitalOn ? `<button class="admin-btn" ${dataAttrs} data-admin-action="showDownloadsModal_" title="The customer's download link and files: what's been used, Reset, Revoke" style="margin-top:4px;">Downloads…</button>` : "";
   const resendDlBtn = o.hasDigital && digitalOn && (o.paid || o.paidForWork) && adminCan_("orders.downloads", "edit")
-    ? `<button class="admin-btn" ${dataAttrs} data-need="orders.downloads:edit" onclick="resendDownloadsNow_(this.dataset.org,this.dataset.order)" title="Email the customer a new download link, with the files attached when they fit (the old link stops working)" style="margin-top:4px;">Resend downloads</button>` : "";
+    ? `<button class="admin-btn" ${dataAttrs} data-need="orders.downloads:edit" data-admin-action="resendDownloadsNow_" title="Email the customer a new download link, with the files attached when they fit (the old link stops working)" style="margin-top:4px;">Resend downloads</button>` : "";
   // Downloads only: nothing to make or ship, so no rush, no shipping and no stages — paid, then completed.
-  const rushBtn = o.digitalOnly || !can("orders.payments", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:full" onclick="showRushFeeModal_(this.dataset.org,this.dataset.order)" title="Rush this order, or change its rush fee" style="margin-top:4px;">${o.rushRequested ? "Rush…" : "+ Rush…"}</button>`;
+  const rushBtn = o.digitalOnly || !can("orders.payments", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:full" data-admin-action="showRushFeeModal_" title="Rush this order, or change its rush fee" style="margin-top:4px;">${o.rushRequested ? "Rush…" : "+ Rush…"}</button>`;
 
   // Paid for everything but a rush fee (migrations/0082) counts as paid for the work: the stages go on.
   if(!o.paid && !o.paidForWork){
-    return (can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" onclick="markOrderPaid(this.dataset.org, this.dataset.order)">Mark as paid</button>` : `<span class="muted-cell" style="font-size:12px;">Not paid</span>`) +
-      (adminDesktopNoEmail_() || !can("orders.invoices", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.invoices:edit" onclick="resendEmail(this.dataset.org, this.dataset.order)" style="margin-top:4px;">${resendLabel}</button>`) +
+    return (can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid">Mark as paid</button>` : `<span class="muted-cell" style="font-size:12px;">Not paid</span>`) +
+      (adminDesktopNoEmail_() || !can("orders.invoices", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.invoices:edit" data-admin-action="resendEmail" style="margin-top:4px;">${resendLabel}</button>`) +
       (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") +
-      (can("orders.details", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" onclick="editOrder(this.dataset.org,this.dataset.order)" style="margin-top:4px;">Edit items</button>` : "") +
+      (can("orders.details", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" data-admin-action="editOrder" style="margin-top:4px;">Edit items</button>` : "") +
       rushBtn + dlBtn + paymentsBtn + deleteBtn;
   }
 
@@ -4320,23 +4569,23 @@ function adminActionCell(org, o){
     ? `<span class="mono" style="font-size:11px;color:var(--ink-soft);" title="Everything on this order is a digital product: nothing to make or ship">Downloads only</span>`
     : eligible.length === 0 && waiting.length === 0
     ? `<span class="mono" style="font-size:11px;color:var(--ink-soft);">All stages ✓</span>`
-    : `<select ${dataAttrs} onchange="if(this.value){setFulfillmentStage(this.dataset.org,this.dataset.order,this.value);this.value=''}" style="font-size:12px;padding:4px 6px;border:1px solid var(--border,#ccc);border-radius:4px;background:var(--surface,#fff);color:var(--ink,#111);cursor:pointer;display:block;width:100%;margin-bottom:4px;">
+    : `<select ${dataAttrs} data-admin-change="pickFulfillmentStage_" style="font-size:12px;padding:4px 6px;border:1px solid var(--border,#ccc);border-radius:4px;background:var(--surface,#fff);color:var(--ink,#111);cursor:pointer;display:block;width:100%;margin-bottom:4px;">
         <option value="">— Stage —</option>
         ${eligible.map(s => `<option value="${escapeHtml(s.stage)}">${escapeHtml(s.stage === "manufactured" && o.allFromStock ? "Pulled from stock" : s.label.replace(/^Mark /, ""))}</option>`).join("")}
         ${waiting.map(s => `<option value="" disabled>${escapeHtml(s.label.replace(/^Mark /, ""))} — upload the order design first</option>`).join("")}
       </select>`;
-  const emailBtn = adminDesktopNoEmail_() || !can("orders.invoices", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.invoices:edit" onclick="resendEmail(this.dataset.org, this.dataset.order)" style="margin-top:4px;">${resendLabel}</button>`;
+  const emailBtn = adminDesktopNoEmail_() || !can("orders.invoices", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.invoices:edit" data-admin-action="resendEmail" style="margin-top:4px;">${resendLabel}</button>`;
   const hasAddr = o.shippingAddress && o.shippingAddress.line1;
-  const shipBtn = o.digitalOnly || !can("orders.shipping", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.shipping:edit" onclick="setShippingInfo(this.dataset.org,this.dataset.order)" style="margin-top:4px;">${hasAddr ? "Edit shipping" : "Set shipping"}</button>`;
-  const editBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" onclick="editOrder(this.dataset.org,this.dataset.order)" style="margin-top:4px;">Edit items</button>`;
-  const datesBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} onclick="showOrderDates_(this.dataset.org,this.dataset.order)" title="Every date on this order — change or clear any of them" style="margin-top:4px;">Dates…</button>`;
+  const shipBtn = o.digitalOnly || !can("orders.shipping", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.shipping:edit" data-admin-action="setShippingInfo" style="margin-top:4px;">${hasAddr ? "Edit shipping" : "Set shipping"}</button>`;
+  const editBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" data-admin-action="editOrder" style="margin-top:4px;">Edit items</button>`;
+  const datesBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-admin-action="showOrderDates_" title="Every date on this order — change or clear any of them" style="margin-top:4px;">Dates…</button>`;
   const completeBtn = o.completedAt
-    ? `<div class="mono" style="font-size:11px;color:var(--ink-soft);margin-top:4px;">Completed ${escapeHtml(adminDate_(o.completedAt))}</div><button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" onclick="completeOrders(this.dataset.org, [this.dataset.order], false)" style="margin-top:4px;">Reopen</button>`
+    ? `<div class="mono" style="font-size:11px;color:var(--ink-soft);margin-top:4px;">Completed ${escapeHtml(adminDate_(o.completedAt))}</div><button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" data-admin-action="completeOrders" style="margin-top:4px;">Reopen</button>`
     : canCompleteOrder(o) && can("orders.stepsLate", "edit")
-      ? `<button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" onclick="completeOrdersAsk_(this.dataset.org, [this.dataset.order])" title="${o.digitalOnly ? "Paid in full, and its downloads have gone out" : "Delivered and paid in full"} — close it out" style="margin-top:4px;background:#166534;color:#fff;border-color:#166534;">Mark completed</button>`
+      ? `<button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" data-admin-action="completeOrdersAsk_" title="${o.digitalOnly ? "Paid in full, and its downloads have gone out" : "Delivered and paid in full"} — close it out" style="margin-top:4px;background:#166534;color:#fff;border-color:#166534;">Mark completed</button>`
       : "";
   // The rush fee still owed (the rest is paid): Mark as paid settles it.
-  const payRushBtn = !o.paid && Number(o.balanceDue) > 0 && can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" onclick="markOrderPaid(this.dataset.org, this.dataset.order)" title="Record the rest of the balance — the rush fee — as paid" style="margin-top:4px;">Mark as paid</button>` : "";
+  const payRushBtn = !o.paid && Number(o.balanceDue) > 0 && can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid" title="Record the rest of the balance — the rush fee — as paid" style="margin-top:4px;">Mark as paid</button>` : "";
   return stageEl + completeBtn + payRushBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + rushBtn + dlBtn + paymentsBtn + deleteBtn;
 }
 
@@ -4479,14 +4728,14 @@ function invoiceCell_(org, o){
   // (The desktop program's invoice is the email itself, with no page to open: no "opened" to report.)
   const status = inv ? `<div class="mono invoice-status" style="font-size:11px;color:var(--ink-soft);margin-top:4px;line-height:1.35;">Invoice sent ${escapeHtml(day(inv.sentAt))}` +
     `${adminDesktop_() ? "" : inv.viewedAt ? " · opened" : " · not opened yet"}${inv.deliveryChosenAt ? " · delivery chosen" : ""}</div>` : "";
-  const btn = owes && !adminDesktopNoEmail_() ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.invoices:edit" onclick="showSendInvoiceModal(this.dataset.org, this.dataset.order)" title="${adminDesktop_() ? "Email the customer the invoice (with a PDF of it) and how to pay" : "Email the customer a link to choose delivery and pay online"}" style="margin-top:4px;">${inv ? "Resend invoice…" : "Send invoice…"}</button>` : "";
+  const btn = owes && !adminDesktopNoEmail_() ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.invoices:edit" data-admin-action="showSendInvoiceModal" title="${adminDesktop_() ? "Email the customer the invoice (with a PDF of it) and how to pay" : "Email the customer a link to choose delivery and pay online"}" style="margin-top:4px;">${inv ? "Resend invoice…" : "Send invoice…"}</button>` : "";
   // The desktop program can save the invoice as a PDF (to print, or hand over) — email or not, and
   // for a paid order too (it then says "Paid in full").
   const pdfBtn = adminDesktop_() && !o.voidedAt && window.oddDesktop && typeof window.oddDesktop.saveInvoicePdf === "function"
-    ? `<button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="saveInvoicePdf_(this.dataset.org, this.dataset.order)" title="Save this order's invoice as a PDF, to print or send yourself" style="margin-top:4px;">Save invoice PDF…</button>` : "";
+    ? `<button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-admin-action="saveInvoicePdf_" title="Save this order's invoice as a PDF, to print or send yourself" style="margin-top:4px;">Save invoice PDF…</button>` : "";
   // On the web: the same PDF the customer's emails carry — an invoice while something is owed, a receipt once paid.
   const webPdfBtn = !adminDesktop_() && !o.voidedAt
-    ? `<button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="downloadOrderPdf_(this.dataset.org, this.dataset.order)" title="Download this order's ${owes ? "invoice" : "receipt"} as a PDF" style="margin-top:4px;">${owes ? "Invoice PDF" : "Receipt PDF"}</button>` : "";
+    ? `<button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-admin-action="downloadOrderPdf_" title="Download this order's ${owes ? "invoice" : "receipt"} as a PDF" style="margin-top:4px;">${owes ? "Invoice PDF" : "Receipt PDF"}</button>` : "";
   return btn + pdfBtn + webPdfBtn + status;
 }
 
@@ -4787,7 +5036,7 @@ function trackingCell(org, o){
   const tracking = o.trackingNumber || (lbl && lbl.trackingNumber) || "";
   // Buying and reprinting labels belong to the Shipping feature; a tracking number typed by hand still shows.
   const shippingOn = typeof featureOn_ !== "function" || featureOn_("shipping");
-  const labelBtn = lbl && shippingOn ? ` <button class="admin-btn admin-btn-sm" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.shipping:edit" onclick="reprintLabel(this.dataset.org, this.dataset.order)" title="Open the label PDF (nothing is bought)">Label</button>` : "";
+  const labelBtn = lbl && shippingOn ? ` <button class="admin-btn admin-btn-sm" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.shipping:edit" data-admin-action="reprintLabel" title="Open the label PDF (nothing is bought)">Label</button>` : "";
   if(tracking){
     const tn = escapeHtml(tracking);
     let trackUrl = "https://tools.usps.com/go/TrackConfirmAction?tLabels=" + encodeURIComponent(tracking);
@@ -4805,7 +5054,7 @@ function trackingCell(org, o){
     if(!o.paid){
       return `<span style="color:var(--ink-soft);font-size:12px;">Awaiting payment</span>`;
     }
-    return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.shipping:edit" onclick="shipOrder(this.dataset.org, this.dataset.order)">Ship</button>`;
+    return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.shipping:edit" data-admin-action="shipOrder">Ship</button>`;
   }
   return '<span style="color:var(--ink-soft)">—</span>';
 }
@@ -5195,7 +5444,7 @@ function cancelCell(it, o, orgId){
       // Blank already ordered — too late to cancel through the UI.
       return `<span class="muted-cell" title="Cannot cancel after blank is ordered">—</span>`;
     }
-    return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(orgId)}" data-row="${it.sheetRow}" data-name="${escapeHtml(it.name)}" data-total="${Number(it.lineTotal).toFixed(2)}" data-need="orders.details:full" onclick="cancelLineItem(this.dataset.org,this.dataset.row,this.dataset.name,this.dataset.total)">Cancel</button>`;
+    return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(orgId)}" data-row="${it.sheetRow}" data-name="${escapeHtml(it.name)}" data-total="${Number(it.lineTotal).toFixed(2)}" data-need="orders.details:full" data-admin-action="cancelLineItem">Cancel</button>`;
   }
   const d = adminDate_(it.cancelDate);
   const reason = it.cancelReason ? `<br><span class="cancel-reason">${escapeHtml(it.cancelReason)}</span>` : "";
@@ -5215,7 +5464,7 @@ function refundCell(it, o, orgId){
   if(it.refundDate){
     return `<span class="refund-badge">$${Number(it.refundAmount).toFixed(2)}<br>${adminDate_(it.refundDate)}</span>`;
   }
-  return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(orgId)}" data-row="${it.sheetRow}" data-amount="${Number(it.lineTotal).toFixed(2)}" data-pay="${escapeHtml(o.paymentMethod||"")}" data-need="orders.payments:full" onclick="setLineItemRefund(this.dataset.org,this.dataset.row,this.dataset.amount,this.dataset.pay)">Record refund</button>`;
+  return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(orgId)}" data-row="${it.sheetRow}" data-amount="${Number(it.lineTotal).toFixed(2)}" data-pay="${escapeHtml(o.paymentMethod||"")}" data-need="orders.payments:full" data-admin-action="setLineItemRefund">Record refund</button>`;
 }
 
 // ---- Unified Orders page: one screen, filter by shop + date range ----------------------------
@@ -5267,7 +5516,7 @@ function ordersRenderSlice_(shown){
 function ordersCapNote_(drawn, total, single){
   if(drawn >= total) return "";
   return `<div class="admin-note orders-cap-note" style="margin-bottom:10px;color:#b45309;">Showing the ${drawn} most recent of ${total} matching orders — narrow the date range${single ? "" : " or pick a shop"} to see the rest.
-    <button type="button" class="admin-btn" style="padding:1px 8px;font-size:12px;margin-left:4px;" onclick="ordersShowMore_()">Show ${Math.min(ORDERS_RENDER_STEP_, total - drawn)} more</button>${single ? `<br>"Select all" ticks only the orders shown.` : ""}</div>`;
+    <button type="button" class="admin-btn" style="padding:1px 8px;font-size:12px;margin-left:4px;" data-admin-action="ordersShowMore_">Show ${Math.min(ORDERS_RENDER_STEP_, total - drawn)} more</button>${single ? `<br>"Select all" ticks only the orders shown.` : ""}</div>`;
 }
 function ordersShowMore_(){
   window._ordersRenderLimit = Math.max(ORDERS_RENDER_STEP_, Number(window._ordersRenderLimit) || 0) + ORDERS_RENDER_STEP_;
@@ -5301,17 +5550,17 @@ function ordersFilterBar_(selectedOrgId){
   const inp = "font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;";
   return `
     <div class="orders-filter-bar" style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:flex-end;margin:8px 0 14px;">
-      <label style="${lbl}">Shop<br><select id="ordFilterOrg" onchange="onOrdersOrgChange(this.value)" style="${inp}min-width:150px;">${opts}</select></label>
-      <label style="${lbl}">From<br><input type="date" id="ordFilterFrom" value="${escapeHtml(f.from || "")}" onchange="onOrdersDateChange()" style="${inp}"></label>
-      <label style="${lbl}">To<br><input type="date" id="ordFilterTo" value="${escapeHtml(f.to || "")}" onchange="onOrdersDateChange()" style="${inp}"></label>
+      <label style="${lbl}">Shop<br><select id="ordFilterOrg" data-admin-change="onOrdersOrgChange" style="${inp}min-width:150px;">${opts}</select></label>
+      <label style="${lbl}">From<br><input type="date" id="ordFilterFrom" value="${escapeHtml(f.from || "")}" data-admin-change="onOrdersDateChange" style="${inp}"></label>
+      <label style="${lbl}">To<br><input type="date" id="ordFilterTo" value="${escapeHtml(f.to || "")}" data-admin-change="onOrdersDateChange" style="${inp}"></label>
       <div style="display:flex;gap:4px 18px;flex-wrap:wrap;padding-bottom:6px;">
-        <label class="checkbox-row" style="margin:0;"><input type="checkbox" id="ordIncludeCompleted" ${window._orderView.includeCompleted ? "checked" : ""} onchange="ordersSetInclude('completed', this.checked)"> Include completed</label>
-        <label class="checkbox-row" style="margin:0;"><input type="checkbox" id="ordIncludeCancelled" ${window._orderView.includeCancelled ? "checked" : ""} onchange="ordersSetInclude('cancelled', this.checked)"> Include cancelled</label>
+        <label class="checkbox-row" style="margin:0;"><input type="checkbox" id="ordIncludeCompleted" ${window._orderView.includeCompleted ? "checked" : ""} data-admin-change="ordersIncludeCompleted_"> Include completed</label>
+        <label class="checkbox-row" style="margin:0;"><input type="checkbox" id="ordIncludeCancelled" ${window._orderView.includeCancelled ? "checked" : ""} data-admin-change="ordersIncludeCancelled_"> Include cancelled</label>
       </div>
-      <button class="admin-btn" onclick="rerenderOrdersView()">Refresh</button>
-      ${selectedOrgId ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" data-need="orders.details:edit" onclick="createLocalSale(this.dataset.org)">+ Local sale</button>
-        ${adminCan_("orders.import", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" data-need="orders.import:edit" onclick="pickOrderImportFile_(this.dataset.org)" title="Orders from Etsy, Shopify or a sheet">Import orders…</button>` : ""}
-        ${adminCan_("catalog.shops", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" data-need="catalog.shops:edit" onclick="createTestTransaction(this.dataset.org)">Create test transaction</button>` : ""}` : ""}
+      <button class="admin-btn" data-admin-action="rerenderOrdersView">Refresh</button>
+      ${selectedOrgId ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" data-need="orders.details:edit" data-admin-action="createLocalSale">+ Local sale</button>
+        ${adminCan_("orders.import", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" data-need="orders.import:edit" data-admin-action="pickOrderImportFile_" title="Orders from Etsy, Shopify or a sheet">Import orders…</button>` : ""}
+        ${adminCan_("catalog.shops", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(selectedOrgId)}" data-need="catalog.shops:edit" data-admin-action="createTestTransaction">Create test transaction</button>` : ""}` : ""}
     </div>`;
 }
 function onOrdersOrgChange(v){
@@ -5540,10 +5789,10 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         ${idx === 0 && showShop ? `<td rowspan="${o.items.length}" style="font-size:12px;color:var(--ink-soft);white-space:nowrap;">${escapeHtml(org.name || org.orgId)}</td>` : ""}
         ${idx === 0 ? `<td rowspan="${o.items.length}" data-action-td>${adminActionCell(org, o)}</td>` : ""}
         ${idx === 0 ? `<td rowspan="${o.items.length}" style="text-align:center;vertical-align:middle;padding:4px;">
-          ${o.items.some(it => !it.cancelDate) ? `<input type="checkbox" class="order-select" data-order="${escapeHtml(o.orderId)}" data-org="${escapeHtml(org.orgId)}" data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" onchange="updateBulkBar(this.dataset.org)" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
+          ${o.items.some(it => !it.cancelDate) ? `<input type="checkbox" class="order-select" data-order="${escapeHtml(o.orderId)}" data-org="${escapeHtml(org.orgId)}" data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" data-admin-change="updateBulkBar" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
         </td>` : ""}
-        <td data-date-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${adminDate_(o.placedAt)} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" onclick="editOrderDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Edit date">✎</button></td>
-        <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" onclick="editOrderDueDate(this)" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
+        <td data-date-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${adminDate_(o.placedAt)} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" data-admin-action="editOrderDate" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Edit date">✎</button></td>
+        <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" data-admin-action="editOrderDueDate" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
         <td>${escapeHtml(o.customerName)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</td>
         <td>${escapeHtml(o.orderId)}</td>
         <td>${escapeHtml(it.name)}</td>
@@ -5579,7 +5828,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
     });
   }).join("");
 }
-const ORDERS_TABLE_HEADERS_ = `<th>Action</th><th><input type="checkbox" id="selectAllOrders" onchange="toggleSelectAllOrders(this)" title="Select all" aria-label="Select all orders"></th><th>Date</th><th>Due</th><th>Customer</th><th>Order #</th><th>Item</th><th>Size</th><th>Qty</th><th>Personalization</th><th>Line Total</th><th>Cancel</th><th>Refund</th><th>Payment</th><th>Paid</th><th>Discount</th><th>Balance Due</th><th>Order email</th><th>Payment email</th><th>Blank Ordered</th><th>Blank Shipped</th><th>Blank Received</th><th>Manufactured</th><th>Digitizing</th><th>Verif. Sent</th><th>Change Req.</th><th>Design Approved</th><th>QA &amp; Packed</th><th>Shipped</th><th>Delivered</th><th>Completed</th><th>Shipping</th><th>Tracking</th>`;
+const ORDERS_TABLE_HEADERS_ = `<th>Action</th><th><input type="checkbox" id="selectAllOrders" data-admin-change="toggleSelectAllOrders" title="Select all" aria-label="Select all orders"></th><th>Date</th><th>Due</th><th>Customer</th><th>Order #</th><th>Item</th><th>Size</th><th>Qty</th><th>Personalization</th><th>Line Total</th><th>Cancel</th><th>Refund</th><th>Payment</th><th>Paid</th><th>Discount</th><th>Balance Due</th><th>Order email</th><th>Payment email</th><th>Blank Ordered</th><th>Blank Shipped</th><th>Blank Received</th><th>Manufactured</th><th>Digitizing</th><th>Verif. Sent</th><th>Change Req.</th><th>Design Approved</th><th>QA &amp; Packed</th><th>Shipped</th><th>Delivered</th><th>Completed</th><th>Shipping</th><th>Tracking</th>`;
 
 // ---- Orders on a phone: one card per order instead of the 31-column table ----------------------
 // Chosen when the page renders (adminIsMobile_); crossing the breakpoint re-renders the view. A card
@@ -5653,11 +5902,11 @@ function orderCardHtml_(o, org, verif, showShop){
     .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${String(v).replace(/^\s*<td[^>]*>|<\/td>\s*$/g, "")}</dd>`).join("");
   return `<div class="order-card" data-order-card="${escapeHtml(o.orderId)}" data-org="${escapeHtml(org.orgId)}" data-shop="${showShop ? 1 : 0}">
     <div class="oc-head">
-      ${!showShop && active.length ? `<input type="checkbox" class="order-select" ${ids} data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" onchange="updateBulkBar(this.dataset.org)" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
+      ${!showShop && active.length ? `<input type="checkbox" class="order-select" ${ids} data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" data-admin-change="updateBulkBar" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
       <div class="oc-who">
         <div class="oc-name">${escapeHtml(o.customerName)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</div>
-        <div class="oc-dim">${escapeHtml(o.orderId)} · ${adminDate_(o.placedAt)} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" onclick="editOrderDate(this)" title="Edit date" aria-label="Edit order date">✎</button></div>
-        <div class="oc-dim">Due: ${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "—"} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" onclick="editOrderDueDate(this)" title="Set due date" aria-label="Set due date">✎</button></div>
+        <div class="oc-dim">${escapeHtml(o.orderId)} · ${adminDate_(o.placedAt)} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" data-admin-action="editOrderDate" title="Edit date" aria-label="Edit order date">✎</button></div>
+        <div class="oc-dim">Due: ${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "—"} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" data-admin-action="editOrderDueDate" title="Set due date" aria-label="Set due date">✎</button></div>
         ${showShop ? `<div class="oc-dim">${escapeHtml(org.name || org.orgId)}</div>` : ""}
       </div>
       <div class="oc-amt"><div class="oc-total">${money(total)}</div>
@@ -5675,7 +5924,7 @@ function orderCardHtml_(o, org, verif, showShop){
 // The order list for whichever layout fits the screen: cards on a phone, the table otherwise.
 function ordersListHtml_(shown, getOrg, getVerif, showShop){
   if(adminIsMobile_()){
-    return `${showShop ? "" : `<label class="checkbox-row oc-select-all"><input type="checkbox" id="selectAllOrders" onchange="toggleSelectAllOrders(this)"> Select all</label>`}
+    return `${showShop ? "" : `<label class="checkbox-row oc-select-all"><input type="checkbox" id="selectAllOrders" data-admin-change="toggleSelectAllOrders"> Select all</label>`}
       <div class="order-cards">${shown.map(o => orderCardHtml_(o, getOrg(o), getVerif(o), showShop)).join("")}</div>`;
   }
   return `<div class="admin-table-wrap orders-table-wrap">
@@ -5828,7 +6077,7 @@ function renderAdminOrders(app, org, opts){
       panel.innerHTML = `
         <h2>Orders</h2>
         <div class="admin-empty">${orders.error === "Unauthorized" ? SESSION_ENDED_ : escapeHtml(orders.error)}</div>
-        <div class="admin-actions"><button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="selectAdminOrg(this.dataset.org)">Try again</button></div>
+        <div class="admin-actions"><button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-admin-action="selectAdminOrg">Try again</button></div>
       `;
       return;
     }
@@ -5868,30 +6117,30 @@ function drawShopOrders_(org){
       ${ordersMoreNote_([org.orgId])}
       <div id="bulkBar" class="bulk-bar" style="display:none;">
         <span id="bulkBarCount" class="bulk-bar-count"></span>
-        ${adminCan_("orders.stepsEarly", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankOrdered" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Blank ordered</button>` : ""}
-        ${adminCan_("orders.stepsEarly", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankShipped" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Blank shipped…</button>` : ""}
-        ${adminCan_("orders.stepsEarly", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankReceived" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Blank received</button>` : ""}
-        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="manufactured" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Manufactured</button>` : ""}
-        ${adminCan_("orders.stepsEarly", "edit") ? adminFeatureOn_("production") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="digitizingComplete" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Digitizing complete</button>` : "" : ""}
-        ${adminCan_("orders.stepsEarly", "edit") ? adminFeatureOn_("designVerification") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="designApproved" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Design approved</button>` : "" : ""}
-        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="qaPacked" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ QA &amp; packed</button>` : ""}
-        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="shipped" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Shipped</button>` : ""}
-        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="delivered" onclick="bulkSetFulfillmentStage(this.dataset.org, this.dataset.stage)">→ Delivered</button>` : ""}
-        ${adminCan_("orders.details", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:edit" onclick="bulkSetDueDate(this.dataset.org)">⏱ Set due date</button>` : ""}
-        ${adminCan_("orders.shipping", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.shipping:edit" onclick="bulkAddTracking(this.dataset.org)">→ Add tracking</button>` : ""}
-        ${adminCan_("orders.details", "edit") ? adminFeatureOn_("designVerification") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:edit" onclick="bulkSendDesignVerification(this.dataset.org)">✉ Send verification</button>` : "" : ""}
-        ${adminCan_("orders.details", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:edit" onclick="bulkEditCustomerInfo(this.dataset.org)">✎ Edit customer info</button>` : ""}
-        ${adminCan_("orders.details", "full") ? `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" style="color:#fff;" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:full" onclick="bulkCancelLineItems(this.dataset.org)">→ Cancel selected</button>` : ""}
-        <button class="admin-btn" onclick="clearBulkSelection()">Clear</button>
+        ${adminCan_("orders.stepsEarly", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankOrdered" data-admin-action="bulkSetFulfillmentStage">→ Blank ordered</button>` : ""}
+        ${adminCan_("orders.stepsEarly", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankShipped" data-admin-action="bulkSetFulfillmentStage">→ Blank shipped…</button>` : ""}
+        ${adminCan_("orders.stepsEarly", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="blankReceived" data-admin-action="bulkSetFulfillmentStage">→ Blank received</button>` : ""}
+        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="manufactured" data-admin-action="bulkSetFulfillmentStage">→ Manufactured</button>` : ""}
+        ${adminCan_("orders.stepsEarly", "edit") ? adminFeatureOn_("production") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="digitizingComplete" data-admin-action="bulkSetFulfillmentStage">→ Digitizing complete</button>` : "" : ""}
+        ${adminCan_("orders.stepsEarly", "edit") ? adminFeatureOn_("designVerification") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="designApproved" data-admin-action="bulkSetFulfillmentStage">→ Design approved</button>` : "" : ""}
+        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="qaPacked" data-admin-action="bulkSetFulfillmentStage">→ QA &amp; packed</button>` : ""}
+        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="shipped" data-admin-action="bulkSetFulfillmentStage">→ Shipped</button>` : ""}
+        ${adminCan_("orders.stepsLate", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-stage="delivered" data-admin-action="bulkSetFulfillmentStage">→ Delivered</button>` : ""}
+        ${adminCan_("orders.details", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:edit" data-admin-action="bulkSetDueDate">⏱ Set due date</button>` : ""}
+        ${adminCan_("orders.shipping", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.shipping:edit" data-admin-action="bulkAddTracking">→ Add tracking</button>` : ""}
+        ${adminCan_("orders.details", "edit") ? adminFeatureOn_("designVerification") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:edit" data-admin-action="bulkSendDesignVerification">✉ Send verification</button>` : "" : ""}
+        ${adminCan_("orders.details", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:edit" data-admin-action="bulkEditCustomerInfo">✎ Edit customer info</button>` : ""}
+        ${adminCan_("orders.details", "full") ? `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" style="color:#fff;" data-org="${escapeHtml(org.orgId)}" data-need="orders.details:full" data-admin-action="bulkCancelLineItems">→ Cancel selected</button>` : ""}
+        <button class="admin-btn" data-admin-action="clearBulkSelection">Clear</button>
       </div>
       ${ordersCapNote_(toDraw.length, shownOrders.length, true)}
       ${ordersListHtml_(toDraw, () => org, (o) => verifMap[o.orderId], false)}
       <div class="admin-actions">
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="exportCsv(this.dataset.org)">Copy as spreadsheet text</button>
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="renderPackingLabels(this.dataset.org, getSelectedOrderIds())">Packing labels</button>
-        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="renderBrandedLabels(this.dataset.org, getSelectedOrderIds())">Branded labels</button>
-        ${shownOrders.some(o => o.shippingAddress && o.shippingAddress.line1) ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" onclick="renderMailingLabels(this.dataset.org, getSelectedOrderIds())">Mailing labels</button>` : ""}
-        ${adminDesktop_() && adminFeatureOn_("shipping") ? `<button class="admin-btn" id="ordCheckTracking" data-org="${escapeHtml(org.orgId)}" data-need="orders.stepsLate:edit" onclick="ordersCheckTracking_(this)" title="Look up every shipped order's tracking now (it's also checked every two hours while the program is open)">Check tracking now</button>` : ""}
+        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-admin-action="exportCsv">Copy as spreadsheet text</button>
+        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-admin-action="renderPackingLabels">Packing labels</button>
+        <button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-admin-action="renderBrandedLabels">Branded labels</button>
+        ${shownOrders.some(o => o.shippingAddress && o.shippingAddress.line1) ? `<button class="admin-btn" data-org="${escapeHtml(org.orgId)}" data-admin-action="renderMailingLabels">Mailing labels</button>` : ""}
+        ${adminDesktop_() && adminFeatureOn_("shipping") ? `<button class="admin-btn" id="ordCheckTracking" data-org="${escapeHtml(org.orgId)}" data-need="orders.stepsLate:edit" data-admin-action="ordersCheckTracking_" title="Look up every shipped order's tracking now (it's also checked every two hours while the program is open)">Check tracking now</button>` : ""}
       </div>
       <textarea class="export-box" id="exportBox" style="display:none;"></textarea>
       <div id="ordBreakdownSection">${renderOrderBreakdown(shownOrders, blankLinks, blanks)}</div>
@@ -6226,10 +6475,10 @@ async function showPaymentsModal(orgId, orderId) {
       const paymentRows = (o.payments || []).map(p => `
         <tr style="${p.voidedAt ? "opacity:.5;text-decoration:line-through;" : ""}">
           <td style="padding:4px 8px;white-space:nowrap;">${adminDate_(p.receivedAt)}${!p.voidedAt && !p.fromStripe
-            ? ` <button type="button" data-pay-id="${p.id}" data-pay-date="${escapeHtml(String(p.receivedAt).slice(0, 10))}" data-need="orders.payments:edit" onclick="pmSetPaymentDate(this.dataset.payId, this.dataset.payDate)" title="Change the date this money was received" style="padding:0 4px;background:none;border:none;cursor:pointer;color:#1d4ed8;font-size:12px;">✎</button>` : ""}</td>
+            ? ` <button type="button" data-pay-id="${p.id}" data-pay-date="${escapeHtml(String(p.receivedAt).slice(0, 10))}" data-need="orders.payments:edit" data-admin-action="pmSetPaymentDate" title="Change the date this money was received" style="padding:0 4px;background:none;border:none;cursor:pointer;color:#1d4ed8;font-size:12px;">✎</button>` : ""}</td>
           <td style="padding:4px 8px;white-space:nowrap;${p.amount < 0 ? "color:#b03a2e;" : ""}">${p.amount < 0 ? "−$" + Math.abs(Number(p.amount)).toFixed(2) : "$" + Number(p.amount).toFixed(2)}${p.kind === "refund" ? " <span style=\"font-size:11px;\">refund</span>" : p.kind === "dispute" ? " <span style=\"font-size:11px;\">lost dispute</span>" : ""}${
             (p.kind === "refund" || p.kind === "dispute") && !p.voidedAt ? `<br><span class="pm-refund-ship" style="font-size:11px;color:#666;">${Number(p.shipping) > 0 ? `$${Number(p.shipping).toFixed(2)} of it shipping (no tax)` : "all goods (tax backed out)"}</span>
-              <button type="button" data-pay-id="${p.id}" data-ship="${Number(p.shipping || 0).toFixed(2)}" data-refund="${Math.abs(Number(p.amount)).toFixed(2)}" data-need="orders.payments:full" onclick="pmSetRefundShipping(this.dataset.payId, this.dataset.ship, this.dataset.refund)"
+              <button type="button" data-pay-id="${p.id}" data-ship="${Number(p.shipping || 0).toFixed(2)}" data-refund="${Math.abs(Number(p.amount)).toFixed(2)}" data-need="orders.payments:full" data-admin-action="pmSetRefundShipping"
                 title="How much of this refund was shipping — shipping isn't taxed, so no sales tax comes back on that part" style="padding:0 4px;background:none;border:none;cursor:pointer;color:#1d4ed8;font-size:11px;">Shipping part…</button>` : ""}</td>
           <td style="padding:4px 8px;font-size:12px;">${escapeHtml(METHOD_LABEL[p.method] || "Other")}${p.reference ? " · " + escapeHtml(p.reference) : ""}${p.fee > 0 ? ` <span style="color:#666;">(fee $${Number(p.fee).toFixed(2)})</span>` : ""}
             <br>${!p.voidedAt && !p.fromStripe && accounts.length
@@ -6239,7 +6488,7 @@ async function showPaymentsModal(orgId, orderId) {
           <td style="padding:4px 8px;">${p.voidedAt
             ? `<span title="${escapeHtml(p.voidReason || "")}" style="font-size:11px;color:#b03a2e;font-weight:600;">void</span>`
             : p.fromStripe ? `<span title="Refund it in Stripe instead" style="font-size:11px;color:#888;">Stripe</span>`
-            : `<button class="admin-btn-danger" type="button" style="padding:2px 7px;border-radius:4px;cursor:pointer;font-size:11px;" data-pay-id="${p.id}" data-need="orders.payments:full" onclick="pmDeletePayment(this.dataset.payId)" title="Void an entry made by mistake">Void</button>`}</td>
+            : `<button class="admin-btn-danger" type="button" style="padding:2px 7px;border-radius:4px;cursor:pointer;font-size:11px;" data-pay-id="${p.id}" data-need="orders.payments:full" data-admin-action="pmDeletePayment" title="Void an entry made by mistake">Void</button>`}</td>
         </tr>`).join("");
 
       const content = document.createElement("div");
@@ -7445,6 +7694,24 @@ function exportCsv(orgId){
   try{ navigator.clipboard && navigator.clipboard.writeText(out); }catch(e){}
 }
 
+// The label sheets' print pop-ups (packing, branded and mailing labels): an about:blank window written with
+// document.write, which shares this page's Content-Security-Policy, so it can run no script of its own. This page
+// prints it instead, once its fonts and pictures (the branded labels' QR codes) have loaded, then closes it.
+// Listening starts after document.close(): writing the document clears any listener added to the window before.
+function printPopupWhenReady_(pw){
+  let started = false;
+  const go = () => {
+    if (started) return;
+    started = true;
+    const imgs = Array.from(pw.document.images);
+    Promise.all(imgs.map(img => img.complete ? null : new Promise(res => { img.addEventListener("load", res); img.addEventListener("error", res); })))
+      .then(() => pw.document.fonts.ready)
+      .then(() => { pw.print(); pw.close(); });
+  };
+  if (pw.document.readyState === "complete") go();
+  else pw.addEventListener("load", go);
+}
+
 // Renders packing labels formatted for Avery 5163 (4" × 2", 2 cols × 10 rows,
 // 20 per letter sheet). One label per order, grouped — multi-item orders
 // list all active items on one label rather than printing N separate ones.
@@ -7510,11 +7777,9 @@ body{margin:0;padding:0;background:#fff;color:#000;}
 .packing-label-items{margin:0;padding:0;list-style:none;font-size:7pt;line-height:1.35;font-family:'IBM Plex Sans',sans-serif;}
 .packing-label-items li{padding-left:8pt;position:relative;}
 .packing-label-items li::before{content:"•";position:absolute;left:0;color:#555;}
-</style></head><body>${html}<script>
-window.onload=function(){
-  document.fonts.ready.then(function(){window.print();window.close();});
-};<\/script></body></html>`);
+</style></head><body>${html}</body></html>`);
     pw.document.close();
+    printPopupWhenReady_(pw);
   }
 
   const selNote = selectedIds ? `<span style="font-size:12px;color:#1d4ed8;font-weight:600;">${selectedIds.length} selected order${selectedIds.length===1?"":"s"}</span>` : "";
@@ -7522,11 +7787,11 @@ window.onload=function(){
   panel.innerHTML = `
     <div class="lbl-controls">
       ${selNote}
-      <label><input type="checkbox" id="lblFilterPaid" checked onchange="document.getElementById('labelArea').innerHTML=window._buildPackingLabels()"> Paid only</label>
-      <label><input type="checkbox" id="lblFilterUndelivered" checked onchange="document.getElementById('labelArea').innerHTML=window._buildPackingLabels()"> Undelivered only</label>
-      <label style="white-space:nowrap;">Start at label: <input type="number" id="lblStartAt" min="1" max="${LABELS_PER_SHEET}" value="1" style="width:52px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;" oninput="document.getElementById('labelArea').innerHTML=window._buildPackingLabels()"></label>
-      <button class="admin-btn" onclick="window.printLabelsPopup()">Print</button>
-      <button class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="refreshAdminOrders(this.dataset.org)">&larr; Back</button>
+      <label><input type="checkbox" id="lblFilterPaid" checked data-admin-change="redrawPackingLabels_"> Paid only</label>
+      <label><input type="checkbox" id="lblFilterUndelivered" checked data-admin-change="redrawPackingLabels_"> Undelivered only</label>
+      <label style="white-space:nowrap;">Start at label: <input type="number" id="lblStartAt" min="1" max="${LABELS_PER_SHEET}" value="1" style="width:52px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;" data-admin-input="redrawPackingLabels_"></label>
+      <button class="admin-btn" data-admin-action="printLabelsPopup">Print</button>
+      <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-admin-action="refreshAdminOrders">&larr; Back</button>
     </div>
     <div id="labelArea">${buildLabels()}</div>
   `;
@@ -7740,15 +8005,9 @@ body{margin:0;padding:0;background:#fff;color:#000;}
 .bl-items li{padding-left:8pt;position:relative;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .bl-items li::before{content:"•";position:absolute;left:0;color:#555;}
 .bl-items li.x{font-weight:700;}.bl-items li.x::before{content:"×";color:#000;}
-</style></head><body>${html}<script>
-window.onload=function(){
-  var imgs=document.querySelectorAll('img');
-  var pending=imgs.length;
-  if(!pending){document.fonts.ready.then(function(){window.print();window.close();});return;}
-  function done(){pending--;if(pending===0)document.fonts.ready.then(function(){window.print();window.close();});}
-  imgs.forEach(function(img){if(img.complete)done();else{img.onload=done;img.onerror=done;}});
-};<\/script></body></html>`);
+</style></head><body>${html}</body></html>`);
     pw.document.close();
+    printPopupWhenReady_(pw);
   }
 
   _labelFontSettings = loadLabelFontSettings(orgId) || defaultLabelFontSettings();
@@ -7759,13 +8018,13 @@ window.onload=function(){
   panel.innerHTML = `
     <div class="lbl-controls">
       ${selNote}
-      <label><input type="checkbox" id="blblFilterPaid" checked onchange="document.getElementById('blblArea').innerHTML=window.buildBrandedLabels()"> Paid only</label>
-      <label><input type="checkbox" id="blblFilterUndelivered" checked onchange="document.getElementById('blblArea').innerHTML=window.buildBrandedLabels()"> Undelivered only</label>
-      <label><input type="checkbox" id="blblPerShirt" onchange="document.getElementById('blblArea').innerHTML=window.buildBrandedLabels()"> One label per shirt</label>
-      <label style="white-space:nowrap;">Start at label: <input type="number" id="blblStartAt" min="1" max="${LABELS_PER_SHEET}" value="1" style="width:52px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;" oninput="document.getElementById('blblArea').innerHTML=window.buildBrandedLabels()"></label>
-      <button class="admin-btn" onclick="window.openBrandedFontSettings()">Font settings</button>
-      <button class="admin-btn" onclick="window.printBrandedPopup()">Print</button>
-      <button class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="refreshAdminOrders(this.dataset.org)">&larr; Back</button>
+      <label><input type="checkbox" id="blblFilterPaid" checked data-admin-change="redrawBrandedLabels_"> Paid only</label>
+      <label><input type="checkbox" id="blblFilterUndelivered" checked data-admin-change="redrawBrandedLabels_"> Undelivered only</label>
+      <label><input type="checkbox" id="blblPerShirt" data-admin-change="redrawBrandedLabels_"> One label per shirt</label>
+      <label style="white-space:nowrap;">Start at label: <input type="number" id="blblStartAt" min="1" max="${LABELS_PER_SHEET}" value="1" style="width:52px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;" data-admin-input="redrawBrandedLabels_"></label>
+      <button class="admin-btn" data-admin-action="openBrandedFontSettings">Font settings</button>
+      <button class="admin-btn" data-admin-action="printBrandedPopup">Print</button>
+      <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-admin-action="refreshAdminOrders">&larr; Back</button>
     </div>
     <div id="blblArea">${buildLabels()}</div>
   `;
@@ -7828,11 +8087,9 @@ body{margin:0;padding:0;background:#fff;color:#000;}
     pw.document.write(`<!DOCTYPE html><html><head>
 <meta charset="utf-8">
 <link rel="stylesheet" href="${location.origin}/vendor/fonts/fonts.css">
-<style>${POPUP_CSS}</style></head><body>${html}<script>
-window.onload=function(){
-  document.fonts.ready.then(function(){window.print();window.close();});
-};<\/script></body></html>`);
+<style>${POPUP_CSS}</style></head><body>${html}</body></html>`);
     pw.document.close();
+    printPopupWhenReady_(pw);
   }
 
   const selNote = selectedIds ? `<span style="font-size:12px;color:#1d4ed8;font-weight:600;">${selectedIds.length} selected order${selectedIds.length===1?"":"s"}</span>` : `<span style="font-size:12px;color:#555;">${pool.filter(o => o.shippingAddress && o.shippingAddress.line1).length} shipping order(s)</span>`;
@@ -7840,9 +8097,9 @@ window.onload=function(){
   panel.innerHTML = `
     <div class="lbl-controls">
       ${selNote}
-      <label style="white-space:nowrap;">Start at label: <input type="number" id="mailStartAt" min="1" max="${LABELS_PER_SHEET}" value="1" style="width:52px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;" oninput="document.getElementById('labelArea').innerHTML=window._buildMailingLabels()"></label>
-      <button class="admin-btn" onclick="window.printMailingPopup()">Print</button>
-      <button class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="refreshAdminOrders(this.dataset.org)">&larr; Back</button>
+      <label style="white-space:nowrap;">Start at label: <input type="number" id="mailStartAt" min="1" max="${LABELS_PER_SHEET}" value="1" style="width:52px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;" data-admin-input="redrawMailingLabels_"></label>
+      <button class="admin-btn" data-admin-action="printMailingPopup">Print</button>
+      <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-admin-action="refreshAdminOrders">&larr; Back</button>
     </div>
     <div id="labelArea">${buildLabels()}</div>
   `;
@@ -7861,7 +8118,7 @@ window.onload=function(){
 
 // Validates that an org accent is a CSS color value — prevents a stored XSS
 // vector where a malicious accent could break out of style= attribute quotes.
-// This is defense-in-depth alongside escapeHtml() in index.html's rendering;
+// This is defense-in-depth alongside escapeHtml() in storefront.js's rendering;
 // the server validates too (functions/_lib/catalogValidation.js).
 function isValidAccent(v){
   return /^(#[0-9a-fA-F]{3,8}|[a-zA-Z]+|rgba?\([^)]+\)|hsla?\([^)]+\))$/.test(String(v || "").trim());
@@ -7977,7 +8234,7 @@ async function makeStoredThumb_(url){
 // pattern as the rest of the admin buttons.
 function imageUploadControl(targetId, orgId){
   return `<span class="img-upload">
-      <input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif" aria-label="Upload image file" data-target="${escapeHtml(targetId)}" data-org="${escapeHtml(orgId)}" data-need="catalog.products:edit|catalog.graphics:edit|inventory.blanks:edit" onchange="handleImageUpload(this)">
+      <input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif" aria-label="Upload image file" data-target="${escapeHtml(targetId)}" data-org="${escapeHtml(orgId)}" data-need="catalog.products:edit|catalog.graphics:edit|inventory.blanks:edit" data-admin-change="handleImageUpload">
       <span class="img-upload-status" id="${escapeHtml(targetId)}-status"></span>
     </span>`;
 }
@@ -8042,7 +8299,7 @@ async function renderAdminOrgList(app){
       adminSessionEnded_(res);
       document.getElementById("adminPanel").innerHTML = `
         <div class="admin-empty">${escapeHtml((data && data.message) || "Could not load shops.")}</div>
-        <div class="admin-actions"><button class="admin-btn" onclick="renderAdminOrgList(document.getElementById('app'))">Try again</button></div>
+        <div class="admin-actions"><button class="admin-btn" data-admin-action="renderAdminOrgList">Try again</button></div>
       `;
       return;
     }
@@ -8193,21 +8450,21 @@ function renderAdminOrgListTable(orgs){
       <td data-label="Name" class="stack-title">${escapeHtml(o.name)}</td>
       <td data-label="Status">${o.ready ? "Live" : "Coming soon"}<div data-publish-state="${escapeHtml(o.orgId)}" style="font-size:12px;margin-top:2px;"></div><div data-shop-issues="${escapeHtml(o.orgId)}" style="font-size:12px;margin-top:2px;color:#92400e;"></div></td>
       <td class="stack-actions">
-        ${adminCan_("catalog.shops", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" onclick="location.hash='#wizard/'+encodeURIComponent(this.dataset.org)" title="The setup steps for this shop — picks up where it was left">Shop setup<span data-wizard-state="${escapeHtml(o.orgId)}"></span></button>
-        ${adminDesktop_() ? "" : `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" data-need="catalog.shops:edit" onclick="publishCatalog(this.dataset.org)" title="Shoppers see this shop's current products and settings">Publish</button>
-        <button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(o.orgId)}" onclick="previewShop_(this.dataset.org)" title="Open the shop page as it will look after Publish">Preview</button>`}` : ""}
-        ${adminCanOpen_("catalog/orgs/" + o.orgId + "/edit") ? `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/edit'">Edit</button>` : ""}
-        <button class="admin-btn" data-org="${escapeHtml(o.orgId)}" data-issues="products" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products'" style="margin-top:4px;">Products</button>
-        ${adminFeatureOn_("production") ? `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" data-issues="designs" onclick="location.hash='#designs/'+encodeURIComponent(this.dataset.org)" style="margin-top:4px;">Designs</button>` : ""}
-        <button class="admin-btn" data-org="${escapeHtml(o.orgId)}" onclick="location.hash='#graphics/'+encodeURIComponent(this.dataset.org)" style="margin-top:4px;">Graphics</button>
+        ${adminCan_("catalog.shops", "edit") ? `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" data-admin-action="goWizard_" title="The setup steps for this shop — picks up where it was left">Shop setup<span data-wizard-state="${escapeHtml(o.orgId)}"></span></button>
+        ${adminDesktop_() ? "" : `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" data-need="catalog.shops:edit" data-admin-action="publishCatalog" title="Shoppers see this shop's current products and settings">Publish</button>
+        <button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(o.orgId)}" data-admin-action="previewShop_" title="Open the shop page as it will look after Publish">Preview</button>`}` : ""}
+        ${adminCanOpen_("catalog/orgs/" + o.orgId + "/edit") ? `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" data-admin-action="goShopEdit_">Edit</button>` : ""}
+        <button class="admin-btn" data-org="${escapeHtml(o.orgId)}" data-issues="products" data-admin-action="goShopProducts_" style="margin-top:4px;">Products</button>
+        ${adminFeatureOn_("production") ? `<button class="admin-btn" data-org="${escapeHtml(o.orgId)}" data-issues="designs" data-admin-action="goShopDesigns_" style="margin-top:4px;">Designs</button>` : ""}
+        <button class="admin-btn" data-org="${escapeHtml(o.orgId)}" data-admin-action="goShopGraphics_" style="margin-top:4px;">Graphics</button>
       </td>
     </tr>
   `).join("");
   panel.innerHTML = `
     <div class="admin-actions" style="margin:6px 0 10px 0;">
-      ${adminCan_("catalog.shops", "edit") ? `<button class="admin-btn wiz-start-btn" onclick="location.hash='#wizard/new'">＋ New shop setup</button>
-      ${adminDesktop_() ? "" : `<button class="admin-btn" data-need="catalog.shops:edit" onclick="publishCatalog()" title="Publish every shop's current products and settings">Publish all shops</button>`}
-      <button class="admin-btn" id="catalogPriceBtn" onclick="showPriceAnalysis_({}, { title: 'Price analysis — every shop' })" title="What each item costs and leaves in every shop, and which are below your targets">Price analysis</button>` : ""}
+      ${adminCan_("catalog.shops", "edit") ? `<button class="admin-btn wiz-start-btn" data-admin-action="goWizardNew_">＋ New shop setup</button>
+      ${adminDesktop_() ? "" : `<button class="admin-btn" data-need="catalog.shops:edit" data-admin-action="publishAllShops_" title="Publish every shop's current products and settings">Publish all shops</button>`}
+      <button class="admin-btn" id="catalogPriceBtn" data-admin-action="showPriceAnalysis_" title="What each item costs and leaves in every shop, and which are below your targets">Price analysis</button>` : ""}
     </div>
     <div id="publishStatus" class="admin-note"></div>
     <div id="catalogIssueNote" class="admin-note"></div>
@@ -9322,7 +9579,7 @@ function wizLiveScreen_(){
   if (!root) return {
     title: "Ready to open the shop?", noNext: true,
     html: `<div class="wiz-warn">${escapeHtml(NO_DOMAIN_YET_)}</div>
-      <div class="wiz-actions"><button type="button" class="admin-btn" onclick="previewShop_(${escapeHtml(JSON.stringify(o.orgId || ""))})">Preview the shop</button></div>
+      <div class="wiz-actions"><button type="button" class="admin-btn" data-org="${escapeHtml(o.orgId || "")}" data-admin-action="previewShop_">Preview the shop</button></div>
       <div class="wiz-note">When your site has its own domain, come back to this step to open the shop for orders.</div>`,
     save: async () => "" };
   return {
@@ -9375,7 +9632,7 @@ async function loadDomainSetup_(){
         <div class="admin-note">Cloudflare opens with the permissions filled in. Scroll to the bottom, click <b>Continue to summary</b>, then <b>Create Token</b>, and copy the key it shows.</div></li>
       <li><b>Paste the key here.</b>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;"><input type="password" id="cfToken" autocomplete="off" spellcheck="false" placeholder="The key from Cloudflare" style="flex:1 1 240px;min-width:0;">
-        <button class="admin-btn" id="cfConnectBtn" data-need="catalog.shops:edit" onclick="connectDomain_()">Connect</button></div></li>
+        <button class="admin-btn" id="cfConnectBtn" data-need="catalog.shops:edit" data-admin-action="connectDomain_">Connect</button></div></li>
     </ol>
     <div id="cfDomainChoose"></div>
     <div class="admin-error" id="cfDomainError" role="alert"></div>
@@ -9395,7 +9652,7 @@ async function connectDomain_(domain){
   if (d.choose) {
     choose.innerHTML = `<div style="margin:8px 0;"><label for="cfDomainPick"><b>Which domain is this site's?</b></label>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;"><select id="cfDomainPick">${d.choose.map(z => `<option value="${escapeHtml(z.name)}">${escapeHtml(z.name)}${z.active ? "" : " (waiting for its nameservers)"}</option>`).join("")}</select>
-      <button class="admin-btn" data-need="catalog.shops:edit" onclick="connectDomain_(document.getElementById('cfDomainPick').value)">Use this domain</button></div></div>`;
+      <button class="admin-btn" data-need="catalog.shops:edit" data-admin-action="connectPickedDomain_">Use this domain</button></div></div>`;
     return;
   }
   const box = document.getElementById("domainSetupBox");
@@ -9662,7 +9919,7 @@ async function renderGlobalSettings(app){
           ? `In use now: <strong>${escapeHtml(effectiveTz)}</strong>.`
           : `Not set here, so <strong>${escapeHtml(effectiveTz)}</strong> is used${envTz && envTz === effectiveTz ? " (from the TIMEZONE variable)" : ""}.`} Months in the reports always run on UTC.</div>
         <label>Country
-          <select id="gLocaleCountry" style="max-width:320px;" onchange="regionCountryChanged_()">
+          <select id="gLocaleCountry" style="max-width:320px;" data-admin-change="regionCountryChanged_">
             <option value="US" ${us ? "selected" : ""}>United States</option>
             <option value="OTHER" ${us ? "" : "selected"}>Other (outside the US)</option>
           </select>
@@ -9747,9 +10004,9 @@ async function renderGlobalSettings(app){
 
         <div id="globalSettingsError" class="admin-error"></div>
         <div class="admin-actions" style="margin-top:16px;">
-          <button class="admin-btn" onclick="submitGlobalSettings()">Save global settings</button>
-          ${adminDesktop_() ? "" : `<button class="admin-btn" type="button" data-need="settings.global:edit" onclick="backfillStripeFees(this)" title="Look up Stripe's processing fee and charge date for card payments (safe to run again)">Sync Stripe fees &amp; dates</button>`}
-          <button class="admin-btn" onclick="location.hash='#catalog'">Cancel</button>
+          <button class="admin-btn" data-admin-action="submitGlobalSettings">Save global settings</button>
+          ${adminDesktop_() ? "" : `<button class="admin-btn" type="button" data-need="settings.global:edit" data-admin-action="backfillStripeFees" title="Look up Stripe's processing fee and charge date for card payments (safe to run again)">Sync Stripe fees &amp; dates</button>`}
+          <button class="admin-btn" data-admin-action="goCatalog_">Cancel</button>
         </div>
       </div>
     `;
@@ -9814,8 +10071,8 @@ function customerEmailsBoxHtml_(settings, sending){
     <div class="admin-note" style="margin-bottom:10px;">The “Order received” email goes out when an order is placed, with how to pay; the “Payment received” email when you record the payment. Both list the items priced before tax, the sales tax above the total, and your business details from above.</div>
     <label class="checkbox-row"><input type="checkbox" id="gEmailAttachPdf" ${settings && settings.attachPdf === false ? "" : "checked"} ${admin ? "" : "disabled"}> Attach a PDF to order emails — an invoice while something is owed, a receipt once paid</label>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 4px;">
-      <button type="button" class="admin-btn" id="gEmailPreviewBtn" onclick="showEmailPreview_()">Preview emails…</button>
-      <button type="button" class="admin-btn admin-btn-secondary" onclick="showEmailPreview_({ pdf: true })">View sample PDF receipt…</button>
+      <button type="button" class="admin-btn" id="gEmailPreviewBtn" data-admin-action="showEmailPreview_">Preview emails…</button>
+      <button type="button" class="admin-btn admin-btn-secondary" data-admin-action="showEmailPreviewPdf_">View sample PDF receipt…</button>
     </div>
     <div class="admin-note">Save first if you've changed the Business profile — the preview uses what's saved.</div>`;
 }
@@ -10183,7 +10440,7 @@ async function renderAccountSetup(app){
   }catch(e){ panel.innerHTML = `<div class="admin-empty">Could not reach the server.</div>`; return; }
   const u = data.user || {}, needPassword = !data.hasPassword;
   panel.innerHTML = `
-      <form class="admin-form" id="acctForm" data-need-password="${needPassword ? "1" : "0"}" onsubmit="submitAccountSetup(event)" style="max-width:440px;">
+      <form class="admin-form" id="acctForm" data-need-password="${needPassword ? "1" : "0"}" data-admin-submit="submitAccountSetup" style="max-width:440px;">
         <h2 style="margin-bottom:8px;">Finish setting up</h2>
         <p class="admin-note" style="margin-bottom:16px;">${needPassword && adminDesktop_()
           ? "Welcome. Say who you are and choose a password. Each time the program opens, you sign in with your email and that password. Next comes Global settings: your business's name, where you are and your sales tax."
@@ -10202,7 +10459,7 @@ async function renderAccountSetup(app){
         <div id="acctError" class="admin-error" style="margin-top:8px;"></div>
         <div class="admin-actions" style="margin-top:14px;">
           <button class="admin-btn" type="submit" id="acctSubmit">Save</button>
-          <button class="admin-btn" type="button" onclick="adminSignOut()">Sign out</button>
+          <button class="admin-btn" type="button" data-admin-action="adminSignOut">Sign out</button>
         </div>
       </form>`;
   const first = document.getElementById("acctName");
@@ -10261,7 +10518,7 @@ function renderChangePassword(app, forced){
       <div class="stitch stitch-thick"></div>
     </div>
     <div class="admin-panel" style="--org-accent:var(--accent);" id="adminPanel">
-      <form class="admin-form" id="pwForm" onsubmit="submitChangePassword(event)" style="max-width:440px;">
+      <form class="admin-form" id="pwForm" data-admin-submit="submitChangePassword" style="max-width:440px;">
         <h2 style="margin-bottom:8px;">${forced ? "Choose your password" : "Change password"}</h2>
         <p class="admin-note" style="margin-bottom:16px;">${forced
           ? "You signed in with a temporary password. Choose one of your own before going any further; the temporary one stops working as soon as you do."
@@ -10277,7 +10534,7 @@ function renderChangePassword(app, forced){
         <div id="pwError" class="admin-error" style="margin-top:8px;"></div>
         <div class="admin-actions" style="margin-top:14px;">
           <button class="admin-btn" type="submit" id="pwSubmit">${forced ? "Set password" : "Change password"}</button>
-          ${forced ? `<button class="admin-btn" type="button" onclick="adminSignOut()">Sign out</button>` : ""}
+          ${forced ? `<button class="admin-btn" type="button" data-admin-action="adminSignOut">Sign out</button>` : ""}
         </div>
       </form>
     </div>
@@ -10373,7 +10630,7 @@ function render2FAPanel(enabled){
         <input type="text" id="tfa-codes-code" inputmode="numeric" maxlength="12"
                autocomplete="one-time-code" placeholder="6-digit code" style="width:180px;margin-top:4px;" />
         <div class="admin-actions" style="margin:10px 0 22px;">
-          <button class="admin-btn" onclick="submit2FANewCodes()">Make new recovery codes</button>
+          <button class="admin-btn" data-admin-action="submit2FANewCodes">Make new recovery codes</button>
         </div>
         ${_tfa.required ? `
         <p class="admin-note" id="tfa-required-note">Two-step sign-in is required here, so it can't be switched off. To move it to a new phone, ask an admin to reset it (Settings → Users); you then set it up again at your next sign-in.</p>` : `
@@ -10383,7 +10640,7 @@ function render2FAPanel(enabled){
         <input type="text" id="tfa-disable-code" inputmode="numeric" maxlength="12"
                autocomplete="one-time-code" placeholder="6-digit code" style="width:180px;margin-top:4px;" />
         <div class="admin-actions" style="margin-top:14px;">
-          <button class="admin-btn" onclick="submit2FADisable()">Disable 2FA</button>
+          <button class="admin-btn" data-admin-action="submit2FADisable">Disable 2FA</button>
         </div>`}
         <div id="tfa-error" class="admin-error" style="margin-top:8px;"></div>
       </div>
@@ -10398,8 +10655,8 @@ function render2FAPanel(enabled){
             : "Not enabled. Add Google Authenticator (or any TOTP app) to require a 6-digit code at every login." + (_tfa.required ? " It is required here: you will be asked to set it up at your next sign-in." : "")}
         </p>
         <div class="admin-actions" style="margin-bottom:20px;">
-          <button class="admin-btn" onclick="start2FASetup()">Set up 2FA</button>
-          ${_tfa.forced ? `<button class="admin-btn" type="button" onclick="adminSignOut()">Sign out</button>` : ""}
+          <button class="admin-btn" data-admin-action="start2FASetup">Set up 2FA</button>
+          ${_tfa.forced ? `<button class="admin-btn" type="button" data-admin-action="adminSignOut">Sign out</button>` : ""}
         </div>
         <div id="tfa-setup-area"></div>
       </div>
@@ -10421,8 +10678,8 @@ function render2FACodes_(codes, then){
         They are shown only now. Write them down or print them, and keep them somewhere other than that phone.</p>
       <pre id="tfa-codes" style="font-size:16px;letter-spacing:.08em;background:#f5f5f5;padding:12px 16px;border-radius:6px;border:1px solid #ddd;user-select:all;display:inline-block;margin:0 0 14px;">${codes.map(escapeHtml).join("\n")}</pre>
       <div class="admin-actions">
-        <button class="admin-btn" type="button" onclick="copy2FACodes()">Copy</button>
-        <button class="admin-btn" type="button" id="tfa-codes-done" onclick="finish2FACodes()">I have saved them</button>
+        <button class="admin-btn" type="button" data-admin-action="copy2FACodes">Copy</button>
+        <button class="admin-btn" type="button" id="tfa-codes-done" data-admin-action="finish2FACodes">I have saved them</button>
       </div>
     </div>`;
 }
@@ -10493,7 +10750,7 @@ async function start2FASetup(){
     <div style="margin:14px 0 4px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:#555;">Your setup key</div>
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
       <code id="tfa-secret-display" style="font-size:18px;letter-spacing:.15em;background:#f5f5f5;padding:8px 14px;border-radius:6px;border:1px solid #ddd;user-select:all;">${escapeHtml(secret)}</code>
-      <button class="admin-btn" style="font-size:13px;padding:6px 12px;" onclick="copy2FAKey()">Copy key</button>
+      <button class="admin-btn" style="font-size:13px;padding:6px 12px;" data-admin-action="copy2FAKey">Copy key</button>
     </div>
     <input type="hidden" id="tfa-proposed-secret" value="${escapeHtml(secret)}" />
     <div style="margin-top:18px;">
@@ -10501,7 +10758,7 @@ async function start2FASetup(){
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap;">
         <input type="text" id="tfa-verify-code" inputmode="numeric" maxlength="6"
                autocomplete="one-time-code" placeholder="6-digit code" style="width:180px;" />
-        <button class="admin-btn" onclick="submit2FAActivate()">Activate 2FA</button>
+        <button class="admin-btn" data-admin-action="submit2FAActivate">Activate 2FA</button>
       </div>
     </div>
     <div id="tfa-error" class="admin-error" style="margin-top:8px;"></div>
@@ -10628,7 +10885,7 @@ async function renderUsers(app){
 }
 // The two tabs: Users, and Roles and permissions.
 function usersTabsHtml_(){
-  const tab = (key, label) => `<button type="button" class="admin-btn${_usersTab === key ? "" : " admin-btn-secondary"}" role="tab" aria-selected="${_usersTab === key}" data-tab="${key}" onclick="usersShowTab_(this.dataset.tab)">${label}</button>`;
+  const tab = (key, label) => `<button type="button" class="admin-btn${_usersTab === key ? "" : " admin-btn-secondary"}" role="tab" aria-selected="${_usersTab === key}" data-tab="${key}" data-admin-action="usersShowTab_">${label}</button>`;
   return `<div class="users-tabs" role="tablist">${tab("users", "Users")}${tab("roles", "Roles and permissions")}</div>`;
 }
 async function usersShowTab_(tab){
@@ -10664,22 +10921,22 @@ async function loadUsers_(){
       <td style="padding:8px 10px;"><strong>${escapeHtml(u.name || "(no name yet)")}</strong>${mine ? " <span class=\"admin-note\">(you)</span>" : ""}<div class="admin-note">${escapeHtml(u.email || "(no email yet)")}</div>
         ${notes.length ? `<div class="admin-note" style="color:#b9770e;font-weight:600;">${escapeHtml(notes.join("; "))}</div>` : ""}</td>
       <td style="padding:8px 10px;">${locked ? escapeHtml(roleNameOf_(u.role))
-        : `<select class="user-role" aria-label="Role of ${escapeHtml(u.name || u.email || "this user")}" onchange="usersSetRole_(${u.id}, this.value)" ${off ? "disabled" : ""}>${roleOptions(u.role)}</select>`}</td>
+        : `<select class="user-role" aria-label="Role of ${escapeHtml(u.name || u.email || "this user")}" data-uid="${u.id}" data-admin-change="usersSetRole_" ${off ? "disabled" : ""}>${roleOptions(u.role)}</select>`}</td>
       <td style="padding:8px 10px;">${off ? "Disabled" : "Active"}</td>
       <td style="padding:8px 10px;">${u.has2fa ? "On" : "Off"}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${escapeHtml(when(u.lastLoginAt))}</td>
       <td style="padding:8px 10px;white-space:nowrap;">
-        ${locked && !mine ? `<span class="admin-note">${canEdit && rankOf(u.role) < myRank ? "Their role can do more than yours" : "Ranked at or above you"}</span>`: !canEdit ? "" : `<button class="admin-btn admin-btn-sm" onclick="usersEdit_(${u.id})">Edit</button>`}
+        ${locked && !mine ? `<span class="admin-note">${canEdit && rankOf(u.role) < myRank ? "Their role can do more than yours" : "Ranked at or above you"}</span>`: !canEdit ? "" : `<button class="admin-btn admin-btn-sm" data-uid="${u.id}" data-admin-action="usersEdit_">Edit</button>`}
         ${locked ? "" : `
-        <button class="admin-btn admin-btn-sm" onclick="usersResetPassword_(${u.id})">Reset password</button>
-        ${u.has2fa ? `<button class="admin-btn admin-btn-sm" onclick="usersReset2fa_(${u.id})">Reset two-step</button>` : ""}
-        <button class="admin-btn admin-btn-sm" onclick="usersSetStatus_(${u.id}, '${off ? "active" : "disabled"}')">${off ? "Enable" : "Disable"}</button>`}
+        <button class="admin-btn admin-btn-sm" data-uid="${u.id}" data-admin-action="usersResetPassword_">Reset password</button>
+        ${u.has2fa ? `<button class="admin-btn admin-btn-sm" data-uid="${u.id}" data-admin-action="usersReset2fa_">Reset two-step</button>` : ""}
+        <button class="admin-btn admin-btn-sm" data-uid="${u.id}" data-status="${off ? "active" : "disabled"}" data-admin-action="usersSetStatus_">${off ? "Enable" : "Disable"}</button>`}
       </td></tr>`;
   };
   panel.innerHTML = `
     ${usersTabsHtml_()}
     <h2 style="margin-bottom:8px;">Users</h2>
-    <div class="admin-note" style="margin-bottom:12px;">What each role sees and may do is set under <a href="javascript:void 0" onclick="usersShowTab_('roles')">Roles and permissions</a>.
+    <div class="admin-note" style="margin-bottom:12px;">What each role sees and may do is set under <a href="#" data-admin-action="usersShowRoles_">Roles and permissions</a>.
       You can only change someone whose role ranks below yours, and only give a role ranked below yours. Nobody changes their own role.
       A user is disabled, never deleted, so the audit log keeps their name.</div>
     <div style="overflow-x:auto;"><table class="stack-mobile" id="usersTable" style="border-collapse:collapse;width:100%;font-size:14px;">
@@ -10687,7 +10944,7 @@ async function loadUsers_(){
         <th style="padding:6px 10px;">Name</th><th style="padding:6px 10px;">Role</th><th style="padding:6px 10px;">Status</th><th style="padding:6px 10px;">Two-step</th><th style="padding:6px 10px;">Last sign-in</th><th style="padding:6px 10px;"></th></tr></thead>
       <tbody>${_usersList.map(row).join("")}</tbody></table></div>
 
-    ${!canEdit ? "" : `<form class="admin-form" id="userForm" onsubmit="usersSave_(event)" style="max-width:520px;margin-top:26px;">
+    ${!canEdit ? "" : `<form class="admin-form" id="userForm" data-admin-submit="usersSave_" style="max-width:520px;margin-top:26px;">
       <h2 id="userFormTitle" style="margin-bottom:10px;">Add a user</h2>
       <input type="hidden" id="userId" value="" />
       <label for="userName">Name</label>
@@ -10699,14 +10956,14 @@ async function loadUsers_(){
       <div class="admin-note" id="userFormNote">They get a temporary password, shown to you once, and must choose their own at their first sign-in.</div>
       <div class="admin-actions" style="margin-top:12px;">
         <button class="admin-btn" type="submit" id="userSubmit">Add user</button>
-        <button class="admin-btn" type="button" id="userCancel" style="display:none;" onclick="usersEdit_(null)">Cancel</button>
+        <button class="admin-btn" type="button" id="userCancel" style="display:none;" data-admin-action="usersAdd_">Cancel</button>
       </div>
     </form>`}
 
     ${!iAmAdmin ? "" : `<div class="admin-form" style="max-width:520px;margin-top:26px;">
       <h2 style="margin-bottom:10px;">Two-step sign-in</h2>
       <label style="display:flex;gap:8px;align-items:flex-start;">
-        <input type="checkbox" id="require2fa" ${data.require2fa ? "checked" : ""} onchange="usersSetRequire2fa_(this)" style="margin-top:3px;" />
+        <input type="checkbox" id="require2fa" ${data.require2fa ? "checked" : ""} data-admin-change="usersSetRequire2fa_" style="margin-top:3px;" />
         <span><strong>Require two-step sign-in for everyone</strong>
           <span class="admin-note" style="display:block;">Nobody is signed out. At their next sign-in, anyone without an authenticator app must set one up before anything else opens. Turn your own on first (Security (2FA)).</span></span>
       </label>
@@ -10758,7 +11015,7 @@ function renderRolesTab_(){
   const p = draft ? draft.permissions : { menus: {}, items: {}, fns: {} };
   const myLevel = (fn) => (d.myLevels || {})[fn] || "none";
   const chips = (d.roles || []).map(r => { const on = !!(draft && draft.key === r.key);
-      return `<button type="button" class="admin-btn role-chip${on ? "" : " admin-btn-secondary"}" aria-pressed="${on}" data-key="${escapeHtml(r.key)}" onclick="roleSelect_(this.dataset.key)">${escapeHtml(r.name)} <span class="perm-count">· ${r.userCount} ${r.userCount === 1 ? "user" : "users"}</span></button>`; }).join("")
+      return `<button type="button" class="admin-btn role-chip${on ? "" : " admin-btn-secondary"}" aria-pressed="${on}" data-key="${escapeHtml(r.key)}" data-admin-action="roleSelect_">${escapeHtml(r.name)} <span class="perm-count">· ${r.userCount} ${r.userCount === 1 ? "user" : "users"}</span></button>`; }).join("")
     + (draft && !draft.key ? `<button type="button" class="admin-btn role-chip" aria-pressed="true">${escapeHtml(draft.name || "New role")}</button>` : "");
   const menuHtml = (m) => {
     const mOn = p.menus[m.key] !== false;
@@ -10768,19 +11025,19 @@ function renderRolesTab_(){
         <div class="perm-fn"><span class="perm-fn-label">${escapeHtml(label)}</span>
           <span class="perm-seg" role="radiogroup" aria-label="${escapeHtml(label)}">${ROLE_LEVELS_.map(([lvl, name]) => {
             const over = ADMIN_LEVEL_RANK_[lvl] > ADMIN_LEVEL_RANK_[myLevel(fn)];
-            return `<label class="${lvl === "full" ? "perm-full" : ""}" title="${over ? "More than your own role has" : ""}"><input type="radio" name="perm-${escapeHtml(fn)}" value="${lvl}" ${(p.fns[fn] || "none") === lvl ? "checked" : ""} ${dis || (over ? "disabled" : "")} data-fn="${escapeHtml(fn)}" onchange="roleSetLevel_(this.dataset.fn, this.value)" /><span>${name}</span></label>`;
+            return `<label class="${lvl === "full" ? "perm-full" : ""}" title="${over ? "More than your own role has" : ""}"><input type="radio" name="perm-${escapeHtml(fn)}" value="${lvl}" ${(p.fns[fn] || "none") === lvl ? "checked" : ""} ${dis || (over ? "disabled" : "")} data-fn="${escapeHtml(fn)}" data-admin-change="roleSetLevel_" /><span>${name}</span></label>`;
           }).join("")}</span></div>`).join("");
-      return `<div class="perm-item"><div class="perm-item-head"><label class="perm-switch"><input type="checkbox" ${iOn ? "checked" : ""} ${dis} data-item="${escapeHtml(it.hash)}" onchange="roleSetItem_(this.dataset.item, this.checked)" /> ${escapeHtml(it.label)}</label>${iOn ? "" : `<span class="perm-off">hidden</span>`}</div>${fns}</div>`;
+      return `<div class="perm-item"><div class="perm-item-head"><label class="perm-switch"><input type="checkbox" ${iOn ? "checked" : ""} ${dis} data-item="${escapeHtml(it.hash)}" data-admin-change="roleSetItem_" /> ${escapeHtml(it.label)}</label>${iOn ? "" : `<span class="perm-off">hidden</span>`}</div>${fns}</div>`;
     }).join("");
     const anyOn = mOn && m.items.some(it => p.items[it.hash] !== false && it.fns.some(([fn]) => roleFnOn_(p, fn)));
-    return `<div class="perm-menu"><div class="perm-menu-head"><label class="perm-switch"><input type="checkbox" ${anyOn ? "checked" : ""} ${dis} data-menu="${escapeHtml(m.key)}" onchange="roleSetMenu_(this.dataset.menu, this.checked)" /> ${escapeHtml(m.label)}</label>${anyOn ? "" : `<span class="perm-off">hidden</span>`}</div>${anyOn ? items : ""}</div>`;
+    return `<div class="perm-menu"><div class="perm-menu-head"><label class="perm-switch"><input type="checkbox" ${anyOn ? "checked" : ""} ${dis} data-menu="${escapeHtml(m.key)}" data-admin-change="roleSetMenu_" /> ${escapeHtml(m.label)}</label>${anyOn ? "" : `<span class="perm-off">hidden</span>`}</div>${anyOn ? items : ""}</div>`;
   };
   panel.innerHTML = `
     ${usersTabsHtml_()}
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
       <h2 style="margin:0;flex:1;">Roles and permissions</h2>
-      ${adminCan_("settings.users", "edit") && myRank > 1 ? `<button type="button" class="admin-btn" onclick="roleNew_(null)">＋ Add role</button>
-      <button type="button" class="admin-btn" ${draft && draft.key && !draft.locked ? "" : "disabled"} onclick="roleNew_(_roleDraft && _roleDraft.key)">Copy role</button>` : ""}
+      ${adminCan_("settings.users", "edit") && myRank > 1 ? `<button type="button" class="admin-btn" data-admin-action="roleNew_">＋ Add role</button>
+      <button type="button" class="admin-btn" ${draft && draft.key && !draft.locked ? "" : "disabled"} data-admin-action="roleCopy_">Copy role</button>` : ""}
     </div>
     <div class="admin-note" style="margin-bottom:12px;"><strong>Read</strong> can open and look. <strong>Edit</strong> can add and change. <strong>Full</strong> is Edit plus delete, void, refund and write off.
       A menu or item switched off is hidden, and the server refuses everything in it. Your own password and two-step sign-in are always there.</div>
@@ -10788,15 +11045,15 @@ function renderRolesTab_(){
     ${!draft ? "" : `
     <div class="role-editor">
       <div class="role-fields">
-        <label class="role-field" for="roleName">Name<input type="text" id="roleName" maxlength="40" value="${escapeHtml(draft.name)}" ${dis} oninput="_roleDraft.name=this.value" style="width:220px;" /></label>
-        <label class="role-field" for="roleRank">Rank (1–${Math.max(1, myRank - 1)})<input type="number" id="roleRank" min="1" max="${Math.max(1, myRank - 1)}" step="1" value="${draft.rank}" ${dis} oninput="_roleDraft.rank=Number(this.value)" style="width:90px;" /></label>
+        <label class="role-field" for="roleName">Name<input type="text" id="roleName" maxlength="40" value="${escapeHtml(draft.name)}" ${dis} data-admin-input="roleDraftName_" style="width:220px;" /></label>
+        <label class="role-field" for="roleRank">Rank (1–${Math.max(1, myRank - 1)})<input type="number" id="roleRank" min="1" max="${Math.max(1, myRank - 1)}" step="1" value="${draft.rank}" ${dis} data-admin-input="roleDraftRank_" style="width:90px;" /></label>
         <div class="admin-note" style="flex:1;min-width:220px;">${draft.locked ? "Admin always has everything and can't be changed." : !draft.canEdit ? "This role ranks at or above yours, so you can see it but not change it." : "Only someone whose role ranks above this one can change it, or give it to someone." + (draft.builtIn ? " A built-in role can be changed but not deleted." : "")}</div>
       </div>
       ${(d.areas || []).map(menuHtml).join("")}
       ${!editable ? "" : `<div class="admin-actions" style="margin-top:12px;">
-        <button type="button" class="admin-btn" onclick="roleSave_()">${draft.key ? "Save role" : "Add role"}</button>
-        ${draft.key ? `<button type="button" class="admin-btn" onclick="roleSelect_(_roleDraft.key)">Undo changes</button>` : `<button type="button" class="admin-btn" onclick="loadRoles_()">Cancel</button>`}
-        ${draft.key && !draft.builtIn ? `<button type="button" class="admin-btn admin-btn-danger" onclick="roleDelete_()" ${draft.userCount ? `title="Give its users another role first"` : ""}>Delete role</button>` : ""}
+        <button type="button" class="admin-btn" data-admin-action="roleSave_">${draft.key ? "Save role" : "Add role"}</button>
+        ${draft.key ? `<button type="button" class="admin-btn" data-admin-action="roleUndoChanges_">Undo changes</button>` : `<button type="button" class="admin-btn" data-admin-action="loadRoles_">Cancel</button>`}
+        ${draft.key && !draft.builtIn ? `<button type="button" class="admin-btn admin-btn-danger" data-admin-action="roleDelete_" ${draft.userCount ? `title="Give its users another role first"` : ""}>Delete role</button>` : ""}
       </div>`}
     </div>`}`;
 }
@@ -11012,7 +11269,7 @@ function applyCloneOrg(){
 }
 
 // Address formats follow the country in Global settings → Region. It arrives with /api/catalog
-// (index.html's siteCountry / isUS_); "US" until told otherwise.
+// (storefront.js's siteCountry / isUS_); "US" until told otherwise.
 function adminIsUS_(){ return typeof isUS_ !== "function" || isUS_(); }
 
 // ---- A shop's delivery & pickup options (migrations/0045) — the managed list on the org form ------
@@ -11133,7 +11390,7 @@ function renderOrgForm(app, org){
                 ${(window._adminOrgRegistry || []).map(o => `<option value="${escapeHtml(o.orgId)}">${escapeHtml(o.name)}</option>`).join("")}
               </select>
             </label>
-            <button class="admin-btn" type="button" data-need="catalog.shops:edit" onclick="applyCloneOrg()">Apply</button>
+            <button class="admin-btn" type="button" data-need="catalog.shops:edit" data-admin-action="applyCloneOrg">Apply</button>
           </div>
           <label class="checkbox-row" style="margin-top:6px;"><input type="checkbox" id="orgFormCopyProducts"> Also copy that shop's products (with their photos) — artwork this shop doesn't have yet is left off and listed</label>
         </div>` : ""}
@@ -11224,8 +11481,8 @@ function renderOrgForm(app, org){
         </label>
         <div id="orgFormError" class="admin-error"></div>
         <div class="admin-actions">
-          <button class="admin-btn" onclick="submitOrgForm(${isEdit ? "true" : "false"})">${isEdit ? "Save changes" : "Create shop"}</button>
-          <button class="admin-btn" onclick="location.hash='#catalog'">Cancel</button>
+          <button class="admin-btn" data-edit="${isEdit ? "1" : "0"}" data-admin-action="submitOrgForm">${isEdit ? "Save changes" : "Create shop"}</button>
+          <button class="admin-btn" data-admin-action="goCatalog_">Cancel</button>
         </div>
       </div>
     </div>
@@ -11339,8 +11596,8 @@ async function loadOrgDomainBox_(orgId, action){
   const subEl = document.getElementById("orgFormSubdomain");
   box.innerHTML = `<strong>Custom domain:</strong> ${escapeHtml(orgDomainText_(d, subEl && subEl.value.trim()))}
     ${d && d.configured ? `<div style="margin-top:6px;display:flex;gap:6px;">
-      ${canSetUp ? `<button type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;" data-org="${escapeHtml(orgId)}" onclick="loadOrgDomainBox_(this.dataset.org, 'setupOrgDomain')">${d.exists ? "Retry setup" : "Set up domain"}</button>` : ""}
-      <button data-perm-keep type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;" data-org="${escapeHtml(orgId)}" onclick="loadOrgDomainBox_(this.dataset.org, 'getOrgDomainStatus')">Check again</button>
+      ${canSetUp ? `<button type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;" data-org="${escapeHtml(orgId)}" data-admin-action="orgDomainSetup_">${d.exists ? "Retry setup" : "Set up domain"}</button>` : ""}
+      <button data-perm-keep type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;" data-org="${escapeHtml(orgId)}" data-admin-action="orgDomainCheck_">Check again</button>
     </div>` : ""}`;
 }
 
@@ -11527,7 +11784,7 @@ function productPriceSummary(p){
 
 // A shop's products in the order its page shows them: one group per category, in the managed order
 // (Catalog → Product categories; a category that's since been deleted comes last), each group's products
-// in the server's order. Mirrors renderOrgPage in index.html. The shop's page leaves hidden products
+// in the server's order. Mirrors renderOrgPage in storefront.js. The shop's page leaves hidden products
 // out; here they're listed too, AFTER the section's visible ones — so the rows above them read exactly
 // as customers see them, and moving a product one place always changes the shop's page.
 function groupProductsByCategory_(products){
@@ -11566,7 +11823,7 @@ function renderProductListTable(orgId, products){
   const panel = document.getElementById("adminPanel");
   const groups = groupProductsByCategory_(products);
   const arrow = (p, dir, off) => `<button type="button" class="admin-btn prod-move" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-dir="${dir}"
-      data-need="catalog.products:edit" onclick="moveProduct_(this.dataset.org, this.dataset.product, Number(this.dataset.dir))" ${off ? "disabled" : ""}
+      data-need="catalog.products:edit" data-admin-action="moveProduct_" ${off ? "disabled" : ""}
       aria-label="Move ${escapeHtml(p.name)} ${dir < 0 ? "up" : "down"}" title="Move ${dir < 0 ? "up" : "down"}"
       style="padding:2px 9px;font-size:13px;line-height:1.2;${off ? "opacity:.35;cursor:default;" : ""}">${dir < 0 ? "&uarr;" : "&darr;"}</button>`;
   // A unit's first product carries the unit's ↑ ↓; its other versions are listed under it, indented.
@@ -11581,9 +11838,9 @@ function renderProductListTable(orgId, products){
       <td data-label="Price">${productPriceSummary(p)}</td>
       <td data-label="Visibility">${p.visible ? "Visible" : "Hidden"}</td>
       <td class="stack-actions">
-        <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products/'+encodeURIComponent(this.dataset.product)+'/edit'">Edit</button>
-        <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-visible="${p.visible ? "0" : "1"}" data-need="catalog.products:edit" onclick="toggleProductVisible(this.dataset.org, this.dataset.product, this.dataset.visible === '1')" style="margin-top:4px;">${p.visible ? "Hide" : "Show"}</button>
-        ${`<button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-product-name="${escapeHtml(p.name)}" data-pricing-mode="${escapeHtml(p.pricingMode || "sized")}" data-size-pricing="${escapeHtml(JSON.stringify(p.sizePricing || {}))}" data-need="inventory.blanks:read" onclick="showStockModal(this.dataset.org, this.dataset.product, this.dataset.productName, this.dataset.pricingMode, JSON.parse(this.dataset.sizePricing))" style="margin-top:4px;" title="Finished stock: pieces already decorated for this shop">Stock</button>`}
+        <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-admin-action="goProductEdit_">Edit</button>
+        <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-visible="${p.visible ? "0" : "1"}" data-need="catalog.products:edit" data-admin-action="toggleProductVisible" style="margin-top:4px;">${p.visible ? "Hide" : "Show"}</button>
+        ${`<button class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-product-name="${escapeHtml(p.name)}" data-pricing-mode="${escapeHtml(p.pricingMode || "sized")}" data-size-pricing="${escapeHtml(JSON.stringify(p.sizePricing || {}))}" data-need="inventory.blanks:read" data-admin-action="showStockModal" style="margin-top:4px;" title="Finished stock: pieces already decorated for this shop">Stock</button>`}
       </td>
     </tr>`;
   // One table per category, with the same column widths so the sections line up.
@@ -11598,13 +11855,13 @@ function renderProductListTable(orgId, products){
       </div>`).join("");
   panel.innerHTML = `
     <div class="admin-actions" style="margin:6px 0 10px 0;">
-      <button data-need="catalog.products:edit" class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="location.hash='#wizard/'+encodeURIComponent(this.dataset.org)+'/products'" title="Pick blanks and turn them into products, one question at a time">＋ Add products from blanks</button>
-      <button data-need="catalog.products:edit" class="admin-btn admin-btn-secondary" data-org="${escapeHtml(orgId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products/new'">+ New Product (full form)</button>
+      <button data-need="catalog.products:edit" class="admin-btn" data-org="${escapeHtml(orgId)}" data-admin-action="goWizardProducts_" title="Pick blanks and turn them into products, one question at a time">＋ Add products from blanks</button>
+      <button data-need="catalog.products:edit" class="admin-btn admin-btn-secondary" data-org="${escapeHtml(orgId)}" data-admin-action="goProductNew_">+ New Product (full form)</button>
       <button data-need="catalog.products:edit" class="admin-btn" id="prodImportCsvBtn" title="Add or update many products at once from a spreadsheet saved as CSV">Import CSV&hellip;</button>
       <button class="admin-btn" id="prodCopyBtn" title="Copy products — with their prices, sizes, colors and blank links — from another shop">Copy from another shop&hellip;</button>
       ${adminCan_("costs.view", "read") ? `<button class="admin-btn" id="prodListPriceBtn" title="What each item costs and leaves, and which are below your targets">Price analysis</button>` : ""}
       <input type="file" id="prodImportCsvFile" accept=".csv,text/csv" style="display:none;">
-      ${adminCan_("catalog.shops", "read") && !adminDesktop_() ? `<button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(orgId)}" onclick="previewShop_(this.dataset.org)" title="Open the shop page as it will look after Publish">Preview</button>` : ""}
+      ${adminCan_("catalog.shops", "read") && !adminDesktop_() ? `<button class="admin-btn admin-btn-secondary" data-org="${escapeHtml(orgId)}" data-admin-action="previewShop_" title="Open the shop page as it will look after Publish">Preview</button>` : ""}
     </div>
     <div data-publish-state="${escapeHtml(orgId)}" class="admin-note"></div>
     <div id="publishStatus" class="admin-note"></div>
@@ -12088,7 +12345,7 @@ function renderProductForm(app, orgId, product){
       <div class="stitch stitch-thick"></div>
     </div>
     <div class="admin-actions" style="margin:6px 0 10px 0;align-items:center;">
-      <button data-perm-keep class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products'">&larr; Products</button>
+      <button data-perm-keep class="admin-btn" data-org="${escapeHtml(orgId)}" data-admin-action="goShopProducts_">&larr; Products</button>
       <span style="font-size:13px;color:var(--ink-soft);">${isEdit ? "Edit product" : "New product"} — ${escapeHtml(orgName)}</span>
     </div>
     <div class="admin-panel" data-need-form="catalog.products:edit" style="--org-accent:var(--accent);">
@@ -12202,7 +12459,7 @@ function renderProductForm(app, orgId, product){
           <input type="number" min="0" step="0.01" id="prodFormPersPrice" value="${product && product.personalizationPrice != null ? product.personalizationPrice : ""}" placeholder="e.g. 2">
         </label>
         <label>Personalization options (one per line — leave blank for free-form text input)
-          <textarea id="prodFormPersOptions" placeholder="e.g.&#10;COACH&#10;CAPTAIN&#10;VOLUNTEER" oninput="drawProductPersSetup_()">${escapeHtml((product && product.personalizationOptions && product.personalizationOptions.length ? product.personalizationOptions : []).join("\n"))}</textarea>
+          <textarea id="prodFormPersOptions" placeholder="e.g.&#10;COACH&#10;CAPTAIN&#10;VOLUNTEER" data-admin-input="drawProductPersSetup_">${escapeHtml((product && product.personalizationOptions && product.personalizationOptions.length ? product.personalizationOptions : []).join("\n"))}</textarea>
         </label>
         <div id="prodFormPersSetup" style="font-size:13px;"><em style="color:#888;">Loading personalization setup&hellip;</em></div>
         </section>
@@ -12210,7 +12467,7 @@ function renderProductForm(app, orgId, product){
           <div class="prod-card-head"><h3>Prices &amp; costs</h3><span class="prod-card-flag"></span></div>
           
         <label>Pricing
-          <select id="prodFormPricingMode" onchange="toggleProductPricingModeFields()">
+          <select id="prodFormPricingMode" data-admin-change="toggleProductPricingModeFields">
             <option value="sized" ${pricingMode === "sized" ? "selected" : ""}>By size</option>
             <option value="flat" ${pricingMode === "flat" ? "selected" : ""}>Flat (one price)</option>
           </select>
@@ -12270,8 +12527,8 @@ function renderProductForm(app, orgId, product){
         </section>
         <div id="prodFormError" class="admin-error"></div>
         <div class="admin-actions">
-          <button class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="submitProductForm(this.dataset.org, ${isEdit ? "true" : "false"})">${isEdit ? "Save changes" : "Create product"}</button>
-          <button class="admin-btn" data-org="${escapeHtml(orgId)}" onclick="location.hash='#catalog/orgs/'+encodeURIComponent(this.dataset.org)+'/products'">Cancel</button>
+          <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-edit="${isEdit ? "1" : "0"}" data-admin-action="submitProductForm">${isEdit ? "Save changes" : "Create product"}</button>
+          <button class="admin-btn" data-org="${escapeHtml(orgId)}" data-admin-action="goShopProducts_">Cancel</button>
         </div>
       </div>
     </div>
@@ -12522,7 +12779,7 @@ function drawProductDesignRows_(){
     }).join("") : `<div style="color:#888;font-size:13px;">No designs linked yet.</div>`}
     <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
       <button type="button" class="admin-btn" id="pdAdd">+ Add design</button>
-      <button type="button" class="admin-btn" onclick="location.hash='#designs/'+encodeURIComponent(window._productDesignCtx.orgId)">Manage designs&hellip;</button>
+      <button type="button" class="admin-btn" data-admin-action="goProductDesigns_">Manage designs&hellip;</button>
     </div>`;
   const rerow = () => drawProductDesignRows_();
   el.querySelectorAll(".pd-design").forEach(x => x.onchange = () => { ctx.rows[x.dataset.i].designId = Number(x.value) || null; rerow(); });
@@ -12685,10 +12942,10 @@ function versionsBoxHtml_(orgId, product){
       <div style="font-weight:600;font-size:13px;margin-bottom:4px;">Versions</div>${inner}</div>`;
   if (!others.length) return box(`
       <div class="admin-note" style="margin:0 0 6px;">Sell this in two versions on one card — e.g. short and long sleeve. Each version is its own product with its own sizes and prices, blanks, colors, photos and overlays; the shop page shows a toggle between them.</div>
-      <button type="button" class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" data-need="catalog.products:edit" onclick="showAddVersionModal_(this.dataset.org, this.dataset.product)">+ Add a version (e.g. long sleeve)…</button>`);
+      <button type="button" class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" data-need="catalog.products:edit" data-admin-action="showAddVersionModal_">+ Add a version (e.g. long sleeve)…</button>`);
   const tab = (p) => p.productId === product.productId
     ? `<span class="admin-btn" aria-current="true" style="padding:4px 12px;font-size:13px;">${escapeHtml(p.versionLabel || p.productId)}</span>`
-    : `<button data-perm-keep type="button" class="admin-btn version-tab" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" onclick="versionGoTo_(this.dataset.org, this.dataset.product)" style="padding:4px 12px;font-size:13px;background:#fff;color:var(--ink,#111);border:1px solid var(--card-line,#ccc);">${escapeHtml(p.versionLabel || p.productId)}${p.visible ? "" : " (hidden)"}</button>`;
+    : `<button data-perm-keep type="button" class="admin-btn version-tab" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(p.productId)}" data-admin-action="versionGoTo_" style="padding:4px 12px;font-size:13px;background:#fff;color:var(--ink,#111);border:1px solid var(--card-line,#ccc);">${escapeHtml(p.versionLabel || p.productId)}${p.visible ? "" : " (hidden)"}</button>`;
   const other = others[0];
   return box(`
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;" role="tablist" aria-label="Versions">${all.map(tab).join("")}</div>
@@ -12697,8 +12954,8 @@ function versionsBoxHtml_(orgId, product){
       </label>
       <div class="admin-note" style="margin:4px 0 8px;">Saved with Save changes. Orders show it after the product name — "${escapeHtml(product.name || "")} (${escapeHtml(product.versionLabel || "…")})".</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
-        <button type="button" class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" data-from="${escapeHtml(other.productId)}" data-need="catalog.products:edit" onclick="copyVersionSettings_(this.dataset.org, this.dataset.product, this.dataset.from)" title="Name, subtitle, features, personalization, the customer's-design setting, graphics at each location and designs — not prices, sizes, blanks, colors, photos or overlays">Copy settings from ${escapeHtml(other.versionLabel || other.productId)}</button>
-        <button type="button" class="admin-btn admin-btn-danger" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" data-need="catalog.products:edit" onclick="separateVersion_(this.dataset.org, this.dataset.product)" >Separate from ${escapeHtml(other.versionLabel || other.productId)}</button>
+        <button type="button" class="admin-btn" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" data-from="${escapeHtml(other.productId)}" data-need="catalog.products:edit" data-admin-action="copyVersionSettings_" title="Name, subtitle, features, personalization, the customer's-design setting, graphics at each location and designs — not prices, sizes, blanks, colors, photos or overlays">Copy settings from ${escapeHtml(other.versionLabel || other.productId)}</button>
+        <button type="button" class="admin-btn admin-btn-danger" data-org="${escapeHtml(orgId)}" data-product="${escapeHtml(product.productId)}" data-need="catalog.products:edit" data-admin-action="separateVersion_" >Separate from ${escapeHtml(other.versionLabel || other.productId)}</button>
       </div>`);
 }
 // Reload the shop's products, then open one of them (the list is what the edit page reads).
@@ -14120,7 +14377,7 @@ async function renderRevenueReport(app) {
           <button type="submit" class="admin-pass-submit" style="padding:6px 18px;font-size:13px;">Generate</button>
           ${[thisYear, thisYear-1].map(y =>
             `<button type="button" style="padding:6px 12px;font-size:12px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:var(--surface,#fff);"
-              onclick="document.getElementById('revFrom').value='${y}-01-01';document.getElementById('revTo').value='${y}-12-31';document.getElementById('revFilters').dispatchEvent(new Event('submit'));">${y}</button>`
+              data-year="${y}" data-admin-action="revenueShowYear_">${y}</button>`
           ).join("")}
         </div>
       </form>
@@ -14823,7 +15080,7 @@ function localDay_(when){
   return p ? ymd_(p.y, p.m, p.d) : "";
 }
 // Money for display, the one style everywhere in the admin: thousands separated, a true minus sign before the dollar
-// sign ("−$1,234.56", never "$-1234.56"). (The storefront's own `money` in index.html is shoppers' and stays as it is.)
+// sign ("−$1,234.56", never "$-1234.56"). (The storefront's own `money` in storefront.js is shoppers' and stays as it is.)
 function adminMoney_(n){
   const x = Number(n) || 0;
   return (x < 0 ? "−$" : "$") + Math.abs(x).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -15985,9 +16242,9 @@ async function showBlankHistoryModal(blank, onDone){
           <td style="${dim}padding:4px 6px;text-align:right;color:${m.qtyDelta < 0 ? "#b03a2e" : "#166534"};">${m.qtyDelta > 0 ? "+" : ""}${m.qtyDelta}</td>
           <td style="${dim}padding:4px 6px;text-align:right;">$${Number(m.unitCost).toFixed(2)}</td>
           <td style="${dim}padding:4px 6px;">${escapeHtml([m.orderId && "Order " + m.orderId, m.vendor, m.vendorRef && "#" + m.vendorRef, m.note].filter(Boolean).join(" · "))}
-            ${m.receiptKey && adminFeatureOn_("bookkeeping") ? ` <button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;" title="${escapeHtml(m.receiptName || "Receipt")}" data-key="${escapeHtml(m.receiptKey)}" onclick="expViewReceipt_(this.dataset.key)">📎 Receipt</button>` : ""}
+            ${m.receiptKey && adminFeatureOn_("bookkeeping") ? ` <button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;" title="${escapeHtml(m.receiptName || "Receipt")}" data-key="${escapeHtml(m.receiptKey)}" data-admin-action="expViewReceipt_">📎 Receipt</button>` : ""}
             ${m.voidedAt ? `<div style="color:#b03a2e;">Voided${m.voidReason ? ": " + escapeHtml(m.voidReason) : ""}</div>` : ""}</td>
-          <td style="padding:4px 6px;text-align:right;white-space:nowrap;">${!m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn admin-btn-danger" style="padding:2px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.blanks:full" onclick="voidBlankMovement_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;text-decoration:none;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" data-need="inventory.blanks:edit" title="Make this entry count toward stock and cost again" onclick="restoreBlankMovement_(this.dataset.mid)">Undo void</button>` : ""}</td>
+          <td style="padding:4px 6px;text-align:right;white-space:nowrap;">${!m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn admin-btn-danger" style="padding:2px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.blanks:full" data-admin-action="voidBlankMovement_">Void</button>` : ""}${m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;text-decoration:none;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" data-need="inventory.blanks:edit" title="Make this entry count toward stock and cost again" data-admin-action="restoreBlankMovement_">Undo void</button>` : ""}</td>
         </tr>`; }).join("")}</tbody></table>` : "No movements yet.";
     } catch (e) { ov.querySelector("#histBody").textContent = "Could not reach the server."; }
   }
@@ -17370,7 +17627,7 @@ async function mnLoad_(){
         <td style="${td}">${escapeHtml(x.vendor || "—")}${x.vendorRef ? `<div style="font-size:12px;color:#666;">#${escapeHtml(x.vendorRef)}</div>` : ""}${x.vendorChargedTax ? `<div style="font-size:11px;color:#b45309;">sales tax charged</div>` : ""}</td>
         <td style="${td}">${x.paidPersonally ? "Personal funds" : x.accountId ? escapeHtml(x.accountName || name(x.accountId)) : `<span style="color:#b45309;">not set</span>`}</td>
         <td style="${td}text-align:right;white-space:nowrap;">${fmt(x.total)}</td>
-        <td style="${td}">${x.receiptKey ? `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" title="${escapeHtml(x.receiptName || "Receipt")}" data-key="${escapeHtml(x.receiptKey)}" onclick="expViewReceipt_(this.dataset.key)">📎 Receipt</button>` : `<span style="font-size:12px;color:#999;">no receipt</span>`}
+        <td style="${td}">${x.receiptKey ? `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" title="${escapeHtml(x.receiptName || "Receipt")}" data-key="${escapeHtml(x.receiptKey)}" data-admin-action="expViewReceipt_">📎 Receipt</button>` : `<span style="font-size:12px;color:#999;">no receipt</span>`}
           <div style="margin-top:4px;"><button type="button" class="admin-btn mn-stock-acct" data-need="finance.money:edit" style="padding:3px 8px;font-size:12px;" data-kind="${escapeHtml(x.kind)}" data-id="${Number(x.ids[0])}">Change account…</button></div>
           ${x.kind === "transfers" ? `<div style="margin-top:4px;"><button type="button" class="admin-btn mn-stock-sheet" data-need="inventory.transfers:full" style="padding:3px 8px;font-size:12px;" data-id="${Number(x.ids[0])}">Edit sheet…</button></div>` : ""}</td></tr>`),
       "No blanks or transfers bought in " + escapeHtml(yr) + ".")}</div>`;
@@ -18707,9 +18964,9 @@ function expDrawRecurring_(){
         <td style="${td}white-space:nowrap;">${r.endDate ? escapeHtml(expShortDate_(r.endDate)) : "—"}</td>
         <td style="${td}white-space:nowrap;">${r.recordedCount ? `${r.recordedCount} · ${expMoney_(r.recordedTotal)}` : "None yet"}</td>
         <td style="${td}white-space:nowrap;text-align:right;">
-          <button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${r.id}" data-need="finance.expenses:edit" onclick="expEditRecurring_(this.dataset.id)">Edit…</button>
-          ${r.ended ? "" : `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${r.id}" data-need="finance.expenses:edit" onclick="expStopRecurring_(this.dataset.id)">Stop</button>`}
-          <button class="admin-btn-danger" type="button" style="padding:3px 8px;font-size:12px;border-radius:4px;cursor:pointer;" data-id="${r.id}" data-need="finance.expenses:full" onclick="expDeleteRecurring_(this.dataset.id)">Delete</button>
+          <button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${r.id}" data-need="finance.expenses:edit" data-admin-action="expEditRecurring_">Edit…</button>
+          ${r.ended ? "" : `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${r.id}" data-need="finance.expenses:edit" data-admin-action="expStopRecurring_">Stop</button>`}
+          <button class="admin-btn-danger" type="button" style="padding:3px 8px;font-size:12px;border-radius:4px;cursor:pointer;" data-id="${r.id}" data-need="finance.expenses:full" data-admin-action="expDeleteRecurring_">Delete</button>
         </td></tr>`).join("")}</tbody></table></div></details>`;
 }
 // Edit a recurring expense in a window: the same fields as the form. The first date is fixed once one is recorded.
@@ -18838,9 +19095,9 @@ async function expLoad_(){
         <td style="${td}text-align:right;white-space:nowrap;">${expMoney_(x.amount)}</td>
         <td style="${td}text-align:right;white-space:nowrap;">${x.deductionType === "deductible" ? expMoney_(x.deductible) : x.deductionType === "depreciation" ? `<span style="font-size:12px;color:#666;">capital</span>` : "—"}</td>
         <td style="${td}white-space:nowrap;text-align:right;">
-          ${x.receiptKey ? `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" title="${escapeHtml(x.receiptName || "Receipt")}" data-key="${escapeHtml(x.receiptKey)}" onclick="expViewReceipt_(this.dataset.key)">📎 Receipt</button>` : ""}
-          <button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${x.id}" data-need="finance.expenses:edit" onclick="expEdit_(this.dataset.id)">Edit</button>
-          <button class="admin-btn-danger" type="button" style="padding:3px 8px;font-size:12px;border-radius:4px;cursor:pointer;" data-id="${x.id}" data-need="finance.expenses:full" onclick="expDelete_(this.dataset.id)">Delete</button>
+          ${x.receiptKey ? `<button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" title="${escapeHtml(x.receiptName || "Receipt")}" data-key="${escapeHtml(x.receiptKey)}" data-admin-action="expViewReceipt_">📎 Receipt</button>` : ""}
+          <button type="button" class="admin-btn" style="padding:3px 8px;font-size:12px;" data-id="${x.id}" data-need="finance.expenses:edit" data-admin-action="expEdit_">Edit</button>
+          <button class="admin-btn-danger" type="button" style="padding:3px 8px;font-size:12px;border-radius:4px;cursor:pointer;" data-id="${x.id}" data-need="finance.expenses:full" data-admin-action="expDelete_">Delete</button>
         </td></tr>`).join("")}</tbody></table></div>`
     : `<div style="color:#888;">No expenses recorded for this period.</div>`;
 }
@@ -19089,14 +19346,14 @@ async function renderCommunications(app, opts){
     ${adminPageHead_("Communications")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:960px;margin:8px auto 60px;">
       <div style="display:flex;gap:8px;margin-bottom:16px;">
-        <button class="admin-btn" style="font-size:13px;padding:6px 14px;" onclick="refreshComms_()">Refresh</button>
+        <button class="admin-btn" style="font-size:13px;padding:6px 14px;" data-admin-action="refreshComms_">Refresh</button>
       </div>
       ${adminCan_("settings.global", "edit") ? `<details id="commsTest" style="margin:0 0 18px;border:1px solid #ddd;border-radius:6px;padding:10px 14px;background:#fafafa;">
         <summary style="cursor:pointer;font-weight:700;font-size:14px;">✉️ Send a test email</summary>
         <div style="font-size:13px;color:#555;margin:8px 0;">Sends one short message the same way order emails go, and shows what the email service answered — for finding out why emails aren't arriving.</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           <input id="commsTestTo" type="email" placeholder="you@example.com" value="${escapeHtml((adminMe && adminMe.email) || "")}" style="flex:1 1 220px;min-width:0;padding:6px 8px;font-size:14px;border:1px solid #ccc;border-radius:4px;">
-          <button id="commsTestBtn" class="admin-btn" style="font-size:13px;padding:6px 14px;" onclick="commsSendTest_()">Send test</button>
+          <button id="commsTestBtn" class="admin-btn" style="font-size:13px;padding:6px 14px;" data-admin-action="commsSendTest_">Send test</button>
         </div>
         <div id="commsTestResult" style="margin-top:10px;font-size:13px;"></div>
       </details>` : ""}
@@ -19239,12 +19496,12 @@ async function renderCommunications(app, opts){
       <ul style="margin:0;padding-left:18px;font-size:14px;">${d.recurringRecorded.map(x => `<li>${escapeHtml(x.date)} — <b>${escapeHtml(x.description)}</b> ${escapeHtml(expMoney_(x.amount))} <span style="color:#666;">· ${escapeHtml([x.frequency, x.paidFrom].filter(Boolean).join(" · "))}</span></li>`).join("")}</ul>` : ""}
     <div style="display:flex;align-items:center;gap:8px;margin:22px 0 8px;flex-wrap:wrap;">
       <h2 style="font-size:17px;margin:0;">👕 Blanks in transit from the vendor${awaitingBlanks.length ? ` — ${awaitingBlanks.length}` : ""}</h2>
-      ${adminFeatureOn_("shipping") ? `<button class="admin-btn" style="font-size:12px;padding:4px 10px;" data-need="orders.stepsEarly:edit" onclick="checkBlankShipmentsNow(this)">Check now</button>` : ""}</div>
+      ${adminFeatureOn_("shipping") ? `<button class="admin-btn" style="font-size:12px;padding:4px 10px;" data-need="orders.stepsEarly:edit" data-admin-action="checkBlankShipmentsNow">Check now</button>` : ""}</div>
     <div style="font-size:13px;color:#555;margin:0 0 8px;">Each shipment's carrier status is polled in the daily roll-up; Check now refreshes it on demand. Delivered shipments queue a reminder — mark the blanks received on the orders screen once you've counted them.</div>
     ${blanksHtml}
     <h2 style="font-size:17px;margin:22px 0 8px;">🚚 Shipped — waiting on delivery${inTransit.length ? ` — ${inTransit.length}` : ""}</h2>
     <div style="font-size:13px;color:#555;margin:0 0 8px;">Tracking checked live above. Delivered orders are marked delivered and appear under Delivered.
-      <button class="admin-btn" id="checkDeliveriesBtn" style="font-size:12px;padding:4px 10px;margin-left:8px;" onclick="refreshComms_()">Refresh</button></div>
+      <button class="admin-btn" id="checkDeliveriesBtn" style="font-size:12px;padding:4px 10px;margin-left:8px;" data-admin-action="refreshComms_">Refresh</button></div>
     ${inTransitHtml}
     ${priceReminderHtml_(d.priceReminder)}`;
 }
@@ -19265,7 +19522,7 @@ function priceReminderHtml_(pr) {
   const money = (v) => adminMoneyOr_(v, "not entered");
   return `<h2 style="font-size:17px;margin:22px 0 8px;">💲 Blank prices to check${blanks.length + products.length ? ` — ${blanks.length} blank${blanks.length === 1 ? "" : "s"}, ${products.length} product${products.length === 1 ? "" : "s"} to re-price` : ""}</h2>
     <div style="font-size:13px;color:#555;margin:0 0 8px;">Every 30 days the roll-up lists blanks used by products on sale whose vendor prices haven't been checked in 30 days, and products priced on blank prices that have since changed. ${when}${pr.lastSentAt ? ` Last sent ${escapeHtml(day(pr.lastSentAt))}.` : ""}
-      ${blanks.length ? `<button type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;margin-left:6px;" data-need="inventory.blanks:edit" onclick="refreshPriceReminderFromVendors_()">Refresh all from connected vendors</button>` : ""}</div>
+      ${blanks.length ? `<button type="button" class="admin-btn" style="font-size:12px;padding:3px 10px;margin-left:6px;" data-need="inventory.blanks:edit" data-admin-action="refreshPriceReminderFromVendors_">Refresh all from connected vendors</button>` : ""}</div>
     ${blanks.length ? `<div style="font-size:13px;margin-bottom:8px;">${blanks.map(b => `<div class="price-check-blank" data-id="${b.id}" style="padding:3px 0;"><b>${escapeHtml(b.name)}</b> <span style="color:#666;">${escapeHtml(b.vendor || "")} · ${escapeHtml(b.checkedAt ? "checked " + day(b.checkedAt) : "never checked")} · ${Number(b.sizesWithPrice) || 0}/${Number(b.sizes) || 0} sizes priced · used by ${escapeHtml((b.products || []).map(p => p.name + " (" + (p.orgName || p.orgId) + ")").join(", "))}</span></div>`).join("")}
       <a href="#inventory" style="font-size:12px;">Open Blanks →</a></div>` : ""}
     ${products.length ? `<div style="font-size:13px;">${products.map(p => `<div class="price-check-product" style="padding:3px 0;"><a href="#catalog/orgs/${encodeURIComponent(p.orgId)}/products/${encodeURIComponent(p.productId)}/edit"><b>${escapeHtml(p.name)}</b></a> <span style="color:#666;">(${escapeHtml(p.orgName || p.orgId)}) — ${escapeHtml(p.changes.map(c => `${c.blankName}${c.color ? " " + c.color : ""}${c.size ? " " + c.size : ""} ${money(c.from)} → ${money(c.to)}`).join("; "))}</span></div>`).join("")}</div>` : ""}`;
@@ -19515,9 +19772,9 @@ async function renderAuditLog(app) {
         <div style="align-self:flex-end;">
           <button type="submit" class="admin-pass-submit" style="padding:6px 18px;font-size:13px;">Search</button>
           <button type="button" style="margin-left:6px;padding:6px 12px;font-size:13px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:var(--surface,#fff);"
-                  onclick="document.getElementById('afOrg').value='';document.getElementById('afOrder').value='';document.getElementById('afAction').value='';document.getElementById('afFrom').value='${thirtyAgoStr}';document.getElementById('afTo').value='${todayStr}';document.getElementById('afLimit').value='20';document.getElementById('auditFilters').dispatchEvent(new Event('submit'));">Reset</button>
+                  data-from="${thirtyAgoStr}" data-to="${todayStr}" data-admin-action="auditReset_">Reset</button>
           <button type="button" id="afSecurity" title="Sign-ins with the installer's passphrase, password and two-step changes, and everything done under Users" style="margin-left:6px;padding:6px 12px;font-size:13px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:var(--surface,#fff);"
-                  onclick="document.getElementById('afOrg').value='';document.getElementById('afOrder').value='';document.getElementById('afAction').value='security.';document.getElementById('afLimit').value='100';document.getElementById('auditFilters').dispatchEvent(new Event('submit'));">Security &amp; users</button>
+                  data-admin-action="auditShowSecurity_">Security &amp; users</button>
         </div>
       </form>
 
@@ -19581,7 +19838,7 @@ async function renderAuditLog(app) {
               return `<tr style="${rowBg}">
                 <td style="padding:7px 10px;white-space:nowrap;border-bottom:1px solid #eee;color:var(--ink-soft,#666);">${dateStr}<br><span style="font-size:11px;">${timeStr}</span>${e.actor ? `<br><span style="font-size:11px;" title="${escapeHtml(e.ip ? "IP " + e.ip : "")}">by ${escapeHtml(e.actor)}</span>` : ""}</td>
                 <td style="padding:7px 10px;border-bottom:1px solid #eee;">${e.orgId ? escapeHtml(e.orgId) : '<span style="color:#aaa;">—</span>'}</td>
-                <td style="padding:7px 10px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px;">${e.orderId ? `<a href="#" data-order="${escapeHtml(e.orderId)}" onclick="event.preventDefault();document.getElementById('afOrder').value=this.dataset.order;document.getElementById('auditFilters').dispatchEvent(new Event('submit'));" style="color:var(--accent);">${escapeHtml(e.orderId)}</a>` : '<span style="color:#aaa;">—</span>'}</td>
+                <td style="padding:7px 10px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px;">${e.orderId ? `<a href="#" data-order="${escapeHtml(e.orderId)}" data-admin-action="auditFilterOrder_" style="color:var(--accent);">${escapeHtml(e.orderId)}</a>` : '<span style="color:#aaa;">—</span>'}</td>
                 <td style="padding:7px 10px;border-bottom:1px solid #eee;white-space:nowrap;">
                   <span style="display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600;background:${auditActionColor(e.action)};color:#fff;">${escapeHtml(label)}</span>
                 </td>
@@ -20059,14 +20316,14 @@ function renderBlanksTable(panel, app, blanks, query) {
           <td style="padding:8px 10px;font-family:monospace;font-size:12px;vertical-align:top;">${escapeHtml(b.brand)}${b.sku ? " / " + escapeHtml(b.sku) : ""}</td>
           <td style="padding:8px 10px;vertical-align:top;">${colorBlocks}<div style="font-size:11px;color:var(--ink-soft);margin-top:3px;">${totalStock} units${totalHeld ? ` · ${totalHeld} set aside` : ""} · $${totalValue.toFixed(2)} value</div></td>
           <td style="padding:8px 10px;white-space:nowrap;vertical-align:top;">
-            <button class="admin-btn" style="padding:3px 10px;font-size:12px;" data-blank-id="${b.id}" data-need="inventory.blanks:edit" onclick="blankEdit(this.dataset.blankId)">Edit</button>
-            <button class="admin-btn" style="padding:3px 10px;font-size:12px;margin-left:4px;" data-blank-id="${b.id}" onclick="blankHistory(this.dataset.blankId)" title="Every stock movement for this blank">History</button>
+            <button class="admin-btn" style="padding:3px 10px;font-size:12px;" data-blank-id="${b.id}" data-need="inventory.blanks:edit" data-admin-action="blankEdit">Edit</button>
+            <button class="admin-btn" style="padding:3px 10px;font-size:12px;margin-left:4px;" data-blank-id="${b.id}" data-admin-action="blankHistory" title="Every stock movement for this blank">History</button>
             <span data-need="inventory.blanks:edit">${adminMenuHtml_("⋯", [
-              adminMenuItem_(`data-blank-id="${b.id}" data-need="inventory.blanks:full" onclick="blankWriteOff(this.dataset.blankId)" title="Damaged, lost, or used for testing/samples/shop scrap"`, "Write off&hellip;"),
-              adminMenuItem_(`data-blank-id="${b.id}" data-need="inventory.blanks:full" onclick="blankMerge(this.dataset.blankId)" title="Fold other blanks (old per-color rows) into this one"`, "Merge&hellip;"),
-              adminMenuItem_(`data-blank-id="${b.id}" onclick="blankClone(this.dataset.blankId)" title="Start a new blank from this one: its colors, sizes, prices and photos, with no stock"`, "Clone"),
+              adminMenuItem_(`data-blank-id="${b.id}" data-need="inventory.blanks:full" data-admin-action="blankWriteOff" title="Damaged, lost, or used for testing/samples/shop scrap"`, "Write off&hellip;"),
+              adminMenuItem_(`data-blank-id="${b.id}" data-need="inventory.blanks:full" data-admin-action="blankMerge" title="Fold other blanks (old per-color rows) into this one"`, "Merge&hellip;"),
+              adminMenuItem_(`data-blank-id="${b.id}" data-admin-action="blankClone" title="Start a new blank from this one: its colors, sizes, prices and photos, with no stock"`, "Clone"),
               '<div class="admin-menu-sep" role="separator"></div>',
-              adminMenuItem_(`data-blank-id="${b.id}" data-blank-name="${escapeHtml(b.name || [b.brand, b.color].filter(Boolean).join(" "))}" data-need="inventory.blanks:full" onclick="blankDelete(this.dataset.blankId, this.dataset.blankName)"`, "Delete&hellip;", true),
+              adminMenuItem_(`data-blank-id="${b.id}" data-blank-name="${escapeHtml(b.name || [b.brand, b.color].filter(Boolean).join(" "))}" data-need="inventory.blanks:full" data-admin-action="blankDelete"`, "Delete&hellip;", true),
             ].join(""), { dots: true, ariaLabel: "More for " + (b.name || "this blank"), btnStyle: "padding:3px 10px;font-size:12px;margin-left:4px;" })}</span>
           </td>
         </tr>`;
@@ -20581,9 +20838,9 @@ async function renderThreadCatalog(app){
           <td style="padding:4px 6px;">${escapeHtml(t.name)}</td>
           <td style="padding:4px 6px;font-size:12px;">${invSummary(t)}</td>
           <td style="padding:4px 6px;text-align:right;white-space:nowrap;">
-            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="production.threads:edit" onclick="threadInventory_(this.dataset.tid)">Inventory</button>
-            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-tid="${t.id}" data-need="production.threads:edit" onclick="threadEdit_(this.dataset.tid)">Edit</button>
-            <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-tid="${t.id}" data-need="production.threads:full" onclick="threadDelete_(this.dataset.tid)">Delete</button>
+            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="production.threads:edit" data-admin-action="threadInventory_">Inventory</button>
+            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-tid="${t.id}" data-need="production.threads:edit" data-admin-action="threadEdit_">Edit</button>
+            <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-tid="${t.id}" data-need="production.threads:full" data-admin-action="threadDelete_">Delete</button>
           </td>
         </tr>`).join("")}</tbody>
       </table>`).join("");
@@ -22123,8 +22380,8 @@ async function renderHoopCatalog(app){
         <td style="padding:5px 6px;">${h.isCapFrame ? "✓ Cap frame" : "—"}</td>
         <td style="padding:5px 6px;color:#666;">${escapeHtml(h.notes)}</td>
         <td style="padding:5px 6px;text-align:right;white-space:nowrap;">
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-hid="${h.id}" data-need="production.hoops:edit" onclick="hoopEdit_(this.dataset.hid)">Edit</button>
-          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-hid="${h.id}" data-need="production.hoops:full" onclick="hoopDelete_(this.dataset.hid)">Delete</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-hid="${h.id}" data-need="production.hoops:edit" data-admin-action="hoopEdit_">Edit</button>
+          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-hid="${h.id}" data-need="production.hoops:full" data-admin-action="hoopDelete_">Delete</button>
         </td>
       </tr>`).join("")}</tbody></table>`;
   }
@@ -22195,8 +22452,8 @@ async function renderAbortReasons(app){
         <td style="padding:5px 6px;font-weight:600;">${escapeHtml(r.label)}</td>
         <td style="padding:5px 6px;color:#666;">${r.sortOrder}</td>
         <td style="padding:5px 6px;text-align:right;white-space:nowrap;">
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-rid="${r.id}" data-need="production.abortreasons:edit" onclick="abortReasonEdit_(this.dataset.rid)">Edit</button>
-          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-rid="${r.id}" data-need="production.abortreasons:full" onclick="abortReasonDelete_(this.dataset.rid)">Delete</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-rid="${r.id}" data-need="production.abortreasons:edit" data-admin-action="abortReasonEdit_">Edit</button>
+          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-rid="${r.id}" data-need="production.abortreasons:full" data-admin-action="abortReasonDelete_">Delete</button>
         </td>
       </tr>`).join("")}</tbody></table>`;
   }
@@ -22735,8 +22992,8 @@ async function renderGraphics(app, orgId){
         <td style="padding:5px 6px;">${g.tier ? TIER_LABEL_[g.tier] : "—"}</td>
         <td style="padding:5px 6px;color:#666;">${escapeHtml((g.inkColors || []).join(", "))}</td>
         <td style="padding:5px 6px;text-align:right;white-space:nowrap;">
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-gid="${g.id}" data-need="catalog.graphics:edit" onclick="graphicEdit_(this.dataset.gid)">Edit</button>
-          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-gid="${g.id}" data-need="catalog.graphics:full" onclick="graphicDelete_(this.dataset.gid)">Delete</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-gid="${g.id}" data-need="catalog.graphics:edit" data-admin-action="graphicEdit_">Edit</button>
+          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-gid="${g.id}" data-need="catalog.graphics:full" data-admin-action="graphicDelete_">Delete</button>
         </td></tr>`).join("")}</tbody></table>`;
   }
   async function load(){
@@ -22911,10 +23168,10 @@ async function renderTransfers(app){
         <td style="padding:5px 6px;">${t.quantity}</td>
         <td style="padding:5px 6px;">${t.purchasePrice == null ? "—" : "$" + Number(t.purchasePrice).toFixed(2)}</td>
         <td style="padding:5px 6px;text-align:right;white-space:nowrap;">
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="inventory.transfers:edit" onclick="transferEdit_(this.dataset.tid)">Edit</button>
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" onclick="transferHistory_(this.dataset.tid)">History</button>
-          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="inventory.transfers:full" onclick="transferWriteOff_(this.dataset.tid)">Write off</button>
-          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="inventory.transfers:full" onclick="transferDelete_(this.dataset.tid)">Delete</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="inventory.transfers:edit" data-admin-action="transferEdit_">Edit</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-admin-action="transferHistory_">History</button>
+          <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="inventory.transfers:full" data-admin-action="transferWriteOff_">Write off</button>
+          <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;" data-tid="${t.id}" data-need="inventory.transfers:full" data-admin-action="transferDelete_">Delete</button>
         </td></tr>`).join("")}</tbody></table>`;
   }
   async function load(){ try { transfers = (await hoopApi_({ action: "listTransfers" })).transfers || []; draw(); }
@@ -22966,10 +23223,10 @@ async function renderTransfers(app){
       if (m.kind === "purchase") {
         const sheet = [m.vendor, m.vendorRef ? "#" + m.vendorRef : ""].filter(Boolean).join(" ") || "Sheet";
         return `${escapeHtml(sheet)}${m.pctOfSheet != null ? `<span style="color:#666;"> · ${Number(m.pctOfSheet)}% of sheet</span>` : ""}` +
-          (!m.voidedAt ? ` <button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.transfers:full" onclick="transferOpenSheet_(this.dataset.mid)">Open sheet</button>` : "");
+          (!m.voidedAt ? ` <button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.transfers:full" data-admin-action="transferOpenSheet_">Open sheet</button>` : "");
       }
       if (m.kind === "consume" && m.orderId) return m.orderOrgId
-        ? `<button type="button" class="admin-btn" style="padding:1px 6px;font-size:11px;" data-org="${escapeHtml(m.orderOrgId)}" data-order="${escapeHtml(m.orderId)}" onclick="transferOpenOrder_(this.dataset.org, this.dataset.order)">Order ${escapeHtml(m.orderId)}</button>`
+        ? `<button type="button" class="admin-btn" style="padding:1px 6px;font-size:11px;" data-org="${escapeHtml(m.orderOrgId)}" data-order="${escapeHtml(m.orderId)}" data-admin-action="transferOpenOrder_">Order ${escapeHtml(m.orderId)}</button>`
         : `Order ${escapeHtml(m.orderId)}`;
       if (m.kind === "consume" && m.reason === "finished") return `<span style="color:#666;">Made for stock</span>`;
       return m.note ? `<span style="color:#666;">${escapeHtml(m.note)}</span>` : "";
@@ -22980,7 +23237,7 @@ async function renderTransfers(app){
         <td style="padding:4px 6px;">${escapeHtml(adminDay_(m.occurredAt))}</td><td style="padding:4px 6px;">${escapeHtml(m.kind)}</td>
         <td style="padding:4px 6px;">${m.qtyDelta}</td><td style="padding:4px 6px;">${m.unitCost == null ? "—" : "$" + Number(m.unitCost).toFixed(2)}</td>
         <td style="padding:4px 6px;">${where(m)}</td>
-        <td style="padding:4px 6px;white-space:nowrap;">${!m.voidedAt && (["purchase", "adjust", "writeoff"].includes(m.kind) || (m.kind === "consume" && m.itemId && m.reason !== "finished")) ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.transfers:full" onclick="transferVoid_(this.dataset.mid)">Void</button>` : ""}${m.voidedAt && m.kind === "consume" ? `<span style="font-size:11px;color:#999;" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : ""))}">voided</span>` : ""}${m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) && m.voidReason !== "Sheet edited" ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : "") + " — click to make this entry count again")}" data-need="inventory.transfers:edit" onclick="transferRestore_(this.dataset.mid)">Undo void</button>` : ""}${m.voidedAt && m.voidReason === "Sheet edited" ? `<span style="font-size:11px;color:#999;">replaced by an edit</span>` : ""}</td>
+        <td style="padding:4px 6px;white-space:nowrap;">${!m.voidedAt && (["purchase", "adjust", "writeoff"].includes(m.kind) || (m.kind === "consume" && m.itemId && m.reason !== "finished")) ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.transfers:full" data-admin-action="transferVoid_">Void</button>` : ""}${m.voidedAt && m.kind === "consume" ? `<span style="font-size:11px;color:#999;" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : ""))}">voided</span>` : ""}${m.voidedAt && ["purchase", "adjust", "writeoff"].includes(m.kind) && m.voidReason !== "Sheet edited" ? `<button class="admin-btn" style="padding:1px 6px;font-size:11px;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" title="${escapeHtml("Voided" + (m.voidReason ? ": " + m.voidReason : "") + " — click to make this entry count again")}" data-need="inventory.transfers:edit" data-admin-action="transferRestore_">Undo void</button>` : ""}${m.voidedAt && m.voidReason === "Sheet edited" ? `<span style="font-size:11px;color:#999;">replaced by an edit</span>` : ""}</td>
       </tr>`).join("")}</tbody></table></div>`, 820);
     window.transferOpenSheet_ = (mid) => { close(); openTransferSheet_(Number(mid), load); };
     window.transferOpenOrder_ = (org, order) => { close(); openOrderFromDashboard_(org, order); };
@@ -23079,7 +23336,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
       <label style="font-size:12px;font-weight:600;">${ed && ed.receiptKey ? "Replace receipt (optional)" : "Receipt (optional)"}<br><input type="file" id="trReceipt" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif,application/pdf" style="font-size:12px;"></label>
       <button type="button" class="admin-btn" id="trImport" style="padding:6px 10px;align-self:flex-end;">Import total from PDF…</button>
     </div>
-    ${ed && ed.receiptKey ? `<div style="font-size:11px;color:#666;margin:-6px 0 6px;">Current receipt: <button type="button" class="admin-btn" style="padding:1px 6px;font-size:11px;" data-key="${escapeHtml(ed.receiptKey)}" onclick="expViewReceipt_(this.dataset.key)">📎 ${escapeHtml(ed.receiptName || "Receipt")}</button> — kept unless you choose another file.</div>` : ""}
+    ${ed && ed.receiptKey ? `<div style="font-size:11px;color:#666;margin:-6px 0 6px;">Current receipt: <button type="button" class="admin-btn" style="padding:1px 6px;font-size:11px;" data-key="${escapeHtml(ed.receiptKey)}" data-admin-action="expViewReceipt_">📎 ${escapeHtml(ed.receiptName || "Receipt")}</button> — kept unless you choose another file.</div>` : ""}
     <div id="trImportNote" style="font-size:11px;color:#666;min-height:14px;margin:-4px 0 8px;"></div>
     ${items.length ? `<table style="width:100%;border-collapse:collapse;font-size:12px;">
       <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:4px;">Item</th><th style="padding:4px;">Count</th><th style="padding:4px;">% of sheet</th><th style="padding:4px;">$</th><th style="padding:4px;">per item</th><th></th></tr></thead>
@@ -23713,7 +23970,7 @@ async function renderDesigns(app, orgId, openDesignId){
         <div id="dsgList" style="color:#888;font-size:13px;">Loading&hellip;</div>
       </div>
       <div class="dsg-detail-col">
-        ${openDesignId ? `<button type="button" class="admin-btn dsg-back" data-org="${escapeHtml(orgId)}" onclick="location.hash='#designs/'+encodeURIComponent(this.dataset.org)">&larr; All designs</button>` : ""}
+        ${openDesignId ? `<button type="button" class="admin-btn dsg-back" data-org="${escapeHtml(orgId)}" data-admin-action="goShopDesigns_">&larr; All designs</button>` : ""}
         <div id="dsgDetail" style="color:#888;font-size:13px;">${openDesignId ? "Loading&hellip;" : "Pick a design from the list, or create a new one."}</div>
       </div>
     </div>`;
@@ -23735,7 +23992,7 @@ async function renderDesigns(app, orgId, openDesignId){
   // The shop's own designs, then the GLOBAL ones every shop can use (migrations/0033).
   const drawList = () => {
     const btn = (d) => `
-      <button type="button" data-did="${d.id}" data-org="${escapeHtml(orgId)}" onclick="location.hash='#designs/'+encodeURIComponent(this.dataset.org)+'/'+this.dataset.did"
+      <button type="button" data-did="${d.id}" data-org="${escapeHtml(orgId)}" data-admin-action="goDesign_"
         style="display:block;width:100%;text-align:left;padding:8px 10px;margin-bottom:4px;border:1px solid #ddd;border-radius:5px;background:${d.id === openDesignId ? "#eef3ee" : "#fff"};cursor:pointer;">${escapeHtml(d.name)}</button>`;
     const own = designs.filter(d => !d.isGlobal), global = designs.filter(d => d.isGlobal);
     listEl.innerHTML = (own.length ? own.map(btn).join("") : `<div style="color:#888;">No designs for this shop yet.</div>`) +
@@ -23802,8 +24059,8 @@ async function loadDesignDetail_(designId){
         ${design.notes ? `<div style="font-size:13px;color:#666;margin-top:4px;">${escapeHtml(design.notes)}</div>` : ""}
       </div>
       <div style="display:flex;gap:6px;">
-        <button type="button" class="admin-btn" data-need="catalog.designs:edit" data-org="${escapeHtml(orgId)}" onclick="showDesignFormModal_(this.dataset.org, window._dsgCtx.designs.find(d=>d.id===${Number(design.id)}), window._dsgCtx.hoops, () => loadDesignDetail_(${Number(design.id)}))">Edit</button>
-        <button type="button" class="admin-btn admin-btn-danger" data-need="catalog.designs:full" data-org="${escapeHtml(orgId)}" onclick="deleteDesign_(${Number(design.id)}, this.dataset.org)">Delete</button>
+        <button type="button" class="admin-btn" data-need="catalog.designs:edit" data-org="${escapeHtml(orgId)}" data-did="${Number(design.id)}" data-admin-action="editDesign_">Edit</button>
+        <button type="button" class="admin-btn admin-btn-danger" data-need="catalog.designs:full" data-org="${escapeHtml(orgId)}" data-did="${Number(design.id)}" data-admin-action="deleteDesign_">Delete</button>
       </div>
     </div>
     ${versions.length && canPreviewStitch_(versions[0].machineFileExt) ? `
@@ -23814,16 +24071,16 @@ async function loadDesignDetail_(designId){
     <div style="margin-top:18px;">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
         <h3 style="margin:0;">Versions</h3>
-        <button type="button" class="admin-btn" data-need="catalog.designs:edit" onclick="showDesignVersionUploadModal_(${design.id}, () => loadDesignDetail_(${design.id}))">+ Upload version</button>
+        <button type="button" class="admin-btn" data-need="catalog.designs:edit" data-did="${design.id}" data-admin-action="uploadDesignVersion_">+ Upload version</button>
       </div>
       ${versions.length ? `<table class="stack-mobile dsg-versions" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;">
         <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:5px 6px;">Uploaded</th><th style="padding:5px 6px;">Design file</th><th style="padding:5px 6px;">Machine file</th><th style="padding:5px 6px;">Threads</th><th style="padding:5px 6px;">Stitches</th><th style="padding:5px 6px;">Notes</th></tr></thead>
         <tbody>${versions.map((v, i) => `<tr style="border-bottom:1px solid #eee;${i === 0 ? "font-weight:600;" : ""}">
           <td data-label="Uploaded" style="padding:5px 6px;">${escapeHtml(adminDay_(v.uploadedAt))}${i === 0 ? ' <span style="font-weight:400;color:#2c6b2f;">(current)</span>' : ""}</td>
-          <td data-label="Design file" style="padding:5px 6px;">${v.designFileKey ? `${escapeHtml(v.designFileName)} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-key="${escapeHtml(v.designFileKey)}" onclick="downloadDesignFile_(this.dataset.key)">Download</button>` : '<span style="color:#888;font-weight:400;">—</span>'}</td>
-          <td data-label="Machine file" style="padding:5px 6px;">${escapeHtml(v.machineFileName)} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-key="${escapeHtml(v.machineFileKey)}" onclick="downloadDesignFile_(this.dataset.key)">Download</button></td>
-          <td data-label="Threads" style="padding:5px 6px;">${v.threadColors.length ? v.threadColors.map(tc => threadSwatch_(tc.threadId)).join("") + v.threadColors.length + " needle" + (v.threadColors.length === 1 ? "" : "s") : "—"} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-need="catalog.designs:edit" onclick="editVersionColors_(${v.id})">Edit colors</button></td>
-          <td data-label="Stitches" style="padding:5px 6px;">${v.stitchCount != null ? Number(v.stitchCount).toLocaleString() : '<span style="color:#888;font-weight:400;">not known</span>'} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-vid="${v.id}" data-did="${design.id}" data-cur="${v.stitchCount == null ? "" : v.stitchCount}" data-need="catalog.designs:edit" onclick="setVersionStitches_(this)">Set</button></td>
+          <td data-label="Design file" style="padding:5px 6px;">${v.designFileKey ? `${escapeHtml(v.designFileName)} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-key="${escapeHtml(v.designFileKey)}" data-admin-action="downloadDesignFile_">Download</button>` : '<span style="color:#888;font-weight:400;">—</span>'}</td>
+          <td data-label="Machine file" style="padding:5px 6px;">${escapeHtml(v.machineFileName)} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-key="${escapeHtml(v.machineFileKey)}" data-admin-action="downloadDesignFile_">Download</button></td>
+          <td data-label="Threads" style="padding:5px 6px;">${v.threadColors.length ? v.threadColors.map(tc => threadSwatch_(tc.threadId)).join("") + v.threadColors.length + " needle" + (v.threadColors.length === 1 ? "" : "s") : "—"} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-need="catalog.designs:edit" data-vid="${v.id}" data-admin-action="editVersionColors_">Edit colors</button></td>
+          <td data-label="Stitches" style="padding:5px 6px;">${v.stitchCount != null ? Number(v.stitchCount).toLocaleString() : '<span style="color:#888;font-weight:400;">not known</span>'} <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-vid="${v.id}" data-did="${design.id}" data-cur="${v.stitchCount == null ? "" : v.stitchCount}" data-need="catalog.designs:edit" data-admin-action="setVersionStitches_">Set</button></td>
           <td data-label="Notes" style="padding:5px 6px;color:#666;">${escapeHtml(v.notes)}</td>
         </tr>`).join("")}</tbody></table>
       ${versions[0].threadColors.length || canPreviewStitch_(versions[0].machineFileExt) ? `<div id="dsgThreadMap" style="margin-top:10px;font-size:13px;">${versions[0].threadColors.length ? `<b>Current thread map</b> (needle order):<br>
@@ -24491,8 +24748,8 @@ async function renderMachines(app){
             ${m.notes ? `<div style="font-size:12px;color:#666;margin-top:2px;">${escapeHtml(m.notes)}</div>` : ""}
           </div>
           <div style="white-space:nowrap;">
-            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-need="production.machines:edit" onclick="machineEdit_(this.dataset.mid)">Edit</button>
-            <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-mid="${m.id}" data-need="production.machines:full" onclick="machineDelete_(this.dataset.mid)">Delete</button>
+            <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-need="production.machines:edit" data-admin-action="machineEdit_">Edit</button>
+            <button type="button" class="admin-btn admin-btn-danger" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-mid="${m.id}" data-need="production.machines:full" data-admin-action="machineDelete_">Delete</button>
           </div>
         </div>
         <div style="margin-top:10px;font-size:13px;">
@@ -24577,15 +24834,15 @@ function machineCounterHtml_(m){
       <span><b>Stitch counter:</b> <span class="mch-stitches">${(Number(m.stitchCount) || 0).toLocaleString()}</span></span>
       <span><b>Run time:</b> ${fmtHours_(m.runSeconds)}</span>
       <span style="color:#888;font-size:12px;">${m.counterUpdatedAt ? "updated " + escapeHtml(adminDate_(m.counterUpdatedAt)) : "no reading entered yet"}</span>
-      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-need="production.machines:edit" onclick="machineReading_(this.dataset.mid)">Enter machine reading&hellip;</button>
+      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-need="production.machines:edit" data-admin-action="machineReading_">Enter machine reading&hellip;</button>
     </div>
     <div style="margin-top:8px;"><b>Maintenance</b>
-      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:6px;" data-mid="${m.id}" data-need="production.maintenance:edit" onclick="machineTasks_(this.dataset.mid)">Tasks&hellip;</button>
-      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-mid="${m.id}" data-need="production.maintenanceLog:edit" onclick="machineMaintDone_(this.dataset.mid, '')">Log other work&hellip;</button>
+      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:6px;" data-mid="${m.id}" data-need="production.maintenance:edit" data-admin-action="machineTasks_">Tasks&hellip;</button>
+      <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;margin-left:4px;" data-mid="${m.id}" data-need="production.maintenanceLog:edit" data-admin-action="machineLogOtherWork_">Log other work&hellip;</button>
       <a href="#maintenance/${m.id}" style="font-size:12px;margin-left:6px;">Log</a></div>
     ${tasks.length ? `<div style="margin-top:4px;">${tasks.map(t => `<div class="mch-task" style="display:flex;align-items:center;gap:8px;padding:3px 0;${t.active ? "" : "opacity:.6;"}">
         ${maintChipHtml_(t)} <span style="flex:1;">${escapeHtml(t.name)} <span style="color:#666;font-size:12px;">· ${escapeHtml(maintProgressText_(t))}</span></span>
-        <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-tid="${t.id}" data-need="production.maintenanceLog:edit" onclick="machineMaintDone_(this.dataset.mid, this.dataset.tid)">Done</button></div>`).join("")}</div>`
+        <button type="button" class="admin-btn" style="padding:2px 8px;font-size:11px;" data-mid="${m.id}" data-tid="${t.id}" data-need="production.maintenanceLog:edit" data-admin-action="machineTaskDone_">Done</button></div>`).join("")}</div>`
       : `<div style="color:#888;font-size:12px;margin-top:4px;">No maintenance tasks yet — Tasks&hellip; adds them (e.g. oil the rotary hook every 4 run hours).</div>`}
   </div>`;
 }
@@ -25293,7 +25550,7 @@ function blankShipmentLine_(s){
   let hist = "";
   if(s.id != null){
     (window._blankShipments = window._blankShipments || {})[s.id] = s;
-    if((s.events || []).length) hist = ` <a href="#" onclick="showShipmentHistoryModal_(${Number(s.id)});return false;" style="font-size:11px;">View history</a>`;
+    if((s.events || []).length) hist = ` <a href="#" data-sid="${Number(s.id)}" data-admin-action="showShipmentHistoryModal_" style="font-size:11px;">View history</a>`;
   }
   return `<div style="color:${color};">📦 ${escapeHtml(s.carrier || "")} ${u ? `<a href="${u}" target="_blank" rel="noopener">${tn}</a>` : tn}${status ? " — " + escapeHtml(status) : ""}${when}${hist}</div>`;
 }
@@ -25387,7 +25644,7 @@ function paidUnrunHtml_(orders){
       <td style="padding:5px 8px;"><b>${escapeHtml(o.customerName)}</b> <a href="#orders/${encodeURIComponent(o.orgId)}" style="color:inherit;font-size:12px;">${escapeHtml(o.orderId)}</a><div style="font-size:12px;color:#777;">${escapeHtml(o.orgName)}</div></td>
       <td style="padding:5px 8px;font-size:13px;">${items}</td>
       <td style="padding:5px 8px;white-space:nowrap;font-size:12px;">${o.needsBlanks === false ? (o.allFromStock ? `<span style="color:#166534;">From stock</span>` : `<span style="color:#666;">No blank needed</span>`) : o.blankReceived ? `<span style="color:#166534;">Blanks in</span>` : o.blankOrdered ? `<span style="color:#b45309;">Blanks ordered</span>`
-        : o.blanksInStock ? `<span style="color:#166534;">In stock</span> <button type="button" class="admin-btn ro-use-stock" data-need="orders.stepsEarly:edit" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" onclick="paidUnrunUseStock_(this)" title="Take this order's blanks from stock on hand" style="padding:2px 8px;font-size:11px;margin-left:4px;">Use from stock</button>`
+        : o.blanksInStock ? `<span style="color:#166534;">In stock</span> <button type="button" class="admin-btn ro-use-stock" data-need="orders.stepsEarly:edit" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" data-admin-action="paidUnrunUseStock_" title="Take this order's blanks from stock on hand" style="padding:2px 8px;font-size:11px;margin-left:4px;">Use from stock</button>`
         : `<span style="color:#b03a2e;">Blanks not ordered yet</span>`}</td>
     </tr>`;
   }).join("");

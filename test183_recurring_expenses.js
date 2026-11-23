@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -198,7 +199,7 @@ const addMonths = (ymd, n) => { const [y, m] = ymd.split("-").map(Number); const
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const sent = [];
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async (u, init) => { const b = init && typeof init.body === "string" ? JSON.parse(init.body) : {};
       sent.push(b);
       const x = await call(b);
@@ -234,11 +235,11 @@ const addMonths = (ymd, n) => { const [y, m] = ymd.split("-").map(Number); const
   await wait(() => doc.querySelector('#expList [title*="Recorded automatically"]'));
   console.log("recorded expenses carry the 🔁 RECURRING tag in the list:", [...doc.querySelectorAll("#expList tr[data-expense-row]")].filter(tr => /RECURRING/.test(tr.textContent) && /Cleaning service/.test(tr.textContent)).length === 2);
   const exRow = [...doc.querySelectorAll("#expList tr[data-expense-row]")].find(tr => /Cleaning service/.test(tr.textContent));
-  exRow.querySelector('button[onclick^="expEdit_"]').click();
+  exRow.querySelector('button[data-admin-action="expEdit_"]').click();
   console.log("editing one recorded expense hides Repeats (it changes only that expense):", !shown("expRepeatRow"));
   doc.getElementById("expCancel").click();
   const ruleId = Number(row.dataset.recurringRow);
-  row.querySelector('button[onclick^="expEditRecurring_"]').click();
+  row.querySelector('button[data-admin-action="expEditRecurring_"]').click();
   const modal = await wait(() => doc.querySelector("#erAmount") && doc.querySelector("#erAmount").closest(".admin-modal, div"));
   console.log("Edit… opens a window with the first date locked (something's recorded):", !!modal && doc.querySelector("#erStart").disabled && doc.querySelector("#erFreq").value === "biweekly");
   doc.querySelector("#erAmount").value = "50";
@@ -247,13 +248,13 @@ const addMonths = (ymd, n) => { const [y, m] = ymd.split("-").map(Number); const
   await wait(() => !doc.querySelector("#erSave"));
   console.log("saved for the future only:", q("SELECT amountCents FROM recurring_expenses WHERE id = ?", ruleId)[0].amountCents === 5000 &&
     q("SELECT count(*) n FROM expenses WHERE recurringId = ? AND amountCents = 4500", ruleId)[0].n === 2);
-  await wait(() => doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"] button[onclick^="expStopRecurring_"]`));
-  doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"] button[onclick^="expStopRecurring_"]`).click();
+  await wait(() => doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"] button[data-admin-action="expStopRecurring_"]`));
+  doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"] button[data-admin-action="expStopRecurring_"]`).click();
   await wait(() => sent.some(b => b.action === "stopRecurringExpense" && b.id === ruleId));
   await wait(() => /Ended/.test((doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"]`) || {}).textContent || ""));
   console.log("Stop (after asking) → the row says Ended and has no Stop button:", /Ended/.test(doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"]`).textContent) &&
-    !doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"] button[onclick^="expStopRecurring_"]`));
-  doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"] button[onclick^="expDeleteRecurring_"]`).click();
+    !doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"] button[data-admin-action="expStopRecurring_"]`));
+  doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"] button[data-admin-action="expDeleteRecurring_"]`).click();
   await wait(() => !doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"]`));
   console.log("Delete → off the list; the recorded expenses stay:", !doc.querySelector(`#expRecurring tr[data-recurring-row="${ruleId}"]`) &&
     q("SELECT count(*) n FROM expenses WHERE recurringId = ? AND deletedAt IS NULL", ruleId)[0].n === 2);

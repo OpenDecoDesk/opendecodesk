@@ -54,8 +54,8 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("the old step-list page is gone", !/function renderShopSetup\b/.test(adminJs) && !/function shopSetupSteps_\b/.test(adminJs));
   ok("#setup/<shop>, #catalog/new-org and #wizard/… all open the wizard", /if \(setupMatch\) \{\s*const sOrgId = routeId_\(setupMatch\[1\]\);\s*if \(sOrgId\) await renderShopWizard\(app, sOrgId\)/.test(adminJs) &&   // (OpenDecoDesk checks the id: routeId_)
     /raw === "catalog\/new-org" \|\| raw === "wizard\/new"\) \{ await renderShopWizard\(app, null\)/.test(adminJs) && /wizardMatch = raw\.match\(\/\^wizard/.test(adminJs));
-  ok("Manage catalog: '＋ New shop setup' at the top, 'Shop setup' on each row opening that shop's wizard", /onclick="location\.hash='#wizard\/new'">＋ New shop setup</.test(adminJs) &&
-    /onclick="location\.hash='#wizard\/'\+encodeURIComponent\(this\.dataset\.org\)"[^>]*>Shop setup/.test(adminJs));
+  ok("Manage catalog: '＋ New shop setup' at the top, 'Shop setup' on each row opening that shop's wizard", /data-admin-action="goWizardNew_">＋ New shop setup</.test(adminJs) &&
+    /data-admin-action="goWizard_"[^>]*>Shop setup/.test(adminJs) && /goWizard_\(\)\{ location\.hash='#wizard\/'\+encodeURIComponent\(this\.dataset\.org\); \}/.test(adminJs));
   console.log(`\n${fail ? "FAIL" : "PASS"} — ${pass} passed, ${fail} failed`);
   if (fail) process.exit(1);
 })().catch(e => { console.error(e); console.log("test148 crashed: false"); process.exit(1); });

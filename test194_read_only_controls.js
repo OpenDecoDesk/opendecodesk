@@ -3,13 +3,14 @@
 // one watcher on the page hides what the signed-in role lacks, on every screen and popup. jsdom with the real
 // index.html + admin.js, signed in as each built-in role.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { asRole, PERM_FUNCTIONS } = require("./testlib/roles");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const ok = (m, c) => console.log(m + ":", !!c);
 
 (async () => {
-  const adminJs = read("public/admin.js"), indexHtml = read("public/index.html");
+  const adminJs = read("public/admin.js"), indexHtml = storefrontPage();
   const HOOPS = [{ id: 1, name: "4in round", widthMm: 100, heightMm: 100, isCapFrame: false, notes: "", sortOrder: 0 }];
   class L extends ResourceLoader { fetch(url, o) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const dom = new JSDOM(indexHtml, { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
@@ -87,17 +88,17 @@ const ok = (m, c) => console.log(m + ":", !!c);
   const tagged = (re) => re.test(adminJs);
   ok("Run Order: start, finish and abort need Run Edit; marking done without timing needs Mark made", tagged(/class="run-start-btn" data-need="run\.runs:edit"/) && tagged(/class="run-complete-btn" data-need="run\.runs:edit"/) && tagged(/class="run-abort-btn admin-btn-danger" data-need="run\.runs:edit"/) && tagged(/class="run-btn" data-need="run\.markMade:edit"/));
   ok("Run Transfer Sheets: received, applied and made need Mark", ["rtRecv", "rtApply", "rtMake"].every(c => tagged(new RegExp(`class="admin-btn ${c}" data-need="transfer\\.mark:edit"`))));
-  ok("Machines: Edit and the hoop and needle pickers need Machines Edit, Delete needs Full, logging work needs only the log", tagged(/data-need="production\.machines:edit" onclick="machineEdit_/) && tagged(/data-need="production\.machines:full" onclick="machineDelete_/) &&
-    tagged(/class="mchHoopSelect" data-need-form="production\.machines:edit"/) && tagged(/data-need="production\.maintenanceLog:edit" onclick="machineMaintDone_/));
+  ok("Machines: Edit and the hoop and needle pickers need Machines Edit, Delete needs Full, logging work needs only the log", tagged(/data-need="production\.machines:edit" data-admin-action="machineEdit_"/) && tagged(/data-need="production\.machines:full" data-admin-action="machineDelete_"/) &&
+    tagged(/class="mchHoopSelect" data-need-form="production\.machines:edit"/) && tagged(/data-need="production\.maintenanceLog:edit" data-admin-action="machineLogOtherWork_"/));
   ok("Machine files: Delete needs Full", tagged(/mfDeleteBtn admin-btn-danger" data-need="production\.machinefiles:full"/));
   ok("Threads, hoops, abort reasons, locations, categories, graphics, designs: delete needs Full",
-    ["threadDelete_", "hoopDelete_", "abortReasonDelete_", "graphicDelete_"].every(f => new RegExp(`data-need="[a-z]+\\.[A-Za-z]+:full" onclick="${f}\\(`).test(adminJs)) &&
-    tagged(/data-need="catalog\.designs:full" data-org="\$\{escapeHtml\(orgId\)\}" onclick="deleteDesign_\(/) &&
+    ["threadDelete_", "hoopDelete_", "abortReasonDelete_", "graphicDelete_"].every(f => new RegExp(`data-need="[a-z]+\\.[A-Za-z]+:full" data-admin-action="${f}"`).test(adminJs)) &&
+    tagged(/data-need="catalog\.designs:full" data-org="\$\{escapeHtml\(orgId\)\}" data-did="[^"]*" data-admin-action="deleteDesign_"/) &&
     tagged(/data-loc-del="\$\{l\.id\}" data-need="catalog\.locations:full"/) && tagged(/data-pc-del="\$\{escapeHtml\(c\.key\)\}" data-need="catalog\.categories:full"/));
   ok("Order popups: recording a payment needs Edit, a refund Full; voiding the order Full", tagged(/data-need="orders\.payments:edit" style="border-top:1px solid #e5e7eb;padding-top:14px;margin-bottom:14px;">\n\s*<div[^>]*>Record payment/) &&
-    tagged(/data-need="orders\.payments:full" style="border-top:1px solid #e5e7eb;padding-top:14px;margin-bottom:14px;">\n\s*<div[^>]*>Record refund/) && tagged(/data-need="orders\.details:full" onclick="deleteTransaction\(/));
+    tagged(/data-need="orders\.payments:full" style="border-top:1px solid #e5e7eb;padding-top:14px;margin-bottom:14px;">\n\s*<div[^>]*>Record refund/) && tagged(/data-need="orders\.details:full" data-admin-action="deleteTransaction"/));
   ok("Blanks, transfers, money, reconcile, books: voids, write-offs, deletes and reopening need Full",
-    tagged(/data-need="inventory\.blanks:full" onclick="voidBlankMovement_/) && tagged(/data-need="inventory\.transfers:full" onclick="transferWriteOff_/) && tagged(/data-need="finance\.money:full" data-kind=/) &&
+    tagged(/data-need="inventory\.blanks:full" data-admin-action="voidBlankMovement_"/) && tagged(/data-need="inventory\.transfers:full" data-admin-action="transferWriteOff_"/) && tagged(/data-need="finance\.money:full" data-kind=/) &&
     tagged(/id="rcReopen" data-need="finance\.reconcile:full"/) && tagged(/data-need="reports\.books:full">Reopen/));
   ok("Product and shop forms lock for a read-only role, keeping the way back", tagged(/class="admin-panel" data-need-form="catalog\.products:edit"/) && tagged(/class="admin-panel" data-need-form="catalog\.shops:edit"/) && tagged(/<button data-perm-keep[^>]*>&larr; Products/));
 

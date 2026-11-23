@@ -1,4 +1,5 @@
 const { JSDOM, ResourceLoader } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
 
 // index.html lazily loads admin.js via a real <script src="admin.js">
@@ -73,7 +74,7 @@ let catalogSrc = fs.readFileSync(__dirname + "/functions/api/catalog.js", "utf8"
 eval(libSrc + "\n" + httpSrc + "\n" + catalogSrc);
 const REAL_CATALOG_RESPONSE = onRequestGet;
 
-const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+const html = storefrontPage();
 
 function makeStorageMock(){
   const store = {};

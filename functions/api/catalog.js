@@ -87,7 +87,7 @@ function normImageUrl(url){
 }
 
 // Maps a stored product (productId/pricingMode/flatPrice/sizePricing) to the
-// shape index.html's rendering expects (id, and sizePricing OR flatPrice —
+// shape storefront.js's rendering expects (id, and sizePricing OR flatPrice —
 // no pricingMode field).
 function toClientProduct(p){
   const out = {
@@ -288,7 +288,7 @@ export async function onRequestGet(context){
 
   // Fetch ready-to-ship stock fresh from D1 (not cached — stock changes with every fulfillment).
   // stock: {size: n} for a product with no choices; stockVariants: {combination key: {size: n}} for one with
-  // color and graphic choices (migrations/0080 — index.html's stockVariantKey_ builds the key from the picks).
+  // color and graphic choices (migrations/0080 — storefront.js's stockVariantKey_ builds the key from the picks).
   let stockByProduct = {}, stockByVariant = {};
   if(env.DB){
     try{

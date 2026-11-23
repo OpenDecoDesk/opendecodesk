@@ -1,6 +1,7 @@
 // Accessibility smoke test: every page in the admin's menu is reached with the keyboard alone (Tab to the
 // menu, Enter opens a menu, Tab to the page, Enter), draws its own page, and logs no errors to the console;
-// and a shop's page and its cart work from the keyboard without console errors.
+// and a shop's page and its cart work from the keyboard without console errors. Each also checks the page's
+// Content-Security-Policy refused nothing (no inline script left on it: fixtures.mjs watchCsp).
 //
 // axe-core is not used: it would be a new dependency, and this smoke test asks the cheaper questions first.
 import { test, expect, openAdmin, waitIdle, shopUrl, apiContext, callApi } from "../fixtures.mjs";
@@ -72,7 +73,7 @@ const PAGES = [...TOP.map(([h, l, t]) => ({ hash: h, menu: null, label: l, title
   ...Object.entries(GROUPS).flatMap(([menu, items]) => items.map(([h, l, t]) => ({ hash: h, menu, label: l, title: t })))];
 
 for (const p of PAGES) {
-  test(`${p.menu ? p.menu + " → " : ""}${p.label}: reached by keyboard, draws its page, no console errors`, async ({ page }) => {
+  test(`${p.menu ? p.menu + " → " : ""}${p.label}: reached by keyboard, draws its page, no console errors`, async ({ page, csp }) => {
     const errors = collectErrors(page);
     // Start somewhere else, so arriving is a change of page.
     const start = p.hash === "home" ? "users" : "home";
@@ -103,10 +104,11 @@ for (const p of PAGES) {
 
     const bad = errors.filter((e) => !(AGENT_PAGES.has(p.hash) && agentNoise(e)));
     expect(bad.map((e) => e.text + (e.url ? " @ " + e.url : "")), "console errors").toEqual([]);
+    expect(csp, "what the Content-Security-Policy refused").toEqual([]);
   });
 }
 
-test("a shop's page: no console errors, and the cart works from the keyboard", async ({ page, api }) => {
+test("a shop's page: no console errors, and the cart works from the keyboard", async ({ page, api, csp }) => {
   const errors = collectErrors(page);
   const shop = await makeShop(api, { prefix: "a11yshop", products: [{ name: "Sample Tee", price: 20 }, { name: "Sample Cap", price: 15, type: "cap", idPrefix: "cap" }] });
   await page.goto(shopUrl(shop.subdomain) + "/");
@@ -143,4 +145,5 @@ test("a shop's page: no console errors, and the cart works from the keyboard", a
   await expect(page.getByRole("button", { name: "Place order" })).toBeDisabled();
   await waitIdle(page);
   expect(errors.map((e) => e.text + (e.url ? " @ " + e.url : "")), "console errors").toEqual([]);
+  expect(csp, "what the Content-Security-Policy refused").toEqual([]);
 });

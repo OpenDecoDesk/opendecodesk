@@ -6,8 +6,9 @@
 //   * the customer's design box also lets a PDF or SVG be picked, and says to send a PNG or JPG;
 //   * no box lists a type iPadOS can't recognise (the thread chart box takes any file and checks its name).
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
-const html = read("public/index.html"), adminJs = read("public/admin.js");
+const html = storefrontPage(), adminJs = read("public/admin.js");
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 

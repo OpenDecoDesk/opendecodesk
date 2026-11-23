@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
 // Pop-up windows only close from a button (✕ / Cancel / Save…) or Escape —
@@ -6,7 +7,7 @@ const { JSDOM, ResourceLoader } = require("jsdom");
 
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 (async () => {
-  const adminJs = read("public/admin.js"), indexHtml = read("public/index.html");
+  const adminJs = read("public/admin.js"), indexHtml = storefrontPage();
   const backdrop = /(e|ev|event)\.target\s*===?\s*(ov|overlay|dialog|modal|backdrop)\b/;
   console.log("no click-outside-to-close handler in admin.js or index.html:", !backdrop.test(adminJs) && !backdrop.test(indexHtml));
 

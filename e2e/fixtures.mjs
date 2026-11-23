@@ -6,6 +6,8 @@
 //     here every test does, so one test's sign-ins never spend another's budget. (One test checks the limit.)
 //   - serves the public picture addresses (https://images.example.test/…) from the app's own image proxy,
 //     which reads the local R2 bucket — the stand-in for the bucket's public domain.
+//   - records everything the page's Content-Security-Policy (public/_headers, sent by wrangler dev as by
+//     Cloudflare) refuses, and fails the test if anything was: see watchCsp below.
 import { test as base, expect, request as playwrightRequest } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
@@ -71,6 +73,27 @@ export async function serveImages(context) {
       await route.abort().catch(() => {});
     }
   });
+}
+
+// ---- The Content-Security-Policy ---------------------------------------------------------------------------
+// The policy runs no inline script (no <script> without a src, no on…="" attribute). A control that still had
+// an inline handler would do nothing at all, so every page a context opens (pop-ups too) reports each refusal
+// two ways: the securitypolicyviolation event, through a binding added before the page's own script runs, and
+// the browser's "Refused to …" console message. The returned list is what was refused; the context fixture
+// below fails the test when it isn't empty.
+export const CSP_CONSOLE = /Content Security Policy|Refused to (?:execute|load|apply|evaluate|run|connect|frame)/i;
+export async function watchCsp(context) {
+  const refused = [];
+  await context.exposeBinding("__e2eCspViolation", (source, text) => { refused.push("event: " + text + " @ " + ((source && source.page && source.page.url()) || "")); });
+  await context.addInitScript(() => {
+    document.addEventListener("securitypolicyviolation", (e) => {
+      try { window.__e2eCspViolation(e.violatedDirective + " blocked " + (e.blockedURI || "(inline)") + (e.sample ? " — " + e.sample : "")); } catch (x) {}
+    }, true);
+  });
+  const watch = (p) => p.on("console", (m) => { if (CSP_CONSOLE.test(m.text())) refused.push("console: " + m.text() + " @ " + p.url()); });
+  context.pages().forEach(watch);
+  context.on("page", watch);
+  return refused;
 }
 
 // ---- The admin's own API, as a signed-in user's browser calls it ----------------------------------------
@@ -152,7 +175,16 @@ export async function confirmDialog(page, buttonName) {
 export const test = base.extend({
   // Every test's browser comes from an address of its own (see the top of this file).
   extraHTTPHeaders: async ({}, use, testInfo) => { await use({ "CF-Connecting-IP": freshIp(testInfo.workerIndex) }); },
-  context: async ({ context }, use) => { await serveImages(context); await use(context); },
+  // …and whatever the security policy refused on its pages fails the test (`csp` is that list, for a test that
+  // checks part-way through).
+  context: async ({ context }, use) => {
+    await serveImages(context);
+    const refused = await watchCsp(context);
+    context.cspRefused = refused;
+    await use(context);
+    expect(refused, "what the Content-Security-Policy refused on this test's pages").toEqual([]);
+  },
+  csp: async ({ context }, use) => { await use(context.cspRefused); },
   // Errors the page logged (console.error and uncaught exceptions), for tests that assert there are none.
   pageErrors: async ({ page }, use) => {
     const errors = [];
@@ -172,9 +204,10 @@ export const test = base.extend({
     await use(async (role) => {
       const context = await browser.newContext({ storageState: role ? stateFile(role) : undefined, extraHTTPHeaders: { "CF-Connecting-IP": freshIp(testInfo.workerIndex) } });
       await serveImages(context);
-      opened.push(context);
+      opened.push({ context, refused: await watchCsp(context) });
       return context.newPage();
     });
-    for (const c of opened) await c.close();
+    for (const c of opened) await c.context.close();
+    expect(opened.flatMap(c => c.refused), "what the Content-Security-Policy refused on the other users' pages").toEqual([]);
   },
 });

@@ -52,9 +52,9 @@ The design this is measured against is described in
 - **The send-agent**, which is a separate project.
 - Denial of service by sheer volume. (A cheap way to make the site do expensive work *is* worth
   reporting.)
-- Missing hardening with no demonstrated impact — with one known exception worth saying out loud:
-  the Content Security Policy allows inline scripts (`'unsafe-inline'`). That is a known limit of
-  how the pages are written, not a new finding; a working injection is still very much in scope.
+- Missing hardening with no demonstrated impact. (The Content Security Policy runs no inline script;
+  it does allow inline styles, `'unsafe-inline'` in `style-src`, which is a known limit, not a new
+  finding.)
 
 ## Supported versions
 

@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 
@@ -35,7 +36,7 @@ LEAGUE-MUG,Mugs,A mug,,,10,,,,,,,,,,TRUE
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt, ready) VALUES ('league','league','League','t','t',1);`);
   const count = async (sql) => Number((await d1.prepare(sql).first()).n);
   const sent = [];
-  const adminJs = read("public/admin.js"), indexHtml = read("public/index.html");
+  const adminJs = read("public/admin.js"), indexHtml = storefrontPage();
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const dom = new JSDOM(indexHtml, { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){

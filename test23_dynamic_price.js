@@ -1,4 +1,5 @@
 const { JSDOM } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
 
 let libSrc = fs.readFileSync(__dirname + "/functions/_lib/hostConfig.js", "utf8")
@@ -71,7 +72,7 @@ function mockCatalogFetch(win){
 }
 
 // Enable discount so we can test the discounted total
-let html = fs.readFileSync(__dirname + "/public/index.html", "utf8")
+let html = storefrontPage()
   .replace("const CASH_DISCOUNT_PERCENT = 0;", "const CASH_DISCOUNT_PERCENT = 2;");
 
 (async () => {
@@ -171,7 +172,7 @@ let html = fs.readFileSync(__dirname + "/public/index.html", "utf8")
 ;(async () => {
   const { JSDOM } = require("jsdom");
   const fs = require("fs");
-  const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+  const html = storefrontPage();
   const dom = new JSDOM(html, {
     runScripts:"dangerously", resources:"usable",
     url:"https://league101.example.com/z.html", pretendToBeVisual:true,

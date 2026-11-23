@@ -5,6 +5,7 @@
 // design. Desktop keeps the table. jsdom with the real index.html + admin.js; matchMedia is stubbed
 // (jsdom has none), fetch is mocked per action.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 
@@ -24,7 +25,7 @@ async function boot(width){
       { blankOrderedAt: iso(2), qaPackedAt: iso(1), labels: [{ trackingNumber: "9400", voidedAt: null }], discountAmount: 5, discountNote: "Club" }),
   ];
   class L extends ResourceLoader { fetch(url, o) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win) {
       win.__width = width;
       win.CSS = win.CSS || { escape: (v) => String(v).replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c) }; // jsdom has no CSS.escape
@@ -61,7 +62,7 @@ async function boot(width){
 
 (async () => {
   try {
-    const css = read("public/index.html");
+    const css = storefrontPage();
 
     console.log("=== Orders on a phone: cards, not the table ===");
     let { w, app, listeners, orders, sent, tick } = await boot(375);
@@ -74,7 +75,7 @@ async function boot(width){
       c2.querySelector(".oc-name").textContent.includes("Sam <b>Gamgee</b>") && !c2.querySelector(".oc-name b") &&
       /PRIME-2/.test(c2.textContent) && /\$88\.00/.test(c2.querySelector(".oc-total").textContent) && /Unpaid/.test(c2.textContent) && /Balance due \$88\.00/.test(c2.textContent));
     console.log("items list qty × name · size and the personalization:", /2 × Polo/.test(c2.textContent) && /· L/.test(c2.textContent) && /“SAM”/.test(c2.textContent));
-    console.log("the same action buttons as the table row:", !!c2.querySelector('.oc-actions button[onclick^="markOrderPaid"]') && !!c2.querySelector('.oc-actions button[onclick^="showPaymentsModal"]'));
+    console.log("the same action buttons as the table row:", !!c2.querySelector('.oc-actions button[data-admin-action="markOrderPaid"]') && !!c2.querySelector('.oc-actions button[data-admin-action="showPaymentsModal"]'));
     const c1 = cards().find(c => c.dataset.orderCard === "PRIME-1");
     console.log("status chip is the latest stage reached, and a bought label isn't shown as shipped:",
       /QA & packed/.test(c1.querySelector(".oc-status").textContent) && /Label created, not shipped/.test(c1.querySelector(".oc-status").textContent));

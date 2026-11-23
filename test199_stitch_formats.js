@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
 // Designs read the other machine-file formats (public/admin-stitch.js): needle stops, stitches and the file's own
@@ -91,7 +92,7 @@ const dstTc = (tcLines, blocks) => {
     if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs));
     return Promise.resolve(Buffer.from("")); } }
   const draws = [];
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){
       win.TextDecoder = TextDecoder;
       win.HTMLCanvasElement.prototype.getContext = () => ({ clearRect(){}, beginPath(){}, moveTo(){}, lineTo(){}, fillText(){},

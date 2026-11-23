@@ -129,7 +129,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const base = { orderId: "X-1", items: [{ name: "Rose design" }], paid: true, paidForWork: true, balanceDue: 0, contact: "pat@cust.test" };
   let cell = ui.adminActionCell(org, { ...base, digitalOnly: true, hasDigital: true, hasDownloads: true });
   ok("downloads only, paid: no stage list, just Mark completed", /Downloads only/.test(cell) && !/<select/.test(cell) && /Mark completed/.test(cell));
-  ok("…Resend downloads", /resendDownloadsNow_\(/.test(cell) && />Resend downloads</.test(cell));
+  ok("…Resend downloads", /data-admin-action="resendDownloadsNow_"/.test(cell) && />Resend downloads</.test(cell));
   ok("…and no Set shipping or Rush", !/Set shipping|Edit shipping/.test(cell) && !/Rush/.test(cell));
   cell = ui.adminActionCell(org, { ...base, paid: false, paidForWork: false, balanceDue: 12, digitalOnly: true, hasDigital: true });
   ok("downloads only, unpaid: Mark as paid, no Resend downloads yet, no Rush", /Mark as paid/.test(cell) && !/>Resend downloads</.test(cell) && !/Rush/.test(cell));

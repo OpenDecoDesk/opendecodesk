@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -165,7 +166,7 @@ const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
   const adminJs = read("public/admin.js");
   const sent = [];
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/#inventory", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/#inventory", pretendToBeVisual: true,
     beforeParse(win){ autoConfirm(win, () => true); win.URL.createObjectURL = () => "blob:x"; win.fetch = async (url, init) => {
       if (String(url).includes("/api/orders")) { const b = JSON.parse(init.body); sent.push(b);
         if (b.action === "applyVendorBlanks" && win.__failApply) return { ok: false, status: 500, json: async () => ({ status: "error", message: "Server down" }) };

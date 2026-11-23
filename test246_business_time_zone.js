@@ -8,6 +8,7 @@
 // New York and already 1:30 AM on Jan 1 2027 in Auckland: a new day and a new year for the business.
 process.env.TZ = "America/New_York";
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { makeAuth } = require("./testlib/auth-harness");
 
@@ -31,7 +32,7 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
   ok("the Region setting comes before the TIMEZONE variable, in both", me.body.timeZone === "Asia/Tokyo" && again.body.timeZone === "Asia/Tokyo");
 
   console.log("\n=== The admin page keeps the zone it is sent ===");
-  const adminJs = read("public/admin.js"), html = read("public/index.html");
+  const adminJs = read("public/admin.js"), html = storefrontPage();
   const sent = [];
   let zoneFromServer = "Pacific/Auckland";
   class L extends ResourceLoader { fetch(url) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return Promise.resolve(Buffer.from("")); } }

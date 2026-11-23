@@ -3,7 +3,8 @@
 // panel keeps a white ring; its rule must be at least as specific as the general one, or the general
 // rule's color wins there.
 const fs = require("fs");
-const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+const { storefrontPage } = require("./testlib/storefront-page");
+const html = storefrontPage();
 const css = html.slice(html.indexOf("<style"), html.indexOf("</style>")).replace(/\/\*[\s\S]*?\*\//g, "");
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };

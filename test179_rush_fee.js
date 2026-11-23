@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 const { ADMIN_ORIGIN, shopOrigin } = require("./testlib/hosts.js");
@@ -242,7 +243,7 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   ok("rush fees to set alone don't send a roll-up", (await email.sendDailyDigestEmail({}, { rushToSet: toSet })) === false);
 
   console.log("\n=== The shop page works the fee out as the server does ===");
-  const html = read("public/index.html");
+  const html = storefrontPage();
   const quoteSrc = html.slice(html.indexOf("function rushQuote_("), html.indexOf("function rushSectionHtml_("));
   const rushQuote_ = new Function(quoteSrc + "\nreturn rushQuote_;")();
   const view = (x) => lib.rushRuleView(R(x));

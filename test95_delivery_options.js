@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
@@ -135,7 +136,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 
   // ---- Storefront in jsdom ----
   console.log("\n=== Checkout shows the shop's list ===");
-  const html = read("public/index.html");
+  const html = storefrontPage();
   const shop = async (catalogBody) => {
     const sent = [];
     const dom = new JSDOM(html, { runScripts: "dangerously", resources: "usable", url: "https://league.example.com/", pretendToBeVisual: true,

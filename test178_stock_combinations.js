@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { ADMIN_ORIGIN } = require("./testlib/hosts.js");
 
@@ -67,7 +68,7 @@ const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}
   ok("color + picks in location order, ink kept; nothing picked and no color = ''", K("Navy", [{ location: "lc", graphicId: 12, ink: "Gold" }, { location: "back", graphicId: 11 }]) === '["Navy",[["back",11,""],["lc",12,"Gold"]]]' &&
     K("", []) === "" && K("Navy", [{ location: "lc", graphicId: null }]) === '["Navy",[]]');
   // The shop page builds the same string from its picks (a graphic with inks and none picked = its first ink).
-  const html = read("public/index.html");
+  const html = storefrontPage();
   const fnSrc = html.slice(html.indexOf("function stockVariantKey_("), html.indexOf("// The stock badge for a product in a color + size"));
   const badgeSrc = html.slice(html.indexOf("function readyBadgeHtml_("), html.indexOf("function renderConfigurableProduct("));
   const shop = new Function(fnSrc + badgeSrc + "\nreturn { stockVariantKey_, readyBadgeHtml_ };")();

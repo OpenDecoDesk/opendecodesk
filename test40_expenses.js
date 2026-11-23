@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
@@ -179,7 +180,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   const catsNow = (await call({ action: "listExpenseCategories" })).body;
   const listNow = (await call({ action: "listExpenses", dateFrom: "2026-01-01", dateTo: "2026-12-31" })).body;
   listNow.expenses[0].description = "<img src=x onerror=alert(1)>";
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(w){ w.fetch = async (u, init) => { const b = init && init.body && typeof init.body === "string" ? JSON.parse(init.body) : {};
       const data = b.action === "listExpenseCategories" ? catsNow : b.action === "listExpenses" ? listNow : { status: "error", message: "n/a" };
       return { ok: true, status: 200, json: async () => data }; }; } });

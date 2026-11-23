@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
@@ -62,7 +63,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   console.log("\n=== Screen wiring ===");
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "error", message: "n/a" }) }); } });
   const w = dom.window;
   await new Promise(res => setTimeout(res, 150));

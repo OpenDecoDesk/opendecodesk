@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
 
@@ -120,7 +121,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const oddQuote = await orders.signQuote(env, { orgId: "shipper", zip: "00100", items: K([{ productId: "tee", qty: 1 }]), amountCents: 900, method: "USPS Ground" });
   r = await place("Q-ODDZIP", [{ productId: "tee", size: "M", qty: 1 }], { shippingAddress: { ...indiana, zip: "00100" }, shippingQuoteToken: oddQuote });
   ok("a quote for a ZIP no state owns can't carry an address that names a state of its choosing", r.status === 400 && /valid ZIP/.test(r.body.message) && !(await saved("Q-ODDZIP")));
-  ok("the storefront stops at 50 a line and 20 lines too (said on the product's card)", /if\(qty > 50\)\{ cardMsg_\(/.test(read("public/index.html")) && /if\(cart\.length >= 20\)\{ cardMsg_\(/.test(read("public/index.html")));
+  ok("the storefront stops at 50 a line and 20 lines too (said on the product's card)", /if\(qty > 50\)\{ cardMsg_\(/.test(storefrontPage()) && /if\(cart\.length >= 20\)\{ cardMsg_\(/.test(storefrontPage()));
 
   console.log("\n=== Shipping, quote to follow ===");
   r = await quote([{ productId: "banner", qty: 1 }]);

@@ -3,8 +3,9 @@
 // the address if the customer cancels to get new rates. On the invoice page, changing the ZIP after the
 // rates are shown drops those rates and asks for new ones. Invented shop, people and addresses only.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, VirtualConsole } = require("jsdom");
-const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+const html = storefrontPage();
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 const wait = (ms) => new Promise(r => setTimeout(r, ms));

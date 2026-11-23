@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Sales-tax scope + use tax (migrations/0013) — real SQL (sql.js),
@@ -127,5 +128,5 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   r = await call({ action: "getAccountantExport", dateFrom: "2026-09-01", dateTo: "2026-09-30" });
   const stab = r.body.expenses.find(x => x.description.startsWith("Stabilizer"));
   console.log("export: use tax per expense and in the monthly summary:", stab.useTax === 3 && stab.vendorChargedTax === "no" && r.body.summary.find(x => x.month === "2026-09").useTax === 3);
-  console.log("storefront still discloses tax-inclusive pricing:", /Prices include/.test(read("public/index.html")));
+  console.log("storefront still discloses tax-inclusive pricing:", /Prices include/.test(storefrontPage()));
 })().catch(e => { console.log("test42 crashed:", false); console.error(e); process.exit(1); });

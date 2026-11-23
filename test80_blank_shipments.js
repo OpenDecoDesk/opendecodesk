@@ -215,9 +215,9 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
     /N\/T ordered\/shipped\/received|\$\{n\}\/\$\{total\} \$\{field\}/.test(a) && /order\.blankShipments\.map\(blankShipmentLine_\)/.test(a));
   ok("the shipment line shows the carrier's own wording + a View history link opening the history modal",
     /function blankStatusText_/.test(a) && /function showShipmentHistoryModal_/.test(a) &&
-    /showShipmentHistoryModal_\(\$\{Number\(s\.id\)\}\)/.test(a) && /View history/.test(a));
+    /data-sid="\$\{Number\(s\.id\)\}" data-admin-action="showShipmentHistoryModal_"/.test(a) && /showShipmentHistoryModal_\(Number\(this\.dataset\.sid\)\)/.test(a) && /View history/.test(a));
   ok("Communications shows the vendor blank shipments + a working Check now",
-    /Blanks in transit from the vendor/.test(a) && /onclick="checkBlankShipmentsNow\(this\)"/.test(a) &&
+    /Blanks in transit from the vendor/.test(a) && /data-admin-action="checkBlankShipmentsNow"/.test(a) &&
     /async function checkBlankShipmentsNow/.test(a) && /action: "checkBlankShipments"/.test(a));
 
   console.log("\n=== Communications + on-demand check actions ===");

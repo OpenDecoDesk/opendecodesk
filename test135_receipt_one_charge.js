@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -99,7 +100,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const sent = [];
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ autoConfirm(win, () => true); win.fetch = async (u, init) => { if (!String(u).includes("/api/orders")) return { ok: true, status: 200, json: async () => ({ status: "admin" }) }; const body = JSON.parse(init.body); sent.push(body); const x = await call(body); return { ok: x.status < 400, status: x.status, json: async () => x.body }; }; } });
   const w = dom.window, d = w.document;
   await new Promise(res => setTimeout(res, 150));

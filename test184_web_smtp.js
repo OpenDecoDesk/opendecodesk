@@ -3,6 +3,7 @@
 // Cloudflare's TCP sockets — here over a fake mail server (testlib/smtp-fake.js) — and email.js sends
 // through it when Global settings → Email says so. The password is stored encrypted and never returned.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const path = require("path");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { fakeSmtp, parseMessage, decodeWords } = require("./testlib/smtp-fake");
@@ -175,7 +176,7 @@ const MSG = { to: "pat@cust.test", fromName: "Acme Tees", replyTo: "owner@acme.t
     if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs));
     const local = new URL(url).pathname.match(/^\/vendor\/fonts\/[a-z0-9.-]+$/);
     return local ? Promise.resolve(fs.readFileSync(__dirname + "/public" + local[0])) : super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.acme.test/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.acme.test/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "error", message: "n/a" }) }); win.confirm = () => true; } });
   const w = dom.window;
   await new Promise(res => setTimeout(res, 200));

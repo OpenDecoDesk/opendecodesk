@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { ADMIN_ORIGIN, shopOrigin, ROOT } = require("./testlib/hosts.js");
@@ -69,7 +70,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/#catalog", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/#catalog", pretendToBeVisual: true,
     beforeParse(win){ autoConfirm(win, () => true); win.open = () => null; win.scrollTo = () => {}; win.fetch = async (url, init) => {
       if (String(url).includes("/api/orders")) { const x = await call(JSON.parse(init.body)); return { ok: x.status < 400, status: x.status, json: async () => x.body }; }
       return { ok: true, status: 200, json: async () => ({ status: "admin", site: { rootDomain: ROOT } }) }; }; } });
@@ -142,7 +143,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
     JSON.stringify([{ kind: "Embroidered", name: "Acme oar logo", location: "Left chest" }, { kind: "Printed", name: "Club crest print", location: "Back" }]));
   const html = w.decorationsHtml_({ decorations: [{ kind: "Printed", name: "<b>Crest</b>", location: "Back" }] });
   ok("the shop page lists each one (“Printed: Crest — Back”), escaped, with no picture needed", /Printed:<\/span> &lt;b&gt;Crest&lt;\/b&gt; — Back/.test(html) && w.decorationsHtml_({}) === "");
-  ok("…on both kinds of product card", (read("public/index.html").match(/\$\{decorationsHtml_\(p\)\}/g) || []).length === 2);
+  ok("…on both kinds of product card", (storefrontPage().match(/\$\{decorationsHtml_\(p\)\}/g) || []).length === 2);
 
   r = await call({ action: "buildProductFromBlank", org: "acme", productId: tee.id, blankId: d1.q("SELECT id FROM blanks WHERE sku='ST1'")[0].id, colors: ["Navy"], sizes: ["M"], name: "Club Tee", decoration: "both", pricingMode: "sized", sizePricing: { M: 20 },
     fixedTransfers: [{ locationId: loc, graphicId: gr, ink: "" }], designs: [{ designId: ds, placement: "Left chest", isMain: true }],

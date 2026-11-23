@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { splitSql, readSources, migrate } = require("./desktop/migrate.js");
@@ -321,7 +322,7 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
     return local ? Promise.resolve(fs.readFileSync(__dirname + "/public" + local[0])) : super.fetch(url, o); } }
   const sent = [];
   let askedForKey = 0;
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "http://localhost:47830/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "http://localhost:47830/", pretendToBeVisual: true,
     beforeParse(win){
       win.fetch = async (url, opts) => {
         if (String(url).includes("/api/orders") && opts && opts.body) {
@@ -343,8 +344,8 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
   ok("the page learns it is in the desktop program from /api/catalog", w.eval("siteEdition") === "desktop" && w.eval("featureOn_('storefront')") === false);
   ok("the admin's tab and home-screen icon are the logo", doc.querySelector('link[rel="icon"]')?.getAttribute("href") === "/images/icon.svg" &&
     doc.querySelector('link[rel="apple-touch-icon"]')?.getAttribute("href") === "/images/icon-180.png" && fs.existsSync(path.join(__dirname, "public/images/icon-180.png")));
-  ok("…and only the admin's: a shop's pages carry no OpenDecoDesk logo", !/rel="icon"/.test(read("public/index.html").split("<style>")[0]) &&
-    (read("public/index.html").match(/applyAdminIcon_\(\)/g) || []).length === 2 && /status === "admin"\)\{ applyEdition_\([^)]*\); applyAdminIcon_\(\);/.test(read("public/index.html")));
+  ok("…and only the admin's: a shop's pages carry no OpenDecoDesk logo", !/rel="icon"/.test(storefrontPage().split("<style>")[0]) &&
+    (storefrontPage().match(/applyAdminIcon_\(\)/g) || []).length === 2 && /status === "admin"\)\{ applyEdition_\([^)]*\); applyAdminIcon_\(\);/.test(storefrontPage()));
   await w.loadAdminScript();
   await tick(200);
   ok("signing in first asks the program for its first-run passphrase", askedForKey >= 1);
@@ -408,7 +409,7 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
   ok("Local sale has a Ship this order section with the address, carrier and charge", ["lsShip", "lsShipLine1", "lsShipCity", "lsShipZip", "lsShipCarrier", "lsShipService", "lsShipCost"].every(id => adminJs.includes(`id="${id}"`)) && !adminJs.includes('id="lsAddress"'));
   w.eval('siteEdition = ""');
   ok("…while a cloud install's admin keeps all of them", /resendEmail/.test(w.adminActionCell({ orgId: "shop" }, { orderId: "X1", paid: false, items: [{}], balanceDue: 20 })) && /showSendInvoiceModal/.test(w.adminActionCell({ orgId: "shop" }, { orderId: "X1", paid: false, items: [{}], balanceDue: 20 })) && /Not published yet/.test(w.publishStateHtml_({ state: "never" })));
-  ok("the page loads its fonts from this site, not Google", /href="\/vendor\/fonts\/fonts\.css"/.test(read("public/index.html")) && !/googleapis|gstatic/.test(read("public/index.html") + adminJs + read("public/_headers")) && fs.existsSync(__dirname + "/public/vendor/fonts/OFL-Fraunces.txt"));
+  ok("the page loads its fonts from this site, not Google", /href="\/vendor\/fonts\/fonts\.css"/.test(storefrontPage()) && !/googleapis|gstatic/.test(storefrontPage() + adminJs + read("public/_headers")) && fs.existsSync(__dirname + "/public/vendor/fonts/OFL-Fraunces.txt"));
   ok("every font file the stylesheet names is there", (read("public/vendor/fonts/fonts.css").match(/url\(([^)]+)\)/g) || []).every(u => fs.existsSync(__dirname + "/public/vendor/fonts/" + u.slice(4, -1))));
   w.close();
 })().catch(e => { console.error(e); process.exit(1); });

@@ -2,6 +2,7 @@
 // belongs to the user of the current session (POST /api/admin-session with verify) and issues nothing; Cancel or a
 // wrong password keeps the session. The row button says what it does ("Void…").
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { makeAuth, request, answer } = require("./testlib/auth-harness");
 
@@ -31,7 +32,7 @@ const wait = async (f) => { for (let i = 0; i < 200 && !f(); i++) await tick(5);
 
   console.log("\n=== Page: Cancel or a wrong password at the check keeps the user signed in ===");
   const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
-  const adminJs = read("public/admin.js"), indexHtml = read("public/index.html");
+  const adminJs = read("public/admin.js"), indexHtml = storefrontPage();
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return Promise.resolve(Buffer.from("")); } }
   const calls = [];
   let verifyAnswer = { status: "error", message: "Unauthorized" };
@@ -77,6 +78,6 @@ const wait = async (f) => { for (let i = 0; i < 200 && !f(); i++) await tick(5);
   await p;
   ok("the right password voids the order, still with the same session", calls.some(c => c.body && c.body.action === "voidOrder" && c.body.reason === "Duplicate order") &&
     !calls.some(c => c.method === "DELETE") && w.eval("adminKey") === "cookie");
-  ok("the row button says Void…, not Delete", /onclick="deleteTransaction\(this\.dataset\.org, this\.dataset\.order\)" style="margin-top:6px;">Void…<\/button>/.test(adminJs));
+  ok("the row button says Void…, not Delete", /data-admin-action="deleteTransaction" style="margin-top:6px;">Void…<\/button>/.test(adminJs) && /deleteTransaction\(\)\{ deleteTransaction\(this\.dataset\.org, this\.dataset\.order\); \}/.test(adminJs));
   process.exit(0);
 })().catch(e => { console.error(e); console.log("test crashed: false"); process.exit(1); });

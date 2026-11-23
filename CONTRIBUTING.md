@@ -172,10 +172,13 @@ An admin write that could change a closed month's numbers must go through `perio
 
 - Escape everything that came from a person or the database with `escapeHtml()` before it goes
   into HTML.
-- Don't build an inline `onclick="…"` string out of data. Put the values in `data-` attributes
-  and read `this.dataset`.
+- No inline `onclick="…"` (or any `on…=""`) and no inline `<script>`: the Content Security Policy
+  runs neither. In the admin, give the element `data-admin-action="name"` (or `data-admin-change`,
+  `-input`, `-submit`, `-keydown`), add `name` to `ADMIN_ACTIONS_` at the top of `admin.js`, and put
+  the values it needs in `data-` attributes (read as `this.dataset`). `test249_no_inline_scripts.js`
+  checks it.
 - A pop-up closes from a button or Escape, never from a click outside it (a test guards this).
-- `public/admin.js` and the script in `index.html` are classic scripts sharing one global scope;
+- `public/admin.js` and `public/storefront.js` (the page's script) are classic scripts sharing one global scope;
   there is no bundler.
 
 ## Style

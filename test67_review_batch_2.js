@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
 const { createD1 } = require("./testlib/d1-shim.js");
 
@@ -127,7 +128,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
     console.log("\n=== UI: Package sizes Save failure, readable storefront buttons ===");
     console.log("a failed Package sizes save shows 'Not saved' instead of a success toast:",
       /if\(err\)\{ errEl\.textContent = "Not saved: " \+ err;/.test(adminJs) && /return \(d && d\.message\) \|\| "Could not save\.";/.test(adminJs));
-    const html = read("public/index.html");
+    const html = storefrontPage();
     const fnSrc = (name) => html.slice(html.indexOf("function " + name + "("), html.indexOf("\n}\n", html.indexOf("function " + name + "(")) + 2);
     const vars = new Function(fnSrc("readableInkOn") + fnSrc("orgAccentVars") + fnSrc("escapeHtml") + "\nreturn orgAccentVars;")();
     console.log("REC's orange gets dark text, Example League's green keeps white:",

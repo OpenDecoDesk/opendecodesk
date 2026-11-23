@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Money safety follow-ups to the 2026-11-21 review (high and medium items left partly done):
@@ -182,7 +183,7 @@ function countQueries(d1) {
   await lib.resolveTimeZone({ DB: d1, TIMEZONE: "America/Los_Angeles" });
   ok("a refusal's time is on the shop's clock (Region / TIMEZONE), not New York's", lib.shopTime_("2026-11-05T03:15:00.000Z") === "Nov 4, 2026, 7:15 PM");
   ok("the Edit items window's buttons don't use data-action (the storefront's cart handler answers those)", !/data-action="/.test(page) && /data-edit-action="remove"/.test(page));
-  ok("the verify page's token is in a data attribute, not inside a script string", /data-token="\$\{escapeHtml\(token\)\}" onclick="dvSubmitResponse\(this\.dataset\.token\)"/.test(read("public/index.html")));
+  ok("the verify page's token is in a data attribute, not inside a script string", /data-token="\$\{escapeHtml\(token\)\}" data-action="dv-submit"/.test(storefrontPage()) && /else if\(a === "dv-submit"\) window\.dvSubmitResponse\(btn\.dataset\.token\);/.test(storefrontPage()));
 
   if (failed) console.log("\nFAILED:", failed);
 })().catch(e => { console.log("crashed: false"); console.error(e); process.exit(1); });

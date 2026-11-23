@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -252,7 +253,7 @@ function dsb(records) {
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const sent = [];
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/", pretendToBeVisual: true,
     beforeParse(win){
       win.fetch = async (url, opts) => {
         if (String(url).includes("/api/orders") && opts && opts.body) {

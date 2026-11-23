@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Inventory races and ship-to addresses:
@@ -129,7 +130,7 @@ const api = A.post;
     console.log("zipIsInState takes a code or a name:", lib.zipIsInState("43601", "OH") && lib.zipIsInState("43601", "ohio") && !lib.zipIsInState("43601", "IN") && lib.zipIsInState("10001-0001", "New York"));
     const zipTable = (src) => (/const ZIP3_STATES_ = ([\s\S]*?);/.exec(src) || [])[1].replace(/\s+/g, " ");
     console.log("the storefront's copy of the ZIP table is the same as the server's:",
-      zipTable(read("public/index.html")) === zipTable(read("functions/_lib/db.js")) && zipTable(read("public/index.html")).length > 500);
+      zipTable(storefrontPage()) === zipTable(read("functions/_lib/db.js")) && zipTable(storefrontPage()).length > 500);
     let c = C({ name: "A", line1: "1 Main", city: "Toledo", state: "ohio", zip: "43601", evil: "<script>", nested: { a: 1 } });
     console.log("a good address: state name normalised to its code, unknown fields dropped:", c.address && c.address.state === "OH" && !("evil" in c.address) && !("nested" in c.address));
     const bad = C({ line1: "1", city: "Toledo", state: "IN", zip: "43601" }).error || "";

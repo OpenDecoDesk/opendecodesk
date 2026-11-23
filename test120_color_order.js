@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -40,7 +41,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   await lib.createProduct(d1, "club", { productId: "polo", type: "shirt", name: "Club polo", pricingMode: "sized", sizePricing: { S: 25, M: 25 }, visible: true });
   await lib.createProduct(d1, "club", { productId: "old", type: "shirt", name: "Old way", pricingMode: "sized", sizePricing: { S: 25 }, visible: true, configurable: true, garmentColors: ["Custom Teal", "Royal", "Navy"], reorderQr: "none", locations: [] });
 
-  const html = read("public/index.html"), adminJs = read("public/admin.js");
+  const html = storefrontPage(), adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const dom = new JSDOM(html, { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.CSS = win.CSS || { escape: (v) => String(v) }; autoConfirm(win, () => true); win.fetch = async (url, init) => {

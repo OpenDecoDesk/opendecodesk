@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Reads that shop and admin pages wait on, made smaller or at the same time:
@@ -82,7 +83,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("…its parts asked for at once (4 or more at a time)", most >= 4);
 
   console.log("\n=== The admin's script is kept by the browser between deploys ===");
-  const page = read("public/index.html");
+  const page = storefrontPage();
   ok("index.html no longer loads admin.js under a new address on every visit", !/"admin\.js\?v=" \+ Date\.now\(\)/.test(page));
   ok("…it loads it under the version /api/catalog gives (fresh only when none is known)", /adminScriptVersion_ = typeof data\.adminScript === "string"/.test(page) &&
     /s\.src = "admin\.js" \+ \(adminScriptVersion_ \? "\?v=" \+ encodeURIComponent\(adminScriptVersion_\) : "\?t=" \+ Date\.now\(\)\)/.test(page));

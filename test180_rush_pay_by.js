@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
 const { ADMIN_ORIGIN, shopOrigin } = require("./testlib/hosts.js");
@@ -148,7 +149,7 @@ const quiet = () => { const vc = new VirtualConsole(); vc.on("jsdomError", (e) =
   let v = (await invGet()).invoice;
   ok("the endpoint gives the needed-by and pay-by dates, not passed", v.rushRequested && v.neededBy === due && v.rushPayBy === addDays(today, 2) && v.rushPayByPassed === false);
   const page = async () => {
-    const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", url: shopOrigin("acme") + "/?invoice=" + token, pretendToBeVisual: true, virtualConsole: quiet(),
+    const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", url: shopOrigin("acme") + "/?invoice=" + token, pretendToBeVisual: true, virtualConsole: quiet(),
       beforeParse(win){
         win.fetch = async (url) => {
           const u = String(url);
@@ -175,7 +176,7 @@ const quiet = () => { const vc = new VirtualConsole(); vc.on("jsdomError", (e) =
   ok("paid in full: no warning, just the rush date", !doc.querySelector(".inv-rush") && /rush delivery date/.test(plain(doc.getElementById("app").innerHTML)));
 
   console.log("\n=== The shop page and the admin ===");
-  const html = read("public/index.html");
+  const html = storefrontPage();
   const payBySrc = html.slice(html.indexOf("function rushPayByDate_("), html.indexOf("function rushPayByHtml_("));
   const rushPayByDate_ = new Function(payBySrc + "\nreturn rushPayByDate_;")();
   ok("the checkout works out the same pay-by date as the server", rushPayByDate_({ rush: M.rushRuleView(R({ mode: "fixed", amount: 1, payByDays: 3 })) }, due, today) === M.rushPayByFor(R({ mode: "fixed", amount: 1, payByDays: 3 }), due, today) &&

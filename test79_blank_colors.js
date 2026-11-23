@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Color as a dimension of a blank (migrations/0037): one blank holds many colors × sizes, stock/COGS
@@ -117,16 +118,16 @@ const near = (a, b) => Math.abs(a - b) < 0.005;
   ok("receiveBlanks with no color defaults to the blank's scalar color", stock(legacyId, "Black", "OSFA").quantity === 10);
 
   console.log("\n=== admin + storefront wiring ===");
-  const a = read("public/admin.js"), h = read("public/index.html"), catSrc = read("functions/api/catalog.js");
+  const a = read("public/admin.js"), h = storefrontPage(), catSrc = read("functions/api/catalog.js");
   ok("blank form edits colors × sizes + per-color images", /id="blkColors"/.test(a) && /id="blkAddColor"/.test(a) &&
     /data-img-add=/.test(a) && /colors: cleanColors/.test(a) && /uploadImage\(file, "blanks"\)/.test(a));
   ok("a color can be duplicated (same sizes & prices) and get the standard XS–4XL run",
     /data-color-dup=/.test(a) && /data-size-std=/.test(a) && /Standard sizes \(XS–4XL\)/.test(a) &&
     /SIZE_ORDER\.forEach\(sz => \{ if \(!have\.has\(sz\)\)/.test(a));
   ok("blanks list shows colors and search covers them", /Colors &amp; sizes/.test(a) && /\.\.\.\(b\.colors \|\| \[\]\)\.map\(c => c\.color\)/.test(a));
-  ok("a Merge button + modal call mergeBlanks", /onclick="blankMerge/.test(a) && /function showMergeBlanksModal_/.test(a) && /action: "mergeBlanks"/.test(a));
+  ok("a Merge button + modal call mergeBlanks", /data-admin-action="blankMerge"/.test(a) && /function showMergeBlanksModal_/.test(a) && /action: "mergeBlanks"/.test(a));
   ok("receive order and write-off send color; the per-blank Receive window is gone (Receive order is the one way in)", /color: q\.dataset\.color \|\| ""/.test(a) && /color: sel\.color \|\| ""/.test(a) &&
-    !/function showReceiveBlanksModal/.test(a) && !/onclick="blankReceive\(/.test(a));
+    !/function showReceiveBlanksModal/.test(a) && !/data-admin-action="blankReceive"/.test(a) && !/blankReceive\(/.test(a));
   ok("blank-links map (productColor, productSize) → blank color+size", /productColor: pc, productSize: size, blankId: Number\(k\.blankId\), blankColor/.test(a) && /class="bl-color"/.test(a));
   ok("blank-links has an Auto-map-from-first-row button that fills every row by name", /id="blAutoMap"/.test(a) && /Auto-map all from the first row/.test(a) && /section\.querySelectorAll\("\.bl-blank"\)\.forEach/.test(a));
   ok("storefront shows blank color images (after the product's own) and swaps them per garment color", /function productImages_/.test(h) && /colorImages/.test(h) && /function cfgImages_/.test(h) && /id="cfgimg-/.test(h));

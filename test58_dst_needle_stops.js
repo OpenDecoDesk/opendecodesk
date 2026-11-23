@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
 // Upload design version: reading a .dst machine file to count its needle stops (color blocks
@@ -16,7 +17,7 @@ const s = (n) => Array.from({ length: n }, () => STITCH);
 (async () => {
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){
       win.TextDecoder = TextDecoder;   // jsdom doesn't provide it; every real browser does
       // jsdom has no 2D canvas; stub it so the DST preview render path runs (no-op draws) and
@@ -113,5 +114,5 @@ const s = (n) => Array.from({ length: n }, () => STITCH);
   await w.loadDesignDetail_(3);
   await new Promise(res => setTimeout(res, 20));
   console.log("the design detail page shows a preview canvas for the current (DST) version:", !!doc.getElementById("dsgDetailCanvas"));
-  console.log("each version still offers Edit colors:", /editVersionColors_\(7\)/.test(detailEl.innerHTML));
+  console.log("each version still offers Edit colors:", !!detailEl.querySelector('button[data-vid="7"][data-admin-action="editVersionColors_"]'));
 })().catch(e => { console.log("test58 crashed:", false); console.error(e); process.exit(1); });

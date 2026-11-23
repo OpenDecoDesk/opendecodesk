@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
 // Blanks -> Import from PDF. Only
@@ -18,7 +19,7 @@ const items = JSON.parse(read("testlib/fixtures/pdf-order-items.json"));
 (async () => {
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "error", message: "n/a" }) }); } });
   const w = dom.window;
   await new Promise(res => setTimeout(res, 150));
@@ -99,7 +100,7 @@ const items = JSON.parse(read("testlib/fixtures/pdf-order-items.json"));
   console.log("picking a file opens the PDF-import preview (showPdfImportModal_), which hands off into Receive order pre-filled:",
     /blankImportPdfFile"\).onchange[\s\S]{0,150}showPdfImportModal_/.test(adminJs) && /showReceiveOrderModal\(onDone, \{ groups/.test(adminJs));
   console.log("Receive order can upload and attach a receipt (reusing the same upload/view functions Expenses uses):",
-    /uploadReceipt_\(receiptFile\)/.test(adminJs) && /body\.receiptKey = r\.key/.test(adminJs) && /onclick="expViewReceipt_\(this\.dataset\.key\)"/.test(adminJs));
+    /uploadReceipt_\(receiptFile\)/.test(adminJs) && /body\.receiptKey = r\.key/.test(adminJs) && /data-key="[^"]*" data-admin-action="expViewReceipt_"/.test(adminJs));
 
   console.log("\n=== New-blank category (productType) is mappable, not hardcoded ===");
   console.log("guessBlankType_ reads the description: cap / sweatshirt / shirt fallback:",

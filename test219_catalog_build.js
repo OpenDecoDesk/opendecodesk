@@ -1,14 +1,16 @@
 const fs = require("fs");
 const { createD1 } = require("./testlib/d1-shim.js");
 
-// Building the storefront catalog reads the whole install in one go (catalogPrefetch_ in db.js), not shop by shop:
-// the same dozen or so queries whether there are two shops or twenty (D1 caps the queries one request may make). Each
-// shop comes out exactly as the shop-by-shop build makes it (getDraftCatalogShop, the admin's preview): products,
-// designs, blank weights and color photos, mockups, decorations, graphics and tier prices.
+// Building the whole install's storefront catalog (getPublicCatalogData) reads it in one go (catalogPrefetch_ in
+// db.js), not shop by shop: the same dozen or so queries whether there are two shops or twenty (D1 caps the queries
+// one request may make). Each shop comes out exactly as the shop-by-shop build makes it (getDraftCatalogShop, the
+// admin's preview): products, designs, blank weights and color photos, mockups, decorations, graphics and tier
+// prices. The request path caches the catalog in parts (catalogCache.js, test244_catalog_per_shop.js): the meta part
+// (getPublicCatalogMeta) and each shop on its own (getPublicCatalogShop) — the same answers, read apart.
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1");
 const lib = new Function(strip(read("functions/_lib/db.js")) + `\nreturn { createProduct, createTransfer, createGraphic, setTierPrices, publishShop,
-  getPublicCatalogData, getDraftCatalogShop };`)();
+  getPublicCatalogData, getPublicCatalogMeta, getPublicCatalogShop, getDraftCatalogShop };`)();
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 
@@ -79,12 +81,27 @@ async function addShop(d1, orgId, n) {
   ok("a published shop's draft edit stays out of the catalog; a never-published shop is live",
     after.orgs.s0.products.find(p => p.productId === "tee").name === "Tee 0" && (await lib.getDraftCatalogShop(d1, "s0")).products.find(p => p.productId === "tee").name === "Renamed");
 
+  console.log("\n=== The catalog read in parts: the meta part and each shop on its own ===");
+  {
+    const { orgs, ...rest } = after;
+    ok("the meta part is the whole build without the shops", JSON.stringify(await lib.getPublicCatalogMeta(d1)) === JSON.stringify(rest));
+    let same = true;
+    for (const org of ["s0", "s1", "s2"]) same = same && JSON.stringify(await lib.getPublicCatalogShop(d1, org)) === JSON.stringify(after.orgs[org]);
+    ok("each shop on its own is the shop the whole build makes (published or live)", same);
+  }
+
   console.log("\n=== The number of queries doesn't grow with the number of shops ===");
   const few = counting(await build(2, [0])), many = counting(await build(12, [0, 1, 2, 3, 4, 5]));
   const a = await lib.getPublicCatalogData(few.db), b = await lib.getPublicCatalogData(many.db);
   ok("2 shops and 12 shops take the same number of queries", Object.keys(a.orgs).length === 2 && Object.keys(b.orgs).length === 12 && few.sqls.length === many.sqls.length);
   ok("…well under D1's 50 a request", many.sqls.length <= 25);
   ok("…and every one of the 12 is built", Object.values(b.orgs).every(o => o.products.length === 3 && o.graphics.length === 2));
+  // (s1 never published in both: a published shop reads its snapshot instead of its live rows.)
+  const fewOne = counting(await build(2, [0])), manyOne = counting(await build(12, [0, 2, 3, 4, 5]));
+  const s1a = await lib.getPublicCatalogShop(fewOne.db, "s1"), s1b = await lib.getPublicCatalogShop(manyOne.db, "s1");
+  ok("one shop on its own: the same number of queries on 2 shops and on 12", s1a.products.length === 3 && s1b.products.length === 3 && fewOne.sqls.length === manyOne.sqls.length);
+  await lib.getPublicCatalogMeta(fewOne.db); await lib.getPublicCatalogMeta(manyOne.db);
+  ok("…and so does the meta part", fewOne.sqls.length === manyOne.sqls.length);
 
   console.log(`\n${pass} passed, ${fail} failed`);
 })().catch(e => { console.error(e); console.log("test crashed:", false); process.exit(1); });

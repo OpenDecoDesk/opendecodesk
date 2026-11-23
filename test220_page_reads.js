@@ -90,7 +90,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const catalog = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
     "const getCatalogData = async () => ({ subdomainMap: {}, orgs: {}, business: {}, features: {} });\n" +
     "const getReadyToShipByOrg = async () => [], getBlankReadyByOrg = async () => ({}), getDraftCatalogShop = async () => null, verifyPreviewToken = async () => false;\n" +
-    strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
+    "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
   const answer = async (env, origin = ADMIN_ORIGIN) => JSON.parse(await (await catalog({ request: { url: origin + "/api/catalog" }, env })).text());
   let asked = null;
   const assets = (etag) => ({ fetch: async (req) => { asked = req; return new Response(null, { status: 200, headers: etag ? { ETag: etag } : {} }); } });

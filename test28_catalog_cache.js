@@ -7,8 +7,10 @@ Object.assign(global, platformGlobals());
 // implementation, including the fallback, is exercised).
 // The catalog version and per-environment cache namespace live in D1
 // (global_settings), exercised here against a real SQLite database. The
-// catalog query itself (getPublicCatalogData) is stripped and replaced with a
-// global mock so the test can control what D1 "returns".
+// meta entry's query itself (getPublicCatalogMeta) is stripped and replaced
+// with a global mock so the test can control what D1 "returns". (Each shop's
+// entry, getCatalogShop, is checked on a real database in
+// test244_catalog_per_shop.js.)
 let src = fs.readFileSync(__dirname + "/functions/_lib/catalogCache.js", "utf8")
   .replace(/import \{[\s\S]*?\} from ["'][^"']+["'];\n?/g, "")
   .replace(/export async function/g, "async function")
@@ -38,7 +40,7 @@ function makeCachesMock(){
   {
     const store = makeCachesMock(); _resetCatalogCacheState();
     const DB = await makePlatformDb();
-    global.getPublicCatalogData = async () => ({subdomainMap:{x:"org-x"}, orgs:{}});
+    global.getPublicCatalogMeta = async () => ({subdomainMap:{x:"org-x"}});
     const data = await getCatalogData({ DB });
     console.log("Returns the fetched data:", data.subdomainMap.x === "org-x");
     console.log("Stored a versioned entry and a last-known-good entry:", store.size === 2);
@@ -50,7 +52,7 @@ function makeCachesMock(){
     makeCachesMock(); _resetCatalogCacheState();
     const DB = await makePlatformDb();
     let d1Calls = 0;
-    global.getPublicCatalogData = async () => { d1Calls++; return {subdomainMap:{x:"org-x"}, orgs:{}}; };
+    global.getPublicCatalogMeta = async () => { d1Calls++; return {subdomainMap:{x:"org-x"}}; };
     const env = { DB };
     await getCatalogData(env);
     await getCatalogData(env);
@@ -62,7 +64,7 @@ function makeCachesMock(){
     makeCachesMock(); _resetCatalogCacheState();
     const DB = await makePlatformDb();
     let d1Calls = 0;
-    global.getPublicCatalogData = async () => { d1Calls++; return {subdomainMap:{x:"org-x-v"+d1Calls}, orgs:{}}; };
+    global.getPublicCatalogMeta = async () => { d1Calls++; return {subdomainMap:{x:"org-x-v"+d1Calls}}; };
     const env = { DB };
     const first = await getCatalogData(env);
     const v = await bumpCatalogVersion(DB); // what the real publish action does
@@ -79,7 +81,7 @@ function makeCachesMock(){
   {
     makeCachesMock(); _resetCatalogCacheState();
     const DB = await makePlatformDb();
-    global.getPublicCatalogData = async () => ({subdomainMap:{x:"org-x"}, orgs:{}});
+    global.getPublicCatalogMeta = async () => ({subdomainMap:{x:"org-x"}});
     let stateReads = 0;
     const counting = { prepare: (sql) => { if(/cacheNs/.test(sql) && /SELECT/.test(sql)) stateReads++; return DB.prepare(sql); } };
     const env = { DB: counting };
@@ -92,8 +94,8 @@ function makeCachesMock(){
     makeCachesMock(); _resetCatalogCacheState();
     const DB = await makePlatformDb();
     let succeed = true;
-    global.getPublicCatalogData = async () => {
-      if(succeed) return {subdomainMap:{x:"org-x"}, orgs:{}};
+    global.getPublicCatalogMeta = async () => {
+      if(succeed) return {subdomainMap:{x:"org-x"}};
       throw new Error("D1 down");
     };
     const env = { DB };
@@ -109,7 +111,7 @@ function makeCachesMock(){
   {
     makeCachesMock(); _resetCatalogCacheState();
     const DB = await makePlatformDb();
-    global.getPublicCatalogData = async () => { throw new Error("D1 unreachable"); };
+    global.getPublicCatalogMeta = async () => { throw new Error("D1 unreachable"); };
     let threw = false;
     try{ await getCatalogData({ DB }); }catch(e){ threw = true; }
     console.log("Throws when there's truly nothing to fall back to:", threw);
@@ -118,7 +120,7 @@ function makeCachesMock(){
   console.log("\n=== State table unreadable (broken DB) but the catalog query works: request still succeeds ===");
   {
     makeCachesMock(); _resetCatalogCacheState();
-    global.getPublicCatalogData = async () => ({subdomainMap:{x:"org-x"}, orgs:{}});
+    global.getPublicCatalogMeta = async () => ({subdomainMap:{x:"org-x"}});
     const data = await getCatalogData({ DB: brokenDb("D1 down") });
     console.log("Still served (uses a one-off namespace, never another env's cache):", data.subdomainMap.x === "org-x");
   }
@@ -126,7 +128,7 @@ function makeCachesMock(){
   console.log("\n=== Missing DB binding -> throws immediately (misconfigured server) ===");
   {
     makeCachesMock(); _resetCatalogCacheState();
-    global.getPublicCatalogData = async () => ({subdomainMap:{}, orgs:{}});
+    global.getPublicCatalogMeta = async () => ({subdomainMap:{}});
     let threw = false;
     try{ await getCatalogData({}); }catch(e){ threw = true; }
     console.log("Throws with missing DB binding:", threw);
@@ -138,10 +140,10 @@ function makeCachesMock(){
     const prodDb = await makePlatformDb(), stageDb = await makePlatformDb();
     await setSettingRaw(prodDb, "catalogVersion", "7"); await setSettingRaw(stageDb, "catalogVersion", "7"); // SAME version number
     _resetCatalogCacheState();
-    global.getPublicCatalogData = async () => ({ subdomainMap: { prod: "org-prod" }, orgs: {} });
+    global.getPublicCatalogMeta = async () => ({ subdomainMap: { prod: "org-prod" } });
     await getCatalogData({ DB: prodDb });
     _resetCatalogCacheState();
-    global.getPublicCatalogData = async () => ({ subdomainMap: { teststaging: "org-stage" }, orgs: {} });
+    global.getPublicCatalogMeta = async () => ({ subdomainMap: { teststaging: "org-stage" } });
     const stageData = await getCatalogData({ DB: stageDb });
     console.log("A second environment with the same version number gets ITS OWN catalog, not the first's:", !!stageData.subdomainMap.teststaging && !stageData.subdomainMap.prod);
     const prodNs = prodDb.q("SELECT value FROM global_settings WHERE key='cacheNs'")[0].value;
@@ -151,7 +153,7 @@ function makeCachesMock(){
     console.log("No shared, un-namespaced keys left in the cache:", keys.every(k => k.includes(prodNs) || k.includes(stageNs)));
     // D1 outage in the second environment: its fallback must be its own last-good, never the first's.
     _resetCatalogCacheState();
-    global.getPublicCatalogData = async () => { throw new Error("D1 down"); };
+    global.getPublicCatalogMeta = async () => { throw new Error("D1 down"); };
     await setSettingRaw(stageDb, "catalogVersion", "8"); // force a cache miss
     const fb = await getCatalogData({ DB: stageDb });
     console.log("An outage there falls back to its own last-good copy:", !!fb.subdomainMap.teststaging && !fb.subdomainMap.prod);
@@ -165,7 +167,7 @@ function makeCachesMock(){
     let d1Calls = 0, matches = 0;
     const match = global.caches.default.match;
     global.caches.default.match = async (k) => { matches++; return match(k); };
-    global.getPublicCatalogData = async () => { d1Calls++; return { subdomainMap: { x: "org-x-" + d1Calls }, orgs: {} }; };
+    global.getPublicCatalogMeta = async () => { d1Calls++; return { subdomainMap: { x: "org-x-" + d1Calls } }; };
     const env = { DB };
     const first = await getCatalogData(env);
     const m0 = matches;
@@ -194,7 +196,7 @@ function makeCachesMock(){
   {
     const store = makeCachesMock(); _resetCatalogCacheState();
     const DB = await makePlatformDb();
-    global.getPublicCatalogData = async () => ({ subdomainMap: { x: "org-x" }, orgs: {} });
+    global.getPublicCatalogMeta = async () => ({ subdomainMap: { x: "org-x" } });
     await getCatalogData({ DB });
     for (const [k, r] of [...store.entries()]) store.set(k, new Response(await r.clone().text(), { headers: { "Content-Type": "application/json" } }));
     _resetCatalogCacheState();
@@ -210,7 +212,7 @@ function makeCachesMock(){
     makeCachesMock(); _resetCatalogCacheState();
     const DB = await makePlatformDb();
     let up = true, calls = 0;
-    global.getPublicCatalogData = async () => { calls++; if(!up) throw new Error("D1 down"); return { subdomainMap: { x: "org-x-" + calls }, orgs: {} }; };
+    global.getPublicCatalogMeta = async () => { calls++; if(!up) throw new Error("D1 down"); return { subdomainMap: { x: "org-x-" + calls } }; };
     const env = { DB };
     await getCatalogData(env);
     await bumpCatalogVersion(DB); invalidateCatalogVersionCache();

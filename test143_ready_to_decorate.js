@@ -94,7 +94,7 @@ const tick = (ms) => new Promise(r => setTimeout(r, ms));
     "let _data, _fail = false; const getCatalogData = async () => _data;\n" +
     "const getReadyToShipByOrg = (db, o) => L.getReadyToShipByOrg(db, o);\n" +
     "const getBlankReadyByOrg = async (db, o) => { if (_fail) throw new Error('boom'); return L.getBlankReadyByOrg(db, o); };\n" +
-    strip(read("functions/api/catalog.js")) + "\nreturn { onRequestGet, set: (d) => { _data = d; }, fail: (f) => { _fail = f; } };")(lib);
+    "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn { onRequestGet, set: (d) => { _data = d; }, fail: (f) => { _fail = f; } };")(lib);
   catalogGet.set(await lib.getPublicCatalogData(d1));
   const get = async () => JSON.parse(await (await catalogGet.onRequestGet({ request: { url: "https://club.example.com/api/catalog" }, env: { DB: d1 } })).text());
   let sent = await get();

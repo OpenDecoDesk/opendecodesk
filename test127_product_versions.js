@@ -26,7 +26,7 @@ const api = new Function(hostSrc + "\n" + httpSrc + "\n" + strip(read("functions
   dbSrc + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")();
 const catalogApi = new Function("lib", hostSrc + "\n" + httpSrc + "\nconst getReadyToShipByOrg = async () => []; const getBlankReadyByOrg = async () => ({});\n" +
   "const getCatalogData = async (env) => ({ ...(await lib.getPublicCatalogData(env.DB)), subdomainMap: { club: 'club' } });\n" +
-  strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")(lib);
+  "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")(lib);
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 

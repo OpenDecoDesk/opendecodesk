@@ -6,12 +6,14 @@
  * ========================================================================
  * ---- HOW THIS HIDES OTHER ORGS ----
  * The real data — name, accent color, description, design preview images,
- * products, prices — lives in D1, read and edge-cached via
- * getCatalogData(env) in functions/_lib/catalogCache.js. It's never embedded
- * in index.html. The client asks this endpoint for "my org's info," and this
- * function decides which org that is by reading the request's Host header
- * itself — NOT by trusting an org id the client sends. A locked subdomain
- * always gets its own data only, no matter what ?org= it's asked with. On
+ * products, prices — lives in D1, read and edge-cached by
+ * functions/_lib/catalogCache.js: getCatalogData(env) for the shop addresses
+ * and settings, getCatalogShop(env, orgId) for the one shop this request is
+ * for (no other shop is read). It's never embedded in index.html. The
+ * client asks this endpoint for "my org's info," and this function decides
+ * which org that is by reading the request's Host header itself — NOT by
+ * trusting an org id the client sends. A locked subdomain always gets its
+ * own data only, no matter what ?org= it's asked with. On
  * boot, the client calls this with no ?org= at all; a response of anything
  * other than status:"ok" (root domain, or an unrecognized host) is the
  * signal index.html uses to render the generic company page instead of
@@ -28,7 +30,7 @@
  */
 
 import { classifyHost } from "../_lib/hostConfig.js";
-import { getCatalogData } from "../_lib/catalogCache.js";
+import { getCatalogData, getCatalogShop } from "../_lib/catalogCache.js";
 import { jsonResponse } from "../_lib/http.js";
 import { getReadyToShipByOrg, getBlankReadyByOrg, getDraftCatalogShop, verifyPreviewToken } from "../_lib/db.js";
 
@@ -246,7 +248,12 @@ export async function onRequestGet(context){
     return jsonResponse({status:"closed", message:"Online ordering isn't available here.", business: catalogData.business || {}, country, features});
   }
 
-  let org = orgId && catalogData.orgs[orgId];
+  // Only this shop's catalog is read (catalogCache.js caches each shop apart), never the other shops'.
+  let org = null;
+  if(orgId){
+    try{ org = await getCatalogShop(env, orgId); }
+    catch(err){ return jsonResponse({status:"error", message:"Catalog temporarily unavailable"}, 503); }
+  }
   // The admin's draft preview (migrations/0076): ?preview=<token signed for THIS shop> serves the shop's live,
   // unpublished rows (never cached). Anything else — a bad or expired token — is just the published shop.
   let preview = false;

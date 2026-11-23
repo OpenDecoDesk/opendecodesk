@@ -77,7 +77,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
     /^https:\/\/opendecodesk\.someone\.workers\.dev\/\?shop=league&preview=\d+\.[0-9a-f]{64}$/.test(devLink.body.url));
   const { prelude } = require("./testlib/auth-harness");
   const shopCatalog = new Function(prelude().replace("const getCatalogData = async () => ({ subdomainMap: {}, business: {} });", "let getCatalogData;") +
-    strip(read("functions/api/catalog.js")) + "\nreturn { get: onRequestGet, set: (f) => { getCatalogData = f; } };")();
+    "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn { get: onRequestGet, set: (f) => { getCatalogData = f; } };")();
   const dbLib = await import("./functions/_lib/db.js");
   shopCatalog.set(async () => ({ ...(await dbLib.getPublicCatalogData(B.d1)), subdomainMap: {} }));
   const at = async (u, e = B.env) => JSON.parse(await (await shopCatalog.get({ request: { url: u.replace(/^(https:\/\/[^/]+)\//, "$1/api/catalog") }, env: e })).text());
@@ -91,7 +91,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 
   const catalog = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
     "const getReadyToShipByOrg = async () => []; const getBlankReadyByOrg = async () => ({});\nconst getCatalogData = async () => ({ subdomainMap: {}, business: {}, features: {} });\n" +
-    strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
+    "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn onRequestGet;")();
   const adminAnswer = async (host, e) => JSON.parse(await (await catalog({ request: { url: `https://${host}/api/catalog` }, env: e })).text());
   const noDomain = await adminAnswer("opendecodesk.someone.workers.dev", {}), withDomain = await adminAnswer("admin.myshop.com", { ROOT_DOMAIN: "myshop.com" });
   ok("the admin is told the site's domain, or \"\" when there is none — never example.com", noDomain.status === "admin" && noDomain.site.rootDomain === "" && withDomain.site.rootDomain === "myshop.com");

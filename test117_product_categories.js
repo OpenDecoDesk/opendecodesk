@@ -163,7 +163,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 60));
   console.log("the public catalog still builds:", (await lib.getPublicCatalogData(old)).categories.length === 4);
 
   // ---- The real storefront, in jsdom, on the real catalog answer ---------------------------
-  const catalogSrc = strip(read("functions/api/catalog.js"));
+  const catalogSrc = "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js"));
   const catalogGet = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
     "let _data; const getCatalogData = async () => _data; const getReadyToShipByOrg = async () => []; const getBlankReadyByOrg = async () => ({});\n" + catalogSrc + "\nreturn { onRequestGet, set: (d) => { _data = d; } };")();
   await lib.createProduct(d1, "club", { productId: "cap1", type: "cap", name: "Club Cap", pricingMode: "flat", flatPrice: 18, visible: true, sortOrder: 5 });

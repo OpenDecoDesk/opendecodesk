@@ -268,6 +268,7 @@ const SAME = { Origin: ADMIN, "CF-Connecting-IP": "203.0.113.7" };
     global.getOrderCheckoutState = async () => state;
     // No card page already open for the order (migrations/0093 — test19 covers reuse and closing).
     Object.assign(global, { checkoutSessionState: async () => ({ state: "none" }), expireCheckoutSession: async () => "closed", saveCheckoutSession: async () => {} });
+    require("./testlib/checkout-session").install();
     let stripeParams = null;
     const realFetch = global.fetch;
     global.fetch = async (url, opts) => { stripeParams = new URLSearchParams(opts.body); return { json: async () => ({ url: "https://checkout.stripe.com/x" }) }; };

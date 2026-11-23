@@ -1925,7 +1925,7 @@ async function renderDesignVerify(app, token){
               </div>`).join("")}
           </div>
           <div id="dvError" class="dv-err" role="alert"></div>
-          <button type="button" id="dvSubmit" class="dv-submit" onclick="dvSubmitResponse('${escapeHtml(token)}')" style="display:none;">Submit response</button>
+          <button type="button" id="dvSubmit" class="dv-submit" data-token="${escapeHtml(token)}" onclick="dvSubmitResponse(this.dataset.token)" style="display:none;">Submit response</button>
         </div>
       `}
     </div>`;

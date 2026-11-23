@@ -219,7 +219,7 @@ const ok = (m, c) => console.log(m + ":", !!c);
     const pending = w.showEditOrderModal(order, products);
     await tick();
     const ov = d.body.lastElementChild;
-    const removeBtn = ov.querySelector('#editOrderRows [data-action="remove"]');
+    const removeBtn = ov.querySelector('#editOrderRows [data-edit-action="remove"]');
     let refund = false;
     if (removeBtn) { removeBtn.click(); await tick(); refund = !!ov.querySelector('[data-field="_refundAmount"]'); }
     d.getElementById("editOrderSave").click();
@@ -235,7 +235,7 @@ const ok = (m, c) => console.log(m + ":", !!c);
     const pending = w.showEditOrderModal(order, products);
     await tick();
     const ov = d.body.lastElementChild;
-    ov.querySelector('#editOrderRows [data-action="remove"]').click(); await tick();
+    ov.querySelector('#editOrderRows [data-edit-action="remove"]').click(); await tick();
     const noRefundBox = !ov.querySelector('[data-field="_refundAmount"]');
     d.getElementById("editOrderSave").click();
     const res = await pending;

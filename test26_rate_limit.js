@@ -86,6 +86,7 @@ global.getOrderCheckoutState = async (db, orderId) => {
 global.checkoutSessionState = async () => ({ state: "none" });
 global.expireCheckoutSession = async () => "closed";
 global.saveCheckoutSession = async () => {};
+require("./testlib/checkout-session").install();   // the real createCheckoutSession (db.js), over the stubs above
 global.getOrderForShipping = async () => null;
 global.priceItem = async () => ({ unitPrice: 25, personalizationFee: 0 });
 global.getPublicCatalogData = async () => ({ subdomainMap: {}, orgs: {} });

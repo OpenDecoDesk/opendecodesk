@@ -139,7 +139,7 @@ import { verifyQuote, canonicalItems } from "../_lib/quoteToken.js";
 import { selectBox } from "../_lib/boxSize.js";
 import { verifyTurnstile } from "../_lib/turnstile.js";
 // Payments, refunds and money integrity (kept apart from the long list above).
-import { expireCheckoutSession, listCacheVersions_, readCachedList_, refreshCachedLists_ } from "../_lib/db.js";
+import { expireCheckoutSession, createCheckoutSession, CHECKOUT_LINK_SECONDS, listCacheVersions_, readCachedList_, refreshCachedLists_ } from "../_lib/db.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9\-]{1,64}$/;
 // The most orders one shop's list returns (getOrders), and the All shops page in all (getOrdersAllShops): the newest that many.
@@ -152,6 +152,9 @@ const OPEN_ORDERS_MAX = 1000;
 const BULK_STAGE_MAX = 20;
 // The same for the lighter bulk changes — complete, due date, customer info — a query or two per order.
 const BULK_ORDERS_MAX = 100;
+// Lines one bulk cancel takes (review #9): each runs several queries (the line, the cancel, the stock it gave back,
+// the paid state) plus its order's email, so the admin page sends a bigger selection in groups of whole orders.
+const BULK_CANCEL_LINES_MAX = 20;
 // "Quote pending" is a note for the shop, not a carrier: wherever a shipping method is printed for
 // a customer (the shipped email, a shipping payment link) it reads as no method.
 const shownMethod_ = (m) => (m === SHIPPING_QUOTE_PENDING ? "" : String(m || ""));
@@ -449,10 +452,14 @@ const listCacheOn_ = () => typeof listCacheVersions_ === "function" && typeof re
 const writesLists_ = (action) => { const p = ACTION_PERM_[action]; return Array.isArray(p) && p.some((e) => Array.isArray(e) && e[1] !== "read"); };
 export async function onRequestPost(context) {
   const { request, env } = context;
-  let action = null;
-  if (listCacheOn_() && env && env.DB && request && typeof request.clone === "function") {
-    try { const b = await request.clone().json(); action = b && typeof b.action === "string" ? b.action : null; } catch (e) { /* not JSON: the handler answers */ }
+  let action = null, asked = null;
+  if (env && env.DB && request && typeof request.clone === "function") {
+    try { asked = await request.clone().json(); action = asked && typeof asked.action === "string" ? asked.action : null; } catch (e) { /* not JSON: the handler answers */ }
   }
+  // A request naming when something happened (`at`, a Local sale's `placedAt`, Edit dates): the install's time
+  // zone first, so a refusal names times as the shop's clock reads them (db.js shopTime_), not New York's.
+  if (asked && (asked.at || asked.placedAt || action === "setOrderDates") && typeof resolveTimeZone === "function") await resolveTimeZone(env).catch(() => {});
+  if (!listCacheOn_()) action = null;
   const before = action && writesLists_(action) ? await listCacheVersions_(env.DB).catch(() => null) : null;
   const res = await handleOrdersPost_(context);
   if (before && res && res.ok && typeof context.waitUntil === "function") context.waitUntil(refreshCachedLists_(env.DB, before).catch((e) => console.error("list cache refresh failed:", e)));
@@ -592,6 +599,24 @@ async function handleOrdersPost_(context) {
   // Null when the request has none (older pages; scripts).
   const requestKeyOf = (b, kind) => /^[A-Za-z0-9_-]{8,64}$/.test(String((b && b.requestId) || "")) ? kind + ":" + b.requestId : null;
   const alreadyRecorded = async (key) => !!key && !!(await env.DB.prepare("SELECT 1 AS x FROM order_payments WHERE requestKey = ?").bind(key).first());
+  // A line's refund paid back by Venmo, Zelle, check, cash or other, into the payments ledger as 💰 Payments →
+  // Record refund would put it (the line's Record refund, and a line taken off in Edit items — review #15), so the
+  // balance, Net kept, the revenue and sales-tax reports and Reconcile all see it. Keyed by the line, so the same
+  // line's refund can't go into the books twice (a double click, a retry). `kept` is what the order still holds,
+  // in dollars. Null when recorded (or already was); otherwise the reply refusing it.
+  const recordLineRefund_ = async (order, itemId, itemName, amount, method, at, kept) => {
+    const requestKey = "lineRefund:" + itemId;
+    if (await alreadyRecorded(requestKey)) return null;
+    if (Math.round(amount * 100) > Math.round(kept * 100)) {
+      return jsonResponse({ status: "error", message: `Refund can't exceed the $${Math.max(0, kept).toFixed(2)} kept on this order` }, 400);
+    }
+    const auditErr = await auditStrict({ orgId: order.orgId, orderId: order.orderId, action: "payment.refunded",
+      detail: { amount, method, reference: "", note: "Refund — " + itemName, shipping: 0, itemId } });
+    if (auditErr) return auditErr;
+    await addOrderPayment(env.DB, order.orderId, -amount, ("Refund — " + (itemName || "cancelled item")).slice(0, 500), "",
+      { method, kind: "refund", receivedAt: at || undefined, requestKey });
+    return null;
+  };
   // When something happened, as the admin chose it (2026-10): `b.at` — an ISO date-time from the browser's
   // date-and-time box (or a bare YYYY-MM-DD = that day). Not given → null (the action uses now); {error} = refused.
   const actionTime = (b, field = "at") => {
@@ -2430,8 +2455,15 @@ async function handleOrdersPost_(context) {
     }
 
     const orgPrefix = org.replace(/[^A-Za-z0-9]/g, "").slice(0, 4).toUpperCase() || "ORD";
-    const randHex = crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase();
-    const orderId = orgPrefix + "-" + Date.now().toString(36).toUpperCase() + "-" + randHex;
+    // One sale per Save (review #33): the form's key, made when it opens, names the order, so a double click, a
+    // retry after a lost answer or a second tab finds the order the first request made instead of making another.
+    // Without a key (older pages, scripts) the number is random, as before.
+    const saleKey = requestKeyOf(body, "localSale");
+    const orderId = saleKey
+      ? orgPrefix + "-LS-" + String(body.requestId).replace(/[^A-Za-z0-9]/g, "").slice(0, 20).toUpperCase()
+      : orgPrefix + "-" + Date.now().toString(36).toUpperCase() + "-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase();
+    const madeAlready = async () => !!(await env.DB.prepare("SELECT 1 AS x FROM orders WHERE orderId = ?").bind(orderId).first());
+    if (saleKey && await madeAlready()) return jsonResponse({ status: "ok", orderId, repeated: true });
 
     // When the sale happened (a date and time, or a bare date = that day; default now): the order date, and —
     // ticked — when it was paid and handed over, and its stock lines pulled.
@@ -2471,11 +2503,18 @@ async function handleOrdersPost_(context) {
 
     // Lines for stocked products come out of the shop's finished stock (migrations/0060) — handed over
     // now, so they're pulled at once.
-    await insertOrder(env.DB, order, pricedItems, { fillFromStock: true });
+    try {
+      await insertOrder(env.DB, order, pricedItems, { fillFromStock: true });
+    } catch (e) {
+      // Two requests with the same key at the same moment: the order and its lines go in as one batch, so the
+      // second fails whole on the order number and the first one's order is the sale.
+      if (saleKey && await madeAlready()) return jsonResponse({ status: "ok", orderId, repeated: true });
+      throw e;
+    }
     await pullStockLines(env.DB, orderId, placedAt);
 
     if (body.paid)      await settleOrderBalance(env.DB, orderId,
-                          "Local sale" + (order.paymentMethod ? " (" + order.paymentMethod + ")" : ""), placedAt);
+                          "Local sale" + (order.paymentMethod ? " (" + order.paymentMethod + ")" : ""), placedAt, saleKey);
     if (body.delivered) await setFulfillmentStage(env.DB, orderId, "delivered", { at: placedAt });
 
     audit({ orgId: org, orderId, action: "order.created_local_sale",
@@ -2796,6 +2835,8 @@ async function handleOrdersPost_(context) {
     if (denied) return denied;
     { const locked = await periodGuard(body); if (locked) return locked; }
     if (!Array.isArray(body.sheetRows)) return jsonResponse({ status: "error", message: "Missing sheetRows" }, 400);
+    if (body.sheetRows.length > BULK_CANCEL_LINES_MAX)
+      return jsonResponse({ status: "error", message: `Too many items at once (at most ${BULK_CANCEL_LINES_MAX}) — reload the page and try again.` }, 400);
     const when = actionTime(body);
     if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
     if (when) for (const itemId of body.sheetRows) {
@@ -2858,18 +2899,8 @@ async function handleOrdersPost_(context) {
     if (toLedger) {
       const order = await getOrderById(env.DB, refundItem.orderId);
       if (!order) return jsonResponse({ status: "error", message: "Order not found" }, 404);
-      // Keyed by the line, so the same line's refund can't go into the books twice (a double click, a retry).
-      const requestKey = "lineRefund:" + refundItem.id;
-      if (!(await alreadyRecorded(requestKey))) {
-        if (Math.round(amount * 100) > Math.round(order.netReceived * 100)) {
-          return jsonResponse({ status: "error", message: `Refund can't exceed the $${order.netReceived.toFixed(2)} kept on this order` }, 400);
-        }
-        const auditErr = await auditStrict({ orgId: order.orgId, orderId: order.orderId, action: "payment.refunded",
-          detail: { amount, method, reference: "", note: "Refund — " + refundItem.name, shipping: 0, itemId: refundItem.id } });
-        if (auditErr) return auditErr;
-        await addOrderPayment(env.DB, order.orderId, -amount, ("Refund — " + (refundItem.name || "cancelled item")).slice(0, 500), "",
-          { method, kind: "refund", receivedAt: when ? when.at : undefined, requestKey });
-      }
+      const refused = await recordLineRefund_(order, refundItem.id, refundItem.name, amount, method, when ? when.at : null, order.netReceived);
+      if (refused) return refused;
     }
     await setLineItemRefund(env.DB, body.sheetRow, amount, when ? when.at : null);
     audit({ orgId: body.org, orderId: refundItem.orderId, action: "item.refund_set",
@@ -2901,6 +2932,21 @@ async function handleOrdersPost_(context) {
     const lineIds = new Set((order.items || []).map(i => Number(i.sheetRow)));
     if (removals.concat(updates).some(x => !lineIds.has(Number(x.itemId))))
       return jsonResponse({ status: "error", message: "An item in this edit isn't on this order. Reload the order and try again." }, 400);
+
+    // A refund on a line taken off: how it was paid back (`refundMethod`, as the line's Record refund asks). Not
+    // card: it goes into the payments ledger too (recordLineRefund_). Card: Stripe's webhook records it, so the
+    // line is only noted. None (an older page): the line only, as before. All of them together can't be more
+    // than the order still holds, checked before anything is written.
+    for (const r of removals) {
+      const m = r.refundMethod == null || r.refundMethod === "" ? "" : String(r.refundMethod).toLowerCase();
+      if (m && !PAYMENT_METHODS.includes(m)) return jsonResponse({ status: "error", message: "Choose how the refund was paid" }, 400);
+      r.refundMethod = m;
+    }
+    const ledgerRefund = (r) => Number(r.refundAmount) > 0 && !!r.refundMethod && r.refundMethod !== "card";
+    const ledgerCents = removals.filter(ledgerRefund).reduce((sum, r) => sum + Math.round(Number(r.refundAmount) * 100), 0);
+    if (ledgerCents > Math.round(order.netReceived * 100))
+      return jsonResponse({ status: "error", message: `Refunds can't exceed the $${order.netReceived.toFixed(2)} kept on this order` }, 400);
+    let keptForRefunds = order.netReceived;
 
     // Original total for computing price diff
     const originalTotal = order.total;
@@ -2977,6 +3023,12 @@ async function handleOrdersPost_(context) {
         await cancelLineItemWithReason(env.DB, itemId, String(removal.reason || "Admin edit").slice(0, 200));
         written++;
         const refund = Number(removal.refundAmount);
+        if (ledgerRefund(removal)) {
+          const line = (order.items || []).find(i => Number(i.sheetRow) === itemId);
+          const refused = await recordLineRefund_(order, itemId, line ? line.name : "", refund, removal.refundMethod, null, keptForRefunds);
+          if (refused) throw new Error("The refund for " + ((line && line.name) || "a line") + " wasn't recorded");
+          keptForRefunds -= refund;
+        }
         if (refund > 0) await setLineItemRefund(env.DB, itemId, refund);
       }
       for (const [itemId, fields] of updateWrites) { await updateOrderItem(env.DB, itemId, fields); written++; }
@@ -3007,31 +3059,15 @@ async function handleOrdersPost_(context) {
       let orgSubdomain = "";
       try { const o = await getOrgById(env.DB, orgId); if (o) orgSubdomain = o.subdomain || ""; } catch (_) {}
       const origin = orgSubdomain ? `https://${orgSubdomain}.${rootDomain(env)}` : new URL(request.url).origin;
-      const params = new URLSearchParams({
-        "payment_method_types[]": "card",
-        "mode": "payment",
-        "line_items[0][price_data][currency]": "usd",
-        "line_items[0][price_data][unit_amount]": String(amountCents),
-        "line_items[0][price_data][product_data][name]": "Order adjustment — " + orderId,
-        "line_items[0][price_data][product_data][description]": "Balance due for order changes",
-        "line_items[0][quantity]": "1",
-        "metadata[type]": "order_edit_payment",
-        "metadata[orderId]": orderId,
-        "metadata[orgId]": orgId,
-        "customer_email": order.contact,
-        "success_url": origin + "/?stripe=success&orderId=" + encodeURIComponent(orderId) + "&org=" + encodeURIComponent(orgId),
-        "cancel_url": origin + "/",
+      const page = await createCheckoutSession(env, {
+        orderId, orgId, amountCents, afterPaid: true, expiresInSec: CHECKOUT_LINK_SECONDS,
+        name: "Order adjustment — " + orderId, description: "Balance due for order changes",
+        metadata: { type: "order_edit_payment" }, customerEmail: order.contact,
+        successUrl: origin + "/?stripe=success&orderId=" + encodeURIComponent(orderId) + "&org=" + encodeURIComponent(orgId),
+        cancelUrl: origin + "/",
       });
-      const stripeRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
-        method: "POST",
-        headers: { "Authorization": "Bearer " + env.STRIPE_SECRET_KEY, "Content-Type": "application/x-www-form-urlencoded" },
-        body: params.toString(),
-      });
-      const session = await stripeRes.json();
-      if (!session.url) {
-        const msg = (session.error && session.error.message) || "Unknown Stripe error";
-        return jsonResponse({ status: "error", message: "Order saved but payment link failed: " + msg }, 500);
-      }
+      if (page.error) return jsonResponse({ status: "error", message: "Order saved but payment link failed: " + page.message }, page.error === "stripe" ? 500 : 409);
+      const session = { url: page.url };
       paymentUrl = session.url;
       const emailBody = String(body.emailBody || "").trim().slice(0, 3000) || null;
       emailSent = await sendShippingPaymentEmail(env, {
@@ -6317,45 +6353,16 @@ async function handleOrdersPost_(context) {
     const amountCents = Math.round(owingAmount * 100);
     const method = shownMethod_(order.shippingMethod) ? ` (${shownMethod_(order.shippingMethod)})` : "";
     const balanceNote = alreadyPaid > 0 ? ` — balance due ($${alreadyPaid.toFixed(2)} already paid)` : "";
-    const params = {
-      "payment_method_types[]": "card",
-      "mode": "payment",
-      "line_items[0][price_data][currency]": "usd",
-      "line_items[0][price_data][unit_amount]": String(amountCents),
-      "line_items[0][price_data][product_data][name]": "Shipping" + method,
-      "line_items[0][price_data][product_data][description]": "Shipping for order " + orderId + balanceNote,
-      "line_items[0][quantity]": "1",
-      // Include orderId + orgId so the webhook can record the payment via resolveOrderRef.
-      "metadata[type]": "shipping_payment",
-      "metadata[orderId]": orderId,
-      "metadata[orgId]": order.orgId,
-      // Also on the PaymentIntent (copied to the Charge), so refund and
-      // dispute events for this payment can be traced back to the order.
-      "payment_intent_data[metadata][type]": "shipping_payment",
-      "payment_intent_data[metadata][orderId]": orderId,
-      "payment_intent_data[metadata][orgId]": order.orgId,
-      "success_url": successUrl,
-      "cancel_url": cancelUrl,
-    };
-    if (order.contact && order.contact.includes("@")) {
-      params["customer_email"] = order.contact;
-    }
-
-    const stripeRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
-      method: "POST",
-      headers: {
-        "Authorization": "Bearer " + env.STRIPE_SECRET_KEY,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams(params).toString(),
+    // The link lasts about a day, and a newer link (or the customer's own Pay by card) closes this one, so two
+    // links for the order can't both be paid (db.js createCheckoutSession).
+    const page = await createCheckoutSession(env, {
+      orderId, orgId: order.orgId, amountCents, afterPaid: true, expiresInSec: CHECKOUT_LINK_SECONDS,
+      name: "Shipping" + method, description: "Shipping for order " + orderId + balanceNote,
+      // The webhook records it as shipping (resolveOrderRef + the type); refunds and disputes find it too.
+      metadata: { type: "shipping_payment" }, customerEmail: order.contact, successUrl, cancelUrl,
     });
-
-    const session = await stripeRes.json();
-    if (!session.url) {
-      const msg = (session.error && session.error.message) ? session.error.message : "Unknown Stripe error";
-      console.error("Stripe shipping session failed:", msg);
-      return jsonResponse({ status: "error", message: "Could not create payment session: " + msg }, 500);
-    }
+    if (page.error) return jsonResponse({ status: "error", message: "Could not create payment session: " + page.message }, page.error === "stripe" ? 500 : 409);
+    const session = { url: page.url };
 
     const customBody = String(body.emailBody || "").trim().slice(0, 3000) || null;
     const emailSent = await sendShippingPaymentEmail(env, {

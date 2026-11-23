@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
 
@@ -324,7 +325,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
   console.log("\n=== Storefront cart (jsdom) ===");
   const { JSDOM } = require("jsdom");
-  const html = read("public/index.html");
+  const html = storefrontPage();
   const catalogFor = (over) => ({ status: "ok", orgId: "acme", catalog: Object.assign({ name: "Acme", eyebrow: "", accent: "#1E7A4C",
     ready: true, desc: "", designImages: {}, shippingEnabled: false, enabledPayments: ["Venmo"],
     products: [{ id: "A", name: "Polo", sub: "", type: "shirt", sizePricing: { L: 16 }, images: [], features: [], stock: null },

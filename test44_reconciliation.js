@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
@@ -219,7 +220,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const accountsNow = (await call({ action: "listAccounts" })).body, recNow = (await call({ action: "getReconciliation", accountId: 1, month: "2026-08" })).body;
   recNow.lines[0].description = "<img src=x onerror=alert(1)>";
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async (u, init) => { const b = init && typeof init.body === "string" ? JSON.parse(init.body) : {};
       const data = b.action === "listAccounts" ? accountsNow : b.action === "getReconciliation" ? recNow : { status: "error", message: "n/a" };
       return { ok: true, status: 200, json: async () => data }; }; } });
@@ -273,7 +274,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   await call({ action: "importStatement", accountId: 2, lines: [{ date: "2026-09-12", description: "SANMAR 5700", amount: -50 }] });
   const d12 = (await call({ action: "getReconciliation", accountId: 2, month: "2026-09" })).body;
   const l12 = d12.lines.find(l => l.amount === -50);
-  const dom2 = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom2 = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async (u, init) => { const b = init && typeof init.body === "string" ? JSON.parse(init.body) : {};
       const res = await call(b); return { ok: res.status < 400, status: res.status, json: async () => res.body }; }; } });
   const w2 = dom2.window;

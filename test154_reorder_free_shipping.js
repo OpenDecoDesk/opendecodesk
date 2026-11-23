@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { ADMIN_ORIGIN } = require("./testlib/hosts.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -155,7 +156,7 @@ const URLS = { product: "https://ws.sanmar.com:8080/promostandards/ProductDataSe
   let copied = "", promptAnswer = null;
   const LOOKUP = { vendor: "SanMar", style: "K540", name: "Silk Touch Polo", brand: "Port Authority", colors: [{ color: "Black" }, { color: "Navy" }], sizes: ["S", "2XL"], prices: { "*": { S: 8.93, "2XL": 9.93 } } };
   let cid = 0;
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/#blankorder", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/#blankorder", pretendToBeVisual: true,
     beforeParse(win){ autoConfirm(win, (m) => promptAnswer != null && /as placed/.test(m) ? promptAnswer : true); win.prompt = () => { throw new Error("prompt() isn't available in the desktop edition"); }; win.fetch = async (url, init) => {
       if (String(url).includes("/api/orders")) {
         const b = JSON.parse(init.body); sentUi.push(b);

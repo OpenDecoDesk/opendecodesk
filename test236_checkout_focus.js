@@ -3,8 +3,9 @@
 // page each time; now focus (and the text cursor) stays on the same control after the redraw.
 // Invented shop, people and addresses only.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, VirtualConsole } = require("jsdom");
-const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+const html = storefrontPage();
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 const wait = (ms) => new Promise(r => setTimeout(r, ms));

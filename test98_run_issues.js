@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
@@ -107,7 +108,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
     rep.otherNotes[0].machineName === "Machine 1" && rep.otherNotes[0].orderId === "A2" && rep.otherNotes[0].designName === "Left chest crest");
 
   // ---- The screens ----
-  const html = read("public/index.html"), adminJs = read("public/admin.js");
+  const html = storefrontPage(), adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const sent = [];
   const dom = new JSDOM(html, { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,

@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -117,7 +118,7 @@ const TODAY = new Date("2026-11-15T12:00:00Z");
     if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs));
     const local = new URL(url).pathname.match(/^\/vendor\/fonts\/[a-z0-9.-]+$/);
     return local ? Promise.resolve(fs.readFileSync(__dirname + "/public" + local[0])) : super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.acme.test/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.acme.test/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async (url, opts) => {
       if (String(url).includes("/api/orders")) { const r = await call(JSON.parse(opts.body)); return { ok: r.status < 300, status: r.status, json: async () => r.body }; }
       return { ok: true, status: 200, json: async () => ({ status: "error", message: "n/a" }) }; }; win.confirm = () => true; } });

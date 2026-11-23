@@ -1,6 +1,7 @@
 const { JSDOM, ResourceLoader } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
-let html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+let html = storefrontPage();
 
 // Focused on promptAdminPassphrase() itself (in admin.js, lazily
 // loaded) — the masked overlay used for the admin passphrase instead

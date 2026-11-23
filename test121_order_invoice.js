@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
@@ -275,7 +276,7 @@ const plain = (html) => String(html || "").replace(/<[^>]+>/g, " ").replace(/&am
   const TP = (await M.getOrderInvoiceByOrder(d1, P1)).token;
   const calls = [];
   const page = async (search) => {
-    const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: "usable", url: "https://club.example.com/" + search, pretendToBeVisual: true, virtualConsole: quiet(),
+    const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: "usable", url: "https://club.example.com/" + search, pretendToBeVisual: true, virtualConsole: quiet(),
       beforeParse(win){
         win.fetch = async (url, opts) => {
           const u = String(url), body = opts && opts.body ? JSON.parse(opts.body) : null;
@@ -374,7 +375,7 @@ const plain = (html) => String(html || "").replace(/<[^>]+>/g, " ").replace(/&am
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o2){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o2); } }
   const sentAdmin = [];
-  const adom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const adom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){
       win.fetch = async (url, opts) => {
         if (String(url).includes("/api/orders") && opts && opts.body) { const b = JSON.parse(opts.body); sentAdmin.push(b); const res = await admin(b); return { ok: res.status < 400, status: res.status, json: async () => res.body }; }

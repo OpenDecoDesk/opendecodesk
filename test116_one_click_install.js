@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { makeAuth, read, strip } = require("./testlib/auth-harness");
 
 // Installing with the Deploy to Cloudflare button. The button copies this repository, makes the
@@ -97,10 +98,10 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("the admin is told the site's domain, or \"\" when there is none — never example.com", noDomain.status === "admin" && noDomain.site.rootDomain === "" && withDomain.site.rootDomain === "myshop.com");
   const adminJs = read("public/admin.js");
   ok("the admin (the shop wizard too) no longer works the domain out from its own address", /function siteRootDomain_\(\)\{ return String\(\(typeof siteInfo_/.test(adminJs) && !/siteRootDomain_[^\n]*location\.hostname/.test(adminJs) &&
-    !/location\.hostname\.split\("\."\)\.slice\(1\)/.test(adminJs) && /siteInfo_ = data\.site \|\| \{\}/.test(read("public/index.html")));
+    !/location\.hostname\.split\("\."\)\.slice\(1\)/.test(adminJs) && /siteInfo_ = data\.site \|\| \{\}/.test(storefrontPage()));
   ok("…and with no domain the wizard warns on its first screen and goes on in preview mode, with the server's own words", adminJs.includes(`NO_DOMAIN_YET_ = "${openIt.body.message}"`) &&
     /noDomain && !made \? \{ nextLabel: "Continue in preview mode" \}/.test(adminJs) && /\$\{noDomain \? `<div class="wiz-warn">\$\{escapeHtml\(NO_DOMAIN_YET_\)\}<\/div>` : ""\}/.test(adminJs) && !/return NO_DOMAIN_YET_;/.test(adminJs));
-  ok("…and its last step offers Preview instead of opening the shop", /if \(!root\) return \{\n    title: "Ready to open the shop\?", noNext: true,/.test(adminJs) && /onclick="previewShop_\(/.test(adminJs));
+  ok("…and its last step offers Preview instead of opening the shop", /if \(!root\) return \{\n    title: "Ready to open the shop\?", noNext: true,/.test(adminJs) && /data-admin-action="previewShop_"/.test(adminJs));
 
   console.log("\n=== The signing secret ===");
   // Cloudflare's page asks only for the setup password, so a button install has no SIGNING_SECRET

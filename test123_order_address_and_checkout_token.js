@@ -7,6 +7,7 @@
 //     and email.
 // Real SQL (sql.js) + the real db.js, http.js, orders.js, shipping.js, checkout.js.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
@@ -88,7 +89,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("a developer's own machine may name the shop", r.status === 200 && r.body.rates.every(x => !!x.quoteToken));
 
   console.log("\n=== The shop page ===");
-  const html = read("public/index.html");
+  const html = storefrontPage();
   ok("the storefront sends the token back when it starts a card payment", /checkoutToken: \(saved && saved\.checkoutToken\) \|\| null/.test(html) && !/customerName: name, contact\n/.test(html));
 
   console.log(`\n${pass} passed, ${fail} failed`);

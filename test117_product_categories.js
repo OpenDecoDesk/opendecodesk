@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -170,7 +171,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 60));
   // A category that normally has sizes, sold at one flat price — used to crash the page.
   await lib.createProduct(d1, "club", { productId: "flattee", type: "shirt", name: "One-Size Poncho", pricingMode: "flat", flatPrice: 12, visible: true, sortOrder: 6 });
   catalogGet.set(await lib.getPublicCatalogData(d1));
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: "usable", url: "https://club.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: "usable", url: "https://club.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async (url) => { const res = await catalogGet.onRequestGet({ request: { url: win.location.origin + url }, env: {} });
       const text = await res.text(); return { ok: true, status: 200, json: async () => JSON.parse(text), text: async () => text }; }; } });
   const w = dom.window, doc = w.document;
@@ -203,7 +204,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 60));
   // ---- The real admin screens, in jsdom, talking to the real API ----------------------------
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const adom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const adom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){
       win.fetch = async (url, opts) => {
         if (String(url).includes("/api/orders") && opts && opts.body) { const res = await call(JSON.parse(opts.body)); return { ok: res.status < 400, status: res.status, json: async () => res.body }; }
@@ -269,5 +270,5 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 60));
     aw.packClassOf_("t-shirt") === "shirt" && aw.packClassOf_("hoodie") === "sweatshirt" && aw.packClassOf_("patch") === "other" && aw.packClassOf_("cap") === "cap");
   console.log("a line whose category is gone is guessed from its wording:", aw.packClassOf_("fleece pullover") === "sweatshirt" && aw.packClassOf_("mystery") === "other");
   console.log("no screen still decides sizes from the words shirt / sweatshirt:",
-    !/type ?=== ?"shirt" ?\|\| ?(it|p|product|c)\.type ?=== ?"sweatshirt"/.test(adminJs) && !/type ?=== ?"shirt" ?\|\| ?(p|product|c)\.type ?=== ?"sweatshirt"/.test(read("public/index.html")));
+    !/type ?=== ?"shirt" ?\|\| ?(it|p|product|c)\.type ?=== ?"sweatshirt"/.test(adminJs) && !/type ?=== ?"shirt" ?\|\| ?(p|product|c)\.type ?=== ?"sweatshirt"/.test(storefrontPage()));
 })().catch(e => { console.log("test117 crashed:", false); console.error(e); process.exit(1); });

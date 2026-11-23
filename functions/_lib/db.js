@@ -13892,7 +13892,7 @@ function parseItem_(row) {
 
 // The size finished stock is kept under: '' for a flat-priced product (whose order lines say "OSFA").
 function stockSize_(pricingMode, size) { return pricingMode === "flat" ? "" : String(size || ""); }
-// The combination's key: color + [location, graphicId, ink] per pick, in location order. index.html's
+// The combination's key: color + [location, graphicId, ink] per pick, in location order. storefront.js's
 // stockVariantKey_ builds the same string from the shop page's picks — keep them equal (test178).
 export function stockVariantKey(color, picks) {
   const list = (picks || []).filter(x => x && x.location && Number(x.graphicId))

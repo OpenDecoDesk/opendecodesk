@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -111,7 +112,7 @@ const tick = (ms) => new Promise(r => setTimeout(r, ms));
   console.log("\n=== The shop page ===");
   // Finished stock on the cap: 2 decorated pieces win over 9 blanks.
   d1._raw.exec(`INSERT INTO ready_to_ship (orgId, productId, size, quantity, updatedAt) VALUES ('club','cap','',2,'t')`);
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: "usable", url: "https://club.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: "usable", url: "https://club.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async (url) => { const res = await catalogGet.onRequestGet({ request: { url: win.location.origin + url }, env: { DB: d1 } });
       const text = await res.text(); return { ok: true, status: 200, json: async () => JSON.parse(text), text: async () => text }; }; } });
   const w = dom.window, doc = w.document;
@@ -135,7 +136,7 @@ const tick = (ms) => new Promise(r => setTimeout(r, ms));
   console.log("\n=== The admin Products list ===");
   const adminJs = read("public/admin.js");
   class L2 extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const adom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L2(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const adom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L2(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.CSS = win.CSS || { escape: (v) => String(v) }; autoConfirm(win, () => true); win.localStorage.setItem("pcwAdminKey", "cookie");
       win.fetch = async (url, init) => {
         if (String(url).includes("/api/catalog")) return { ok: true, status: 200, json: async () => ({ status: "admin" }) };

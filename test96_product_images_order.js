@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
 // Product pictures: the storefront shows the product's OWN images first (in the order set on the
@@ -6,7 +7,7 @@ const { JSDOM, ResourceLoader } = require("jsdom");
 // them. The product form manages its images as thumbnail tiles that can be reordered and removed, and
 // lists the blank's photos underneath, read-only.
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
-const html = read("public/index.html"), adminJs = read("public/admin.js");
+const html = storefrontPage(), adminJs = read("public/admin.js");
 const ok = (m, c) => console.log(m + ":", !!c);
 
 (async () => {

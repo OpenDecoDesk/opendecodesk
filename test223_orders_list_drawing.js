@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
@@ -57,7 +58,7 @@ const wait = async (fn, n = 400) => { for (let i = 0; i < n && !fn(); i++) await
   const adminJs = read("public/admin.js");
   const sent = [];
   class L extends ResourceLoader { fetch(url, o) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win) { win.fetch = async (u, init) => { const b = init && typeof init.body === "string" ? JSON.parse(init.body) : {}; sent.push(b); const x = await call(b);
       return { ok: x.status < 400, status: x.status, json: async () => x.body, text: async () => JSON.stringify(x.body) }; }; } });
   const w = dom.window, d = w.document;
@@ -72,7 +73,7 @@ const wait = async (fn, n = 400) => { for (let i = 0; i < n && !fn(); i++) await
   await wait(() => d.getElementById("ordSummaryBar"));
   ok("the list asks for blank stock only", sent.some(b => b.action === "getBlanks" && b.stockOnly === true) && !sent.some(b => b.action === "getBlanks" && !b.stockOnly));
   ok("319 open orders match; the newest 300 are drawn", drawn() === 300 && /^319 orders/.test(summary()));
-  const note = () => (d.querySelector("#adminPanel .admin-note button[onclick^='ordersShowMore_']") || {}).parentElement;
+  const note = () => (d.querySelector("#adminPanel .admin-note button[data-admin-action='ordersShowMore_']") || {}).parentElement;
   ok("…the note says so, with Show 19 more, and that Select all ticks only those shown", !!note() && /Showing the 300 most recent of 319 matching orders/.test(note().textContent) &&
     /Show 19 more/.test(note().textContent) && /Select all.{0,3} ticks only the orders shown/.test(note().textContent));
   ok("the totals still cover all 319 ($6380.00)", /\$6380\.00 active total/.test(summary()));

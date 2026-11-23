@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -107,7 +108,7 @@ const tick = () => new Promise(res => setTimeout(res, 5));
   ok("…a group naming a color the product doesn't offer is a problem on that row", bad.results[0].problems.some(x => /isn't one of this product's colors/.test(x)));
 
   console.log("\n=== The storefront ===");
-  const sf = new JSDOM(read("public/index.html"), { runScripts: "dangerously", url: "https://club.example.com/", beforeParse(win){ win.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "none" }) }); } }).window;
+  const sf = new JSDOM(storefrontPage(), { runScripts: "dangerously", url: "https://club.example.com/", beforeParse(win){ win.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "none" }) }); } }).window;
   await new Promise(res => setTimeout(res, 50));
   const sp = { id: "polo", sizePricing: { S: 34, "2XL": 36 }, configurable: true, garmentColors: ["Black", "Oxford Heather"], colorGroups: [{ label: "Heathers", colors: ["Oxford Heather"], sizePricing: { S: 36, "2XL": 38 } }] };
   ok("the shop page prices the color picked by its group, other colors by Standard", sf.cfgBasePrice_(sp, "Oxford Heather", "2XL") === 38 && sf.cfgBasePrice_(sp, "Black", "2XL") === 36 && sf.cfgBasePrice_(sp, "", "S") === 34);
@@ -118,7 +119,7 @@ const tick = () => new Promise(res => setTimeout(res, 5));
   console.log("\n=== The product form ===");
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/#catalog", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/#catalog", pretendToBeVisual: true,
     beforeParse(win){ autoConfirm(win, () => true); win.fetch = async (url, init) => {
       if (String(url).includes("/api/orders")) { const b = JSON.parse(init.body); const x = await call(b); return { ok: x.status < 400, status: x.status, json: async () => x.body }; }
       return { ok: true, status: 200, json: async () => ({ status: "admin" }) }; }; } });

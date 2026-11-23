@@ -130,7 +130,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const csvSafe = new Function(adminJs.match(/function csvSafe\(value\)\{[\s\S]*?\n\}/)[0] + "\nreturn csvSafe;")();
   ok("a tab or line break in a value becomes a space, so it can't start a cell or row of its own", csvSafe("Ann\t=SUM(A1)") === "Ann =SUM(A1)" && csvSafe("x\r\n=1") === "x =1" && csvSafe("a b") === "a b");
   ok("a value that starts like a formula is still made text", csvSafe("=1+1") === "'=1+1" && csvSafe("\t=1") === "' =1" && csvSafe("@x") === "'@x");
-  ok("the Security menu offers Sign out everywhere", /\{ action: "adminSignOutEverywhere\(\)", label: "Sign out everywhere" \}/.test(adminJs) && /fetch\("\/api\/admin-session\?all=1", \{ method: "DELETE" \}\)/.test(adminJs));
+  ok("the Security menu offers Sign out everywhere", /\{ action: "navSignOutEverywhere_", label: "Sign out everywhere" \}/.test(adminJs) && /navSignOutEverywhere_\(\)\{ closeNavDropdowns\(\); adminSignOutEverywhere\(\); \}/.test(adminJs) && /fetch\("\/api\/admin-session\?all=1", \{ method: "DELETE" \}\)/.test(adminJs));
 
   console.log(`\n${pass} passed, ${fail} failed`);
 })().catch(e => { console.error(e); console.log("test122 ran to the end without crashing: false"); process.exitCode = 1; });

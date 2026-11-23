@@ -3,6 +3,7 @@
 // refusal naming that section.
 // Also: the admin's "today" is the local day everywhere (not the UTC one, which is tomorrow in a US evening).
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
 const ok = (d, v) => console.log(d + ":", !!v);
@@ -10,7 +11,7 @@ const tick = (ms) => new Promise(r => setTimeout(r, ms || 40));
 
 (async () => {
   const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
-  const adminJs = read("public/admin.js"), html = read("public/index.html");
+  const adminJs = read("public/admin.js"), html = storefrontPage();
   const calls = [];
   let failPricing = false;
   class L extends ResourceLoader { fetch(url, o) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return Promise.resolve(Buffer.from("")); } }

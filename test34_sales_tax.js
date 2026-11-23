@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Sales tax (migrations/0007): tax-INCLUSIVE prices, 6% (the configured rate) backed out
@@ -197,7 +198,7 @@ async function migratedDb(){
   // UI: storefront disclosure + admin Sales Tax report (jsdom)
   // ===================================================================
   const { JSDOM, ResourceLoader } = require("jsdom");
-  const html = read("public/index.html");
+  const html = storefrontPage();
   const adminJs = read("public/admin.js");
   const catalogFor = (rate) => ({ status: "ok", orgId: "prime", catalog: { name: "Example League", eyebrow: "", accent: "#1E7A4C",
     ready: true, desc: "", designImages: {}, shippingEnabled: false, enabledPayments: ["Venmo"],

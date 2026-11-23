@@ -158,7 +158,7 @@ const role = (key, fns) => ({ key, name: key, rank: 10, locked: false, builtIn: 
   const stock = adminJs.slice(adminJs.indexOf("async function showStockModal"), adminJs.indexOf("async function showStockModal") + 9000);
   ok("in the admin, the finished-stock count is read-only without Full: its box and button need Full", /class="fsCount"[^>]*data-need-form="inventory\.blanks:full"/.test(stock) &&
     /class="admin-btn fsCorrect" data-need="inventory\.blanks:full"/.test(stock) && /id="fsNewCount"[^>]*data-need-form="inventory\.blanks:full"/.test(adminJs) && /id="fsNewCorrect"[^>]*data-need="inventory\.blanks:full"/.test(adminJs));
-  ok("…the Merge menu item needs Full", /data-need="inventory\.blanks:full" onclick="blankMerge/.test(adminJs));
+  ok("…the Merge menu item needs Full", /data-need="inventory\.blanks:full" data-admin-action="blankMerge"/.test(adminJs));
   ok("…and the product form offers no 'None' for a saved link, nor sends a removal, without Full", /const canUnlink = adminCan_\("inventory\.blanks", "full"\)/.test(adminJs) &&
     /<option value=""\$\{!canUnlink && linkMap\[pc \+ "\|" \+ size\] \? " disabled" : ""\}>— None —<\/option>/.test(adminJs) && /if \(!canUnlink\) remove\.length = 0;/.test(adminJs));
 

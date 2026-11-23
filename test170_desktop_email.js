@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const os = require("os");
 const path = require("path");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -308,7 +309,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); };
     const local = new URL(url).pathname.match(/^\/vendor\/fonts\/[a-z0-9.-]+$/);
     return local ? Promise.resolve(fs.readFileSync(__dirname + "/public" + local[0])) : super.fetch(url, o); } }
   const saved = [], asked = [], pdfSaves = [], applied = [], sentFetch = [];
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "http://localhost:47830/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "http://localhost:47830/", pretendToBeVisual: true,
     beforeParse(win){
       win.fetch = async (url, opts) => {
         if (String(url).includes("/api/orders") && opts && !/getInvoiceDocument/.test(opts.body)) sentFetch.push(JSON.parse(opts.body).action);

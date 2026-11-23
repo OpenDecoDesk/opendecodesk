@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 const { ADMIN_ORIGIN, shopOrigin } = require("./testlib/hosts.js");
@@ -64,7 +65,7 @@ function fakeR2() {
   ok("marked digital: no blank and no design needed, with its own limits", p.digital && p.noBlankNeeded && p.noDesignNeeded && p.digitalDelivery.days === 3 && p.digitalDelivery.downloads === 2 && !("attach" in p.digitalDelivery));
   ok("the global defaults: 7 days, 5 downloads, email and attach on, 10 MB", JSON.stringify(await lib.getDigitalSettings(d1)) === JSON.stringify({ days: 7, downloads: 5, attachMb: 10, attach: true, email: true }));
   ok("a product's limits sit on top of the defaults", JSON.stringify(lib.digitalDeliveryFor(p, await lib.getDigitalSettings(d1))) === JSON.stringify({ days: 3, downloads: 2, attachMb: 10, attach: true, email: true }));
-  ok("the storefront is told it's a download", /if\(p\.digital\) out\.digital = true;/.test(read("functions/api/catalog.js")) && /Instant download/.test(read("public/index.html")));
+  ok("the storefront is told it's a download", /if\(p\.digital\) out\.digital = true;/.test(read("functions/api/catalog.js")) && /Instant download/.test(storefrontPage()));
   let r = await admin({ action: "updateProduct", org: "acme", productId: "rose", pricingMode: "sized", sizePricing: { M: 5 } });
   ok("a digital product can't have sizes", r.status === 400 && /one price/.test(r.body.message));
 

@@ -1,10 +1,11 @@
 const { JSDOM } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
 
 // Storefront: a configurable product with personalization offers the name box (or the preset-word list),
 // charges the fee in the price/breakdown/cart, keeps the real name apart from the picks summary, and
 // refuses an empty name while personalization is ticked.
-const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+const html = storefrontPage();
 const catalog = { status: "ok", orgId: "o1", catalog: { name: "League", eyebrow: "", accent: "#123456", ready: true, desc: "", designImages: { shirt: "", cap: "", detail: "" },
   enabledPayments: ["check"], salesTaxRate: 0,
   graphics: [{ id: 1, name: "Logo", kind: "transfer", imageUrl: "", thumbUrl: "", addOnCents: 200, inkColors: [], allowedLocations: [], allowedGarmentColors: [] }],

@@ -1,4 +1,5 @@
 const { JSDOM } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
 
 // Run the ACTUAL catalog.js handler (not a hand-typed stand-in), so a
@@ -64,7 +65,7 @@ let catalogSrc = fs.readFileSync(__dirname + "/functions/api/catalog.js", "utf8"
 eval(libSrc + "\n" + httpSrc + "\n" + catalogSrc);
 const REAL_CATALOG_RESPONSE = onRequestGet; // the actual handler, unmodified
 
-let html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+let html = storefrontPage();
 html = html.replace("const PROXY_MODE = false;", "const PROXY_MODE = true;");
 
 function makeStorageMock(){

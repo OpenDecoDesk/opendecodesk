@@ -1,6 +1,7 @@
 const { JSDOM, ResourceLoader } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
-let html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+let html = storefrontPage();
 const adminJsSource = fs.readFileSync(__dirname + "/public/admin.js", "utf8");
 
 // index.html doesn't ship the admin panel to every storefront

@@ -102,7 +102,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
     console.log("\n=== Payments window ===");
     const adminJs = read("public/admin.js");
     console.log("refund rows say goods/shipping and have a Shipping part… button:",
-      /all goods \(tax backed out\)/.test(adminJs) && /of it shipping \(no tax\)/.test(adminJs) && /onclick="pmSetRefundShipping\(/.test(adminJs) && /action:"setRefundShipping"/.test(adminJs));
+      /all goods \(tax backed out\)/.test(adminJs) && /of it shipping \(no tax\)/.test(adminJs) && /data-admin-action="pmSetRefundShipping"/.test(adminJs) && /action:"setRefundShipping"/.test(adminJs));
     console.log("the Record refund form has “Of which shipping” and sends it:", /id="pmRefundShipping"/.test(adminJs) && /at: refundWhen\.at, shippingAmount,/.test(adminJs));
   } catch (e) {
     console.log("test75 crashed:", false);

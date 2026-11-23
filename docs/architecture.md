@@ -7,8 +7,8 @@ given so each statement can be checked.
 
 OpenDecoDesk is **one Cloudflare Worker** (`src/worker.js`, configured by `wrangler.toml`) with:
 
-- **Static assets** — everything in `public/`: one page (`index.html`) that is the storefront, and
-  `admin.js`, the admin panel, loaded only on the admin address. Plain JavaScript, no framework and
+- **Static assets** — everything in `public/`: one page (`index.html`, its script `storefront.js`) that
+  is the storefront, and `admin.js`, the admin panel, loaded only on the admin address. Plain JavaScript, no framework and
   no build step. Only `public/` is ever served; nothing else in the repository is reachable.
 - **An API** — `/api/<name>`, each one a file in `functions/api/`. The Worker only runs for
   `/api/*`; pages and pictures are served without it.
@@ -57,6 +57,7 @@ Orders are **not** priced from the cache's prices as shown in a browser: `priceI
 
 ```
 public/index.html         the storefront page, and the shell the admin loads into
+public/storefront.js      the storefront page's script
 public/admin.js           the admin panel (loaded only on the admin host)
 public/_headers           security headers for every response
 public/vendor/pdfjs/      Mozilla's pdf.js, vendored, for reading vendor invoices
@@ -269,10 +270,15 @@ refund, a discount, changing dates, voiding or restoring a stock movement, switc
   served.
 - Spreadsheet exports neutralise cells that start like a formula.
 - `public/_headers` sets a Content Security Policy, `X-Frame-Options: DENY`, `nosniff`, a referrer
-  policy, a permissions policy and HSTS on every response. **A known limit:** the policy allows
-  inline scripts and styles (`'unsafe-inline'`), because the pages are written with inline
-  handlers — so it is a second line of defence, not a guarantee against script injection. The
-  HttpOnly session cookie is what keeps an injected script from stealing a reusable sign-in.
+  policy, a permissions policy and HSTS on every response. Its `script-src` runs only script files
+  from the site itself (and Cloudflare's analytics and bot check): no inline `<script>` and no
+  `on…=""` attribute runs. The pages have none — an admin button names its action in a
+  `data-admin-action` attribute and one listener runs it from a fixed list (the top of `admin.js`),
+  and `test249_no_inline_scripts.js` keeps it that way. Inline *styles* are still allowed
+  (`style-src 'unsafe-inline'`). The HttpOnly session cookie remains what keeps an injected script
+  from stealing a reusable sign-in.
+- The one page the API writes itself, a paid order's downloads (`/api/download`), sends its own
+  stricter policy, with its one small script allowed by a nonce made for that response.
 - The policy also lets the admin page talk to `http://127.0.0.1:8787`, for a send-agent running on
   the same computer.
 

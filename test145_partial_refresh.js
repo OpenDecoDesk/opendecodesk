@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -55,7 +56,7 @@ const wait = async (cond, n = 300) => { for (let i = 0; i < n && !cond(); i++) a
   const adminJs = read("public/admin.js");
   const sent = [];
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/#orders/acme", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/#orders/acme", pretendToBeVisual: true,
     beforeParse(win){ autoConfirm(win, () => true); win.CSS = win.CSS || { escape: (s) => String(s).replace(/["\\]/g, "\\$&") }; win.fetch = async (url, init) => {
       if (String(url).includes("/api/orders")) { const b = JSON.parse(init.body); sent.push(b); const x = await call(b); return { ok: x.status < 400, status: x.status, json: async () => x.body }; }
       return { ok: false, status: 404, json: async () => ({ status: "error" }) }; }; } });
@@ -201,7 +202,7 @@ const wait = async (cond, n = 300) => { for (let i = 0; i < n && !cond(); i++) a
   ok("rush fee and order dates draw from the order in the reply", /replaceOrderRows_\(orgId, \[saved\.order\]\)/.test(body("showRushFeeModal_")) && /replaceOrderRows_\(orgId, \[r\.order\]\)/.test(body("showOrderDates_")));
   ok("the due date, customer details and a void are drawn from what the page knows", ["bulkSetDueDate", "bulkEditCustomerInfo", "deleteTransaction"].every(f => /patchKnownOrders_\(/.test(body(f))));
   ok("the CSV import, the delivery check and Refresh still reload the whole list, on purpose", /showOrderCsvImportModal_\(orgId, f, \(\) => rerenderOrdersView\(\)\)/.test(adminJs) &&
-    /refreshOrdersInPlace_\(org\)/.test(body("ordersCheckTracking_")) && /onclick="rerenderOrdersView\(\)">Refresh/.test(adminJs) && /rerenderOrdersView\(\)/.test(body("onOrdersDateChange")));
+    /refreshOrdersInPlace_\(org\)/.test(body("ordersCheckTracking_")) && /data-admin-action="rerenderOrdersView">Refresh/.test(adminJs) && /rerenderOrdersView\(\)/.test(body("onOrdersDateChange")));
 
   console.log("\n=== Products: show / hide refills the table in place; saving returns to the same place ===");
   await w.renderProductList(app, "acme");

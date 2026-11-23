@@ -1,4 +1,5 @@
 const { JSDOM } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
 
 let libSrc = fs.readFileSync(__dirname + "/functions/_lib/hostConfig.js", "utf8")
@@ -61,7 +62,7 @@ let catalogSrc = fs.readFileSync(__dirname + "/functions/api/catalog.js", "utf8"
 eval(libSrc + "\n" + httpSrc + "\n" + catalogSrc);
 const REAL_CATALOG_RESPONSE = onRequestGet;
 
-const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+const html = storefrontPage();
 
 function makeStorageMock(){
   const store = {};

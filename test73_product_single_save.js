@@ -3,6 +3,7 @@
 // with no design stops the save before anything is written; a later failure keeps the page open
 // with what went wrong. jsdom with the real index.html + admin.js; fetch is mocked per action.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 
@@ -12,7 +13,7 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
     const calls = [];
     let failDesigns = false;
     class L extends ResourceLoader { fetch(url, o) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-    const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+    const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
       beforeParse(win) {
         win.CSS = win.CSS || { escape: (v) => String(v).replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c) };
         win.fetch = async (url, opts) => {

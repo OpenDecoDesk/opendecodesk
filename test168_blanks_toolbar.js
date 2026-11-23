@@ -3,6 +3,7 @@
 // Connected vendor only appears once a vendor is connected with a login; the desktop version doesn't ask
 // while its supplier connections are off. jsdom with the real index.html + admin.js; fetch mocked per action.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const ok = (d, c) => console.log(d + ":", !!c);
@@ -22,7 +23,7 @@ async function blanksPage({ connections = [], desktop = null } = {}) {
     if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs));
     const local = new URL(url).pathname.match(/^\/vendor\/fonts\/[a-z0-9.-]+$/);
     return local ? Promise.resolve(fs.readFileSync(__dirname + "/public" + local[0])) : super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: desktop ? "http://localhost:47830/" : "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: desktop ? "http://localhost:47830/" : "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win) {
       win.fetch = async (url, opts) => {
         const body = opts && opts.body ? JSON.parse(opts.body) : {};

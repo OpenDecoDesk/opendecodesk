@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -119,7 +120,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("…with each version's own colors, blank photos and mockups", cLs.garmentColors.join() === "Navy,Royal" && (cLs.colorImages.Navy || []).includes("img/ls-navy.jpg") &&
     Object.values(cLs.graphicImages || {}).includes("img/mock-ls-navy.png") && !Object.values(cTee.graphicImages || {}).includes("img/mock-ls-navy.png"));
   const orders = [];
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", url: "https://club.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", url: "https://club.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.alert = () => {}; win.fetch = async (url, init) => {
       if (String(url).startsWith("/api/orders")) { orders.push(JSON.parse(init.body)); return { ok: true, status: 200, json: async () => ({ status: "ok" }) }; }
       return { ok: true, status: 200, json: async () => cat, text: async () => JSON.stringify(cat) }; }; } });
@@ -149,7 +150,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   toggle()[0].click();
   await new Promise(res => setTimeout(res, 20));
   ok("switching back shows the short sleeve again", card().dataset.vactive === "tee" && swatches() === "Navy,Black");
-  ok("the toggle row wraps on a narrow screen", /\.version-toggle\{margin:0 0 10px;\}/.test(read("public/index.html")) && /\.cfg-swatches\{display:flex; gap:6px; flex-wrap:wrap;/.test(read("public/index.html")));
+  ok("the toggle row wraps on a narrow screen", /\.version-toggle\{margin:0 0 10px;\}/.test(storefrontPage()) && /\.cfg-swatches\{display:flex; gap:6px; flex-wrap:wrap;/.test(storefrontPage()));
   // A version that's hidden isn't on the page at all: the other is a plain card.
   await lib.setProductVisible(d1, "club", "tee-ls", false);
   const cat2 = JSON.parse(await (await catalogApi({ request: { url: "https://club.example.com/api/catalog", headers: { get: () => null } }, env: { DB: d1 } })).text());
@@ -173,7 +174,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   console.log("\n=== The admin ===");
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const adom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const adom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.CSS = win.CSS || { escape: (v) => String(v) }; autoConfirm(win, () => true); win.fetch = async (url, init) => {
       if (String(url).includes("/api/orders")) { const x = await call(JSON.parse(init.body)); return { ok: x.status < 400, status: x.status, json: async () => x.body }; }
       return { ok: true, status: 200, json: async () => ({ status: "admin" }) }; }; } });

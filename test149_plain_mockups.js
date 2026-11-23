@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const vm = require("vm");
 const { createD1 } = require("./testlib/d1-shim.js");
 
@@ -60,7 +61,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("/api/catalog passes them to the shop page", cTee.graphicImages[`${BACK}|${crest}|`] === R2 + "tee-back.png" && cTee.fixedMockups[0].label === "Back" && cPolo.fixedMockups[0].graphicId === crest);
 
   // The shop page's picture list (productImages_ from index.html).
-  const html = read("public/index.html");
+  const html = storefrontPage();
   const fnSrc = html.slice(html.indexOf("function productImages_("), html.indexOf("function imageRowHtml_("));
   const ctx = {}; vm.createContext(ctx); vm.runInContext(fnSrc, ctx);
   const imgs = ctx.productImages_(cTee, "");

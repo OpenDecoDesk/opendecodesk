@@ -14,6 +14,7 @@
 //     object URLs freed) and the admin (the product form's fields, Edit items keeping the design).
 // Real SQL (sql.js) with every migration + the real db.js, orders.js, catalog.js, customer-design.js.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
@@ -400,7 +401,7 @@ const bucket = () => { const m = new Map(); const o = { m, deletes: 0, put: asyn
     ] } };
   const uploads = [], orders = [], revoked = [];
   let nUrl = 0, bitmap = null;
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", url: "https://league.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", url: "https://league.example.com/", pretendToBeVisual: true,
     beforeParse(win){
       win.alert = (m) => { win._alerts = (win._alerts || []).concat(m); };
       win.URL.createObjectURL = () => "blob:https://league.example.com/u" + (++nUrl);
@@ -499,7 +500,7 @@ const bucket = () => { const m = new Map(); const o = { m, deletes: 0, put: asyn
   const adminJs = read("public/admin.js");
   const calls = [];
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const adom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const adom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.CSS = win.CSS || { escape: (v) => String(v) }; autoConfirm(win, () => true);
       win.fetch = async (url, init) => {
         const b = init && init.body ? JSON.parse(init.body) : {};

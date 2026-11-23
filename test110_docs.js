@@ -166,7 +166,7 @@ console.log("\n=== Menu paths name menus that exist ===");
   const groupsSrc = adminSrc.slice(adminSrc.indexOf("const ADMIN_NAV_GROUPS = ["), adminSrc.indexOf("// Flat list of every page hash"));
   const menus = {};
   for (const g of groupsSrc.matchAll(/\{ label: "([^"]+)", items: \[([\s\S]*?)\]\}/g)) menus[g[1]] = [...g[2].matchAll(/\["[a-z]+", "([^"]+)"\]|label: "([^"]+)"/g)].map(m => m[1] || m[2]);
-  const files = [...DOCS, "scripts/setup.mjs", "desktop/main.js", "public/admin.js", "public/index.html", "functions/_lib/email.js", "functions/_lib/http.js",
+  const files = [...DOCS, "scripts/setup.mjs", "desktop/main.js", "public/admin.js", "public/index.html", "public/storefront.js", "functions/_lib/email.js", "functions/_lib/http.js",
     "functions/_lib/supplierOrders.js", "functions/api/orders.js", "functions/api/admin-users.js", "functions/api/admin-password.js"];
   const wrong = [];
   for (const f of files) {

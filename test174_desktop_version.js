@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -96,7 +97,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   a = await answer({ DB: d1, DESKTOP_VERSION: "2026.11.01.01" }, ADMIN_ORIGIN);
   ok("a cloud install's admin answer has no edition and no version", a.status === "admin" && a.edition === undefined && a.version === undefined);
 
-  const page = read("public/index.html");
+  const page = storefrontPage();
   class L extends ResourceLoader { fetch(url, o){
     if (url.includes("/admin.js")) return Promise.resolve(Buffer.from("window.adminRoute = async () => {};"));
     const local = new URL(url).pathname.match(/^\/vendor\/fonts\/[a-z0-9.-]+$/);

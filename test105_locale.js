@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
@@ -104,7 +105,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("only TIMEZONE set: the roll-up keeps its local hour (Chicago 6 AM = 11:00 UTC in summer, 12:00 in winter)", (await tick({ ...env, TIMEZONE: "America/Chicago" }, "2026-07-15T11:00:00Z")) && (await tick({ ...env, TIMEZONE: "America/Chicago" }, "2026-12-15T12:00:00Z")) && !(await tick({ ...env, TIMEZONE: "America/Chicago" }, "2026-12-15T11:00:00Z")));
   ok("nothing set: 06:00 UTC", (await tick(env, "2026-07-15T06:00:00Z")) && !(await tick(env, "2026-07-15T10:00:00Z")));
   ok("DIGEST_HOUR still applies with a saved zone", sch.isDigestHour({ DIGEST_HOUR: "9" }, new Date("2026-07-15T00:00:00Z"), "Asia/Tokyo") === true);
-  const code = ["functions/_lib/db.js", "functions/_lib/email.js", "functions/_lib/schedule.js", "functions/_lib/deliveryCheck.js", "functions/api/daily-digest.js", "functions/api/orders.js", "src/worker.js", "public/admin.js", "public/index.html", "wrangler.toml", "scripts/setup.mjs"];
+  const code = ["functions/_lib/db.js", "functions/_lib/email.js", "functions/_lib/schedule.js", "functions/_lib/deliveryCheck.js", "functions/api/daily-digest.js", "functions/api/orders.js", "src/worker.js", "public/admin.js", "public/index.html", "public/storefront.js", "wrangler.toml", "scripts/setup.mjs"];
   ok("no US zone is written into the code or its copy", code.every(f => !/\b(Eastern|Central|Mountain|Pacific) (Standard |Daylight )?[Tt]ime\b|\b(EST|EDT|CST|CDT|MST|MDT|PST|PDT)\b/.test(read(f).replace(/<option value="America\/[A-Za-z_]+">|"America\/[A-Za-z_]+"(, )?/g, ""))));
 
   console.log("\n=== Country US (the default): exactly as before ===");
@@ -245,7 +246,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("the ZIP table itself is untouched by the country (only whether it's consulted)", lib.zipStates("43004").join() === "OH" && lib.zipStates("SW1A 1AA").length === 0);
 
   console.log("\n=== Storefront ===");
-  const html = read("public/index.html");
+  const html = storefrontPage();
   const page = async (answer) => { const dom = new JSDOM(html, { runScripts: "dangerously", url: "https://acme.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async () => ({ ok: true, status: 200, json: async () => answer }); } });
     await new Promise(res => setTimeout(res, 150)); return dom.window; };

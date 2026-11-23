@@ -13,7 +13,7 @@ their mail from an office across a state line. Those address states are added fr
 so the check never refuses them. The check this table feeds is deliberately lenient: a prefix accepts
 every state listed for it. Without --write it prints the table and what
 would change; with --write it replaces the ZIP3_STATES_ constant in functions/_lib/db.js and
-public/index.html (the two copies must stay identical — a test checks). The spreadsheet itself is not
+public/storefront.js (the two copies must stay identical — a test checks). The spreadsheet itself is not
 kept in the repository. Standard library only.
 """
 import os, re, sys, zipfile, collections
@@ -94,7 +94,7 @@ if __name__ == "__main__":
     states, nzip = read_states(args[0])
     table = to_table(states)
     print(f"{nzip} ZIP Codes, {len(states)} prefixes in use")
-    files = [os.path.join(root, "functions", "_lib", "db.js"), os.path.join(root, "public", "index.html")]
+    files = [os.path.join(root, "functions", "_lib", "db.js"), os.path.join(root, "public", "storefront.js")]
     try:
         src = open(files[0]).read(); old = CONST_RE.search(src).group(0)
         old_map = parse_table(" ".join(re.findall(r'"([^"]*)"', old)).replace("  ", " "))

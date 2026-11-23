@@ -6954,7 +6954,7 @@ async function handleOrdersPost_(context) {
   if (items.some((it) => !it || typeof it !== "object" || Array.isArray(it) || lineQty(it.qty) === null)) {
     return jsonResponse({ status: "error", message: QTY_MESSAGE }, 400);
   }
-  // The storefront keeps one order id per checkout until it hears back (index.html placeOrder), so an id already
+  // The storefront keeps one order id per checkout until it hears back (storefront.js placeOrder), so an id already
   // saved is usually its retry after the first answer was lost. The very same order — same shop, name, email and
   // lines, placed in the last day, not voided — gets the answer the first one would have (ok, with its checkout
   // token), so the customer sees the confirmation and card step for THAT order and no second one is made. Asked

@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
 // Admin pop-up windows behave as dialogs for keyboard and screen-reader users, the older hand-built prompts follow the
@@ -9,7 +10,7 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const ok = (d, v) => console.log(d + ":", !!v);
 const tick = (ms) => new Promise(r => setTimeout(r, ms || 5));
 (async () => {
-  const adminJs = read("public/admin.js"), indexHtml = read("public/index.html");
+  const adminJs = read("public/admin.js"), indexHtml = storefrontPage();
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return Promise.resolve(Buffer.from("")); } }
   const dom = new JSDOM(indexHtml, { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "error", message: "n/a" }) }); } });

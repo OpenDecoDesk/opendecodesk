@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Printed transfers (migrations/0068): DTFs at fixed locations that are part of a product — configurable or
@@ -139,7 +140,7 @@ const near = (a, b) => Math.abs(a - b) < 0.005;
     copied[0].notes.some(n => /Printed transfer: graphic “Club crest” → this shop's/.test(n)));
 
   console.log("\n=== Screens ===");
-  const adm = read("public/admin.js"), idx = read("public/index.html"), cat = read("functions/api/catalog.js"), mail = read("functions/_lib/email.js");
+  const adm = read("public/admin.js"), idx = storefrontPage(), cat = read("functions/api/catalog.js"), mail = read("functions/_lib/email.js");
   ok("the product form has the Printed transfers box, outside the configurable-only fields", /id="cfgFixedWrap"/.test(adm) && adm.indexOf('id="cfgFixedWrap"') > adm.indexOf('<div id="cfgFields"') &&
     /function drawFixed\(\)/.test(adm) && /fixedTransfers: window\._productFixedGet\(\)/.test(adm));
   ok("the Pricing panel's draft includes them", /d\.fixedTransfers = window\._productFixedGet\(\)/.test(adm));

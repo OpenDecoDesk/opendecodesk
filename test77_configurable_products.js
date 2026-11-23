@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Configurable products (migrations/0036): base + tier add-ons priced server-side, all-None and
@@ -213,7 +214,7 @@ const near = (a, b) => Math.abs(a - b) < 0.005;
   ok("the form explains leaving boxes unchecked offers it wherever a product offers the graphic",
     /Leave all unchecked to offer it wherever a product offers this graphic/.test(a));
 
-  const h = read("public/index.html");
+  const h = storefrontPage();
   ok("storefront: configurable branch + configurator + cart config",
     /if\(p\.configurable\) return renderConfigurableProduct/.test(h) && /function renderConfigurableProduct/.test(h) &&
     /function cfgRefresh_/.test(h) && /function cfgPicks_/.test(h) && /if\(product\.configurable\)/.test(h) && /garmentColor: color, locations:/.test(h));
@@ -229,7 +230,7 @@ const near = (a, b) => Math.abs(a - b) < 0.005;
   const noPers = await lib.priceItem(d1, "colonnade", "rag", "L", 1, true, { garmentColor: "Navy", locations: { front: { graphicId: gLock, ink: "White" } } });
   ok("a product with no personalization price still charges nothing", near(noPers.personalizationFee, 0));
 
-  const hh = read("public/index.html");
+  const hh = storefrontPage();
   ok("storefront: the configurable card has the personalization box (shared with plain products)",
     /function personalizeHtml_\(p\)/.test(hh) && /\$\{personalizeHtml_\(p\)\}\s*\n\s*<div class="cfg-preview"/.test(hh) && /const personalizeRow = personalizeHtml_\(p\)/.test(hh));
   ok("storefront: the cart line keeps the real name apart from the picks summary and charges the fee",

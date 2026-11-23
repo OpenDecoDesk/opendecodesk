@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 const { MAIL_ENV, MAIL_OK, captureMail } = require("./testlib/mail-mock");
@@ -468,7 +469,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   const adminJs = read("public/admin.js");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const sent = [], sentBodies = [];
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win){
       win.fetch = async (url, opts) => {
         if (String(url).includes("/api/orders") && opts && opts.body) {
@@ -665,7 +666,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   // ------------------------------------------------------------------------------------------------
   console.log("\n=== The storefront ===");
   const shopPage = async () => { const answer = await cat("acme");
-    const d = new JSDOM(read("public/index.html"), { runScripts: "dangerously", url: "https://acme.example.com/", pretendToBeVisual: true,
+    const d = new JSDOM(storefrontPage(), { runScripts: "dangerously", url: "https://acme.example.com/", pretendToBeVisual: true,
       beforeParse(win){ win.fetch = async () => ({ ok: true, status: 200, json: async () => answer }); } });
     await tick(150); return d.window; };
   let sw = await shopPage(), section = sw.eval("renderShippingSection(currentOrg)");
@@ -678,7 +679,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   sw = await shopPage();
   ok("shipping back on: the ZIP box is back", /shippingZipInput/.test(sw.eval("renderShippingSection(currentOrg)")));
   const vAnswer = { status: "unavailable", feature: "designVerification", message: "Design approval isn't available right now. Please contact us about your order." };
-  const vd = new JSDOM(read("public/index.html"), { runScripts: "dangerously", url: "https://acme.example.com/?verify=abc", pretendToBeVisual: true,
+  const vd = new JSDOM(storefrontPage(), { runScripts: "dangerously", url: "https://acme.example.com/?verify=abc", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async (url) => ({ ok: true, status: 200, json: async () => String(url).includes("/api/verify") ? vAnswer : { status: "error" } }); } });
   await tick(200);
   ok("a customer opening an approval link while it's off reads \"not available\", not \"invalid or expired\"", /isn't available right now/.test(vd.window.document.getElementById("app").textContent) && !/invalid or has expired/.test(vd.window.document.getElementById("app").textContent));

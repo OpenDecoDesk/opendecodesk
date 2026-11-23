@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Configurable products (migrations/0042): per-location graphic × garment-color mockups.
@@ -113,7 +114,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("a missing object is 404 (not a same-zone fetch)", pr.status === 404);
 
   console.log("\n=== Admin + storefront wiring ===");
-  const a = read("public/admin.js"), h = read("public/index.html");
+  const a = read("public/admin.js"), h = storefrontPage();
   ok("product form builds per-location mockup tables + Overlay buttons",
     /id="cfgMockups"/.test(a) && /function drawMockups/.test(a) && /class="admin-btn cfgMockBtn"/.test(a));
   ok("the custom-canvas overlay editor + proxy + flatten/upload exist",

@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 
@@ -47,7 +48,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("every catalog answer includes it — a shop, the admin host, and an unrecognized host", (cat.match(/business: catalogData\.business \|\| \{\}/g) || []).length >= 5);
 
   console.log("\n=== Storefront ===");
-  const html = read("public/index.html");
+  const html = storefrontPage();
   const page = async (answer, url) => { const dom = new JSDOM(html, { runScripts: "dangerously", url, pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async () => ({ ok: answer.status !== "error" || !answer._404, status: 200, json: async () => answer }); } });
     await new Promise(res => setTimeout(res, 150)); return dom.window; };

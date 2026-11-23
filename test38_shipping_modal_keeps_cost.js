@@ -1,6 +1,7 @@
 const { JSDOM, ResourceLoader } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
-const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+const html = storefrontPage();
 
 // The Edit shipping window must not change an order's shipping cost unless a
 // new rate (or custom amount) is chosen — saving an address/"shipping paid"

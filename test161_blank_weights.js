@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { ADMIN_ORIGIN } = require("./testlib/hosts.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -77,7 +78,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   console.log("\n=== From vendor files ===");
   const adminJs = read("public/admin.js");
   class Ld extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new Ld(), url: ADMIN_ORIGIN + "/#catalog", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new Ld(), url: ADMIN_ORIGIN + "/#catalog", pretendToBeVisual: true,
     beforeParse(win){ autoConfirm(win, () => true); win.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "admin" }) }); } });
   const w = dom.window;
   await new Promise(res => setTimeout(res, 150));

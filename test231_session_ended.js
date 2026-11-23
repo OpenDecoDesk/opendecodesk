@@ -2,6 +2,7 @@
 // asks to sign in again and is repeated once, so the edit isn't lost; the orders list does the same instead of
 // "Server error (HTTP 401)". Every screen's API helper goes through the one adminApi_.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM, ResourceLoader } = require("jsdom");
 
 const ok = (d, v) => console.log(d + ":", !!v);
@@ -10,7 +11,7 @@ const wait = async (f) => { for (let i = 0; i < 200 && !f(); i++) await tick(5);
 
 (async () => {
   const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
-  const adminJs = read("public/admin.js"), indexHtml = read("public/index.html");
+  const adminJs = read("public/admin.js"), indexHtml = storefrontPage();
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return Promise.resolve(Buffer.from("")); } }
   const calls = [];
   let expired = 0;   // how many /api/orders calls answer 401 before the session is good again

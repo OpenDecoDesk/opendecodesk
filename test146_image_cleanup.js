@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { execFileSync } = require("child_process");
@@ -153,7 +154,7 @@ function bucket(objects){
   const sent = [];
   class Ld extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const pageEnv = { IMAGES: bucket([obj("uploads/acme/x1.jpg", old, 3000), obj("uploads/acme/x1-thumb.jpg", old, 300), obj("uploads/acme/x2.jpg", old, 3000)]), R2_PUBLIC_BASE: BASE };
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new Ld(), url: "https://admin.example.com/#inventory", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new Ld(), url: "https://admin.example.com/#inventory", pretendToBeVisual: true,
     beforeParse(win){ autoConfirm(win, () => true); win.TextEncoder = TextEncoder; win.Blob = Blob; win.HTMLAnchorElement.prototype.click = function(){ (win.__downloads = win.__downloads || []).push(this.download); }; win.CSS = win.CSS || { escape: (x) => String(x) }; win.URL.createObjectURL = () => "blob:zip"; win.fetch = async (url, init) => {
       if (String(url).includes("/api/orders")) { const b = JSON.parse(init.body); sent.push(b); const x = await call(b, pageEnv); return { ok: x.status < 400, status: x.status, json: async () => x.body }; }
       if (String(url).includes("/api/image-proxy")) return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer, blob: async () => { throw new Error("no blob"); } };

@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { createD1 } = require("./testlib/d1-shim.js");
 
 // Assorted behaviours:
@@ -98,7 +99,7 @@ const tick = () => new Promise(r => setTimeout(r, 3));
     console.log("ordinary text and numbers are left alone:", csvSafe("Ann Smith") === "Ann Smith" && csvSafe("12.50") === "12.50" && csvSafe("") === "");
 
     console.log("\n=== A-2: dead storefront/admin modes are gone ===");
-    const html = read("public/index.html");
+    const html = storefrontPage();
     console.log("no direct-to-another-backend switch or in-browser storage in the pages:",
       !/const PROXY_MODE|GOOGLE_SCRIPT_URL\s*=|window\.storage/.test(html) && !/PROXY_MODE|GOOGLE_SCRIPT_URL|window\.storage/.test(adminJs));
     console.log("orders still submit to /api/orders, and the admin still loads them from there:",

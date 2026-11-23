@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { autoConfirm } = require("./testlib/confirm.js");
 const { ADMIN_ORIGIN, shopOrigin } = require("./testlib/hosts.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -132,7 +133,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 
   console.log("\n=== The screens ===");
   class L extends ResourceLoader { fetch(url, o){ if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
-  const dom = new JSDOM(read("public/index.html"), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/#catalog", pretendToBeVisual: true,
+  const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: ADMIN_ORIGIN + "/#catalog", pretendToBeVisual: true,
     beforeParse(win){ autoConfirm(win, () => true); win.open = () => null; win.fetch = async (url, init) => {
       if (String(url).includes("/api/orders")) { const b = JSON.parse(init.body); const x = await call(b); return { ok: x.status < 400, status: x.status, json: async () => x.body }; }
       return { ok: true, status: 200, json: async () => ({ status: "admin" }) }; }; } });
@@ -144,9 +145,9 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   await call(prod("tee", 31));
   await w.renderAdminOrgList(d.getElementById("app"));
   await wait(() => d.querySelector('[data-publish-state="acme"] .pub-state'));
-  ok("Manage catalog: each shop has Publish and Preview, and says it has unpublished changes", d.querySelector('button[data-org="acme"][onclick*="publishCatalog"]') && d.querySelector('button[data-org="acme"][onclick*="previewShop_"]') &&
+  ok("Manage catalog: each shop has Publish and Preview, and says it has unpublished changes", d.querySelector('button[data-org="acme"][data-admin-action="publishCatalog"]') && d.querySelector('button[data-org="acme"][data-admin-action="previewShop_"]') &&
     /Unpublished changes \(1 product\)/.test(d.querySelector('[data-publish-state="acme"]').textContent));
-  d.querySelector('button[data-org="acme"][onclick*="publishCatalog"]').click();
+  d.querySelector('button[data-org="acme"][data-admin-action="publishCatalog"]').click();
   await wait(() => /✓ Published/.test(d.querySelector('[data-publish-state="acme"]').textContent));
   ok("…Publish on the row publishes that shop and the badge turns to ✓ Published", /✓ Published/.test(d.querySelector('[data-publish-state="acme"]').textContent) && await shownPrice() === 31);
   await wait(() => d.querySelector('[data-shop-issues="empty"]') && /No product/.test(d.querySelector('[data-shop-issues="empty"]').textContent));

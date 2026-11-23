@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { may, lowest } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { createD1 } = require("./testlib/d1-shim.js");
 const { ADMIN_ORIGIN } = require("./testlib/hosts.js");
@@ -137,7 +138,7 @@ const ok = (label, v) => console.log(label + ":", !!v);
     ok("an unknown product is a 404", (await call({ action: "previewProductHoopings", org: "acme", productId: "nope" })).status === 404);
 
     console.log("\n=== The product form ===");
-    const adm = read("public/admin.js"), html = read("public/index.html");
+    const adm = read("public/admin.js"), html = storefrontPage();
     ok("the form is cards in order: basics, what the customer chooses, blank & colors, every piece, the pick, own design, personalization, prices, pictures",
       ["prodCardBasics", "prodCardMode", "prodCardBlank", "prodCardEvery", "prodCardOptions", "prodCardCustom", "prodCardPers", "prodCardPrices", "prodCardPictures"]
         .map(id => adm.indexOf(`"${id}"`)).every((v, i, a) => v > 0 && (i === 0 || v > a[i - 1])));

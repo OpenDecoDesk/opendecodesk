@@ -1,4 +1,5 @@
 const { JSDOM } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
 
 let libSrc = fs.readFileSync(__dirname + "/functions/_lib/hostConfig.js", "utf8")
@@ -71,11 +72,11 @@ function mockCatalogFetch(win){
 }
 
 // ---- Client-side: test with discount ON (=2) ----
-let htmlOn = fs.readFileSync(__dirname + "/public/index.html", "utf8")
+let htmlOn = storefrontPage()
   .replace("const CASH_DISCOUNT_PERCENT = 0;", "const CASH_DISCOUNT_PERCENT = 2;");
 
 // ---- Client-side: test with discount OFF (=0) ----
-let htmlOff = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+let htmlOff = storefrontPage();
 
 (async () => {
   // ---- DISCOUNT ON ----

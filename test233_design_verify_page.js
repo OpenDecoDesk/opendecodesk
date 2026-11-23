@@ -3,8 +3,9 @@
 // changes choice is told to screen readers, the upload boxes can be reached by keyboard, and a
 // failed upload or submit says why. Invented shop and order only.
 const fs = require("fs");
+const { storefrontPage } = require("./testlib/storefront-page");
 const { JSDOM } = require("jsdom");
-const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+const html = storefrontPage();
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 const wait = (ms) => new Promise(r => setTimeout(r, ms));

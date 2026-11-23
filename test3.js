@@ -1,4 +1,5 @@
 const { JSDOM } = require("jsdom");
+const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
 
 let libSrc = fs.readFileSync(__dirname + "/functions/_lib/hostConfig.js", "utf8")
@@ -67,7 +68,7 @@ function mockCatalogFetch(win){
   };
 }
 
-const html = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+const html = storefrontPage();
 
 function makeStorageMock(){
   const store = {};

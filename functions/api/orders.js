@@ -6745,7 +6745,8 @@ async function handleOrdersPost_(context) {
   // body.dates = {placedAt, blankOrderedAt, …, completedAt} (only the ones changed; ISO date-time, or null / "" to
   // clear), body.dueDate (YYYY-MM-DD or "" — optional). Every date must fit the others (out of order is refused,
   // saying which), none in the future; the order date and Manufactured can be changed but not cleared; a date that
-  // moves money or cost of goods (order date, manufactured) can't move into or out of a closed month. Audited first.
+  // moves money or cost of goods (order date, manufactured; shipped, delivered and completed when orders count as sold
+  // when they ship) can't move into or out of a closed month. Audited first.
   if (body.action === "setOrderDates") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
@@ -6784,8 +6785,12 @@ async function handleOrdersPost_(context) {
       const why = whyNotCompletable_({ ...order, deliveredAt: merged.deliveredAt, completedAt: null, activeItems: (order.items || []).filter(i => !i.cancelDate).length });
       if (why) return jsonResponse({ status: "error", message: `It can't be completed: ${why}.` }, 409);
     }
-    // Closed months: the order date and Manufactured move money / cost of goods between months.
-    for (const col of ["placedAt", "manufacturedAt"]) {
+    // Closed months: the order date and Manufactured move money / cost of goods between months. With orders counted
+    // as sold when they ship (Global settings → Bookkeeping), Shipped, Delivered and Completed are the sale date: they
+    // move the order's revenue and COGS, and its cost "made, not yet shipped" at each month's end, between months.
+    const guarded = ["placedAt", "manufacturedAt"];
+    if (["shippedAt", "deliveredAt", "completedAt"].some(c => c in changes) && await getSaleDateBasis(env.DB) === "shipped") guarded.push("shippedAt", "deliveredAt", "completedAt");
+    for (const col of guarded) {
       if (!(col in changes)) continue;
       for (const m of [order[col], changes[col]].filter(Boolean).map(v => String(v).slice(0, 7))) {
         if (await isMonthClosed(env.DB, m)) {

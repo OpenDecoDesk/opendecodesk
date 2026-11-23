@@ -958,6 +958,8 @@ CREATE TABLE IF NOT EXISTS finished_goods_movements (
 );
 CREATE INDEX IF NOT EXISTS idx_fgm_item ON finished_goods_movements (orgId, productId, size, variant, occurredAt);
 CREATE INDEX IF NOT EXISTS idx_fgm_occurred ON finished_goods_movements (occurredAt);
+-- Costs on orders not sold yet look finished stock up by order (migrations/0103).
+CREATE INDEX IF NOT EXISTS idx_fgm_order ON finished_goods_movements (orderId);
 
 
 CREATE INDEX IF NOT EXISTS idx_orders_org            ON orders(orgId, placedAt DESC);
@@ -1756,3 +1758,36 @@ CREATE TRIGGER IF NOT EXISTS lcv_orgs_upd AFTER UPDATE ON orgs
 BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'orgs'; END;
 CREATE TRIGGER IF NOT EXISTS lcv_orgs_del AFTER DELETE ON orgs
 BEGIN UPDATE list_cache_versions SET version = version + 1 WHERE name = 'orgs'; END;
+
+-- Month-end stock snapshots (migrations/0103): the replay state of blanks, transfers and finished stock at the end of
+-- a closed month, written the first time a report needs it. The triggers below delete every snapshot from a
+-- changed movement's month on, so none can outlive a change under it.
+CREATE TABLE IF NOT EXISTS inventory_period_snapshots (
+  month     TEXT    NOT NULL,
+  kind      TEXT    NOT NULL,
+  key       TEXT    NOT NULL,
+  qty       INTEGER NOT NULL DEFAULT 0,
+  avgCents  INTEGER NOT NULL DEFAULT 0,
+  name      TEXT,
+  label     TEXT,
+  PRIMARY KEY (month, kind, key)
+);
+
+CREATE TRIGGER IF NOT EXISTS ips_inventory_movements_ins AFTER INSERT ON inventory_movements
+BEGIN DELETE FROM inventory_period_snapshots WHERE month >= substr(NEW.occurredAt, 1, 7); END;
+CREATE TRIGGER IF NOT EXISTS ips_inventory_movements_upd AFTER UPDATE ON inventory_movements
+BEGIN DELETE FROM inventory_period_snapshots WHERE month >= substr(NEW.occurredAt, 1, 7) OR month >= substr(OLD.occurredAt, 1, 7); END;
+CREATE TRIGGER IF NOT EXISTS ips_inventory_movements_del AFTER DELETE ON inventory_movements
+BEGIN DELETE FROM inventory_period_snapshots WHERE month >= substr(OLD.occurredAt, 1, 7); END;
+CREATE TRIGGER IF NOT EXISTS ips_transfer_movements_ins AFTER INSERT ON transfer_movements
+BEGIN DELETE FROM inventory_period_snapshots WHERE month >= substr(NEW.occurredAt, 1, 7); END;
+CREATE TRIGGER IF NOT EXISTS ips_transfer_movements_upd AFTER UPDATE ON transfer_movements
+BEGIN DELETE FROM inventory_period_snapshots WHERE month >= substr(NEW.occurredAt, 1, 7) OR month >= substr(OLD.occurredAt, 1, 7); END;
+CREATE TRIGGER IF NOT EXISTS ips_transfer_movements_del AFTER DELETE ON transfer_movements
+BEGIN DELETE FROM inventory_period_snapshots WHERE month >= substr(OLD.occurredAt, 1, 7); END;
+CREATE TRIGGER IF NOT EXISTS ips_finished_goods_movements_ins AFTER INSERT ON finished_goods_movements
+BEGIN DELETE FROM inventory_period_snapshots WHERE month >= substr(NEW.occurredAt, 1, 7); END;
+CREATE TRIGGER IF NOT EXISTS ips_finished_goods_movements_upd AFTER UPDATE ON finished_goods_movements
+BEGIN DELETE FROM inventory_period_snapshots WHERE month >= substr(NEW.occurredAt, 1, 7) OR month >= substr(OLD.occurredAt, 1, 7); END;
+CREATE TRIGGER IF NOT EXISTS ips_finished_goods_movements_del AFTER DELETE ON finished_goods_movements
+BEGIN DELETE FROM inventory_period_snapshots WHERE month >= substr(OLD.occurredAt, 1, 7); END;

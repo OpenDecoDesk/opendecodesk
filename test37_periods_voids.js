@@ -107,8 +107,12 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   console.log("July order unchanged:", (await lib.getOrderById(d1, "JUL")).discountAmount === 0);
   r = await call({ action: "setDiscount", orderId: "AUG", amount: 1, note: "ok" });
   console.log("August (open) still editable:", r.status === 200);
+  // Month-end stock snapshots (migrations/0103) of the month and later months go with it; earlier ones stay.
+  d1._raw.exec("INSERT INTO inventory_period_snapshots (month, kind, key) VALUES ('2026-06', 'blank', '#complete'), ('2026-07', 'blank', '#complete'), ('2026-08', 'transfer', '#complete')");
   r = await call({ action: "reopenPeriod", month: "2026-07" });
   console.log("reopened (audited):", r.status === 200 && r.body.periods.length === 0 && audits("period.reopened") === 1);
+  console.log("…its stock snapshots and later months' are dropped, earlier ones kept:", d1.q("SELECT group_concat(month) m FROM inventory_period_snapshots")[0].m === "2026-06");
+  d1._raw.exec("DELETE FROM inventory_period_snapshots");
   r = await call({ action: "setDiscount", orderId: "JUL", amount: 0, note: "" });
   console.log("July editable again after reopening:", r.status === 200);
 

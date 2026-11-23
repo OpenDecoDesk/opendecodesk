@@ -5,7 +5,8 @@
 //
 // Mirrors the D1 surface db.js uses: prepare(sql).bind(...).first()/all()/run(),
 // batch([...]) (one transaction), exec(sql) for migration files. Like D1,
-// foreign keys are enforced and binding `undefined` is an error.
+// foreign keys are enforced, binding `undefined` is an error, and meta.changes
+// counts the rows triggers change too.
 
 const initSqlJs = require("sql.js");
 
@@ -28,16 +29,20 @@ function makeD1(SQL, raw){
       return rows;
     }finally{ stmt.free(); }
   }
-  function meta(){
+  // meta.changes as D1 reports it: every row the statement changed, its triggers' changes included (SQLite's
+  // total_changes() before and after; sqlite3_changes() alone would leave the triggers' rows out, and code that
+  // expects exactly one row would pass here and fail on D1).
+  const totalChanges = () => raw.exec("SELECT total_changes()")[0].values[0][0];
+  function meta(before){
     const last = raw.exec("SELECT last_insert_rowid() AS id")[0].values[0][0];
-    return { changes: raw.getRowsModified(), last_row_id: last };
+    return { changes: totalChanges() - before, last_row_id: last };
   }
   function bound(sql, params){
     return {
       _sql: sql, _params: params,
       async first(col){ const r = execute(sql, params)[0]; return r === undefined ? null : (col ? r[col] : r); },
-      async all(){ const results = execute(sql, params); return { results, success: true, meta: meta() }; },
-      async run(){ execute(sql, params); return { success: true, meta: meta() }; },
+      async all(){ const before = totalChanges(); const results = execute(sql, params); return { results, success: true, meta: meta(before) }; },
+      async run(){ const before = totalChanges(); execute(sql, params); return { success: true, meta: meta(before) }; },
     };
   }
   return {
@@ -49,7 +54,7 @@ function makeD1(SQL, raw){
       raw.run("SAVEPOINT d1_batch");
       try{
         const out = [];
-        for(const s of stmts){ execute(s._sql, s._params); out.push({ success: true, meta: meta() }); }
+        for(const s of stmts){ const before = totalChanges(); execute(s._sql, s._params); out.push({ success: true, meta: meta(before) }); }
         raw.run("RELEASE d1_batch");
         return out;
       }catch(e){ raw.run("ROLLBACK TO d1_batch"); raw.run("RELEASE d1_batch"); throw e; }

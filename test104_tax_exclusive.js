@@ -358,7 +358,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
   console.log("\n=== Admin ===");
   const adminJs = read("public/admin.js");
-  ok("Global settings has the mode selector, explains both, and saves it", /id="gTaxMode"/.test(adminJs) && /Prices include sales tax<\/option>/.test(adminJs) && /Sales tax is added at checkout<\/option>/.test(adminJs) && /taxMode: \(document\.getElementById\("gTaxMode"\)/.test(adminJs));
+  ok("Global settings has the mode selector, explains both, and saves it", /id="gTaxMode"/.test(adminJs) && /Prices include sales tax<\/option>/.test(adminJs) && /Sales tax is added at checkout<\/option>/.test(adminJs) && /taxMode: \(\$g\("gTaxMode"\) \|\| \{\}\)\.value/.test(adminJs));
   const orderActiveTotal_ = new Function(/function orderActiveTotal_\(o\)\{[\s\S]*?\n\}/.exec(adminJs)[0] + "\nreturn orderActiveTotal_;")();
   ok("the orders list's active total includes tax on top, from the order as loaded", orderActiveTotal_(await get("MIX")) === 103.6 && orderActiveTotal_(await get("DISCI")) === 106 && orderActiveTotal_(await get("SHIP")) === 114.35);
 

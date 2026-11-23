@@ -1,5 +1,6 @@
-// Global settings saves part by part: a rush-fee rule that can't be saved is caught before anything is sent, and a
-// part that fails half-way says which parts are already saved (and live) and which aren't.
+// Global settings saves every section in one request (saveGlobalSettingsAll, all or nothing): a rush-fee rule that
+// can't be saved is caught before anything is sent, and a section the server refuses means nothing was saved, the
+// refusal naming that section.
 // Also: the admin's "today" is the local day everywhere (not the UTC one, which is tomorrow in a US evening).
 const fs = require("fs");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -26,7 +27,8 @@ const tick = (ms) => new Promise(r => setTimeout(r, ms || 40));
         if (body.action === "getSalesTaxSettings") return j({ status: "ok", salesTax: { ratePercent: 6, jurisdiction: "OH", taxMode: "inclusive" } });
         if (body.action === "getRushSettings") return j({ status: "ok", rush: { rule: { mode: "fixed", amount: 15 }, taxable: false } });
         if (body.action === "getBusinessProfile") return j({ status: "ok", business: {} });
-        if (body.action === "updatePricingSettings" && failPricing) return j({ status: "error", message: "The card fee must be 0 to 10%." }, 400);
+        if (body.action === "saveGlobalSettingsAll" && failPricing) return j({ status: "error", section: "Pricing", message: "The card fee must be 0 to 10%." }, 400);
+        if (body.action === "saveGlobalSettingsAll") return j({ status: "ok", settings: { ...body.settings, business: {} }, belowTarget: [] });
         if (body.action === "updateFeatures") return j({ status: "ok", features: body.features });
         if (/^update/.test(body.action)) return j({ status: "ok", business: {}, locale: { country: "US" }, salesTax: {}, features: {}, globalSettings: {} });
         return j({ status: "error", message: "n/a" });
@@ -44,15 +46,15 @@ const tick = (ms) => new Promise(r => setTimeout(r, ms || 40));
   d.getElementById("gRushAmount").value = "5000";
   calls.length = 0;
   await w.submitGlobalSettings(); await tick();
-  ok("an out-of-range rush fee is refused with nothing saved", /^Nothing was saved\. Rush fee: Enter the rush fee/.test(err()) && !calls.some(a => /^update/.test(a)));
+  ok("an out-of-range rush fee is refused with nothing saved", /^Nothing was saved\. Rush fee: Enter the rush fee/.test(err()) && !calls.some(a => /^update|^saveGlobal/.test(a)));
   ok("…its box is outlined", /solid/.test(d.getElementById("gRushAmount").style.outline));
 
-  console.log("\n=== A part that fails half-way says what is saved and what isn't ===");
+  console.log("\n=== One request; a section the server refuses means nothing was saved ===");
   d.getElementById("gRushAmount").value = "15";
   failPricing = true; calls.length = 0;
   await w.submitGlobalSettings(); await tick();
-  ok("the saved parts are named as saved and live", /^Saved \(already live\): Region, Features, Payment methods, Sales tax/.test(err()));
-  ok("…and the failed part and the ones after it as not saved, with the reason", /Not saved: Pricing, Rush fee — The card fee must be 0 to 10%\./.test(err()) && !calls.includes("updateRushSettings"));
+  ok("Save sends every section in one request, and nothing else", calls.filter(a => /^update|^saveGlobal/.test(a)).join() === "saveGlobalSettingsAll");
+  ok("a refusal says nothing was saved, naming the section and why", /^Nothing was saved\. Pricing: The card fee must be 0 to 10%\. Fix it and save again\.$/.test(err()));
 
   console.log("\n=== Today is the local day ===");
   // In a US evening (UTC already tomorrow) the admin's today must still be today.

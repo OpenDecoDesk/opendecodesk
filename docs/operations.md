@@ -20,6 +20,9 @@ Free plan). A clean-up that fails is recorded and reported in the roll-up an hou
 - Deletes vendor web-service logs older than 30 days.
 - Deletes customers' design uploads (see [shops-and-domains.md](shops-and-domains.md#customers-own-designs))
   that are older than 48 hours and on no order — up to 200 a day, in one go; any more wait for the next day.
+- Deletes receipts and design, order and digital-product files uploaded more than 48 hours ago that nothing in
+  the database names (their form was never saved) — up to 1,000 a day, looking through at most 8,000 files a run
+  (and 20 seconds); the next day carries on where it stopped. A storage bucket that isn't set up is skipped.
 
 **What the roll-up's tick does**, in order:
 

@@ -429,7 +429,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     "getAuditLog", "getRevenueReport", "getDashboard", "getSalesTaxReport", "getInventoryReport",
     // Shops, products, catalog, settings
     "listOrgsAdmin", "createOrg", "setupOrgDomain", "getOrgDomainStatus", "updateOrg", "listProducts", "createProduct", "updateProduct", "importProducts", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "getCatalogIssues", "publish",
-    "getGlobalSettings", "updateGlobalSettings", "getSetupStatus", "getCloudflareSetup", "connectCloudflare", "getBusinessProfile", "updateBusinessProfile", "getEmailSettings", "updateEmailSettings", "previewCustomerEmail", "samplePdf", "sendSampleEmail", "getLocaleSettings", "updateLocaleSettings", "getFeatures", "updateFeatures", "getShipFromAddress", "getSalesTaxSettings", "updateSalesTaxSettings",
+    "getGlobalSettings", "updateGlobalSettings", "saveGlobalSettingsAll", "getSetupStatus", "getCloudflareSetup", "connectCloudflare", "getBusinessProfile", "updateBusinessProfile", "getEmailSettings", "updateEmailSettings", "previewCustomerEmail", "samplePdf", "sendSampleEmail", "getLocaleSettings", "updateLocaleSettings", "getFeatures", "updateFeatures", "getShipFromAddress", "getSalesTaxSettings", "updateSalesTaxSettings",
     "listLocations", "saveLocation", "deleteLocation", "listProductCategories", "saveProductCategory", "deleteProductCategory", "listProductGraphicImages", "setProductGraphicImage", "deleteProductGraphicImage",
     "listGraphics", "saveGraphic", "setProductGraphicColorBlocked", "deleteGraphic", "getTierPrices", "setTierPrices",
     // Inventory — always on in this release: blanks, transfers, stock movements, cost of goods
@@ -577,14 +577,16 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   const auditBefore = d1.q("SELECT count(*) n FROM audit_log WHERE action='settings.features_set'")[0].n;
   boxes().find(b => b.dataset.feature === "bookkeeping").checked = false;
   boxes().find(b => b.dataset.feature === "shipping").checked = false;
-  sent.length = 0;
+  sent.length = 0; sentBodies.length = 0;
   await w.submitGlobalSettings(); await tick(80);
   const saved = await lib.getFeatures(d1);
   ok("unticking two and saving turns exactly those off, in the database", saved.bookkeeping === false && saved.shipping === false && saved.production === true && saved.designVerification === true);
   aud = d1.q("SELECT detail FROM audit_log WHERE action='settings.features_set' ORDER BY id DESC LIMIT 1")[0];
   ok("…with one audit entry naming both", d1.q("SELECT count(*) n FROM audit_log WHERE action='settings.features_set'")[0].n === auditBefore + 1 && /"bookkeeping":\{"from":true,"to":false\}/.test(aud.detail) && /"shipping":\{"from":true,"to":false\}/.test(aud.detail));
   ok("…the menu follows at once, without reloading", !desktop().includes("Expenses") && !desktop().includes("Package sizes") && !mobile().includes("Reconcile") && desktop().includes("Machines"));
-  ok("…and the ship-from address of the feature just switched off isn't sent", sent.includes("updateFeatures") && !sent.includes("updateShipFromAddress") && sent.includes("updateMachineSettings") && sent.indexOf("updateFeatures") < sent.indexOf("updateMachineSettings"));
+  const allReq = (sentBodies.find(b => b.action === "saveGlobalSettingsAll") || {}).settings || {};
+  ok("…all in one request, without the ship-from address of the feature just switched off (Machine Files, still on, goes with it)", sent.filter(a => /^update|^saveGlobal/.test(a)).join() === "saveGlobalSettingsAll" &&
+    allReq.features && allReq.features.shipping === false && !allReq.shipFrom && allReq.machine && allReq.machine.showDeleteButton === false);
   sent.length = 0;
   await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 6);
   ok("the form comes back showing what's saved, without the switched-off feature's section", boxes().filter(b => !b.checked).map(b => b.dataset.feature).join() === "bookkeeping,shipping" &&
@@ -653,9 +655,9 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     w.eval("window._gShippoKey = true");
     sent.length = 0; sentBodies.length = 0;
     await w.submitGlobalSettings(); await tick(80);
-    const featReq = sentBodies.find(b => b.action === "updateFeatures") || {};
-    ok("complete: the address goes with the features in one request, after the Region", featReq.features && featReq.features.shipping === true && featReq.shipFrom && featReq.shipFrom.phone === "614-555-0199" &&
-      !sent.includes("updateShipFromAddress") && sent.indexOf("updateLocaleSettings") < sent.indexOf("updateFeatures") && sent.indexOf("updateFeatures") < sent.indexOf("updateGlobalSettings"));
+    const featReq = (sentBodies.find(b => b.action === "saveGlobalSettingsAll") || {}).settings || {};
+    ok("complete: the address goes with the features and the Region, in the one request", featReq.features && featReq.features.shipping === true && featReq.shipFrom && featReq.shipFrom.phone === "614-555-0199" &&
+      !!featReq.locale && sent.filter(a => /^update|^saveGlobal/.test(a)).join() === "saveGlobalSettingsAll");
     ok("…and both are saved", (await lib.getFeatures(d1)).shipping === true && (await admin({ action: "getShipFromAddress" })).body.shipFrom.phone === "614-555-0199");
   }
   ok("admin.js still parses as a classic script", (() => { try { new Function(adminJs); return true; } catch (e) { return false; } })());

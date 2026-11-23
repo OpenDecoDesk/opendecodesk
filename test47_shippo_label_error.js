@@ -77,11 +77,11 @@ async function migratedDb(){
 
   console.log("\n=== admin.js: Global Settings screen has a ship-from address form ===");
   const adminJs = read("public/admin.js");
-  // (Global settings sends the address with the Shipping switch, in updateFeatures — saved together or not at all.)
-  console.log("form fields present and wired to updateFeatures' shipFrom:",
+  // (Global settings sends the address with the Shipping switch, in the one save request — saved together or not at all.)
+  console.log("form fields present and sent with the features' shipFrom:",
     /f\("gShipName"/.test(adminJs) && /f\("gShipStreet1"/.test(adminJs) && /f\("gShipCity"/.test(adminJs) &&
     /id="gShipState"/.test(adminJs) && /id="gShipZip"/.test(adminJs) && /f\("gShipPhone"/.test(adminJs) && /f\("gShipEmail"/.test(adminJs) &&
-    /action: "updateFeatures", key: adminKey, features: want, \.\.\.\(shipFrom \? \{ shipFrom \} : \{\}\)/.test(adminJs) && /action:\s*"getShipFromAddress"/.test(adminJs));
+    /settings\.features = want;/.test(adminJs) && /if\(want\.shipping && \$g\("gShipStreet1"\)\) settings\.shipFrom = \{/.test(adminJs) && /action: "saveGlobalSettingsAll"/.test(adminJs) && /action:\s*"getShipFromAddress"/.test(adminJs));
   console.log("the old SHIP_FROM_* env vars are referenced ONLY by the temporary bridge in db.js (nowhere in the client or the API handlers):",
     !/SHIP_FROM_(NAME|STREET1|CITY|STATE|ZIP|PHONE|EMAIL)/.test(adminJs) &&
     !/SHIP_FROM_(NAME|STREET1|CITY|STATE|ZIP|PHONE|EMAIL)/.test(read("functions/api/shippo-label.js")) &&

@@ -38,7 +38,7 @@ import { classifyHost }  from "../_lib/hostConfig.js";
 import { getCatalogData } from "../_lib/catalogCache.js";
 import { requireAdmin }  from "../_lib/adminAuth.js";
 import { jsonResponse, featureOffResponse }  from "../_lib/http.js";
-import { getOrderForShipping, recordShippingLabel, getShipFromAddress, getOrderLabel, setShippingLabelUrl, getCategoryPackMap } from "../_lib/db.js";
+import { getOrderForShipping, recordShippingLabel, getShipFromAddress, getOrderLabel, setShippingLabelUrl, getCategoryPackMap, claimLabelPurchase, releaseLabelPurchase } from "../_lib/db.js";
 import { selectBox } from "../_lib/boxSize.js";
 
 // Fallback box used when selectBox() returns null (order doesn't match a
@@ -268,6 +268,19 @@ export async function onRequestPost(context){
       return jsonResponse({status:"error", message:"Invalid serviceToken format."}, 400);
     }
 
+    // One purchase at a time for this order (db.js claimLabelPurchase): two requests at the same moment would
+    // both pass the existing-label check below and both pay for postage.
+    let claimed;
+    try{ claimed = await claimLabelPurchase(env.DB, orderId); }
+    catch(err){
+      console.error("claimLabelPurchase D1 error:", err);
+      return jsonResponse({status:"error", message:"Couldn't check whether this order already has a label — try again."}, 500);
+    }
+    if(!claimed){
+      return jsonResponse({status:"error", code:"label_in_progress",
+        message:"A label is already being bought for this order. Wait a moment, then check its tracking before trying again."}, 409);
+    }
+    try{
     // A label already bought for this order (a retry after a lost answer, a second tab, another admin) isn't
     // bought — and paid for — again unless the admin confirms they want another one (replaceExisting).
     if(body.replaceExisting !== true){
@@ -381,6 +394,9 @@ export async function onRequestPost(context){
       labelCost:      amount,
       ...(warning ? { warning } : {})
     });
+    } finally {
+      await releaseLabelPurchase(env.DB, orderId);
+    }
   }
 
   return jsonResponse({status:"error", message:"Unknown action. Use 'rates' or 'purchase'."}, 400);

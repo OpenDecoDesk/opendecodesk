@@ -561,7 +561,7 @@ const bucket = () => { const m = new Map(); const o = { m, deletes: 0, put: asyn
   await new Promise(res => setTimeout(res, 50));
   const locSel = ad.querySelector('select[data-cfgfield="graphic"][data-loc="front"]');
   ok("Edit items shows the line's Customer design, selected", locSel && locSel.value === "custom" && /Customer design/.test(locSel.selectedOptions[0].textContent));
-  ok("…with the Files button (a line with the customer's design)", !!ad.querySelector('#editOrderRows [data-action="files"]'));
+  ok("…with the Files button (a line with the customer's design)", !!ad.querySelector('#editOrderRows [data-edit-action="files"]'));
   const colorSel = ad.querySelector('select[data-cfgfield="color"]');
   colorSel.value = "Navy"; colorSel.dispatchEvent(new aw.Event("change", { bubbles: true }));
   ok("changing the color keeps it, at its own price", ad.querySelector('select[data-cfgfield="graphic"][data-loc="front"]').value === "custom" && /\$46\.00/.test(ad.getElementById("editOrderRows").textContent));

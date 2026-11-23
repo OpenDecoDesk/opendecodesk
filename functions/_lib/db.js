@@ -3409,10 +3409,13 @@ export async function setLocaleSettings(db, p) {
 export async function resolveTimeZone(env) {
   let saved = "";
   try { saved = (await getLocaleSettings(env && env.DB)).timeZone; } catch (e) { /* fall through */ }
-  if (saved) return saved;
   const fromEnv = env && env.TIMEZONE ? String(env.TIMEZONE).trim() : "";
-  return isValidTimeZone(fromEnv) ? fromEnv : DEFAULT_TIME_ZONE;
+  const tz = saved || (isValidTimeZone(fromEnv) ? fromEnv : DEFAULT_TIME_ZONE);
+  _shopTimeZone_ = tz;   // what shopTime_ writes times in from now on
+  return tz;
 }
+// The install's time zone as last resolved (resolveTimeZone), for shopTime_'s messages; "" until then.
+let _shopTimeZone_ = "";
 
 // "YYYY-MM-DD" on the calendar of a time zone (an unknown zone counts as UTC).
 export function dateInTimeZone(date, timeZone) {
@@ -10347,7 +10350,9 @@ function manufacturedPrereq_(o) {
 const DATE_ONLY_NOON_ = /T12:00:00(\.000)?Z$/;
 export function timeFloor_(iso) { const s = String(iso || ""); return DATE_ONLY_NOON_.test(s) ? new Date(s.slice(0, 10) + "T00:00:00Z") : new Date(s); }
 function timeCeil_(iso) { const s = String(iso || ""); return DATE_ONLY_NOON_.test(s) ? new Date(Date.parse(s.slice(0, 10) + "T00:00:00Z") + 36 * 3600000 - 1) : new Date(s); }
-export function shopTime_(iso, tz = "America/New_York") {
+// A time in a refusal ("…can't be before it was delivered (Nov 5, 2026, 7:15 PM)"), on the shop's clock: the
+// install's time zone (Global settings → Region, resolved for the request by orders.js), else New York as before.
+export function shopTime_(iso, tz = _shopTimeZone_ || "America/New_York") {
   const s = String(iso || ""), d = new Date(s);
   if (isNaN(d)) return s;
   return DATE_ONLY_NOON_.test(s) ? d.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" })
@@ -10660,19 +10665,19 @@ export async function markOrderDelivered(db, orderId, iso) {
   return !!(r && r.meta && r.meta.changes > 0);
 }
 
+// One statement for the whole selection (review #9): an UPDATE per order ran one query each, and a big selection
+// passed the per-request query cap. `skipped` = orders in the list that weren't found.
 export async function setTrackingNumbers(db, orderIds, trackingNumber) {
-  const results = { updated: 0, skipped: 0, errors: [] };
-  for (const orderId of orderIds) {
-    try {
-      const r = await db.prepare("UPDATE orders SET trackingNumber=? WHERE orderId=?")
-        .bind(trackingNumber, orderId).run();
-      if (r.meta.changes > 0) results.updated++;
-      else results.skipped++;
-    } catch (e) {
-      results.errors.push(orderId + ": " + e.message);
-    }
+  const ids = [...new Set((orderIds || []).map(String))];
+  if (!ids.length) return { updated: 0, skipped: 0, errors: [] };
+  try {
+    const r = await db.prepare("UPDATE orders SET trackingNumber=? WHERE orderId IN (SELECT value FROM json_each(?))")
+      .bind(trackingNumber, JSON.stringify(ids)).run();
+    const updated = Number(r && r.meta && r.meta.changes) || 0;
+    return { updated, skipped: Math.max(0, ids.length - updated), errors: [] };
+  } catch (e) {
+    return { updated: 0, skipped: 0, errors: [e.message] };
   }
-  return results;
 }
 
 export async function cancelLineItem(db, itemId) {
@@ -10946,6 +10951,77 @@ export async function expireCheckoutSession(env, orderId) {
     const after = await checkoutSessionState(env, orderId);
     return after.state === "none" || after.state === "closed" ? "closed" : after.state === "paid" ? "paid" : "unknown";
   } catch (e) { console.error("Could not close the card page for", orderId, e); return "unknown"; }
+}
+
+// ---- One way to make a Stripe card page for an order (review #7 / #51) -------------------------------------
+// The storefront's Pay by card, the Edit items "ask the customer to pay the difference" link and the emailed
+// shipping link all come here, so each:
+//  - closes the order's card page still open first (or hands it back when it's for the same amount and return
+//    page), so two pages for one order can't both be paid;
+//  - stamps the order on the PaymentIntent as well as the session (Stripe copies it to the Charge), so refund
+//    and dispute events find the order without extra lookups;
+//  - expires: an hour for a page the customer opens now, about a day for a link sent by email (Stripe's most);
+//  - is remembered in checkout_sessions (migrations/0093), so the next one, and voiding the order, can close it.
+// `p`: { orderId, orgId, amountCents, name, description, customerEmail, successUrl, cancelUrl, expiresInSec,
+// metadata (more session and PaymentIntent metadata, e.g. {type}), sessionMetadata (session only),
+// afterPaid: true when an earlier page for the order having been paid is expected (an admin link for more
+// money on a paid order) }.
+// Returns { url, sessionId, reused } or { error: "paid" | "unknown" | "stripe", message }.
+export const CHECKOUT_LINK_SECONDS = 23 * 60 * 60;
+export async function createCheckoutSession(env, p) {
+  const orderId = String(p.orderId);
+  const amountCents = Math.max(0, Math.round(Number(p.amountCents) || 0));
+  const paid = () => ({ error: "paid", message: "A card payment for this order has just gone through — it can take a minute to show. Please don't pay again." });
+  const unknown = () => ({ error: "unknown", message: "Couldn't check the card payment already started for this order — please try again in a minute." });
+  const prior = await checkoutSessionState(env, orderId);
+  if (prior.state === "paid" && !p.afterPaid) return paid();
+  if (prior.state === "unknown") return unknown();
+  if (prior.state === "open") {
+    if (prior.url && prior.amountCents === amountCents && prior.successUrl === p.successUrl) return { url: prior.url, sessionId: prior.sessionId, reused: true };
+    const closed = await expireCheckoutSession(env, orderId);
+    if (closed === "paid" && !p.afterPaid) return paid();
+    if (closed === "unknown") return unknown();
+  }
+  const expiresAt = Math.floor(Date.now() / 1000) + Math.max(1800, Math.min(CHECKOUT_LINK_SECONDS, Number(p.expiresInSec) || 3600));
+  const params = {
+    "payment_method_types[]": "card",
+    "mode": "payment",
+    "line_items[0][price_data][currency]": "usd",
+    "line_items[0][price_data][unit_amount]": String(amountCents),
+    "line_items[0][price_data][product_data][name]": String(p.name || "Order " + orderId),
+    "line_items[0][quantity]": "1",
+    "success_url": p.successUrl,
+    "cancel_url": p.cancelUrl,
+    "expires_at": String(expiresAt),
+  };
+  if (p.description) params["line_items[0][price_data][product_data][description]"] = String(p.description);
+  const meta = { ...(p.metadata || {}), orderId, orgId: String(p.orgId || "") };
+  for (const [k, v] of Object.entries({ ...meta, ...(p.sessionMetadata || {}) })) if (v != null && v !== "") params["metadata[" + k + "]"] = String(v);
+  for (const [k, v] of Object.entries(meta)) if (v != null && v !== "") params["payment_intent_data[metadata][" + k + "]"] = String(v);
+  // Stripe refuses a blank or malformed customer_email ("Invalid email address"), so it's only sent when it is one.
+  if (p.customerEmail && String(p.customerEmail).includes("@")) params["customer_email"] = String(p.customerEmail);
+  let session;
+  try {
+    const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + env.STRIPE_SECRET_KEY, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(params).toString(),
+    });
+    session = await res.json();
+  } catch (e) {
+    console.error("Stripe session creation failed for", orderId, e);
+    return { error: "stripe", message: "Couldn't reach Stripe." };
+  }
+  if (!session || !session.url) {
+    // Stripe's own error message is written for the caller (it hides key material itself); the raw object isn't.
+    console.error("Stripe session creation failed:", session && session.error ? session.error.message : JSON.stringify(session));
+    return { error: "stripe", message: (session && session.error && session.error.message) || "Unknown Stripe error (see server logs)." };
+  }
+  // Remembered so the next card page reuses or closes this one. A failure here doesn't stop the payment: the
+  // webhook still flags a second payment for the owner (stripe-webhook.js).
+  try { if (session.id) await saveCheckoutSession(env.DB, orderId, session.id, amountCents, new Date(expiresAt * 1000).toISOString()); }
+  catch (e) { console.error("Could not remember the card page for", orderId, e); }
+  return { url: session.url, sessionId: session.id || "", reused: false };
 }
 
 export async function getOrderTotal(db, orderId) {
@@ -11610,6 +11686,25 @@ export async function getAccountantExport(db, dateFrom, dateTo) {
 // ---- Shipping labels (postage expense) -----------------------------------
 
 // Idempotent on the Shippo transaction id.
+// One label purchase at a time per order (review #52). The check for an existing label runs before Shippo is
+// paid, so two requests at the same moment (a double click, two tabs, two admins) could both pass it and both
+// buy postage. The purchase first takes this claim, a global_settings row `labelBuying:<orderId>` holding when
+// it was taken: the upsert only writes when there is no claim or the one there is over LABEL_CLAIM_MS old (a
+// purchase that crashed never released it), so exactly one request gets changes = 1. Released once the label is
+// recorded or the purchase fails.
+const LABEL_CLAIM_MS = 120 * 1000;
+export async function claimLabelPurchase(db, orderId, now = Date.now()) {
+  const r = await db.prepare(
+    `INSERT INTO global_settings (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE global_settings.value < ?`
+  ).bind("labelBuying:" + orderId, new Date(now).toISOString(), new Date(now - LABEL_CLAIM_MS).toISOString()).run();
+  return !!(r && r.meta && r.meta.changes > 0);
+}
+export async function releaseLabelPurchase(db, orderId) {
+  try { await db.prepare("DELETE FROM global_settings WHERE key = ?").bind("labelBuying:" + orderId).run(); }
+  catch (e) { console.error("Couldn't release the label claim for", orderId, e); }   // it goes stale on its own
+}
+
 export async function recordShippingLabel(db, { orderId, shippoTransactionId, carrier, service, amount, trackingNumber, labelUrl }) {
   await db.prepare(
     `INSERT OR IGNORE INTO shipping_labels (orderId, shippoTransactionId, carrier, service, amountCents, trackingNumber, labelUrl, purchasedAt, accountId)

@@ -56,6 +56,7 @@ global.__savedCardPages = [];
 global.checkoutSessionState = async () => global.__cardPage;
 global.expireCheckoutSession = async () => global.__expireResult;
 global.saveCheckoutSession = async (db, orderId, id, cents, exp) => { global.__savedCardPages.push({ orderId, id, cents, exp }); };
+require("./testlib/checkout-session").install();   // the real createCheckoutSession (db.js), over the stubs above
 const { orderTokenFor } = require("./testlib/order-token");
 let checkoutSrc = fs.readFileSync(__dirname + "/functions/api/checkout.js", "utf8")
   .replace(/import \{[\s\S]*?\} from ["'][^"']+["'];\n?/g, "")

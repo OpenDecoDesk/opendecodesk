@@ -2555,14 +2555,6 @@ function orderViewFilter_(orders){
   return orders.filter(o => (window._orderView.includeCompleted || !o.completedAt) &&
     (window._orderView.includeCancelled || !isCancelledOrder_(o)));
 }
-function toggleIncludeCompleted(orgId, on){
-  window._orderView.includeCompleted = !!on;
-  selectAdminOrg(orgId);
-}
-function toggleIncludeCancelled(orgId, on){
-  window._orderView.includeCancelled = !!on;
-  selectAdminOrg(orgId);
-}
 // Delivered, paid in full, not voided, something still active, not already completed. Downloads only (digital
 // products, migrations/0086): nothing is delivered, so paid in full is enough.
 function canCompleteOrder(o){
@@ -2659,16 +2651,19 @@ function clearBulkSelection(){
 // BULK_STAGE_MAX, BULK_ORDERS_MAX). The groups go one after another and the first that fails stops the rest.
 // Returns { replies: each group's answer, done: how many orders those groups held, error: why it stopped ("" =
 // it didn't), unreachable: the server couldn't be reached }.
-const BULK_STAGE_GROUP_ = 20, BULK_ORDERS_GROUP_ = 100;
-async function postOrdersInGroups_(payload, orderIds, size){
+// `field`: the request's list name (bulk cancel sends line numbers as `sheetRows`); `groups`: groups already made
+// (bulk cancel keeps each order's lines in one request, so its customer gets one email), else `size` at a time.
+const BULK_STAGE_GROUP_ = 20, BULK_ORDERS_GROUP_ = 100, BULK_CANCEL_GROUP_ = 20;
+async function postOrdersInGroups_(payload, orderIds, size, field = "orderIds", groups = null){
   const replies = [];
   let done = 0;
-  for(let i = 0; i < orderIds.length; i += size){
-    const ids = orderIds.slice(i, i + size);
+  const parts = groups || [];
+  if(!groups) for(let i = 0; i < orderIds.length; i += size) parts.push(orderIds.slice(i, i + size));
+  for(const ids of parts){
     let res, data;
     try{
       res = await fetch("/api/orders", { method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ ...payload, orderIds: ids, key: adminKey }) });
+        body: JSON.stringify({ ...payload, [field]: ids, key: adminKey }) });
       data = await res.json().catch(() => null);
     }catch(e){ return { replies, done, error: "Could not reach the server.", unreachable: true }; }
     if(!res.ok || !data || data.status === "error"){
@@ -2783,9 +2778,18 @@ async function bulkCancelLineItems(orgId){
   const orderIds = checked.map(c => c.dataset.order);
   const orders = (window._ordersCache && window._ordersCache[orgId]) || [];
   const sheetRows = [];
+  // Sent in groups of at most BULK_CANCEL_GROUP_ lines (the server's limit), each order's lines kept together.
+  const groups = [];
   orderIds.forEach(orderId => {
     const o = orders.find(o => o.orderId === orderId);
-    if(o) o.items.forEach(it => { if(!it.cancelDate && !o.blankOrderedAt) sheetRows.push(Number(it.sheetRow)); });
+    if(!o) return;
+    const lines = o.items.filter(it => !it.cancelDate && !o.blankOrderedAt).map(it => Number(it.sheetRow));
+    for(let i = 0; i < lines.length; i += BULK_CANCEL_GROUP_){
+      const part = lines.slice(i, i + BULK_CANCEL_GROUP_);
+      const last = groups[groups.length - 1];
+      if(last && last.length + part.length <= BULK_CANCEL_GROUP_) last.push(...part); else groups.push(part);
+    }
+    sheetRows.push(...lines);
   });
   if(!sheetRows.length){ showToast("No cancellable items in selection (blank already ordered or all already cancelled).", true); return; }
   const ans = await confirmModal_({ title: "Cancel " + sheetRows.length + " item" + (sheetRows.length === 1 ? "" : "s") + "?",
@@ -2796,29 +2800,22 @@ async function bulkCancelLineItems(orgId){
   const reason = ans.reason;
   if(!adminKey) adminKey = (await adminLogin()) || "";
   if(!adminKey) return;
-  try{
-    const res = await fetch("/api/orders", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({action:"bulkCancelLineItems", org:orgId, sheetRows, reason: reason||"", at: ans.at, key:adminKey})
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      adminSessionEnded_(data);
-      showToast("Bulk cancel failed: " + ((data && data.message) || "unknown error"), true);
-      return;
-    }
-    const results = data.results || [];
-    const cancelled = results.filter(r => r.status === "ok" && !r.alreadyCanceled).length;
-    const lateCancels = results.filter(r => r.lateCancel).length;
-    let msg = "Cancelled " + cancelled + " item(s).";
-    if(lateCancels) msg += " ⚠ " + lateCancels + " late cancel(s) — manual reconciliation needed.";
-    showToast(msg, lateCancels > 0);
-    const org = (adminOrgs || []).find(o => o.orgId === orgId);
-    if(org) refreshOrdersInPlace_(org);
-  }catch(e){
-    showToast("Could not reach the server.", true);
+  const r = await postOrdersInGroups_({action:"bulkCancelLineItems", org:orgId, reason: reason||"", at: ans.at}, sheetRows, BULK_CANCEL_GROUP_, "sheetRows", groups);
+  // Each line's result: { itemId, lateCancel, alreadyCancelled? } (the server's spelling). The count used to read
+  // `r.status` and a differently spelled flag, neither of which the server sends, so it always said "Cancelled 0".
+  const results = r.replies.flatMap(d => d.results || []);
+  const cancelled = results.filter(x => !x.alreadyCancelled).length;
+  const lateCancels = results.filter(x => x.lateCancel).length;
+  if(r.error && !r.done){
+    showToast(r.unreachable ? r.error : "Bulk cancel failed: " + r.error, true);
+    return;
   }
+  let msg = "Cancelled " + cancelled + " item" + (cancelled === 1 ? "" : "s") + ".";
+  if(lateCancels) msg += " ⚠ " + lateCancels + " late cancel(s) — manual reconciliation needed.";
+  if(r.error) msg += ` It stopped after ${r.done} of ${sheetRows.length} items (${r.error}) — the others were not cancelled. Select them and try again.`;
+  showToast(msg, lateCancels > 0 || !!r.error);
+  const org = (adminOrgs || []).find(o => o.orgId === orgId);
+  if(org) refreshOrdersInPlace_(org);
 }
 
 // Adds a tracking number to all selected orders in bulk.
@@ -4026,7 +4023,7 @@ async function bulkAddTracking(orgId){
       return;
     }
     let msg = "Tracking saved for " + (data.updated || 0) + " order" + ((data.updated || 0) === 1 ? "" : "s");
-    if(data.skipped) msg += ", " + data.skipped + " already had tracking";
+    if(data.skipped) msg += ", " + data.skipped + " not found (deleted?)";
     if(data.errors && data.errors.length) msg += ", " + data.errors.length + " error" + (data.errors.length === 1 ? "" : "s");
     showToast(msg + ".");
     const org = (adminOrgs || []).find(o => o.orgId === orgId);
@@ -4114,8 +4111,14 @@ async function cancelLineItem(orgId, sheetRow, itemName, lineTotal){
 // check, cash or other is added to the order's payments (a refund entry, as 💰 Payments → Record refund does),
 // so the balance, the books and the sales-tax report all see it. A card payment is refunded in the Stripe
 // Dashboard, and that refund reaches 💰 Payments by itself — so for card this only notes the refund on the line.
+const LINE_REFUND_METHODS_ = { venmo: "Venmo", zelle: "Zelle", check: "Check", cash: "Cash", other: "Other", card: "Card (refunded in Stripe)" };
+// The refund method a line's refund starts on: how the order was paid, else Other.
+function lineRefundMethodFor_(paymentMethod){
+  const pm = String(paymentMethod || "").toLowerCase();
+  return pm in LINE_REFUND_METHODS_ ? pm : "other";
+}
 async function setLineItemRefund(orgId, sheetRow, defaultAmount, paymentMethod){
-  const METHODS = { venmo: "Venmo", zelle: "Zelle", check: "Check", cash: "Cash", other: "Other", card: "Card (refunded in Stripe)" };
+  const METHODS = LINE_REFUND_METHODS_;
   const pm = String(paymentMethod || "").toLowerCase();
   const defaultMethod = pm in METHODS ? pm : "other";
   const fee = (Number(defaultAmount) * 0.029 + 0.30).toFixed(2);
@@ -6626,7 +6629,15 @@ function showEditCustomerModal(orders){
 // ---- Local sale (admin-recorded in-person / cash transaction) ---------------
 
 
+// One Local sale window per shop at a time (review #33): a double click on "+ Local sale" opened two, and each
+// could record the same sale.
+const _localSaleOpen = new Set();
 async function createLocalSale(orgId){
+  if (_localSaleOpen.has(orgId)) return;
+  _localSaleOpen.add(orgId);
+  try { await createLocalSaleOnce_(orgId); } finally { _localSaleOpen.delete(orgId); }
+}
+async function createLocalSaleOnce_(orgId){
   // Fetch all products (including hidden) and blanks
   let products, blanks;
   try{
@@ -6652,12 +6663,18 @@ async function createLocalSale(orgId){
   const result = await showLocalSaleModal(products, blanks);
   if(!result) return;
   const { sendInvoice: wantsInvoice, ...sale } = result;
+  // This sale's key: the server makes one order (and books one payment) per key, so the retry below, or a
+  // second tab, finds the first one's order instead of recording the sale again.
+  const requestId = newRequestId_();
+  const send = () => fetch("/api/orders", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({action:"createLocalSale", key:adminKey, org:orgId, requestId, ...sale})
+  });
 
   try{
-    const res = await fetch("/api/orders", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({action:"createLocalSale", key:adminKey, org:orgId, ...sale})
-    });
+    // A dropped connection is tried once more with the same key: the sale may have been recorded already.
+    let res;
+    try { res = await send(); } catch (_) { res = await send(); }
     const data = await res.json();
     if(!res.ok || data.status === "error"){
       adminSessionEnded_(res);
@@ -6672,7 +6689,7 @@ async function createLocalSale(orgId){
       invoiceNote = inv.ok ? (inv.emailSent ? " — invoice emailed to " + inv.sentTo : " — but the invoice email couldn't be sent (use Send invoice… on the order)")
         : " — but the invoice wasn't sent: " + inv.message;
     }
-    showToast("Local sale recorded — " + (data.orderId || "") + invoiceNote, /but the invoice/.test(invoiceNote));
+    showToast((data.repeated ? "Local sale already recorded — " : "Local sale recorded — ") + (data.orderId || "") + invoiceNote, /but the invoice/.test(invoiceNote));
     const org = (adminOrgs || []).find(o => o.orgId === orgId);
     if(org) refreshOrdersInPlace_(org);
   }catch(e){
@@ -26033,6 +26050,7 @@ function showEditOrderModal(order, products, ctx){
           })(),
           _removed: false,
           _refundAmount: Number(it.lineTotal).toFixed(2),
+          _refundMethod: lineRefundMethodFor_(order.paymentMethod),
           _refundReason: "",
         };
       });
@@ -26154,7 +26172,7 @@ function showEditOrderModal(order, products, ctx){
           </td>
           <td style="padding:6px 4px;vertical-align:top;">
             ${!row._removed && row.itemId && ((curProd && curProd.personalizationPrice != null) || row._hasCustom)
-              ? `<button type="button" data-rowidx="${idx}" data-action="files" style="font-size:11px;padding:2px 8px;border:1px solid var(--border,#ccc);border-radius:3px;cursor:pointer;background:var(--surface,#fff);">Files${row._fileCount ? ` (${row._fileCount})` : ""}</button>`
+              ? `<button type="button" data-rowidx="${idx}" data-edit-action="files" style="font-size:11px;padding:2px 8px;border:1px solid var(--border,#ccc);border-radius:3px;cursor:pointer;background:var(--surface,#fff);">Files${row._fileCount ? ` (${row._fileCount})` : ""}</button>`
               : `<span style="font-size:12px;color:var(--ink-soft);">—</span>`
             }
           </td>
@@ -26165,11 +26183,14 @@ function showEditOrderModal(order, products, ctx){
             ${row._removed
               ? `<div style="font-size:11px;">
                   <input type="text" placeholder="Reason" value="${escapeHtml(row._refundReason)}" data-rowidx="${idx}" data-field="_refundReason" style="font-size:11px;width:90px;padding:2px 4px;border:1px solid var(--border,#ccc);border-radius:3px;margin-bottom:3px;">
-                  ${mayRefund_ ? `<div>Refund: $<input type="number" min="0" step="0.01" value="${escapeHtml(row._refundAmount)}" data-rowidx="${idx}" data-field="_refundAmount" style="font-size:11px;width:60px;padding:2px 4px;border:1px solid var(--border,#ccc);border-radius:3px;"></div>` : ""}
-                  <button data-rowidx="${idx}" data-action="unremove" style="font-size:11px;margin-top:3px;padding:2px 6px;border:1px solid var(--border,#ccc);border-radius:3px;cursor:pointer;background:var(--surface,#fff);">Undo</button>
+                  ${mayRefund_ ? `<div>Refund: $<input type="number" min="0" step="0.01" value="${escapeHtml(row._refundAmount)}" data-rowidx="${idx}" data-field="_refundAmount" aria-label="Refund amount" style="font-size:11px;width:60px;padding:2px 4px;border:1px solid var(--border,#ccc);border-radius:3px;"></div>
+                  <div style="margin-top:3px;"><select data-rowidx="${idx}" data-field="_refundMethod" aria-label="Refunded by" title="How the money goes back. Not card: it's added to 💰 Payments. Card: refund it in Stripe; it reaches Payments by itself." style="font-size:11px;max-width:150px;padding:1px 2px;border:1px solid var(--border,#ccc);border-radius:3px;">
+                    ${Object.entries(LINE_REFUND_METHODS_).map(([k, v]) => `<option value="${k}" ${k === row._refundMethod ? "selected" : ""}>${escapeHtml(v)}</option>`).join("")}
+                  </select></div>` : ""}
+                  <button data-rowidx="${idx}" data-edit-action="unremove" style="font-size:11px;margin-top:3px;padding:2px 6px;border:1px solid var(--border,#ccc);border-radius:3px;cursor:pointer;background:var(--surface,#fff);">Undo</button>
                 </div>`
               : row.itemId != null && !mayRemove_ ? `<span style="font-size:12px;color:var(--ink-soft);">—</span>`
-              : `<button class="admin-btn-danger" data-rowidx="${idx}" data-action="remove" style="font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer;">Remove</button>`
+              : `<button class="admin-btn-danger" data-rowidx="${idx}" data-edit-action="remove" style="font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer;">Remove</button>`
             }
           </td>
         `;
@@ -26315,6 +26336,9 @@ function showEditOrderModal(order, products, ctx){
       } else if(field === "_refundAmount"){
         row._refundAmount = el.value;
         return;
+      } else if(field === "_refundMethod"){
+        row._refundMethod = el.value;
+        return;
       }
       updateSummary(overlay);
     });
@@ -26328,10 +26352,10 @@ function showEditOrderModal(order, products, ctx){
     });
 
     tbody.addEventListener("click", (e) => {
-      const btn = e.target.closest("[data-action]");
+      const btn = e.target.closest("[data-edit-action]");
       if(!btn) return;
       const idx = Number(btn.dataset.rowidx);
-      const action = btn.dataset.action;
+      const action = btn.dataset.editAction;
       const row = state.rows[idx];
       if(!row) return;
       if(action === "remove"){
@@ -26384,6 +26408,8 @@ function showEditOrderModal(order, products, ctx){
             itemId: row.itemId,
             reason: row._refundReason || "Admin edit",
             refundAmount: mayRefund_ ? parseFloat(row._refundAmount) || 0 : 0,
+            // How it was paid back: not card, the server adds it to 💰 Payments too (review #15).
+            refundMethod: mayRefund_ ? row._refundMethod || "" : "",
           });
         } else if(!row._removed && row.itemId != null){
           // Check if changed

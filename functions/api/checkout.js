@@ -44,7 +44,7 @@ import { classifyHost } from "../_lib/hostConfig.js";
 import { getCatalogData } from "../_lib/catalogCache.js";
 import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { jsonResponse, verifyOrderToken } from "../_lib/http.js";
-import { getOrderCheckoutState, getOrderInvoice, invoiceExpired, checkoutSessionState, expireCheckoutSession, saveCheckoutSession } from "../_lib/db.js";
+import { getOrderCheckoutState, getOrderInvoice, invoiceExpired, createCheckoutSession } from "../_lib/db.js";
 
 // How long a card page stays payable (Stripe's minimum is 30 minutes). Short, so a page opened before the
 // order changed doesn't linger for Stripe's default 24 hours.
@@ -164,96 +164,25 @@ export async function onRequestPost(context){
   // Stripe uses integer minor units (cents)
   const amountCents = Math.round(total * 100);
 
-  // The card page already made for this order (migrations/0093). Still open for this same amount and return
-  // page: hand it back rather than open a second one that could be paid as well. Open for a different amount
-  // (the order changed): close it first. Just paid (its webhook not in yet): refuse, so it isn't paid twice.
-  const prior = await checkoutSessionState(env, String(orderId));
-  const alreadyPaid = () => jsonResponse({status:"error", message:"A card payment for this order has just gone through — it can take a minute to show. Please don't pay again."}, 409);
-  const tryLater = () => jsonResponse({status:"error", message:"Couldn't check the card payment already started for this order — please try again in a minute."}, 502);
-  if(prior.state === "paid") return alreadyPaid();
-  if(prior.state === "unknown") return tryLater();
-  if(prior.state === "open"){
-    if(prior.url && prior.amountCents === amountCents && prior.successUrl === successUrl){
-      return jsonResponse({status:"ok", url: prior.url});
-    }
-    const closed = await expireCheckoutSession(env, String(orderId));
-    if(closed === "paid") return alreadyPaid();
-    if(closed !== "closed") return tryLater();
-  }
-  const expiresAt = Math.floor(Date.now() / 1000) + CHECKOUT_PAGE_SECONDS;
-
-  const params = {
-    "payment_method_types[]": "card",
-    "mode": "payment",
-    "line_items[0][price_data][currency]": "usd",
-    "line_items[0][price_data][unit_amount]": String(amountCents),
-    "line_items[0][price_data][product_data][name]": "Order — " + orderOrgId,
+  // The card page (db.js createCheckoutSession): the one still open for this same amount and return page is handed
+  // back rather than a second one opened that could be paid as well; one open for a different amount (the order
+  // changed) is closed first; one just paid (its webhook not in yet) refuses, so it isn't paid twice.
+  const page = await createCheckoutSession(env, {
+    orderId: String(orderId), orgId: orderOrgId, amountCents,
+    name: "Order — " + orderOrgId,
     // One line for the whole balance; when sales tax was added on top of the prices, say how much of it is tax.
-    "line_items[0][price_data][product_data][description]": "Order " + orderId + (orderName ? " for " + orderName : "")
+    description: "Order " + orderId + (orderName ? " for " + orderName : "")
       + (state.taxAdded > 0 ? " — includes $" + Number(state.taxAdded).toFixed(2) + " sales tax" : ""),
-    "line_items[0][quantity]": "1",
-    // Metadata is echoed back in the webhook so it can find the right
-    // order to update without a separate lookup.
-    "metadata[orderId]": orderId,
-    "metadata[orgId]": orderOrgId,
-    "metadata[customerName]": orderName,
-    "metadata[contact]": orderContact,
-    // Session metadata above only comes back on checkout.session.* events.
-    // Refunds and disputes reference the Charge/PaymentIntent instead, whose
-    // metadata Stripe does NOT populate from the session — so also stamp the
-    // order identifiers onto the PaymentIntent (Stripe copies PaymentIntent
-    // metadata onto the Charge it creates). Without this, charge.refunded /
-    // charge.dispute.* events arrive with empty metadata and the webhook
-    // can never map them back to an order row.
-    "payment_intent_data[metadata][orderId]": orderId,
-    "payment_intent_data[metadata][orgId]": orderOrgId,
-    "success_url": successUrl,
-    "cancel_url": cancelUrl,
-    "expires_at": String(expiresAt)
-  };
-  // Only include customer_email when there's an actual valid one — Stripe
-  // rejects an explicitly-blank value with "Invalid email address" (it
-  // treats an empty string as "supplied but invalid," not "omitted").
-  // The admin's test-transaction flow has a blank contact, and an older
-  // order may carry a phone number instead of an email.
-  if(orderContact && orderContact.includes("@")){
-    params["customer_email"] = orderContact;
-  }
-
-  const stripeRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
-    method: "POST",
-    headers: {
-      "Authorization": "Bearer " + env.STRIPE_SECRET_KEY,
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: new URLSearchParams(params).toString()
+    // Echoed back in the webhook so it finds the order without a separate lookup.
+    sessionMetadata: { customerName: orderName, contact: orderContact },
+    // The admin's test-transaction flow has a blank contact, and an older order may carry a phone number.
+    customerEmail: orderContact,
+    successUrl, cancelUrl, expiresInSec: CHECKOUT_PAGE_SECONDS,
   });
-
-  const session = await stripeRes.json();
-  if(!session.url){
-    // Stripe's error responses look like {error: {message, type, code}} —
-    // surface that real message instead of a generic "something went wrong,"
-    // so a bad/expired key, wrong mode, or account issue is visible without
-    // digging through the Worker's logs. Stripe designs .error.message to be
-    // developer/API-caller-facing (it even redacts key material itself, as
-    // in "Invalid API Key provided: sk_live_***"), so it's safe to return
-    // as-is — to a real customer's browser AND to the admin's own "Create
-    // test transaction" diagnostic. The ONLY thing that's NOT safe to echo
-    // back is the raw session object when Stripe's response has no
-    // .error.message at all — that's an unbounded internal object dump, not
-    // a crafted user-facing string. Full detail (including the raw session)
-    // always still reaches the Worker's log.
-    const stripeErrorDetail = (session.error && session.error.message) ? session.error.message : "Unknown Stripe error (see server logs).";
-    console.error("Stripe session creation failed:", session.error ? session.error.message : JSON.stringify(session));
-    return jsonResponse({status:"error", message:"Could not create payment session: " + stripeErrorDetail}, 500);
-  }
-
-  // Remembered so the next "Pay by card" reuses or closes this page. A failure here doesn't stop the payment:
-  // the webhook still flags a second payment for the owner (stripe-webhook.js).
-  try{ if(session.id) await saveCheckoutSession(env.DB, String(orderId), session.id, amountCents, new Date(expiresAt * 1000).toISOString()); }
-  catch(err){ console.error("Could not remember the card page for", orderId, err); }
-
-  return jsonResponse({status:"ok", url: session.url});
+  if(page.error === "paid") return jsonResponse({status:"error", message: page.message}, 409);
+  if(page.error === "unknown") return jsonResponse({status:"error", message: page.message}, 502);
+  if(page.error) return jsonResponse({status:"error", message:"Could not create payment session: " + page.message}, 500);
+  return jsonResponse({status:"ok", url: page.url});
 }
 
 export async function onRequestGet(){

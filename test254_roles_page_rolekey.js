@@ -94,7 +94,8 @@ const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) a
 
   sent.length = 0; toasts.length = 0;
   btn("Delete role").click();
-  await wait(() => toasts.some(t => /Role deleted/.test(t.m)));
+  // "Role deleted." shows before the page reloads the roles (roleDelete_), so wait for the redraw as well.
+  await wait(() => toasts.some(t => /Role deleted/.test(t.m)) && ![...d.querySelectorAll(".role-chip")].some(c => /Weekend crew/.test(c.textContent)));
   const del = sent.find(b => b.action === "deleteRole");
   ok("Delete role (confirmed): key \"cookie\", and the role as roleKey", !!del && del.key === "cookie" && del.roleKey === added);
   ok("…the role is gone and the page no longer lists it", custom().length === 0 && !toasts.some(t => t.err) &&

@@ -270,13 +270,9 @@ test.describe("no role beyond your own", () => {
     }
   });
 
-  // APP BUG: the Roles tab shows "Delete role" on a custom role to anyone who may edit roles, but deleteRole needs
-  // Users and roles at Full (functions/api/admin-users.js), so a user manager with Edit gets a button the server
-  // always refuses ("Your role can't do this. Ask an admin."). Every other Full-only button carries
-  // data-need="…:full" and is hidden; renderRolesTab_ in public/admin.js doesn't check the level. Remove test.fail
-  // when the button is hidden from a role without Full.
+  // deleteRole needs Users and roles at Full (functions/api/admin-users.js), so the Roles tab offers "Delete role" only
+  // to Full (fixed 2026-11-23: renderRolesTab_ used to show it to anyone who could edit roles, and the server refused it).
   test("Delete role is not offered to a user manager without Full on Users and roles", async ({ api, as }) => {
-    test.fail(true, "app bug: renderRolesTab_ shows Delete role without checking settings.users:full");
     const { desk, junior, D } = await makeDesk(api);
     try {
       const page = await deskPage(as, D);

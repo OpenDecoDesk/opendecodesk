@@ -115,7 +115,7 @@ const ok = (m, c) => console.log(m + ":", !!c);
     r.status === 200 && sizeOf(r.body).quantity === 10 && !("purchasePrice" in sizeOf(r.body)) && !("vendorPrice" in sizeOf(r.body)) &&
     (r.body.blanks.find(b => b.id === 7).colors[0].sizes[0].purchasePrice === undefined));
   r = await A.orders({ action: "getBlanks" }, staff);
-  ok("the Blanks screen (Blanks Read) keeps them: receiving and pricing work there", sizeOf(r.body).purchasePrice === 5 && sizeOf(r.body).vendorPrice === 4.5);
+  ok("the Blanks screen (Back office: Blanks Edit) keeps them: receiving and pricing work there", sizeOf(r.body).purchasePrice === 5 && sizeOf(r.body).vendorPrice === 4.5);
 
   console.log("=== Blanks: stock and cost from the blank form, merging ===");
   const blankSave = (qty, extra) => ({ action: "updateBlank", id: 7, name: "Sample Blank", ...(extra || {}),

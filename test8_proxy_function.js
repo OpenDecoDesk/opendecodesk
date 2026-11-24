@@ -68,8 +68,9 @@ global.getOrdersByOrg = async () => [];
 global.getOrderById = async () => ({ orderId:"X1", orgId:"league-101", contact:"c@x.com", paid:0, items:[] });
 global.insertOrder = async () => {};
 global.setOrderPaid = async () => {};
-// markPaidManual settles the balance in the payments ledger.
+// markPaidManual settles the balance in the payments ledger (settleOrderBalanceOnce: also whether this call paid it).
 global.settleOrderBalance = async () => 0;
+global.settleOrderBalanceOnce = async () => ({ recorded: 0, tookRow: false });
 global.getOrderItemById = async () => null;
 global.setOrderEmailTimestamp = async () => {};
 global.setFulfillmentStage = async () => {};
@@ -220,31 +221,25 @@ function makeContext(bodyObj, env, url){
   console.log("\n=== markPaidManual with WRONG proxy passphrase: rejected, D1 not written ===");
   {
     let dbWritten = false;
-    global.settleOrderBalance = async () => { dbWritten = true; return 0; };
+    global.settleOrderBalanceOnce = async () => { dbWritten = true; return { recorded: 0, tookRow: false }; };
     const res = await onRequestPost(makeContext({action:"markPaidManual", org:"league-101", orderId:"ORD-T1", key:"wrong-guess"}, BASE_ENV, "https://admin.example.com/api/orders"));
     const data = JSON.parse(await res.text());
     console.log("Rejected:", data.status === "error" && data.message === "Unauthorized");
     console.log("D1 was never written:", !dbWritten);
-    global.settleOrderBalance = async () => 0;
-// markPaidManual settles the balance in the payments ledger.
-global.settleOrderBalance = async () => 0;
-global.getOrderItemById = async () => null;
+    global.settleOrderBalanceOnce = async () => ({ recorded: 0, tookRow: false });
   }
 
   console.log("\n=== markPaidManual with CORRECT proxy passphrase: settles the balance in the ledger and returns ok ===");
   {
     let paidOrderId = null, paidNote = null;
-    global.settleOrderBalance = async (db, orderId, note) => { paidOrderId = orderId; paidNote = note; return 25; };
+    global.settleOrderBalanceOnce = async (db, orderId, note) => { paidOrderId = orderId; paidNote = note; return { recorded: 25, tookRow: true }; };
     global.getOrderById = async () => ({ orderId:"ORD-T1", orgId:"league-101", contact:"c@x.com", paid:0, items:[] });
     const res = await onRequestPost(makeContext({action:"markPaidManual", org:"league-101", orderId:"ORD-T1", key:"proxy-passphrase"}, BASE_ENV, "https://admin.example.com/api/orders"));
     const data = JSON.parse(await res.text());
     console.log("Returns ok:", data.status === "ok");
-    console.log("settleOrderBalance called with the correct orderId:", paidOrderId === "ORD-T1");
+    console.log("settleOrderBalanceOnce called with the correct orderId:", paidOrderId === "ORD-T1");
     console.log("Ledger note says it was marked paid manually:", /Marked paid manually/.test(paidNote || ""));
-    global.settleOrderBalance = async () => 0;
-// markPaidManual settles the balance in the payments ledger.
-global.settleOrderBalance = async () => 0;
-global.getOrderItemById = async () => null;
+    global.settleOrderBalanceOnce = async () => ({ recorded: 0, tookRow: false });
     global.getOrderById = async () => ({ orderId:"X1", orgId:"league-101", contact:"c@x.com", paid:0, items:[] });
   }
 

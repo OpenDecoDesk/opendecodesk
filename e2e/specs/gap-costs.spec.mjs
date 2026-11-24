@@ -312,17 +312,26 @@ test("a role without costs.view gets products, stock, transfers, orders, Home an
     // An entry that isn't money keeps its detail: the transfer this file made.
     const [, tx] = await both("getAuditLog", { filter: "transfer.created", limit: 200 });
     expect(tx.entries.some(e => e.detail && e.detail.name === D.transferName)).toBe(true);
+    // What stock cost keeps its row, not its detail (2026-11-24): the transfer sheet received and the pieces made for stock.
+    const [orc, trc] = await both("getAuditLog", { filter: "transfer.received", limit: 200 });
+    const rec = orc.entries.find(e => e.detail && (e.detail.rows || []).some(r => Number(r.transferId) === D.transferId));
+    expect(rec.detail.total).toBe(25);
+    expect(trc.entries.find(e => e.id === rec.id)).toMatchObject({ action: "transfer.received", detail: null });
+    const [omk, tmk] = await both("getAuditLog", { filter: "inventory.made_for_stock", limit: 200 });
+    const made = omk.entries.find(e => e.detail && e.detail.productId === D.product.productId);
+    expect(typeof made.detail.unitCost).toBe("number");
+    expect(tmk.entries.find(e => e.id === made.id)).toMatchObject({ action: "inventory.made_for_stock", detail: null });
   } finally {
     await owner.dispose();
     await theirs.dispose();
   }
 });
 
-// Review #22's rule is "a role that can only LOOK at a screen gets it without costs". The Blanks list (getBlanks,
-// orders.js blankCostsFor_) keeps the purchase and vendor price for any role with Blanks at Read, so this role,
-// which may only look at Blanks and has no costs.view, still gets every blank's cost there and the Blanks page
-// shows it — while the same stock's costs are left out of getInventory and finished stock.
-test.fail("a role that only looks at Blanks gets them without costs (getBlanks keeps purchasePrice / vendorPrice for Blanks at Read)", async ({ browser }, testInfo) => {
+// Review #22's rule is "a role that can only LOOK at a screen gets it without costs", and the owner's decision
+// (2026-11-23) is that Read on Blanks is stock and details only. The Blanks list (getBlanks, orders.js blankCostsFor_)
+// used to keep the purchase and vendor price for any role with Blanks at Read; now only costs.view or Edit on Blanks
+// gets them, and the Blanks page shows this role no money at all.
+test("a role that only looks at Blanks gets them without costs, and the Blanks page shows it no money", async ({ browser }, testInfo) => {
   const theirs = await client(D.user.state, testInfo.workerIndex);
   const opened = [];
   try {
@@ -333,6 +342,10 @@ test.fail("a role that only looks at Blanks gets them without costs (getBlanks k
     await openAdmin(page, "inventory");
     await page.getByRole("searchbox", { name: /Search name, vendor/ }).fill(D.blankName);
     await expect(page.getByRole("row", { name: new RegExp(D.blankName) })).not.toContainText("$");
+    // Read only: none of the toolbar's controls that lead to a change (2026-11-24: Import, Connected vendor and More too).
+    for (const name of ["+ New blank", "Receive order", "Count stock…", "Import", "Connected vendor", "More"])
+      await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "History", exact: true }).first()).toBeVisible();
   } finally {
     await theirs.dispose();
     await closeBrowsers(opened);

@@ -28,10 +28,8 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   "const sendOrderReceivedEmail = async () => false, sendPaymentConfirmedEmail = async () => false, sendCancellationEmail = async () => false, sendDesignVerificationEmail = async () => false, sendShippingPaymentEmail = async () => false, sendShippedEmail = async () => false, sendInvoiceEmail = async () => false;\n" +
   "const ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({ configured: false });\n" +
   dbSrc + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")();
-let pass = 0, fail = 0, known = 0;
+let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
-// A check that shows a bug not fixed yet: reported, but it doesn't fail the run.
-const knownBug = (d, c, note) => { if (c) { console.log(d + ": true"); pass++; } else { known++; console.log("KNOWN BUG — " + d + " (" + note + ")"); } };
 const pause = (ms) => new Promise(r => setTimeout(r, ms));
 const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) await pause(10); return cond(); };
 
@@ -167,8 +165,7 @@ const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) a
   const synced = lastToast().m;
   ok("…fees recorded, dates corrected, the unmatched ones named, and more to do — all in one message", synced.startsWith("Stripe sync: recorded fees on 2 payments ($2.38), corrected the date on 1 payment. Couldn't match in Stripe: pi_unmatched1") &&
     / More payments to check \(3\) — press Sync Stripe fees & dates again to carry on\.$/.test(synced) && !lastToast().err && !btn.disabled && btn.textContent === "Sync Stripe fees & dates");
-  knownBug("…with a full stop between the unmatched payments and \"More payments to check\"", /pi_unmatched1\. More payments/.test(synced),
-    "reads \"…Couldn't match in Stripe: pi_unmatched1 More payments to check…\" — public/admin.js:10057 adds no full stop after the unmatched list when more follows");
+  ok("…with a full stop between the unmatched payments and \"More payments to check\"", /pi_unmatched1\. More payments/.test(synced));
   scripted = { action: "backfillStripeFees", answers: [{ body: { status: "ok", updated: 0, results: [], notFound: ["pi_x"] } }, { body: { status: "ok", more: true } }, { body: { status: "ok" } }] };
   await w.backfillStripeFees(btn);
   ok("only unmatched payments: said as a problem", lastToast().m === "Couldn't match in Stripe: pi_x" && lastToast().err);
@@ -305,6 +302,6 @@ const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) a
   await wait(() => downloads.length === 2 && /^Downloaded/.test(d.getElementById("expStatus").textContent));
   ok("Sales lines: a row per order line in the dates (5)", d.getElementById("expStatus").textContent === "Downloaded 5 rows.");
 
-  console.log(`\n${fail ? "FAIL" : "PASS"} — ${pass} passed, ${fail} failed${known ? ", " + known + " known bug(s) reported" : ""}`);
+  console.log(`\n${fail ? "FAIL" : "PASS"} — ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); console.log("test256 crashed: false"); process.exit(1); });

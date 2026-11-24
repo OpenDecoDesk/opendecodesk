@@ -10054,7 +10054,7 @@ async function backfillStripeFees(btn){
     if(d.redated) parts.push(`corrected the date on ${d.redated} payment${d.redated === 1 ? "" : "s"}`);
     // Each click does a limited number of Stripe lookups; the next one carries on.
     const more = d.more ? ` More payments to check${d.datesToCheck ? ` (${d.datesToCheck})` : ""} — press Sync Stripe fees & dates again to carry on.` : "";
-    if(parts.length) showToast("Stripe sync: " + parts.join(", ") + (nf ? ". " + nf : ".") + more, false);
+    if(parts.length) showToast("Stripe sync: " + parts.join(", ") + (nf ? ". " + nf + (more ? "." : "") : ".") + more, false);
     else if(nf) showToast(nf + (more ? "." + more : ""), true);
     else if(more) showToast("Stripe sync: nothing to change so far." + more, false);
     else showToast("Everything already matches Stripe.", false);

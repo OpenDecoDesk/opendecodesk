@@ -84,7 +84,7 @@ import {
   listActiveRuns, startProductionRun, startHooping, markHoopingDone, completeProductionRun, getRunStats, RUN_ISSUE_KINDS, abortProductionRun, getRunReportByDesign,
   getBlankLinks, setBlankLink, deleteBlankLink,
   getOrdersByOrg, getOpenOrders, getOpenOrderStages, getOrdersByIds, HOME_STAGES, getOrderById, insertOrder,
-  settleOrderBalance, getOrderItemById, setOrderEmailTimestamp, setRefundShipping,
+  settleOrderBalance, settleOrderBalanceOnce, getOrderItemById, setOrderEmailTimestamp, setRefundShipping,
   setFulfillmentStage, setTrackingNumbers,
   cancelLineItemWithReason, setLineItemRefund,
   updateOrderItem, addOrderItem, recalcOrderTotals,
@@ -427,12 +427,30 @@ const COST_FIELDS_ = {
   products: (k) => /^(transferCost|suppliesCost)(Cents)?$/.test(k),
   stock: (k) => /^(cost|avgCost|value|unitCost)(Cents)?$/.test(k),
   purchases: (k) => /^purchasePrice/.test(k) || /^(unitCost|cost)(Cents)?$/.test(k),
+  // Blanks (owner's decision, 2026-11-23): a role that may only read Blanks sees their stock and details, never their
+  // money — no average cost, vendor price (or when it was entered), MAP, movement cost, or anything worked out from them.
+  blanks: (k) => /^(purchasePrice|vendorPrice|vendorPriceAt|mapPrice)(Cents)?$/.test(k),   // a blank's sizes
+  blankPrices: (k) => /^(price|previous)(Cents)?$/.test(k),                                // a blank's vendor-price history
+  catchUp: (k) => /^(unitCost|cost|oldCost|total|replacedEstimate)(Cents)?$/.test(k),     // Use blanks for past orders
+  vendorPlan: (k) => /^(price|current|map|mapCurrent)$/.test(k),                         // a vendor file's plan, per size
+  vendorProducts: (k) => /^(prices|maps)$/.test(k),                                      // products fetched from a vendor
+  colorGroups: (k) => /^(costs|sizePricing|flatPrice)$/.test(k),                         // color groups priced on blank cost
+  blankOrder: (k) => /^(price|vendorPrice|vendorPriceAt|purchasePrice|cost)(Cents)?$/.test(k),   // Blanks to Order, free shipping
 };
 // A copy of `v` without the fields `drop` names, at any depth.
 const dropFields_ = (v, drop) => Array.isArray(v) ? v.map(x => dropFields_(x, drop))
   : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).filter(([k]) => !drop(k)).map(([k, x]) => [k, dropFields_(x, drop)])) : v;
-// Audit entries whose detail is money: pricing settings, the shop rate, payments, expenses (and recurring ones).
-const MONEY_AUDIT_ACTIONS_ = /^(settings\.pricing|settings\.shop_rate|payment\.|expense\.|recurring_expense\.)/;
+// Audit entries whose detail is money: pricing settings, the shop rate, payments, expenses (and recurring ones) — and
+// (2026-11-24) what stock cost: blank and transfer receipts, their unit costs and totals, vendor prices, average costs,
+// catch-up costs, stock made at a cost, a receipt's account, supplier orders' totals, statement entries and
+// reconciliations, deposit mapping and Stripe fees, and the blank costs behind a product's confirmed prices. Their
+// rows stay; their detail goes to a role without costs.view (auditCostsFor_). Counts, write-offs, links and names stay.
+const MONEY_AUDIT_ACTIONS_ = new RegExp("^(settings\\.pricing|settings\\.shop_rate|payment\\.|expense\\.|recurring_expense\\.|" +
+  "inventory\\.(received|order_received|receipt_account_changed|vendor_prices_changed|average_cost_recomputed|catch_up|movement_voided|movement_restored|made_for_stock)$|" +
+  "transfer\\.(received|sheet_edited|catch_up|movement_voided|movement_restored|receipt_account_changed)$|" +
+  "supplier_order\\.(placed|failed)$|statement\\.(created_entry|reconciled)$|payments\\.(deposit_mapped|stripe_fees_backfilled)$|product\\.prices_confirmed$)");
+// A product's own costs in a product.created / product.updated entry's changes (the rest of the change stays).
+const PRODUCT_COST_AUDIT_FIELDS_ = ["transferCost", "suppliesCost"];
 
 // ---- Features (Global settings → Features; db.js FEATURES) ---------------------------------------
 // Which optional feature an admin action belongs to. An action listed here is refused (403) while
@@ -642,12 +660,10 @@ async function handleOrdersPost_(context) {
     if (Array.isArray(o.payments)) rest.payments = o.payments.map(({ fee, ...p }) => p);
     return rest;
   });
-  // Blanks for a screen that only shows them (Run Order, the blanks step): without Blanks or costs.view, no
-  // average cost or vendor price. Blanks itself shows and edits them (receiving, counting), so it keeps them.
-  const blankCostsFor_ = (blanks) => seesPricing_() || can_("inventory.blanks", "read") ? blanks : blanks.map(b => {
-    const cut = ({ purchasePrice, vendorPrice, vendorPriceAt, ...s }) => s;
-    return { ...b, sizes: (b.sizes || []).map(cut), colors: (b.colors || []).map(c => ({ ...c, sizes: (c.sizes || []).map(cut) })) };
-  });
+  // Blanks for any screen (the Blanks list, Run Order, the blanks step): without costs.view or Edit on Blanks, no average
+  // cost, vendor price or MAP — Read on Blanks is stock and details only (owner's decision, 2026-11-23), the same rule as
+  // stripCosts_ below. Whoever receives, counts or prices blanks (Edit) still sees them.
+  const blankCostsFor_ = (blanks) => stripCosts_(blanks, "inventory.blanks", "blanks");
   // What things cost, on the screens that show it (review #22): a role without costs.view that can only LOOK at a
   // screen gets its answer without the costs. Whoever adds or changes things there (receiving, counting, pricing a
   // product) still sees them, as does a role with costs.view. `fn` is the screen's function, `kind` which fields
@@ -655,7 +671,17 @@ async function handleOrdersPost_(context) {
   const stripCosts_ = (data, fn, kind) => seesPricing_() || can_(fn, "edit") ? data : dropFields_(data, COST_FIELDS_[kind]);
   // The audit log's money entries (pricing settings, shop rate, payments, expenses) keep their row without costs.view,
   // not their detail: the amounts are in it.
-  const auditCostsFor_ = (entries) => seesPricing_() ? entries : entries.map(e => e && MONEY_AUDIT_ACTIONS_.test(String(e.action || "")) ? { ...e, detail: null } : e);
+  const auditCostsFor_ = (entries) => seesPricing_() ? entries : entries.map(e => {
+    if (!e) return e;
+    const action = String(e.action || "");
+    if (MONEY_AUDIT_ACTIONS_.test(action)) return { ...e, detail: null };
+    if (/^product\.(created|updated)$/.test(action) && e.detail && e.detail.changes && typeof e.detail.changes === "object") {
+      const changes = { ...e.detail.changes };
+      for (const f of PRODUCT_COST_AUDIT_FIELDS_) delete changes[f];
+      return { ...e, detail: { ...e.detail, changes } };
+    }
+    return e;
+  });
   // Versioned list cache (db.js readCachedList_): { version, data } for blanks, threads, hoops, locations,
   // machines or orgs. data is shared between requests: shape it into new objects, never change it.
   const cachedList_ = async (name) => {
@@ -2058,14 +2084,15 @@ async function handleOrdersPost_(context) {
     if (when) { const bad = stageTimeError(before, "paid", when.at); if (bad) return jsonResponse({ status: "error", message: bad + "." }, 409); }
     // Books the balance only while nobody else has (settleOrderBalance): a repeat — a double click, a retry,
     // another admin, a card payment landing first — records nothing and sends no second email.
-    const recorded = await settleOrderBalance(env.DB, body.orderId,
+    // Whether it's newly paid comes from that guarded write's own result (tookRow), never from comparing a read made
+    // before it: of several requests at once, only the one whose write took the row emails, audits and delivers.
+    const { recorded, tookRow } = await settleOrderBalanceOnce(env.DB, body.orderId,
       "Marked paid manually" + (before.paymentMethod ? " (" + before.paymentMethod + ")" : ""), when ? when.at : null,
       requestKeyOf(body, "markPaid"));
 
     const order = await getOrderById(env.DB, body.orderId);
     const paidAt = (order && order.paidAt) || new Date().toISOString();
-    const newlyPaid = recorded > 0 || (!before.paid && !!(order && order.paid));
-    if (!newlyPaid) return jsonResponse({ status: "ok", alreadyPaid: !!(order && order.paid), amountRecorded: 0 });
+    if (!tookRow) return jsonResponse({ status: "ok", alreadyPaid: !!(order && order.paid), amountRecorded: 0 });
     if (order && order.contact) {
       const sent = await sendPaymentConfirmedEmail(env, order, paidAt);
       if (sent) await setOrderEmailTimestamp(env.DB, body.orderId, "confirmedEmailAt", new Date().toISOString());
@@ -3765,7 +3792,8 @@ async function handleOrdersPost_(context) {
     if (body.action === "suggestColorGroups") {
       if (!body.org || !body.productId) return jsonResponse({ status: "error", message: "Missing org or productId" }, 400);
       const r = await suggestColorGroups(env.DB, body.org, String(body.productId));
-      return r ? jsonResponse({ status: "ok", ...r }) : jsonResponse({ status: "error", message: "Product not found" }, 404);
+      // Worked out from the blanks' costs: without costs.view or Edit on Blanks, the groups without what they cost.
+      return r ? jsonResponse({ status: "ok", ...stripCosts_(r, "inventory.blanks", "colorGroups") }) : jsonResponse({ status: "error", message: "Product not found" }, 404);
     }
 
     // "Prices still OK": the product's prices are right for its blanks' current vendor prices.
@@ -4449,7 +4477,8 @@ async function handleOrdersPost_(context) {
         sup.vendorId = v ? v.id : null;
       }
       const vendors = shipping.filter(v => v.forBlanks && !v.hidden).map(v => ({ id: v.id, vendor: v.name, freeShipping: v.freeShipping }));
-      return jsonResponse({ status: "ok", ...report, vendors, restockOrders });
+      // Its prices and costs: costs.view, or Edit on Blanks to Order (recording a restock order works from them).
+      return jsonResponse(stripCosts_({ status: "ok", ...report, vendors, restockOrders }, "inventory.blankorder", "blankOrder"));
     }
     // "Get me to free shipping" (2026-10): the vendor's blanks and their use, its threshold, and whether it can be
     // ordered through a connection. Works for any vendor name on a blank, connected or not.
@@ -4457,7 +4486,7 @@ async function handleOrdersPost_(context) {
       const vendor = String(body.vendor || "").trim();
       if (!vendor) return jsonResponse({ status: "error", message: "Pick a vendor." }, 400);
       const [candidates, shipping] = await Promise.all([getFreeShippingCandidates(env.DB, vendor), getVendorShipping(env.DB)]);
-      return jsonResponse({ status: "ok", vendor, freeShipping: vendorShippingFor(shipping, vendor), candidates });
+      return jsonResponse({ status: "ok", vendor, freeShipping: vendorShippingFor(shipping, vendor), candidates: stripCosts_(candidates, "inventory.blankorder", "blankOrder") });
     }
     // ---- The vendor list (migrations/0084) — Manage… beside every vendor picker ----
     if (body.action === "listVendors") {
@@ -4610,7 +4639,7 @@ async function handleOrdersPost_(context) {
       const products = Array.isArray(body.products) ? body.products.slice(0, 51) : [];
       if (!products.length || products.length > 50) return jsonResponse({ status: "error", message: "Send 1–50 styles at a time" }, 400);
       const aliases = body.aliases && typeof body.aliases === "object" ? body.aliases : {};
-      if (body.action === "previewVendorBlanks") return jsonResponse({ status: "ok", plans: await planVendorBlanks(env.DB, products, { blankIds: body.blankIds || {}, aliases }) });
+      if (body.action === "previewVendorBlanks") return jsonResponse({ status: "ok", plans: stripCosts_(await planVendorBlanks(env.DB, products, { blankIds: body.blankIds || {}, aliases }), "inventory.blanks", "vendorPlan") });
       const selections = Array.isArray(body.selections) ? body.selections.slice(0, 50) : [];
       // Image addresses land in an <img src> — the same allowlist as every catalog image.
       for (const sel of selections) for (const im of (Array.isArray(sel && sel.images) ? sel.images : [])) {
@@ -4747,7 +4776,7 @@ async function handleOrdersPost_(context) {
         catch (e) { errors.push({ style: x.style, message: e.message || "Failed" }); }
       }
       await setVendorConnectionStatus(env.DB, row.id, { ok: products.length > 0 || !errors.length, error: errors.length && !products.length ? errors[0].message : "", refreshed: products.length > 0 });
-      return jsonResponse({ status: "ok", products, errors });
+      return jsonResponse({ status: "ok", products: stripCosts_(products, "inventory.blanks", "vendorProducts"), errors });
     }
 
     // ---- Publish per shop (migrations/0076): what's unpublished, and a signed link to preview a shop's draft ----
@@ -5037,7 +5066,7 @@ async function handleOrdersPost_(context) {
     }
 
     if (body.action === "getBlankVendorPriceHistory") {
-      return jsonResponse({ status: "ok", history: await getBlankVendorPriceHistory(env.DB, Number(body.blankId)) });
+      return jsonResponse({ status: "ok", history: stripCosts_(await getBlankVendorPriceHistory(env.DB, Number(body.blankId)), "inventory.blanks", "blankPrices") });
     }
 
     // The average cost of what's on hand is worked out from the stock history, never typed. This rebuilds
@@ -6046,7 +6075,7 @@ async function handleOrdersPost_(context) {
       return withList_({ status: "ok", corrected: done, failed }, "blanks", "blanks", blankCostsFor_);
     }
     if (body.action === "getBlankMovements") {
-      return jsonResponse({ status: "ok", movements: await getBlankMovements(env.DB, Number(body.blankId)) });
+      return jsonResponse({ status: "ok", movements: stripCosts_(await getBlankMovements(env.DB, Number(body.blankId)), "inventory.blanks", "stock") });
     }
     if (body.action === "voidInventoryMovement") {
       const locked = await periodGuard(body); if (locked) return locked;
@@ -6087,9 +6116,9 @@ async function handleOrdersPost_(context) {
       const plan = await planBlankCatchUp(env.DB);
       const closed = new Set();
       for (const l of plan.lines) { const m = String(l.useDate).slice(0, 7); if (!closed.has(m) && await isMonthClosed(env.DB, m)) closed.add(m); }
-      return jsonResponse({ status: "ok", lines: plan.lines.map(l => ({ ...l, unitCost: l.unitCostCents / 100, cost: l.costCents / 100, oldCost: l.oldCostCents == null ? null : l.oldCostCents / 100,
+      return jsonResponse(stripCosts_({ status: "ok", lines: plan.lines.map(l => ({ ...l, unitCost: l.unitCostCents / 100, cost: l.costCents / 100, oldCost: l.oldCostCents == null ? null : l.oldCostCents / 100,
         locked: closed.has(String(l.useDate).slice(0, 7)) })),
-        totalUnits: plan.totalUnits, total: plan.totalCents / 100, replacedEstimate: plan.replacedEstimateCents / 100, shortLines: plan.shortLines });
+        totalUnits: plan.totalUnits, total: plan.totalCents / 100, replacedEstimate: plan.replacedEstimateCents / 100, shortLines: plan.shortLines }, "inventory.blanks", "catchUp"));
     }
     if (body.action === "applyBlankCatchUp") {
       const ids = Array.isArray(body.itemIds) ? body.itemIds.map(Number).filter(n => Number.isInteger(n) && n > 0).slice(0, 1000) : [];

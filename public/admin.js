@@ -294,6 +294,9 @@ const ADMIN_LEVEL_RANK_ = { none: 0, read: 1, edit: 2, full: 3 };
 function adminLevel_(fn){ if (!adminPerms) return "full"; const l = Object.prototype.hasOwnProperty.call(adminPerms, fn) ? adminPerms[fn] : "none"; return ADMIN_LEVEL_RANK_[l] != null ? l : "none"; }
 // adminCan_(fn, level): may the signed-in user use this function at least at this level (default read)?
 function adminCan_(fn, level){ return ADMIN_LEVEL_RANK_[adminLevel_(fn)] >= (ADMIN_LEVEL_RANK_[level || "read"] || 1); }
+// Whether this user is sent what blanks cost (orders.js blankCostsFor_ / stripCosts_): costs.view, or Edit on Blanks. Read on
+// Blanks alone is stock and details only, so the Blanks screens leave the money out rather than show $0.00 or NaN.
+function adminSeesBlankCosts_(){ return adminCan_("costs.view") || adminCan_("inventory.blanks", "edit"); }
 function adminRoleName_(){ return (adminMe && (adminMe.roleName || ADMIN_ROLE_LABELS[adminMe.role])) || "a user"; }
 // Controls tagged with what they need are hidden from a role without it. One place does it for every screen and popup:
 //   data-need="catalog.graphics:edit"            hidden unless the role has Edit on that function
@@ -2573,7 +2576,8 @@ function adminNavActive_(){
 // (a "⋯" button with no ▾), ariaLabel, title, btnStyle.
 function adminMenuHtml_(label, itemsHtml, opts){
   opts = opts || {};
-  return `<div class="admin-menu${opts.dots ? " admin-menu-dots" : ""}"${opts.id ? ` id="${escapeHtml(opts.id)}"` : ""}${opts.hidden ? ' style="display:none;"' : ""}>`
+  // opts.need: what the menu needs (data-need, like any tagged control) — hidden whole for a role without it.
+  return `<div class="admin-menu${opts.dots ? " admin-menu-dots" : ""}"${opts.id ? ` id="${escapeHtml(opts.id)}"` : ""}${opts.need ? ` data-need="${escapeHtml(opts.need)}"` : ""}${opts.hidden ? ' style="display:none;"' : ""}>`
     + `<button type="button" class="admin-btn" style="${opts.btnStyle || ""}" aria-haspopup="menu" aria-expanded="false"${opts.title ? ` title="${escapeHtml(opts.title)}"` : ""}${opts.ariaLabel ? ` aria-label="${escapeHtml(opts.ariaLabel)}"` : ""} data-admin-action="toggleAdminMenu_" data-admin-keydown="adminMenuKey_">${label}</button>`
     + `<div class="admin-menu-list" role="menu" data-admin-keydown="adminMenuKey_">${itemsHtml}</div></div>`;
 }
@@ -11053,7 +11057,7 @@ function renderRolesTab_(){
       ${!editable ? "" : `<div class="admin-actions" style="margin-top:12px;">
         <button type="button" class="admin-btn" data-admin-action="roleSave_">${draft.key ? "Save role" : "Add role"}</button>
         ${draft.key ? `<button type="button" class="admin-btn" data-admin-action="roleUndoChanges_">Undo changes</button>` : `<button type="button" class="admin-btn" data-admin-action="loadRoles_">Cancel</button>`}
-        ${draft.key && !draft.builtIn ? `<button type="button" class="admin-btn admin-btn-danger" data-admin-action="roleDelete_" ${draft.userCount ? `title="Give its users another role first"` : ""}>Delete role</button>` : ""}
+        ${draft.key && !draft.builtIn && adminCan_("settings.users", "full") ? `<button type="button" class="admin-btn admin-btn-danger" data-need="settings.users:full" data-admin-action="roleDelete_" ${draft.userCount ? `title="Give its users another role first"` : ""}>Delete role</button>` : ""}
       </div>`}
     </div>`}`;
 }
@@ -13252,12 +13256,14 @@ function loadColorGroupsSection_(orgId, product){
       </table></div>
       <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center;">
         <button type="button" class="admin-btn" id="cgAdd" style="padding:3px 10px;font-size:12px;">+ Add group</button>
-        <button type="button" class="admin-btn" id="cgSuggest" style="padding:3px 10px;font-size:12px;" title="Group the colors whose blanks cost the same, keeping Standard's margin">Suggest from blank prices</button>
+        ${adminSeesBlankCosts_() ? `<button type="button" class="admin-btn" id="cgSuggest" style="padding:3px 10px;font-size:12px;" title="Group the colors whose blanks cost the same, keeping Standard's margin">Suggest from blank prices</button>` : ""}
         <span id="cgNote" style="font-size:12px;color:#555;">${note || ""}</span></div>`;
     el.querySelector("#cgAdd").onclick = () => { sync(); groups.push({ label: "", colors: [], sizePricing: Object.fromEntries(sizes().map(z => [z, stdPrice(z) === "" ? "" : Number(stdPrice(z))])), flatPrice: flat() ? Number(stdPrice("")) || null : null }); draw(); };
     el.querySelectorAll(".cgRemove").forEach(b => b.onclick = () => { sync(); groups.splice(Number(b.dataset.i), 1); draw(); });
     el.querySelectorAll(".cgColor").forEach(cb => cb.onchange = () => { sync(); const g = groups[Number(cb.dataset.i)]; cb.checked ? g.colors.push(cb.value) : (g.colors = g.colors.filter(x => x !== cb.value)); draw(); });
-    el.querySelector("#cgSuggest").onclick = async () => {
+    // Only for whoever is sent what blanks cost (adminSeesBlankCosts_): without it the suggestion comes back with no prices.
+    const suggestBtn = el.querySelector("#cgSuggest");
+    if (suggestBtn) suggestBtn.onclick = async () => {
       sync();
       try {
         const r = await hoopApi_({ action: "suggestColorGroups", org: orgId, productId: product.productId });
@@ -16233,14 +16239,15 @@ async function showBlankHistoryModal(blank, onDone){
       const d = await r.json();
       const body = ov.querySelector("#histBody");
       if (!r.ok || d.status === "error") { body.textContent = (d && d.message) || "Could not load history."; return; }
+      const costs = adminSeesBlankCosts_();   // Read on Blanks alone: no Unit cost column (the server sends none)
       body.innerHTML = d.movements.length ? `<table style="border-collapse:collapse;width:100%;font-size:12px;color:#1a1a1a;">
-        <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:4px 6px;">Date</th><th style="padding:4px 6px;">Color / size</th><th style="padding:4px 6px;">Type</th><th style="padding:4px 6px;text-align:right;">Qty</th><th style="padding:4px 6px;text-align:right;">Unit cost</th><th style="padding:4px 6px;">Details</th><th style="padding:4px 6px;"></th></tr></thead>
+        <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:4px 6px;">Date</th><th style="padding:4px 6px;">Color / size</th><th style="padding:4px 6px;">Type</th><th style="padding:4px 6px;text-align:right;">Qty</th>${costs ? `<th style="padding:4px 6px;text-align:right;">Unit cost</th>` : ""}<th style="padding:4px 6px;">Details</th><th style="padding:4px 6px;"></th></tr></thead>
         <tbody>${d.movements.map(m => { const dim = m.voidedAt ? "opacity:.5;text-decoration:line-through;" : ""; return `<tr style="border-bottom:1px solid #eee;">
           <td style="${dim}padding:4px 6px;white-space:nowrap;">${adminDate_(m.occurredAt)}</td>
           <td style="${dim}padding:4px 6px;">${m.color ? escapeHtml(m.color) + " · " : ""}${escapeHtml(m.size || "—")}</td>
           <td style="${dim}padding:4px 6px;">${KIND[m.kind] || escapeHtml(m.kind)}</td>
           <td style="${dim}padding:4px 6px;text-align:right;color:${m.qtyDelta < 0 ? "#b03a2e" : "#166534"};">${m.qtyDelta > 0 ? "+" : ""}${m.qtyDelta}</td>
-          <td style="${dim}padding:4px 6px;text-align:right;">$${Number(m.unitCost).toFixed(2)}</td>
+          ${costs ? `<td style="${dim}padding:4px 6px;text-align:right;">${adminMoneyOr_(m.unitCost)}</td>` : ""}
           <td style="${dim}padding:4px 6px;">${escapeHtml([m.orderId && "Order " + m.orderId, m.vendor, m.vendorRef && "#" + m.vendorRef, m.note].filter(Boolean).join(" · "))}
             ${m.receiptKey && adminFeatureOn_("bookkeeping") ? ` <button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;" title="${escapeHtml(m.receiptName || "Receipt")}" data-key="${escapeHtml(m.receiptKey)}" data-admin-action="expViewReceipt_">📎 Receipt</button>` : ""}
             ${m.voidedAt ? `<div style="color:#b03a2e;">Voided${m.voidReason ? ": " + escapeHtml(m.voidReason) : ""}</div>` : ""}</td>
@@ -16371,6 +16378,9 @@ async function renderBlanksToOrder(app){
   const draw = () => {
     if (!report) return;
     const t = blanksToOrderTotals_(report, view.useStock, view.includeRestock, view.restockEdits);
+    // Prices and costs come only to costs.view or Edit here (orders.js getBlanksToOrder): without them the list is what to
+    // order and how many — no Price / Cost columns, totals or free-shipping progress worked out from prices that aren't there.
+    const costs = adminCan_("costs.view") || adminCan_("inventory.blankorder", "edit");
     const th = "padding:6px 8px;text-align:left;font-size:11px;color:#555;background:#f0f0f0;white-space:nowrap;", td = "padding:6px 8px;border-top:1px solid #eee;font-size:13px;vertical-align:top;";
     const num = "text-align:right;white-space:nowrap;";
     const stockCols = view.useStock ? `<th style="${th}${num}">Needed</th><th style="${th}${num}">On hand</th>` : "";
@@ -16383,7 +16393,7 @@ async function renderBlanksToOrder(app){
       <div class="bto-supplier" data-supplier="${escapeHtml(s.vendor)}" style="margin-bottom:22px;">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px;">
           <h2 style="margin:0;font-size:17px;">${escapeHtml(s.vendor || "No supplier set")}</h2>
-          ${s.vendor ? freeShipHeaderHtml_(s, si) : ""}
+          ${s.vendor && costs ? freeShipHeaderHtml_(s, si) : ""}
           <span style="display:flex;gap:6px;flex-wrap:wrap;margin-left:auto;">${orderableRows_(s).length ? `<button type="button" class="admin-btn bto-order" data-need="inventory.supplierOrders:edit" data-si="${si}" style="padding:3px 10px;font-size:12px;" title="Check the supplier's stock and place the order through its web service">Order from ${escapeHtml(s.vendor || "supplier")}…</button>` : ""}
           <button type="button" class="admin-btn bto-copy" data-si="${si}" style="padding:3px 10px;font-size:12px;" title="Copy this supplier's list to paste into a spreadsheet or their order form">Copy list</button></span>
         </div>
@@ -16392,19 +16402,19 @@ async function renderBlanksToOrder(app){
         ${brandApprovalNeededHtml_(s.rows)}
         <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;">
           <thead><tr><th style="${th}">Blank</th><th style="${th}">Brand</th><th style="${th}">SKU</th><th style="${th}">Color</th><th style="${th}">Size</th>${stockCols}
-            <th style="${th}${num}">To order</th><th style="${th}${num}">Price</th><th style="${th}${num}">Cost</th></tr></thead>
+            <th style="${th}${num}">To order</th>${costs ? `<th style="${th}${num}">Price</th><th style="${th}${num}">Cost</th>` : ""}</tr></thead>
           <tbody>${s.shown.map(r => `<tr${r.toOrder ? "" : ` class="bto-restock-out" style="opacity:.55;"`}>
             <td style="${td}">${escapeHtml(r.blank)}${r.brandRule ? ` <span class="bto-brand" title="${escapeHtml(r.brandRule.note || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fef3c7;color:#92400e;white-space:nowrap;">${escapeHtml(r.brandRule.brand)}${r.brandRule.mustDecorate ? " — decorated only" : ""}</span>` : ""}</td><td style="${td}">${escapeHtml(r.brand)}</td><td style="${td}font-family:'IBM Plex Mono',monospace;font-size:12px;">${escapeHtml(r.sku)}</td>
             <td style="${td}">${escapeHtml(r.color || "—")}</td><td style="${td}">${escapeHtml(r.size || "—")}</td>
             ${view.useStock ? `<td style="${td}${num}">${r.needed}</td><td style="${td}${num}" title="${r.reserved ? r.onHand + " on hand, " + r.reserved + " of them for orders whose blanks are already in" : ""}">${r.free}${r.reserved ? `<span style="color:#888;"> of ${r.onHand}</span>` : ""}</td>` : ""}
             <td style="${td}${num}font-weight:700;">${r.toOrder}${restockCellHtml_(r)}</td>
-            <td style="${td}${num}">${Number(r.price) > 0 ? money(r.price) : `<span style="color:#b03a2e;" title="This size has no cost on the blank">no price</span>`}</td>
-            <td style="${td}${num}">${money(r.cost)}</td></tr>`).join("")}</tbody>
+            ${costs ? `<td style="${td}${num}">${Number(r.price) > 0 ? money(r.price) : `<span style="color:#b03a2e;" title="This size has no cost on the blank">no price</span>`}</td>
+            <td style="${td}${num}">${money(r.cost)}</td>` : ""}</tr>`).join("")}</tbody>
           <tfoot><tr><td colspan="${view.useStock ? 7 : 5}" style="${td}font-weight:700;border-top:2px solid #ccc;">Total for ${escapeHtml(s.vendor || "no supplier")}</td>
-            <td style="${td}${num}font-weight:700;border-top:2px solid #ccc;">${s.qty}</td><td style="${td}border-top:2px solid #ccc;"></td>
-            <td class="bto-supplier-total" style="${td}${num}font-weight:700;border-top:2px solid #ccc;">${money(s.cost)}</td></tr></tfoot>
+            <td style="${td}${num}font-weight:700;border-top:2px solid #ccc;">${s.qty}</td>${costs ? `<td style="${td}border-top:2px solid #ccc;"></td>
+            <td class="bto-supplier-total" style="${td}${num}font-weight:700;border-top:2px solid #ccc;">${money(s.cost)}</td>` : ""}</tr></tfoot>
         </table></div>
-        ${s.noPrice ? `<div style="font-size:12px;color:#b03a2e;margin-top:3px;">${s.noPrice} line${s.noPrice === 1 ? " has" : "s have"} no price on the blank, so this total is low.</div>` : ""}
+        ${costs && s.noPrice ? `<div style="font-size:12px;color:#b03a2e;margin-top:3px;">${s.noPrice} line${s.noPrice === 1 ? " has" : "s have"} no price on the blank, so this total is low.</div>` : ""}
       </div>`).join("");
     const reason = { notLinked: "its size isn't linked to a blank", custom: "a custom line with no product" };
     const unlinkedHtml = (report.unlinked || []).length ? `
@@ -16416,7 +16426,7 @@ async function renderBlanksToOrder(app){
       ${notes.length ? `<div style="font-size:12px;color:#666;margin-bottom:12px;">${notes.map(escapeHtml).join(" ")}</div>` : ""}
       ${t.suppliers.length ? supplierHtml + `
         <div id="btoGrand" style="display:flex;justify-content:flex-end;gap:24px;align-items:baseline;border-top:2px solid var(--ink,#222);padding-top:10px;font-size:15px;">
-          <span>${t.suppliers.length} supplier${t.suppliers.length === 1 ? "" : "s"} · ${t.grandQty} piece${t.grandQty === 1 ? "" : "s"}</span><strong>Total ${money(t.grandCost)}</strong></div>`
+          <span>${t.suppliers.length} supplier${t.suppliers.length === 1 ? "" : "s"} · ${t.grandQty} piece${t.grandQty === 1 ? "" : "s"}</span>${costs ? `<strong>Total ${money(t.grandCost)}</strong>` : ""}</div>`
         : `<div class="admin-empty">Nothing to order${(report.suppliers || []).length ? " — stock on hand covers every open order." : report.unpaidPieces ? " for paid orders." : " — no open order is waiting on blanks."}</div>`}
       ${unlinkedHtml}
       ${restockOrdersHtml_(report.restockOrders)}
@@ -16454,9 +16464,9 @@ async function renderBlanksToOrder(app){
     body.querySelectorAll(".bto-copy").forEach(b => b.onclick = async () => {
       const s = t.suppliers[Number(b.dataset.si)];
       // Tab-separated, so it pastes into columns; text cells are made formula-safe like every other export.
-      const lines = [["Blank", "Brand", "SKU", "Color", "Size", "Qty", "Price", "Cost"].join("\t")]
-        .concat(s.rows.map(r => [r.blank, r.brand, r.sku, r.color, r.size].map(v => csvSafe(String(v || "")).replace(/[\t\r\n]+/g, " ")).concat([r.toOrder, Number(r.price || 0).toFixed(2), r.cost.toFixed(2)]).join("\t")))
-        .concat([["Total", "", "", "", "", s.qty, "", s.cost.toFixed(2)].join("\t")]);
+      const lines = [["Blank", "Brand", "SKU", "Color", "Size", "Qty", ...(costs ? ["Price", "Cost"] : [])].join("\t")]
+        .concat(s.rows.map(r => [r.blank, r.brand, r.sku, r.color, r.size].map(v => csvSafe(String(v || "")).replace(/[\t\r\n]+/g, " ")).concat([r.toOrder, ...(costs ? [Number(r.price || 0).toFixed(2), r.cost.toFixed(2)] : [])]).join("\t")))
+        .concat([["Total", "", "", "", "", s.qty, ...(costs ? ["", s.cost.toFixed(2)] : [])].join("\t")]);
       try { await navigator.clipboard.writeText(lines.join("\n")); showToast(`Copied ${s.rows.length} line${s.rows.length === 1 ? "" : "s"} for ${s.vendor || "no supplier"}.`); }
       catch (e) { showToast("Couldn't copy — select the table and copy it by hand.", true); }
     });
@@ -19920,7 +19930,8 @@ async function renderAdminBlanks(app) {
   adminSetHash("inventory");
   document.title = adminTitle_("Blanks");
   // Same layout as Threads: description, then a toolbar (search + actions) INSIDE the panel,
-  // then the list.
+  // then the list. Import, Connected vendor and More lead only to changes (importing, receiving, refreshing from a
+  // vendor, taking photos off, making thumbnails), so like New blank, Receive order and Count stock they're Edit's.
   app.innerHTML = `
     ${adminPageHead_("Blanks")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:1180px;margin:8px auto 60px;">
@@ -19938,15 +19949,15 @@ async function renderAdminBlanks(app) {
           adminMenuItem_('id="blankVendorNewBtn" title="Bring in complete blanks from a vendor\'s product file — colors, sizes, prices per color, description, and images from the vendor\'s image download"', "Vendor product file — new blanks&hellip;"),
           adminMenuItem_('id="blankVendorUpdBtn" title="Refresh the vendor prices (per color) of blanks you have from a vendor\'s product file"', "Vendor product file — update prices&hellip;"),
           adminMenuItem_('id="blankImportCsvBtn" title="Add or update many blanks at once from a spreadsheet saved as CSV: one row per style, a cost column per size"', "Spreadsheet (CSV)&hellip;"),
-        ].join(""), { title: "Bring blanks in from a file: a vendor's invoice or product file, or a spreadsheet" })}
+        ].join(""), { need: "inventory.blanks:edit", title: "Bring blanks in from a file: a vendor's invoice or product file, or a spreadsheet" })}
         ${adminMenuHtml_("Connected vendor", [
           adminMenuItem_('id="blankVendorApiNewBtn" title="Look up a style at a connected vendor and bring it in as a complete blank"', "Look up a style → new blank&hellip;"),
           adminMenuItem_('id="blankVendorLiveBtn" title="Fetch live prices, colors and content for the blanks linked to a connected vendor"', "Refresh prices and colors&hellip;"),
-        ].join(""), { id: "blankVendorMenu", hidden: true, title: "A vendor connected under Vendor integrations" })}
+        ].join(""), { id: "blankVendorMenu", need: "inventory.blanks:edit", hidden: true, title: "A vendor connected under Vendor integrations" })}
         ${adminMenuHtml_("More", [
           adminMenuItem_('id="blankDupPhotosBtn" title="Find the same photo more than once on a blank\'s color, and take the extra copies off"', "Find duplicate photos&hellip;"),
           adminMenuItem_('id="blankRepairThumbsBtn" title="Make the small preview copy for blank photos that don\'t have one (photos downloaded from a vendor before this was fixed)"', "Repair photo thumbnails&hellip;"),
-        ].join(""))}
+        ].join(""), { need: "inventory.blanks:edit" })}
         <button type="button" class="admin-btn" id="blankCountBtn" data-need="inventory.blanks:edit" title="Check the blanks on the shelf against what's on record, and settle each difference">Count stock…</button>
         <input type="file" id="blankImportPdfFile" accept="application/pdf" style="display:none;">
         <input type="file" id="blankImportCsvFile" accept=".csv,text/csv" style="display:none;">
@@ -19985,6 +19996,7 @@ async function renderAdminBlanks(app) {
 // The desktop version doesn't even ask while supplier connections are off (they would be refused there).
 function showBlankVendorMenu_(){
   if (adminDesktop_() && !adminDesktopSuppliers_()) return;
+  if (!adminCan_("inventory.blanks", "edit")) return;   // its items are Edit's (bringing in or refreshing blanks)
   hoopApi_({ action: "listVendorConnections" }).then(r => {
     const menu = document.getElementById("blankVendorMenu");
     if (menu && ((r && r.connections) || []).some(c => c.hasCredentials)) menu.style.display = "";
@@ -20261,6 +20273,7 @@ function renderBlanksTable(panel, app, blanks, query) {
   let grandTotalValue = 0;
   let grandTotalStock = 0;
   let testingValue = 0, testingStock = 0;   // blanks for testing / shop use (migrations/0060)
+  const costs = adminSeesBlankCosts_();       // without them: stock only, no prices or held value
 
   allTypes.forEach(type => {
     const label = categoryPlural_(type);
@@ -20273,7 +20286,7 @@ function renderBlanksTable(panel, app, blanks, query) {
         <th style="padding:6px 10px;">Name</th>
         <th style="padding:6px 10px;">Vendor</th>
         <th style="padding:6px 10px;">Brand / SKU</th>
-        <th style="padding:6px 10px;">Colors &amp; sizes (stock · vendor price · avg cost in stock)</th>
+        <th style="padding:6px 10px;">Colors &amp; sizes (stock${costs ? " · vendor price · avg cost in stock" : ""})</th>
         <th style="padding:6px 10px;"></th>
       </tr></thead>
       <tbody>`;
@@ -20296,7 +20309,7 @@ function renderBlanksTable(panel, app, blanks, query) {
                 low ? `Below its reorder point: keep ${low.keep}, ${Math.max(0, low.free)} free${low.onOrder ? ` (counting ${low.onOrder} on order)` : ""} — see Blanks to Order.` : ""].filter(Boolean);
               const tip = tips.length ? ` title="${escapeHtml(tips.join(" "))}"` : "";
               const bg = out ? "#fef2f2" : low ? "#fffbeb" : "var(--surface,#fff)", fg = out ? "#b03a2e" : low ? "#92400e" : "var(--ink)";
-              return `<span class="blank-size-cell${low ? " blank-size-low" : ""}"${tip} style="display:inline-block;margin:1px 3px 1px 0;padding:1px 6px;border:1px solid ${low && !out ? "#fcd34d" : "var(--border,#ccc)"};border-radius:3px;font-size:11px;white-space:nowrap;background:${bg};color:${fg}">${escapeHtml(s.size)}: ${s.quantity}${held ? ` <span style="color:#b45309;">· ${held} set aside</span>` : ""}${low ? ` <span style="color:#92400e;">· keep ${low.keep}</span>` : ""} · ${blankSizePrices_(s)}</span>`;
+              return `<span class="blank-size-cell${low ? " blank-size-low" : ""}"${tip} style="display:inline-block;margin:1px 3px 1px 0;padding:1px 6px;border:1px solid ${low && !out ? "#fcd34d" : "var(--border,#ccc)"};border-radius:3px;font-size:11px;white-space:nowrap;background:${bg};color:${fg}">${escapeHtml(s.size)}: ${s.quantity}${held ? ` <span style="color:#b45309;">· ${held} set aside</span>` : ""}${low ? ` <span style="color:#92400e;">· keep ${low.keep}</span>` : ""}${costs ? " · " + blankSizePrices_(s) : ""}</span>`;
             }).join("")
           : `<span style="color:var(--ink-soft);font-size:12px;">No sizes</span>`;
         const firstImg = (c.images && c.images[0]) ? (typeof c.images[0] === "object" ? c.images[0].url : c.images[0]) : "";
@@ -20304,17 +20317,17 @@ function renderBlanksTable(panel, app, blanks, query) {
         return `<div style="margin-bottom:3px;">${img}<strong style="font-size:12px;">${escapeHtml(c.color || "—")}</strong> ${cells}</div>`;
       }).join("");
       const totalStock = cols.reduce((s, c) => s + (c.sizes || []).reduce((t, r) => t + r.quantity, 0), 0);
-      const totalValue = cols.reduce((s, c) => s + (c.sizes || []).reduce((t, r) => t + r.quantity * r.purchasePrice, 0), 0);
+      const totalValue = costs ? cols.reduce((s, c) => s + (c.sizes || []).reduce((t, r) => t + r.quantity * (Number(r.purchasePrice) || 0), 0), 0) : 0;
       const totalHeld = cols.reduce((s, c) => s + (c.sizes || []).reduce((t, r) => t + setAside(r, c), 0), 0);
       sectionStock += totalStock;
       sectionValue += totalValue;
       if (b.forTesting) { testingValue += totalValue; testingStock += totalStock; }
       html += `
         <tr data-blank-row="${b.id}" style="border-bottom:1px solid var(--card-line);">
-          <td style="padding:8px 10px;font-weight:600;vertical-align:top;">${escapeHtml(b.name || "—")}${b.forTesting ? ` <span class="blank-testing-badge" title="For testing / shop use — still inventory (it could be sold), reported as its own group" style="font-size:10px;font-weight:700;letter-spacing:.04em;padding:1px 5px;border-radius:3px;background:#ede9fe;color:#5b21b6;vertical-align:middle;">TESTING</span>` : ""}${b.needleType ? `<div style="font-weight:400;font-size:11px;color:var(--ink-soft);margin-top:2px;">Needle: ${escapeHtml(b.needleType)}</div>` : ""}${blankUsesHtml_(b)}${(window._blanksPriceCheck || []).includes(b.id) ? `<div class="blank-price-check" title="Used by products on sale — check the vendor's prices (Edit → enter any change, or Prices are current)" style="font-weight:400;font-size:11px;color:#b45309;margin-top:2px;">💲 ${escapeHtml(blankPricesCheckedLabel_(b))}</div>` : ""}</td>
+          <td style="padding:8px 10px;font-weight:600;vertical-align:top;">${escapeHtml(b.name || "—")}${b.forTesting ? ` <span class="blank-testing-badge" title="For testing / shop use — still inventory (it could be sold), reported as its own group" style="font-size:10px;font-weight:700;letter-spacing:.04em;padding:1px 5px;border-radius:3px;background:#ede9fe;color:#5b21b6;vertical-align:middle;">TESTING</span>` : ""}${b.needleType ? `<div style="font-weight:400;font-size:11px;color:var(--ink-soft);margin-top:2px;">Needle: ${escapeHtml(b.needleType)}</div>` : ""}${blankUsesHtml_(b)}${costs && (window._blanksPriceCheck || []).includes(b.id) ? `<div class="blank-price-check" title="Used by products on sale — check the vendor's prices (Edit → enter any change, or Prices are current)" style="font-weight:400;font-size:11px;color:#b45309;margin-top:2px;">💲 ${escapeHtml(blankPricesCheckedLabel_(b))}</div>` : ""}</td>
           <td style="padding:8px 10px;color:var(--ink-soft);vertical-align:top;">${escapeHtml(b.vendor)}</td>
           <td style="padding:8px 10px;font-family:monospace;font-size:12px;vertical-align:top;">${escapeHtml(b.brand)}${b.sku ? " / " + escapeHtml(b.sku) : ""}</td>
-          <td style="padding:8px 10px;vertical-align:top;">${colorBlocks}<div style="font-size:11px;color:var(--ink-soft);margin-top:3px;">${totalStock} units${totalHeld ? ` · ${totalHeld} set aside` : ""} · $${totalValue.toFixed(2)} value</div></td>
+          <td style="padding:8px 10px;vertical-align:top;">${colorBlocks}<div style="font-size:11px;color:var(--ink-soft);margin-top:3px;">${totalStock} units${totalHeld ? ` · ${totalHeld} set aside` : ""}${costs ? ` · $${totalValue.toFixed(2)} value` : ""}</div></td>
           <td style="padding:8px 10px;white-space:nowrap;vertical-align:top;">
             <button class="admin-btn" style="padding:3px 10px;font-size:12px;" data-blank-id="${b.id}" data-need="inventory.blanks:edit" data-admin-action="blankEdit">Edit</button>
             <button class="admin-btn" style="padding:3px 10px;font-size:12px;margin-left:4px;" data-blank-id="${b.id}" data-admin-action="blankHistory" title="Every stock movement for this blank">History</button>
@@ -20333,11 +20346,13 @@ function renderBlanksTable(panel, app, blanks, query) {
     grandTotalValue += sectionValue;
 
     html += `</tbody></table>`;
-    html += `<div style="text-align:right;font-size:12px;color:var(--ink-soft);padding:3px 10px 12px;border-bottom:1px solid var(--card-line);">${escapeHtml(label)} held value: <strong style="color:var(--ink);">${sectionStock} units · $${sectionValue.toFixed(2)}</strong></div>`;
+    html += `<div style="text-align:right;font-size:12px;color:var(--ink-soft);padding:3px 10px 12px;border-bottom:1px solid var(--card-line);">${escapeHtml(label)} ${costs ? "held value" : "in stock"}: <strong style="color:var(--ink);">${sectionStock} units${costs ? ` · $${sectionValue.toFixed(2)}` : ""}</strong></div>`;
   });
 
-  html += `<div style="text-align:right;font-size:13px;font-weight:700;padding:12px 10px;border-top:2px solid var(--border,#ccc);margin-top:4px;">${query ? "Matching blanks' held value" : "Total held inventory value"}: $${grandTotalValue.toFixed(2)} <span style="font-weight:400;color:var(--ink-soft);font-size:12px;">(${grandTotalStock} units)</span>
-    <div class="blank-group-totals" style="font-weight:400;font-size:12px;color:var(--ink-soft);margin-top:2px;">For sale $${(grandTotalValue - testingValue).toFixed(2)} (${grandTotalStock - testingStock} units) · For testing / shop use $${testingValue.toFixed(2)} (${testingStock} units)</div></div>`;
+  html += costs ? `<div style="text-align:right;font-size:13px;font-weight:700;padding:12px 10px;border-top:2px solid var(--border,#ccc);margin-top:4px;">${query ? "Matching blanks' held value" : "Total held inventory value"}: $${grandTotalValue.toFixed(2)} <span style="font-weight:400;color:var(--ink-soft);font-size:12px;">(${grandTotalStock} units)</span>
+    <div class="blank-group-totals" style="font-weight:400;font-size:12px;color:var(--ink-soft);margin-top:2px;">For sale $${(grandTotalValue - testingValue).toFixed(2)} (${grandTotalStock - testingStock} units) · For testing / shop use $${testingValue.toFixed(2)} (${testingStock} units)</div></div>`
+    : `<div style="text-align:right;font-size:13px;font-weight:700;padding:12px 10px;border-top:2px solid var(--border,#ccc);margin-top:4px;">${query ? "Matching blanks in stock" : "Total blanks in stock"}: ${grandTotalStock} units
+    <div class="blank-group-totals" style="font-weight:400;font-size:12px;color:var(--ink-soft);margin-top:2px;">For sale ${grandTotalStock - testingStock} units · For testing / shop use ${testingStock} units</div></div>`;
   panel.innerHTML = html;
 
   window.blankHistory = function(idStr) {

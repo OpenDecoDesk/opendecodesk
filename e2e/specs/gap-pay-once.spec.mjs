@@ -156,7 +156,7 @@ test("Payments: Save again after a lost answer sends the same key and is booked 
 // ---- P15: two Mark as paid at once ------------------------------------------------------------------------
 // The money is booked once however the requests meet (settleOrderBalance books the balance only while the payments
 // still add up to what it read). What the other requests are told, and whether they are audited and emailed again,
-// depends on how they meet: that part is the test.fixme test below (a bug).
+// depends on how they meet: that part is the next test below (five at once, twenty rounds).
 test("Mark as paid from two pages at the same moment books the balance once", async ({ page, api, as }) => {
   const { shop, order } = await shopWithOrder(api, page, "mp2p");
   const id = order.orderId;
@@ -230,17 +230,12 @@ test("Mark as paid sent five times at once, on ten orders, books each balance on
   }
 });
 
-// BUG (functions/api/orders.js, markPaidManual): a Mark as paid that loses the race books nothing, but is still
-// answered as if it had paid the order, and is audited and emailed again. `newlyPaid = recorded > 0 ||
-// (!before.paid && order.paid)`: the second half (meant for an order that owes $0) is also true for a losing
-// request that read `before` before the winner's payment went in. So it answers plain "ok" (no alreadyPaid: its page
-// shows no "already paid"), sends the customer a second payment-confirmed email, writes a second order.marked_paid
-// audit entry and delivers digital products again. The money itself is booked once (the tests above).
-// It shows only when the requests interleave on the server, which depends on how busy the machine is: while this
-// spec was written it showed in up to half the rounds under load (it failed the two-page test above once in a full
-// suite run) and in about 1 of 200 rounds on a quiet machine. A test.fail would then "unexpectedly pass", so this is
-// test.fixme until markPaidManual is fixed; then take the fixme off and it must pass every time.
-test.fixme("Mark as paid sent at once: one answer books it, the rest are told it was already paid, one audit entry", async ({ api }) => {
+// Fixed 2026-11-23 (functions/api/orders.js markPaidManual, db.js settleOrderBalanceOnce): a Mark as paid that loses
+// the race used to be answered as if it had paid the order, and was audited and emailed again — it decided from
+// `!before.paid && order.paid`, true for a request that read `before` before the winner's payment went in. Now only
+// the request whose guarded write took the row emails, audits and delivers; the others are told it was already paid.
+// It showed only when the requests interleave on the server, so this runs twenty rounds and must pass every time.
+test("Mark as paid sent at once: one answer books it, the rest are told it was already paid, one audit entry", async ({ api }) => {
   test.setTimeout(120_000);
   const shop = await makeShop(api, { prefix: "mprace", products: [{ name: "Sample Tee", price: 20 }] });
   for (let round = 1; round <= 20; round++) {

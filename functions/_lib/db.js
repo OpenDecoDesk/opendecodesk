@@ -3908,21 +3908,32 @@ export async function refreshPaidStatus(db, orderId) {
 // second "Mark as paid" — a double click, another admin, or one racing a card payment's webhook — records nothing
 // more; `requestKey` (the admin form's key for this Save, migrations/0095) stops a retried request too.
 export async function settleOrderBalance(db, orderId, note, at = null, requestKey = null) {
+  return (await settleOrderBalanceOnce(db, orderId, note, at, requestKey)).recorded;
+}
+
+// settleOrderBalance, also saying whether THIS call is the one that made the order paid (`tookRow`): its guarded
+// payment row went in, or — for an order that owes $0 — its UPDATE took the still-unpaid row. Decided from the
+// write's own result, never from a read made before it, so of several "Mark as paid"s arriving at once only one
+// sends the email, writes the audit entry and delivers digital files (markPaidManual); the rest find it paid.
+export async function settleOrderBalanceOnce(db, orderId, note, at = null, requestKey = null) {
   const state = await refreshPaidStatus(db, orderId);
-  if (!state) return 0;
+  if (!state) return { recorded: 0, tookRow: false };
   const balance = state.owedCents - state.receivedCents;
   if (balance > 0) {
     const o = await db.prepare("SELECT paymentMethod FROM orders WHERE orderId=?").bind(orderId).first();
     const id = await addOrderPayment(db, orderId, fromCents(balance), note || "Marked paid", "",
       { method: methodFromPaymentMethod(o && o.paymentMethod), ...(at ? { receivedAt: at } : {}),
         expectReceivedCents: state.receivedCents, ...(requestKey ? { requestKey } : {}) });
-    return id ? fromCents(balance) : 0;
+    return id ? { recorded: fromCents(balance), tookRow: true } : { recorded: 0, tookRow: false };
   }
   if (state.owedCents === 0) {
-    await db.prepare("UPDATE orders SET paid = 1, paidForWork = 1, paidAt = COALESCE(paidAt, ?) WHERE orderId = ?")
+    // Only while it is still unpaid (paid = 0): the request whose UPDATE took the row is the one that paid it.
+    // tookRow_, not === 1 — D1's meta.changes also counts the rows a trigger changed.
+    const r = await db.prepare("UPDATE orders SET paid = 1, paidForWork = 1, paidAt = COALESCE(paidAt, ?) WHERE orderId = ? AND paid = 0")
       .bind(at || new Date().toISOString(), orderId).run();
+    return { recorded: 0, tookRow: tookRow_(r) };
   }
-  return 0;
+  return { recorded: 0, tookRow: false };
 }
 
 // ---- Blanks (global blank catalog with per-size stock) -----------------

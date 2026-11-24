@@ -191,20 +191,17 @@ test("Shop settings changes are a draft until Publish, and Preview shows the dra
   await expect(shopper.locator("main")).toContainText("New season kit — order by the end of the month.");
 });
 
-// The shop bar's Publish button (on a shop's own pages): asks, then publishes.
-// (The page is opened afresh first: after the Live switch the bar keeps showing "✓ Published" — part of the known
-// bug below — until it re-reads the publish state.)
-async function shopBarPublish(page) {
+// The shop bar, read afresh (after the Live switch the bar redraws from what it last read, up to 15 seconds old):
+// nothing waits to publish. The switch changes the published copy as well as the draft (functions/_lib/db.js
+// setOrgReady), so a shop with nothing else changed stays "✓ Published" and needs no Publish either way.
+async function expectNothingToPublish(page) {
   await page.reload();
   const bar = page.getByRole("navigation", { name: "Shop" });
   await expect(bar.locator("button.shop-bar-pub")).toBeVisible();
-  await bar.locator("button.shop-bar-pub:not([disabled])").click();
-  await confirmDialog(page, "Publish");
-  await expect(toast(page)).toContainText("Published — shoppers see");
   await expect(bar.getByRole("button", { name: "✓ Published" })).toBeDisabled();
 }
 
-test("the Live switch puts the shop on Coming soon and opens it again (with Publish)", async ({ page, context }) => {
+test("the Live switch puts the shop on Coming soon and opens it again (no Publish needed)", async ({ page, context }) => {
   await openAdmin(page, "catalog/orgs/" + shop.orgId + "/products");
   const live = page.getByRole("switch");
   await expect(live).toHaveText("Live");
@@ -217,8 +214,8 @@ test("the Live switch puts the shop on Coming soon and opens it again (with Publ
   await expect(toast(page)).toContainText("now shows “Coming soon”");
   await expect(page.getByRole("switch")).toHaveText("Coming soon");
   await expect(page.getByRole("switch")).toHaveAttribute("aria-checked", "false");
-  // (Shoppers only see it after Publish — see the known bug below.)
-  await shopBarPublish(page);
+  await expectNothingToPublish(page);
+  await expect(page.getByRole("switch")).toHaveText("Coming soon");
 
   const shopper = await context.newPage();
   await openShop(shopper, shop);
@@ -229,7 +226,8 @@ test("the Live switch puts the shop on Coming soon and opens it again (with Publ
   await confirmDialog(page, "Go live");
   await expect(toast(page)).toContainText("is open for orders.");
   await expect(page.getByRole("switch")).toHaveText("Live");
-  await shopBarPublish(page);
+  await expectNothingToPublish(page);
+  await expect(page.getByRole("switch")).toHaveText("Live");
   await shopper.reload();
   await expect(shopper.getByRole("heading", { level: 3, name: shop.product })).toBeVisible();
   await expect(shopper.getByRole("button", { name: "Place order" })).toBeVisible();

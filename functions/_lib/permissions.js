@@ -196,6 +196,7 @@ const ALSO = {
   getDesign: [["run.queue", "read"], ["orders.details", "read"]],
   listGraphics: [["run.queue", "read"], ["orders.details", "read"]],
   listProductDesigns: [["run.queue", "read"]],
+  listProducts: [["orders.details", "read"]],   // the Local sale window lists the shop's products (costs stay hidden: stripCosts_)
   listThreads: [["run.queue", "read"]],
   getNeedleSettings: [["run.queue", "read"]],
   listHoops: [["run.queue", "read"]],

@@ -20,10 +20,8 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +
   dbSrc + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")();
-let pass = 0, fail = 0, known = 0;
+let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
-// A check that shows a bug not fixed yet: reported, but it doesn't fail the run.
-const knownBug = (d, c, note) => { if (c) { console.log(d + ": true"); pass++; } else { known++; console.log("KNOWN BUG — " + d + " (" + note + ")"); } };
 
 (async () => {
   const d1 = await createD1();
@@ -102,12 +100,12 @@ const knownBug = (d, c, note) => { if (c) { console.log(d + ": true"); pass++; }
   try { pend = await report(); } catch (e) { pend = { status: "thrown", body: { message: String(e && e.message) } }; }
   refuse = () => false;
   ok("(the marker was refused)", refused >= 1);
-  knownBug("a refused '#pending' write doesn't fail the report either", pend.status === 200 && figures(pend.body) === figures(failed.body),
-    "the request throws " + JSON.stringify(pend.body.message || "") + " instead of answering (a 500 on Cloudflare) — db.js stockSnapshotStart_ rethrows every error but 'no such table'");
+  ok("a refused '#pending' write doesn't fail the report either: it replays the whole history", pend.status === 200 && figures(pend.body) === figures(failed.body));
+  ok("…and saves no snapshot from it", complete() === "");
   const after = await report();
   ok("…and with the database fine again the report answers and saves the snapshots", after.status === 200 && figures(after.body) === figures(failed.body) &&
     complete() === "blank@2025-05,finished@2025-05,transfer@2025-05");
 
-  console.log(`\n${fail ? "FAIL" : "PASS"} — ${pass} passed, ${fail} failed${known ? ", " + known + " known bug(s) reported" : ""}`);
+  console.log(`\n${fail ? "FAIL" : "PASS"} — ${pass} passed, ${fail} failed`);
   if (fail) process.exit(1);
 })().catch((e) => { console.error(e); console.log("test253 crashed: false"); process.exit(1); });

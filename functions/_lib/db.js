@@ -8391,8 +8391,15 @@ async function stockSnapshotStart_(db, kind, asOfList) {
     let write = null;
     if (base !== target) {
       write = { month: target, end: monthEndMoment_(target), token: crypto.randomUUID() };
-      await db.prepare("INSERT OR REPLACE INTO inventory_period_snapshots (month, kind, key, qty, avgCents, name, label) VALUES (?, ?, ?, 0, 0, ?, '')")
-        .bind(target, kind, SNAP_PENDING_, write.token).run();
+      // A refused '#pending' write (the database busy or read-only) never fails the report: without the marker
+      // the seed isn't guarded either, so replay the whole history and leave the snapshot for the next report.
+      try {
+        await db.prepare("INSERT OR REPLACE INTO inventory_period_snapshots (month, kind, key, qty, avgCents, name, label) VALUES (?, ?, ?, 0, 0, ?, '')")
+          .bind(target, kind, SNAP_PENDING_, write.token).run();
+      } catch (e) {
+        if (/no such table/i.test(String(e && e.message))) throw e;
+        return none;
+      }
       // A change at or before the seed between reading it and the '#pending' row would have gone unnoticed: if the
       // seed is gone now, read again (a seed read from here on is guarded by '#pending').
       if (base && !(await db.prepare("SELECT 1 AS x FROM inventory_period_snapshots WHERE month = ? AND kind = ? AND key = ?").bind(base, kind, SNAP_COMPLETE_).first())) {

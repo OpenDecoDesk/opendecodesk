@@ -4,9 +4,8 @@
 // "Your role can't record payments." / "Your role can't set that step."), and the window shows neither box to a
 // role without it (public/admin.js, data-need on each label). A role with only Orders → details at Edit ("Counter"
 // here) records an unpaid, undelivered sale through the API. The window itself also lists the shop's products
-// (listProducts, which needs Products at Read), so the page test gives the role that as well; the owner sees both
-// boxes. The last test is an expected failure: + Local sale is offered to a role with only Orders → details at
-// Edit, and its window doesn't open for it (see the test).
+// (listProducts: Products at Read, or Orders → details at Read for this window), and the owner sees both boxes.
+// The last test opens the window for a role with only Orders → details at Edit.
 //
 // Each test's role, its user and the shop are its own, with unique names, made through the owner's session. At
 // the end the user is moved to Production and disabled, and the role deleted.
@@ -168,13 +167,11 @@ test("Local sale: the window shows no Paid or Delivered box to a role without th
   }
 });
 
-// BUG (expected failure): "+ Local sale" is shown to any role with Orders → details at Edit (its data-need, public/
-// admin.js ordersFilterBar_) and the server records the sale on that alone (createLocalSale is orders.details:edit in
-// functions/_lib/permissions.js), but the window first asks for listProducts, which needs Products at Read
-// (catalog.products) and has no ALSO entry for the order screens. For a role without Products the click shows
-// "Could not load products: …" and no window opens. Remove test.fail once the button and the window agree.
+// "+ Local sale" is shown to any role with Orders → details at Edit (its data-need, public/admin.js ordersFilterBar_)
+// and the server records the sale on that alone (createLocalSale is orders.details:edit in functions/_lib/
+// permissions.js). The window first asks for listProducts, so that role can list the products too (ALSO), costs
+// left out; before, the click showed "Could not load products: …" and no window opened.
 test("Local sale: with only Orders → details at Edit, + Local sale opens its window", async ({ api, as }, testInfo) => {
-  test.fail(true, "+ Local sale is offered, but its window needs listProducts (Products at Read), which this role lacks");
   const { C, cleanUp } = await makeCounter(api, { "orders.details": "edit" }, testInfo.workerIndex);
   try {
     const shop = await makeShop(api, { prefix: "lsb", products: [{ name: "Sample Tee", price: 20 }] });

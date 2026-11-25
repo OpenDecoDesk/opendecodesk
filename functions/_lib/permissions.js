@@ -175,9 +175,9 @@ const BY_FN = {
   "reports.books": { read: ["listClosedPeriods", "getAccountantExport"], edit: ["closePeriod"], full: ["reopenPeriod"] },
   "settings.global": {
     read: ["getGlobalSettings", "getFeatures", "getBusinessProfile", "getLocaleSettings", "getSalesTaxSettings", "getShipFromAddress", "getSetupStatus",
-      "getRushSettings", "getEmailSettings", "getDigitalSettings", "previewCustomerEmail", "samplePdf"],
+      "getRushSettings", "getEmailSettings", "getDigitalSettings", "previewCustomerEmail", "samplePdf", "getAccountingSettings"],
     edit: ["saveGlobalSettingsAll", "updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "updateLocaleSettings", "updateSalesTaxSettings", "updateShipFromAddress",
-      "getAccountingSettings", "updateAccountingSettings", "updateMachineSettings", "updatePricingSettings", "updateRushSettings", "updateEmailSettings",
+      "updateAccountingSettings", "updateMachineSettings", "updatePricingSettings", "updateRushSettings", "updateEmailSettings",
       "sendSampleEmail", "sendTestEmail", "checkMailbox", "updateDigitalSettings", "getCloudflareSetup", "connectCloudflare", "backfillStripeFees"] },
   "settings.vendors": {
     read: ["vendorDirectorySearch", "vendorDirectoryEndpoints"],

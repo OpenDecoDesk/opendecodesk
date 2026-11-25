@@ -346,8 +346,8 @@ test("A custom role with Global settings at Edit and nothing else passes every s
       expect(session.status, JSON.stringify(session)).toBe("ok");
       expect(session.pending || null).toBeNull();
 
-      // Every section the page sends (Pricing and Rush fee among them, though the role has no costs.view): the
-      // permission checks pass; the bad time zone is what's refused.
+      // Every section the page sends this role (Rush fee among them; Pricing isn't on its page, as it has no
+      // costs.view): the permission checks pass; the bad time zone is what's refused.
       const now = await current(api);
       const { accounting } = await api("getAccountingSettings");
       const settings = {
@@ -355,13 +355,17 @@ test("A custom role with Global settings at Edit and nothing else passes every s
         salesTax: { ratePercent: now.salesTax.ratePercent, jurisdiction: now.salesTax.jurisdiction || "", taxMode: now.salesTax.taxMode },
         accounting: { saleDate: accounting.saleDate },
         business: { ...before, tagline },
-        pricing: pricingForm(now.pricing),
         rush: { rule: now.rush.rule, taxable: now.rush.taxable },
       };
       const r = await callApi(them, "saveGlobalSettingsAll", { settings }, { allowError: true, withStatus: true });
       expect(r.status, JSON.stringify(r.data)).toBe(400);
       expect(r.data.section).toBe("Region");
       expect(r.data.code).not.toBe("forbidden");
+      // Pricing is costs: sent anyway, it is refused, naming it (review #88), and nothing is saved.
+      const p = await callApi(them, "saveGlobalSettingsAll", { settings: { ...settings, locale: { timeZone: now.locale.timeZone || "", country: now.locale.country }, pricing: pricingForm(now.pricing) } },
+        { allowError: true, withStatus: true });
+      expect(p.status, JSON.stringify(p.data)).toBe(403);
+      expect(p.data.section).toBe("Pricing");
     } finally {
       await them.dispose();
     }

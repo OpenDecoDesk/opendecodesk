@@ -7,6 +7,7 @@
 //   * costs.view: the order lists leave out cost of goods and processor fees; Run Order's blanks leave out costs.
 //   * Blanks: Edit can't change stock or average cost from the blank form; merging blanks is Full.
 //   * Local sale: Paid needs Payments, Delivered needs the late steps.
+//   * The Dates window: each step's date needs the half of the steps it is in (review #89).
 //   * Shipping: the label details are Shipping's; the charge and a ship-to state that moves the tax are Payments'.
 //   * The audit log keeps only real order IDs, and its order links carry the ID as data, not code.
 // Real sign-in (testlib/auth-harness), real SQL and the real endpoints; jsdom with the real admin page.
@@ -176,6 +177,27 @@ const ok = (m, c) => console.log(m + ":", !!c);
   ok("Run Edit or Machine files Edit gets past the role check (here to 'agent offline')",
     await send({ "run.runs": 2 }) === 503 && await send({ "production.machinefiles": 2 }) === 503);
 
+  console.log("=== The Dates window: a step's date needs its half of the steps (review #89) ===");
+  r = await A.users({ action: "saveRole", name: "Early steps", rank: 40, permissions: { fns: { "orders.details": "edit", "orders.stepsEarly": "edit" } } }, admin);
+  const early = await A.addUser(admin, r.body.role && r.body.role.key, "Drew Sample", "drew@example.com");
+  r = await A.users({ action: "saveRole", name: "Late steps", rank: 40, permissions: { fns: { "orders.details": "edit", "orders.stepsLate": "edit" } } }, admin);
+  const late = await A.addUser(admin, r.body.role && r.body.role.key, "Lee Sample", "lee@example.com");
+  const orderCol = (c) => A.d1.q("SELECT " + c + " v FROM orders WHERE orderId='TST-2002'")[0].v;
+  const at = (minsAgo) => new Date(Date.now() - minsAgo * 60000).toISOString();
+  const placedAgo = at(90);
+  A.d1._raw.exec(`UPDATE orders SET placedAt='${placedAgo}' WHERE orderId='TST-2002'`);
+  r = await A.orders({ action: "setOrderDates", org: "shop1", orderId: "TST-2002", dates: { shippedAt: at(10) } }, early);
+  ok("early steps only: setting when it shipped is refused, nothing written", forbidden(r) && !orderCol("shippedAt"));
+  r = await A.orders({ action: "setOrderDates", org: "shop1", orderId: "TST-2002", dates: { blankOrderedAt: at(60), shippedAt: at(10) } }, early);
+  ok("…even alongside a date it may change: nothing written", forbidden(r) && !orderCol("blankOrderedAt"));
+  const blankAt = at(60);
+  r = await A.orders({ action: "setOrderDates", org: "shop1", orderId: "TST-2002", dates: { blankOrderedAt: blankAt } }, early);
+  ok("…its own half (blank ordered) goes through", r.status === 200 && orderCol("blankOrderedAt") === blankAt);
+  r = await A.orders({ action: "setOrderDates", org: "shop1", orderId: "TST-2002", dates: { blankOrderedAt: null } }, late);
+  ok("late steps only: clearing blank ordered is refused", forbidden(r) && !!orderCol("blankOrderedAt"));
+  r = await A.orders({ action: "setOrderDates", org: "shop1", orderId: "TST-2002", dates: { placedAt: at(80) } }, late);
+  ok("…the order date is the order's own: either half may move it", r.status === 200 && orderCol("placedAt") !== placedAgo);
+
   console.log("=== The audit log: only real order IDs, linked as data ===");
   const insertAuditLog = new Function("__hits", prelude(false, false) + "\nreturn insertAuditLog;")([]);
   const evil = "x');window.__pwned=1;//";
@@ -241,6 +263,22 @@ const ok = (m, c) => console.log(m + ":", !!c);
     d.getElementById("editOrderSave").click();
     const res = await pending;
     ok("…a role without Payments Full removes the line with no refund box, and sends no refund", noRefundBox && res.removals[0].refundAmount === 0);
+  }
+  {
+    // The Dates window greys out the half of the steps the role lacks (the server refuses it: above).
+    w._ordersCache = { shop1: [{ orderId: "TST-2002", placedAt: now, blankOrderedAt: now, shippedAt: now, dueDate: "" }] };
+    const datesAs = async (perms) => {
+      w.eval(asRole("staff")); w.eval(`adminPerms = Object.assign({}, adminPerms, ${JSON.stringify(perms)});`);
+      w.showOrderDates_("shop1", "TST-2002"); await tick();
+      const ov = d.body.lastElementChild, box = (c) => ov.querySelector(`.od-input[data-col="${c}"]`);
+      const res = { placed: !box("placedAt").disabled, blank: !box("blankOrderedAt").disabled, shipped: !box("shippedAt").disabled, clearShipped: !!ov.querySelector('.od-clear[data-col="shippedAt"]'), clearBlank: !!ov.querySelector('.od-clear[data-col="blankOrderedAt"]') };
+      ov.querySelector("#odCancel").click(); await tick();
+      return res;
+    };
+    let dd = await datesAs({ "orders.stepsLate": "none" });
+    ok("Dates window, early steps only: blank ordered can change, shipped can't (no ✕ either), the order date can", dd.blank && dd.clearBlank && !dd.shipped && !dd.clearShipped && dd.placed);
+    dd = await datesAs({ "orders.stepsEarly": "none" });
+    ok("…late steps only: the other way round", !dd.blank && !dd.clearBlank && dd.shipped && dd.clearShipped && dd.placed);
   }
   ok("Local sale: Paid needs Payments, Delivered the late steps", /<label data-need="orders\.payments:edit"[^>]*>\s*<input type="checkbox" id="lsPaid"/.test(adminJs) &&
     /<label data-need="orders\.stepsLate:edit"[^>]*>\s*<input type="checkbox" id="lsDelivered"/.test(adminJs));

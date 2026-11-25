@@ -2,16 +2,22 @@ const fs = require("fs");
 const read = f => fs.readFileSync(__dirname + "/" + f, "utf8");
 const strip = src => src.replace(/import \{[\s\S]*?\} from ["'][^"']+["'];\n?/g, "").replace(/export (async function|function|const)/g, "$1");
 
-// Real agentRelay.js + real api/agent.js, with the admin gate / rate limiter / design signer stubbed.
-let adminOk = true, hitBucket = [];
+// Real agentRelay.js + real api/agent.js, with the admin gate / rate limiter / design signer stubbed. With `asRole`
+// set, the gate and the per-job checks use the real permissions.js rules for that role (testlib/roles).
+const R = require("./testlib/roles");
+let adminOk = true, hitBucket = [], asRole = null;
+const rank = (l) => ["none", "read", "edit", "full"].indexOf(l);
 const relaySrc = strip(read("functions/_lib/agentRelay.js"));
 const agentSrc = strip(read("functions/api/agent.js"));
 const api = new Function("deps",
-  "const {classifyHost, requireAdmin, timingSafeEqual, jsonResponse, rateLimited, rateLimitResponse, signedDesignPath, DESIGN_KEY_RE} = deps;\n" +
+  "const {classifyHost, requireAdmin, timingSafeEqual, jsonResponse, rateLimited, rateLimitResponse, signedDesignPath, DESIGN_KEY_RE, adminUser, adminCan} = deps;\n" +
   "const featureIsOff = async () => false, featureOffResponse = () => null;\n" +
   relaySrc + "\n" + agentSrc + "\nreturn onRequestPost;")({
   classifyHost: h => ({ kind: /^(test)?admin\./.test(h) ? "admin" : "root" }),
-  requireAdmin: async () => adminOk ? null : new Response(JSON.stringify({ status: "error", message: "Unauthorized" }), { status: 401 }),
+  requireAdmin: async (env, host, key, request, msg, need) => !adminOk ? new Response(JSON.stringify({ status: "error", message: "Unauthorized" }), { status: 401 })
+    : asRole && !R.roleAllows(asRole, need) ? new Response(JSON.stringify({ status: "error", message: "Your role can't do this." }), { status: 403 }) : null,
+  adminUser: () => asRole ? { id: 7, role: asRole.key, roleInfo: asRole } : null,
+  adminCan: (request, fn, level) => !!asRole && rank(R.effectivePermissions(asRole)[fn]) >= rank(level || "read"),
   timingSafeEqual: (a, b) => a === b,
   jsonResponse: (o, s) => new Response(JSON.stringify(o), { status: s || 200, headers: { "Content-Type": "application/json" } }),
   rateLimited: async (env, bucket) => { hitBucket.push(bucket); return { blocked: false }; },
@@ -135,6 +141,22 @@ const browser = (op, body, o) => call(op, body, { agent: false, ...(o || {}) });
   console.log("relay disabled without AGENT_TOKEN:", r.status === 503);
   r = await call("poll", {}, { e: { AGENT_TOKEN: "short" } });
   console.log("a short AGENT_TOKEN is refused:", r.status === 503);
+
+  console.log("\n=== Who may list, read, send, delete and scan (review #86) ===");
+  await call("poll", {});
+  const custom = (key, fns) => ({ key, name: key, rank: 10, locked: false, builtIn: false, permissions: { menus: {}, items: {}, fns } });
+  const asA = async (role, b) => { asRole = role; try { return (await browser("submit", b)).status; } finally { asRole = null; } };
+  const LIST = { type: "list", machineIp: "192.168.1.60", remoteDir: "/EMB" }, READ = { type: "read", machineIp: "192.168.1.60", fileName: "A.001" };
+  const runOnly = custom("runonly", { "run.runs": "edit" }), machinesOnly = custom("machinesonly", { "production.machines": "read" });
+  const filesRead = custom("filesread", { "production.machinefiles": "read" });
+  console.log("Machines-only read role can't read a file off a machine (403):", await asA(machinesOnly, READ) === 403);
+  console.log("…nor list a machine's files (403):", await asA(machinesOnly, LIST) === 403);
+  console.log("a run-only role can't read a file off a machine (403):", await asA(runOnly, READ) === 403);
+  console.log("…but still lists a machine's files (Run Order's Resend label):", await asA(runOnly, LIST) === 200);
+  console.log("Machine files read lists and reads:", await asA(filesRead, LIST) === 200 && await asA(filesRead, READ) === 200);
+  console.log("…but can't delete a machine's file (403):", await asA(filesRead, { type: "delete", machineIp: "192.168.1.60", fileName: "A.001" }) === 403);
+  console.log("the built-in Production role lists and reads:", await asA(R.DEFAULT_ROLES.production, LIST) === 200 && await asA(R.DEFAULT_ROLES.production, READ) === 200);
+  while ((await call("poll", {})).data.job) { /* drain what this section queued */ }
 
   console.log("\n=== Queue is bounded ===");
   await call("poll", {});

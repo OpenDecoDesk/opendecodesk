@@ -8,7 +8,7 @@
  *
  * setupStatus(env, settings) is pure: `env` is the Worker's environment, `settings` is what the
  * caller read from the database ({ business, salesTax, locale, …, migrations: the database updates it hasn't
- * had, from migrationCheck.js }). Each item is
+ * had, from migrationCheck.js; customDesign: whether a shown product takes the customer's own design }). Each item is
  *   { key, label, ready, level, affects, note }
  *     level:   "required" (the site doesn't work without it), "recommended" (something visible is
  *              missing), or "optional" (a service you may not want)
@@ -25,7 +25,7 @@ const MIN_AGENT_TOKEN = 32;
 
 export function setupStatus(env, settings) {
   env = env || {};
-  const { business = {}, salesTax = {}, locale = {}, payments = null, mailbox = null, migrations = null } = settings || {};
+  const { business = {}, salesTax = {}, locale = {}, payments = null, mailbox = null, migrations = null, customDesign = false } = settings || {};
   const items = [];
   const add = (key, label, level, ready, affects, note) => items.push({ key, label, level, ready: !!ready, affects, note: note || "" });
   // The database: bound, and (when the caller could tell — migrationCheck.js) with every migration this code needs.
@@ -96,6 +96,14 @@ export function setupStatus(env, settings) {
     "Refuses orders placed by scripts. Without it, order submission is only rate-limited.",
     tsSecret && tsSite ? "" : tsSecret ? "TURNSTILE_SECRET_KEY is set without TURNSTILE_SITE_KEY: the check can't be shown, so EVERY order is refused. Set the site key or remove the secret."
       : tsSite ? "TURNSTILE_SITE_KEY is set without TURNSTILE_SECRET_KEY, so the check is off." : "");
+
+  // A product that takes the customer's own design lets anyone on its shop page upload a file (customer-design.js).
+  // Without the bot check only the per-address and per-shop limits stand in front of storage: worth a nudge.
+  if (customDesign) {
+    add("turnstileUploads", "Bot check on customer design uploads", "recommended", tsSecret && tsSite,
+      "Refuses design uploads from scripts on products that take the customer's own design.",
+      tsSecret && tsSite ? "" : "A product takes the customer's own design, but the bot check (Turnstile) is off: uploads are only limited per address and per shop. Set TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY.");
+  }
 
   const team = set(env.ACCESS_TEAM_DOMAIN), aud = set(env.ACCESS_AUD);
   add("access", "Cloudflare Access for the admin", "optional", team && aud,

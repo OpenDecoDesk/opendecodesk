@@ -417,7 +417,7 @@ const NO_MONTH_ACTIONS = new Set([
   "ignoreStatementLine", "reconcileMonth", "unreconcileMonth", "saveShopRate", "closePeriod", "reopenPeriod",
   // Settings
   "saveGlobalSettingsAll", "updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "updateLocaleSettings", "updateSalesTaxSettings", "updateShipFromAddress",
-  "getAccountingSettings", "updateAccountingSettings", "updateMachineSettings", "updatePricingSettings", "updateRushSettings", "updateEmailSettings",
+  "updateAccountingSettings", "updateMachineSettings", "updatePricingSettings", "updateRushSettings", "updateEmailSettings",
   "sendSampleEmail", "sendTestEmail", "checkMailbox", "updateDigitalSettings", "getCloudflareSetup", "connectCloudflare", "backfillStripeFees",
   "saveVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks", "deleteVendorConnection", "deleteOrphanImages",
 ]);
@@ -3878,7 +3878,9 @@ async function handleOrdersPost_(context) {
       // Database updates this code needs that the database hasn't had (migrationCheck.js): the Database line says so.
       const pending = await safe(() => pendingMigrations(env.DB), null);
       const migrations = pending ? { pending, note: pendingMigrationsNote(pending) } : null;
-      const items = setupStatus(env, { business, salesTax, locale, payments: (global && global.enabledPayments) || null, mailbox, migrations });
+      // A shown product that takes the customer's own design: its shop page takes uploads from anyone (customer-design.js).
+      const customDesign = await safe(async () => !!(await env.DB.prepare("SELECT 1 AS x FROM products WHERE visible = 1 AND customDesign IS NOT NULL AND customDesign != '' LIMIT 1").first()), false);
+      const items = setupStatus(env, { business, salesTax, locale, payments: (global && global.enabledPayments) || null, mailbox, customDesign, migrations });
       return jsonResponse({ status: "ok", items, summary: setupSummary(items) });
     }
 
@@ -3972,14 +3974,17 @@ async function handleOrdersPost_(context) {
       return jsonResponse({ status: "ok", shopRate: shopRateView_(r), input: await getShopRate(env.DB), belowTarget: below });
     }
     if (body.action === "updatePricingSettings") {
+      // Fees, supplies and targets are costs: a Settings editor without Money, costs and margins can't see them,
+      // so can't change them either.
+      if (!can_("costs.view", "read")) return jsonResponse({ status: "error", code: "forbidden", section: "Pricing", message: "Your role can't change Pricing: it needs Money, costs and margins. Ask an admin." }, 403);
       let saved;
       try { saved = await setPricingSettings(env.DB, pricingInput_(body.pricing)); }
       catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
       audit({ orgId: null, orderId: null, action: "settings.pricing_set", detail: saved });
       // A new fee, supplies cost or target re-flags products straight away: say which are now below a target.
       const all = await analyzePricing(env.DB);
-      const below = all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems }));
-      return jsonResponse({ status: "ok", pricing: all.settings, belowTarget: below });
+      const below = belowFor_(all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems })));
+      return jsonResponse({ status: "ok", ...(seesPricing_() ? { pricing: all.settings } : {}), belowTarget: below });
     }
     // The analysis of one product (productId, optionally with the form's unsaved `draft`), one shop (org) or every shop.
     // What Run Order will do for a product (the product form's box), from planHoopings_ on made-up lines.
@@ -4312,6 +4317,8 @@ async function handleOrdersPost_(context) {
         if (offline) return jsonResponse({ status: "error", code: "desktop", section: label(offline), message: DESKTOP_REFUSED_MSG }, 403);
       }
       const refuse = (k, message, status = 400, extra = {}) => jsonResponse({ status: "error", ...extra, section: label(k), message }, status);
+      // Pricing is costs (fees, supplies, targets): only for a role with Money, costs and margins, as updatePricingSettings.
+      if (s.pricing != null && !can_("costs.view", "read")) return refuse("pricing", "Nothing was saved: your role can't change Pricing (it needs Money, costs and margins). Ask an admin.", 403, { code: "forbidden" });
       const bad = included.find(k => typeof s[k] !== "object" || Array.isArray(s[k]));
       if (bad) return refuse(bad, "That isn't a valid " + label(bad) + " section.");
       // Every section's build: what it checks is refused (userFacing) here, before anything is written.
@@ -4418,13 +4425,14 @@ async function handleOrdersPost_(context) {
       let belowTarget = [];
       if (builds.pricing || builds.salesTax) {
         const all = await analyzePricing(env.DB).catch(() => ({ products: [] }));
-        belowTarget = all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems }));
+        belowTarget = belowFor_(all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems })));
       }
       const saved = {};
       for (const k of included) saved[k] = v(k);
       if (builds.shipFrom) saved.shipFrom = v("shipFrom");
       if (saved.salesTax) saved.salesTax = { ...saved.salesTax, ratePercent: saved.salesTax.rateBps / 100 };
       if (saved.rush) saved.rush = { rule: rushRuleView(saved.rush.rule), taxable: saved.rush.taxable };
+      if (!seesPricing_()) delete saved.pricing;
       // A Region save also sends the time zone now in force (the Region's, else TIMEZONE, else UTC): the admin page
       // shows every date and "today" on it.
       const tz = builds.locale ? { effectiveTimeZone: await resolveTimeZone(env) } : {};
@@ -5789,12 +5797,17 @@ async function handleOrdersPost_(context) {
       audit({ orgId: body.org, orderId: body.orderId, action: "order.piece_manufactured",
         detail: { itemId: Number(body.itemId), orderComplete: !!res.orderComplete } });
       const machineId = Number(body.machineId) || 0;
+      // The piece is marked made either way; changing a machine's mounted hoop is the Machines screen's (Edit).
+      // Without it the hoop is left as it is and the answer says so.
+      let hoopIgnored = false;
       if (machineId && body.hoopId !== undefined) {
-        await setMachineHoop(env.DB, machineId, body.hoopId);
-        audit({ orgId: body.org, orderId: body.orderId, action: "machine.run_update",
-          detail: { machineId, hoopId: body.hoopId ?? null } });
+        if (can_("production.machines", "edit")) {
+          await setMachineHoop(env.DB, machineId, body.hoopId);
+          audit({ orgId: body.org, orderId: body.orderId, action: "machine.run_update",
+            detail: { machineId, hoopId: body.hoopId ?? null } });
+        } else hoopIgnored = true;
       }
-      return jsonResponse({ status: "ok", orderComplete: !!res.orderComplete });
+      return jsonResponse({ status: "ok", orderComplete: !!res.orderComplete, ...(hoopIgnored ? { hoopIgnored: true } : {}) });
     }
 
     // ---- Run tracking (migrations/0030) -----------------------------------
@@ -6798,6 +6811,13 @@ async function handleOrdersPost_(context) {
       const t = actionTime({ at: raw });
       if (t.error) return jsonResponse({ status: "error", message: `${NAMES[col]}: ${t.error}` }, 400);
       if (t.at !== order[col]) changes[col] = t.at;
+    }
+    // A step's date belongs to the half of the steps it is in, as moving the step does (stageDenied_): Edit on
+    // order details opens this window, but changing when it shipped needs the later steps. The order date is the order's own.
+    for (const col of Object.keys(changes)) {
+      if (col === "placedAt") continue;
+      const no = stageDenied_(col.replace(/At$/, ""));
+      if (no) return no;
     }
     let dueChange;
     if ("dueDate" in body) {

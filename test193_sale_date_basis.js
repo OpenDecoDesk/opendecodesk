@@ -134,6 +134,7 @@ const from = (d) => d + "T00:00:00.000Z", to = (d) => d + "T23:59:59.999Z";
 
   const src = read("functions/api/orders.js");
   const list = (name) => (src.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`)) || [])[1] || "";
-  console.log("only an admin can read or change it:", lowest("updateAccountingSettings") === "admin" && lowest("getAccountingSettings") === "admin" && list("ADMIN_ONLY_ACTIONS") === "");
+  // Reading it is Global settings' read level, as every other section of the page (review #78); changing it is an admin's.
+  console.log("only an admin can change it; anyone who can see Global settings can read it:", lowest("updateAccountingSettings") === "admin" && lowest("getAccountingSettings") === lowest("getGlobalSettings") && list("ADMIN_ONLY_ACTIONS") === "");
   console.log("…and it isn't behind a feature switch — Home and the reports use it whatever is switched on:", !/"getAccountingSettings"/.test((src.match(/const FEATURE_ACTIONS = \{([\s\S]*?)\n\};/) || [])[1] || "x"));
 })().catch(e => { console.log("test193 crashed:", false); console.error(e); process.exit(1); });

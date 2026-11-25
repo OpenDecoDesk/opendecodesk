@@ -58,16 +58,31 @@ export const DESIGN_KEY_RE = /^((designs|order-files)\/[a-z0-9-]+|digital\/[a-z0
 // A digital product's files (migrations/0086): any embroidery format, and PDFs and zip bundles (a design in several
 // formats, instructions).
 const DIGITAL_EXTRA_EXTS = new Set(["pdf", "zip"]);
+// Who may open a link to each family of files (functions/_lib/permissions.js). Design files are for anyone who
+// sees designs, orders or the production queues (Run Order shows them); an order's own files for the order and
+// production screens; a digital product's files for the product-files and downloads screens.
+const DESIGN_VIEW_NEEDS = [["catalog.designs", "read"], ["orders.details", "read"], ["run.queue", "read"], ["transfer.queue", "read"], ["production.machinefiles", "read"]];
+const VIEW_NEEDS_BY_PREFIX = {
+  "designs/": DESIGN_VIEW_NEEDS,
+  "order-files/": [["orders.details", "read"], ["run.queue", "read"], ["transfer.queue", "read"], ["production.machinefiles", "read"]],
+  "digital/": [["catalog.productFiles", "read"], ["orders.downloads", "read"]],
+};
+function mayView_(request, key) {
+  // No role on the request means a test's stand-in for the admin gate (as mayUpload below).
+  if (!(typeof adminUser === "function" && (adminUser(request) || {}).roleInfo)) return true;
+  const prefix = Object.keys(VIEW_NEEDS_BY_PREFIX).find(p => key.startsWith(p));
+  return !!prefix && VIEW_NEEDS_BY_PREFIX[prefix].some(([fn, level]) => adminCan(request, fn, level));
+}
 const keyPart_ = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60) || "x";
 
 export async function onRequestPost({ request, env }) {
   const url = new URL(request.url);
   const contentType = (request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
 
-  // Design files and an order's own files (functions/_lib/permissions.js). Looking at one is for anyone who sees
-  // designs, orders or the production queues (Run Order shows them); uploading needs Edit, checked below.
+  // Design files, an order's own files and a digital product's files (functions/_lib/permissions.js). Looking at one
+  // is for a role that sees that kind of file (VIEW_NEEDS_BY_PREFIX, checked below); uploading needs Edit, checked below.
   const denied = await requireAdmin(env, classifyHost(url.hostname, null, env), request.headers.get("X-Admin-Key"), request, "Not available here.",
-    [["catalog.designs", "read"], ["orders.details", "read"], ["run.queue", "read"], ["transfer.queue", "read"], ["production.machinefiles", "read"]]);
+    [...DESIGN_VIEW_NEEDS, ["catalog.productFiles", "read"], ["orders.downloads", "read"]]);
   if (denied) return denied;
   if (!env.DESIGNS) return jsonResponse({ status: "error", message: "Design storage isn't set up (DESIGNS bucket binding)." }, 500);
   // Global settings → Features → Production switched off: embroidery design files (a design
@@ -81,6 +96,9 @@ export async function onRequestPost({ request, env }) {
     try { body = await request.json(); } catch { return jsonResponse({ status: "error", message: "Invalid JSON" }, 400); }
     const key = String((body && body.key) || "");
     if (!DESIGN_KEY_RE.test(key)) return jsonResponse({ status: "error", message: "Invalid file reference" }, 400);
+    // Each family of files has its own readers: passing the gate above for one family (say, digital product
+    // files) mustn't sign a link to another (an order's customer photos).
+    if (!mayView_(request, key)) return jsonResponse({ status: "error", message: "Your role can't do this. Ask an admin." }, 403);
     if (productionOff && key.startsWith("designs/")) return featureOffResponse("production", "Production");
     const secret = linkSecret(env);
     if (!secret) return jsonResponse({ status: "error", message: "No signing secret configured" }, 500);

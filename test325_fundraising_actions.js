@@ -244,6 +244,13 @@ const ordersJs = read("functions/api/orders.js");
     ok("if the catalog's cache can't be cleared, the fundraiser is still saved and audited, and the failure is logged, not answered",
       failed.status === 200 && same(failed.body, { status: "ok", fundraiser: pct }) && failed.rows.length === 1 && failed.bumped === 1 &&
       orgRow("acme").fundraiserJson !== "" && logs.some(l => l.includes("catalog version bump failed")));
+
+    const lo = await call({ action: "listOrgs" }, admin);
+    const label = (id) => { const o = ((lo.body && lo.body.orgs) || []).find(x => x.orgId === id); return o ? o.fundraiserLabel : undefined; };
+    ok("listOrgs answers each shop's fundraiserLabel: who its fundraiser supports (Example Club → \"Example Boosters\")",
+      lo.status === 200 && label("acme") === "Example Boosters");
+    ok("…and \"\" for a shop with none", label("band") === "" && label("blank") === "");
+    ok("…and no fundraiser amounts (only the label)", ((lo.body && lo.body.orgs) || []).every(o => !("fundraiser" in o) && keys(o) === "fundraiserLabel,name,orgId,subdomain"));
   }
 
   // Orders under test, priced with Example Club's 10% fundraiser (set above): O-1 two caps at $20, shipped; O-2 one cap,

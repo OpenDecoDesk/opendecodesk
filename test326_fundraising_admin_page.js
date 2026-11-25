@@ -786,6 +786,21 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
     w.orderFundraiserText_({ fundraiserRaised: -1, orgId: "club" }) === "" && w.orderFundraiserText_({ orgId: "club" }) === "" && w.orderFundraiserText_(null, "club") === "" && w.orderFundraiserPill_({ orgId: "club" }) === "");
   ok("the group's name is escaped in the pill", /Raises \$6\.00 for &lt;i&gt;Band&lt;\/i&gt; &amp; Parents/.test(w.orderFundraiserPill_({ fundraiserRaised: 6, orgId: "band" })) &&
     !(() => { const b = d.createElement("div"); b.innerHTML = w.orderFundraiserPill_({ fundraiserRaised: 6, orgId: "band" }); return b.querySelector("i"); })());
+  { // An Orders page opened before any catalog page: no shop registry, only the session's shop list (listOrgs).
+    const keepReg = w._adminOrgRegistry;
+    const listed = (await call({ action: "listOrgs" })).body.orgs;
+    ok("(listOrgs gives the page each shop's fundraiserLabel)", listed.find(o => o.orgId === "club").fundraiserLabel === "Example Boosters");
+    w.eval("window._adminOrgRegistry = null; adminOrgs = " + JSON.stringify(listed) + ";");
+    app.innerHTML = "";
+    w.adminRoute(); await wait(() => pillsOf("CLUB-1").length > 0, 1500); await idle();
+    ok("with no shop registry loaded, the pill still names the group from listOrgs: “Raises $4.00 for Example Boosters”",
+      w._adminOrgRegistry == null && pillsOf("CLUB-1").length > 0 && pillsOf("CLUB-1").every(p => p.textContent === "Raises $4.00 for Example Boosters"));
+    const pm = w.showPaymentsModal("club", "CLUB-1");
+    await wait(() => !!q("#pmContent"));
+    ok("…and so does the Payments window's line",
+      w._adminOrgRegistry == null && text(q("#pmContent tr.pm-fundraiser")) === "Raises $4.00 for Example Boosters (inside the price)");
+    q("#pmCloseBottom").click(); await pm;
+    w.eval("window._adminOrgRegistry = " + JSON.stringify(keepReg) + "; adminOrgs = " + JSON.stringify(shopList) + ";"); }
   ok("(the pill has its own style: .fundraiser-pill)", /\.fundraiser-pill\{[^}]*display:inline-block/.test(read("public/admin.css")));
 
   // ==============================================================================================================

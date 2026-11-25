@@ -265,6 +265,15 @@ const PER = (amount, extra = {}) => ({ mode: "perPiece", amount, label: "Example
   await lib.setOrgFundraiser(pd, "club", null);
   ok("ending it shows at once on the storefront's shop, though the published copy had one",
     (await lib.getPublicCatalogShop(pd, "club")).fundraiser === null && (await lib.getPublicCatalogData(pd)).orgs.club.fundraiser === null);
+  { const pub = await lib.getPublishedOrg(pd, "club");
+    ok("getPublishedOrg for a published shop carries no fundraiser at all, so not the published copy's (since ended)",
+      !!pub && pub.name === "Example Club" && !("fundraiser" in pub));
+    const pubW = await lib.getPublishedOrg(pd, "works");
+    ok("…nor for a shop published without one that has one now", !!pubW && !("fundraiser" in pubW)); }
+  { const np = await makeDb();
+    await lib.setOrgFundraiser(np, "club", PCT(10, { showOnShop: true }));
+    ok("getPublishedOrg for a shop never published still carries the live fundraiser",
+      same((await lib.getPublishedOrg(np, "club")).fundraiser, { mode: "percent", percent: 10, label: "Example Boosters", showOnShop: true })); }
   ok("an unknown shop is still no shop", (await lib.getPublicCatalogShop(pd, "nowhere")) === null && (await lib.getPublicCatalogShop(pd, "")) === null);
 
   say("Discard puts back the other settings and leaves the fundraiser");

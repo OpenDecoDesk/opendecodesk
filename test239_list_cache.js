@@ -87,7 +87,7 @@ function countQueries(d1) {
   ok("getBlanks stockOnly keeps its shape: each blank's id and its sizes' stock", JSON.stringify(Object.keys(stock.body.blanks[0])) === '["id","sizes"]' && stock.body.blanks[0].sizes[0].quantity === 7);
   ok("…and is 'unchanged' too when its version is current", (await call({ action: "getBlanks", stockOnly: true, cacheVersion: stock.body.version })).body.unchanged === true);
   const orgsShort = await call({ action: "listOrgs" });
-  ok("listOrgs keeps its short shape (orgId, name, subdomain); listOrgsAdmin has the whole shop", JSON.stringify(Object.keys(orgsShort.body.orgs[0])) === '["orgId","name","subdomain"]' &&
+  ok("listOrgs keeps its short shape (orgId, name, subdomain, and who its fundraiser supports); listOrgsAdmin has the whole shop", JSON.stringify(Object.keys(orgsShort.body.orgs[0])) === '["orgId","name","subdomain","fundraiserLabel"]' &&
     "deliveryOptions" in (await call({ action: "listOrgsAdmin" })).body.orgs[0]);
   const fullUnchanged = await call({ action: "getBlanks", cacheVersion: version("blanks") });
   ok("the full getBlanks still works out reservations, price checks, product uses and low stock when the list is unchanged",

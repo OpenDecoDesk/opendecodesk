@@ -14,13 +14,19 @@ const strip = (src) => src
 const dbSrc = strip(read("functions/_lib/db.js"));
 const lib = new Function(dbSrc + `\nreturn { insertOrder, getOrderById, createHoop, createThread, saveDesign, addDesignVersion,
   setProductDesign, createProduct, setBlankLink, createBlank, saveMachine, getMachine, getProductionQueue };`)();
+// The sign-in gate is stubbed; with `as.role` set (a built-in role, functions/_lib/permissions.js) the action's own
+// checks (adminCan) follow that role's real rules.
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
+  strip(read("functions/_lib/permissions.js")) + "\n" +
+  "const __as = { role: null };\n" +
+  "const adminUser = () => __as.role ? { id: 7, role: __as.role.key, roleInfo: __as.role } : null;\n" +
+  "const adminCan = (request, fn, level) => !__as.role || permRank(effectiveLevel(__as.role, fn)) >= permRank(level || 'read');\n" +
   "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +
   "const sendOrderReceivedEmail = async () => false, sendOrderNotificationEmail = async () => false, sendPaymentConfirmedEmail = async () => false, sendCancellationEmail = async () => false, sendDesignVerificationEmail = async () => false, sendShippingPaymentEmail = async () => false;\n" +
-  dbSrc + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")();
+  dbSrc + "\n" + strip(read("functions/api/orders.js")) + "\nconst post = onRequestPost; post.as = __as; post.roles = DEFAULT_ROLES; return post;")();
 
 (async () => {
   const d1 = await createD1();
@@ -122,6 +128,25 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   r = await call({ action: "markManufacturedOnMachine", org: "acme", orderId: "READY2", itemId: ready2ItemId, machineId: null, hoopId: null });
   console.log("succeeds with no machine chosen and completes after all pieces:",
     r.status === 200 && r.body.orderComplete === true && !!(await lib.getOrderById(d1, "READY2")).manufacturedAt);
+
+  console.log("\n=== Real admin API: the hoop changes only with Machines edit (review #90) ===");
+  // Production marks pieces made (run.markMade) but only reads the Machines screen: the piece is marked, the
+  // machine's mounted hoop is left alone, and the answer says so.
+  await order("READY3", { paid: 1, blankReceivedAt: "2026-07-05T00:00:00Z", designApprovedAt: "2026-07-06T00:00:00Z" });
+  const ready3ItemId = Number((await d1.prepare("SELECT id FROM order_items WHERE orderId='READY3'").first()).id);
+  const hoopBefore = (await lib.getMachine(d1, machine1)).currentHoopId;
+  api.as.role = api.roles.production;
+  r = await call({ action: "markManufacturedOnMachine", org: "acme", orderId: "READY3", itemId: ready3ItemId, machineId: machine1, hoopId: capHoop });
+  api.as.role = null;
+  console.log("Production: the piece is still marked made:", r.status === 200 && Number((await d1.prepare("SELECT manufacturedQty FROM order_items WHERE id=?").bind(ready3ItemId).first()).manufacturedQty) === 1);
+  console.log("…the answer says the hoop was left alone (hoopIgnored):", r.body.hoopIgnored === true);
+  console.log("…and the machine's hoop is unchanged, with no machine.run_update audit:", (await lib.getMachine(d1, machine1)).currentHoopId === hoopBefore &&
+    Number((await d1.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='machine.run_update' AND orderId='READY3'").first()).n) === 0);
+  api.as.role = api.roles.staff;
+  r = await call({ action: "markManufacturedOnMachine", org: "acme", orderId: "READY3", itemId: ready3ItemId, machineId: machine1, hoopId: capHoop });
+  api.as.role = null;
+  console.log("Back office (Machines edit): the hoop is brought up to date, no hoopIgnored:", r.status === 200 && r.body.hoopIgnored === undefined &&
+    (await lib.getMachine(d1, machine1)).currentHoopId === capHoop);
 
   console.log("\n=== Client-side pure functions: hoopChangeCost_ / needleReadiness_ / proposeMachine_ ===");
   const adminJs = read("public/admin.js");

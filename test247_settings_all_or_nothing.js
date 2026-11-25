@@ -195,9 +195,29 @@ const role = (key, fns) => ({ key, name: key, rank: 10, locked: false, builtIn: 
     const noPricing = { ...s }; delete noPricing.pricing;
     r = await call({ action: "saveGlobalSettingsAll", settings: noPricing }, editor);
     ok("…the same role saves the sections it may change", r.status === 200 && (await api.lib.getBusinessProfile(d1)).name === "Role test");
-    r = await call({ action: "saveGlobalSettingsAll", settings: s }, role("both", { "settings.global": "edit", "finance.shoprate": "edit" }));
+    r = await call({ action: "saveGlobalSettingsAll", settings: s }, role("both", { "settings.global": "edit", "finance.shoprate": "edit", "costs.view": "read" }));
     ok("…and a role with both saves everything", r.status === 200);
     api.ACTION_PERM.updatePricingSettings = keep;
+
+    // Pricing is costs (review #88): a Settings editor without Money, costs and margins (costs.view) can't change it,
+    // in the one save or on its own, and isn't told the products below a target.
+    const priced = role("priced", { "settings.global": "edit", "costs.view": "read" });
+    await call({ action: "updatePricingSettings", pricing: { cardPct: "2.9", cardFixed: "0.30", supplies: "0", targetHourly: "", targetIncome: "500" } });
+    const withPricing = { pricing: { cardPct: "2.5", cardFixed: "0.25", supplies: "0", targetHourly: "", targetIncome: "500" }, business: { name: "Costs test" } };
+    before = snapshot();
+    r = await call({ action: "saveGlobalSettingsAll", settings: withPricing }, editor);
+    ok("Global settings edit without costs.view: a save with Pricing is refused, naming it, nothing saved", r.status === 403 && r.body.code === "forbidden" && r.body.section === "Pricing" &&
+      snapshot() === before && (await api.lib.getPricingSettings(d1)).cardPctBps === 290);
+    r = await call({ action: "updatePricingSettings", pricing: withPricing.pricing }, editor);
+    ok("…and so is updatePricingSettings, naming Pricing", r.status === 403 && /Pricing/.test(r.body.message) && (await api.lib.getPricingSettings(d1)).cardPctBps === 290);
+    r = await call({ action: "saveGlobalSettingsAll", settings: { salesTax: { ratePercent: 7, jurisdiction: "oh" } } }, editor);
+    ok("…its other saves go through, without the costs: no below-target list, no pricing", r.status === 200 && Array.isArray(r.body.belowTarget) && r.body.belowTarget.length === 0 && !("pricing" in r.body.settings));
+    r = await call({ action: "saveGlobalSettingsAll", settings: { salesTax: { ratePercent: 7.25, jurisdiction: "oh" } } }, priced);
+    ok("a role with costs.view hears which products are below a target", r.status === 200 && r.body.belowTarget.some(p => p.productId === "tee"));
+    r = await call({ action: "saveGlobalSettingsAll", settings: withPricing }, priced);
+    ok("…and saves Pricing, getting it back", r.status === 200 && r.body.settings.pricing && (await api.lib.getPricingSettings(d1)).cardPctBps === 250);
+    r = await call({ action: "updatePricingSettings", pricing: { cardPct: "2.9", cardFixed: "0.30", supplies: "0", targetHourly: "", targetIncome: "" } }, priced);
+    ok("…on its own too", r.status === 200 && !!r.body.pricing && (await api.lib.getPricingSettings(d1)).cardPctBps === 290);
     ok("it is listed with Global settings' edit actions, and as touching no month's numbers", JSON.stringify(api.ACTION_PERM.saveGlobalSettingsAll) === JSON.stringify([["settings.global", "edit"]]) &&
       api.NO_MONTH_ACTIONS.has("saveGlobalSettingsAll") && api.CATALOG_ADMIN_ACTIONS.has("saveGlobalSettingsAll"));
   }

@@ -70,7 +70,7 @@ const P = new Function(read("functions/_lib/permissions.js").replace(/export (as
   // Every API file is either open to the public on purpose, or names what it needs.
   const PUBLIC = ["admin-session", "catalog", "checkout", "customer-design", "daily-digest", "download", "image-proxy", "invoice", "shipping", "stripe-webhook", "upload-verify", "verify"];
   const NEEDS = { "orders": /ACTION_PERM_\[body\.action\]/, "admin-users": /\n\s*need, self \? \{ pending/, "admin-2fa": /"staff", \{ pending: \["2fa"\] \}/, "admin-password": /"staff", \{ pending: \["account", "password"\] \}/,
-    "agent": /\[\["production\./, "design": /\[\["catalog\./, "receipt": /\[\["finance\.expenses", "edit"\]/, "shippo-label": /\[\["orders\.shipping", "edit"\]\]$/, "upload": /\[\["catalog\.products", "edit"\]/ };
+    "agent": /\[\["production\./, "design": /\[\.\.\.DESIGN_VIEW_NEEDS, |\[\["catalog\./, "receipt": /\[\["finance\.expenses", "read"\]/, "shippo-label": /\[\["orders\.shipping", "edit"\]\]$/, "upload": /\[\["catalog\.products", "edit"\]/ };
   const files = fs.readdirSync(__dirname + "/functions/api").filter(f => f.endsWith(".js")).map(f => f.replace(/\.js$/, ""));
   const loose = files.filter(f => { const src = read("functions/api/" + f + ".js"), calls = [...src.matchAll(/await requireAdmin\(([\s\S]*?)\);/g)].map(m => m[1]);
     return PUBLIC.includes(f) ? calls.length > 0 : !(NEEDS[f] && calls.length > 0 && calls.every(a => NEEDS[f].test(a))); });

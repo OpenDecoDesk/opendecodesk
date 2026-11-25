@@ -36,10 +36,13 @@ const api = new Function(hostSrc + "\n" + httpSrc + "\n" + strip(read("functions
   "const sendOrderReceivedEmail = async () => false, sendPaymentConfirmedEmail = async () => false, sendCancellationEmail = async () => false, sendDesignVerificationEmail = async () => false, sendShippingPaymentEmail = async () => false, sendShippedEmail = async () => false;\n" +
   "const ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({ configured: false });\n" +
   dbSrc + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")();
-// The upload endpoint, with the rate limit and the bot check under the test's control.
-const gate = { blocked: false, bot: true };
+// The upload endpoint, with the rate limits and the bot check under the test's control. The 48-hour limit per
+// address counts in gate.hits (a check reads it; a stored upload adds one).
+const gate = { blocked: false, bot: true, hits: {}, windows: {} };
 const upload = new Function("gate", hostSrc + "\n" + httpSrc + "\n" + strip(read("functions/_lib/fileUpload.js")) + "\n" + strip(read("functions/_lib/imageInfo.js")) + "\n" + dbSrc + "\n" +
   "const rateLimited = async () => ({ blocked: gate.blocked, retryAfter: 30 }); const rateLimitResponse = (s) => new Response('{\"status\":\"error\"}', { status: 429 });\n" +
+  "const rateLimitCheck = async (env, bucket, request, limit, win) => { gate.windows[bucket] = win; return { blocked: (gate.hits[bucket] || 0) >= limit, retryAfter: 60 }; };\n" +
+  "const rateLimitHit = async (env, bucket, request, win) => { gate.windows[bucket] = win; gate.hits[bucket] = (gate.hits[bucket] || 0) + 1; };\n" +
   "const verifyTurnstile = async (env, token) => gate.bot && token === 'tok' ? { ok: true } : { ok: false, message: 'Bot check failed' };\n" +
   "const getCatalogData = async () => ({ subdomainMap: " + JSON.stringify(SUBS) + ", orgs: {}, features: {} });\n" +
   strip(read("functions/api/customer-design.js")) + "\nreturn { post: onRequestPost, cleanUp: cleanUpCustomerDesigns };")(gate);
@@ -144,6 +147,33 @@ const bucket = () => { const m = new Map(); const o = { m, deletes: 0, put: asyn
   ok("refused: the whole site is over 2 GB in 48 hours", (await post(good)).status === 503);
   d1._raw.run("DELETE FROM customer_design_uploads");
   ok("nothing refused was stored", R2.m.size === 0 && d1.q("SELECT count(*) n FROM customer_design_uploads")[0].n === 0);
+  ok("…and no refused upload counted toward the address's 48 hours", !gate.hits.customer_design_48h);
+
+  // The upload caps (review #87): 20 an address in 48 hours, 500 MB a shop, 2 GB the site — counting only
+  // uploads no order has taken yet (the ones the clean-up would delete).
+  const big = (orgId, n, key) => d1._raw.run("INSERT INTO customer_design_uploads (id, orgId, productId, fileKey, fileName, fileExt, contentType, bytes, width, height, createdAt) VALUES ('f'||hex(randomblob(15)), ?, 'logo-tee', ?, 'x', 'png', 'image/png', ?, 1, 1, ?)",
+    [orgId, key || "order-files/pending/" + Math.random().toString(16).slice(2) + ".png", n, new Date().toISOString()]);
+  const resetCaps = () => { d1._raw.run("DELETE FROM customer_design_uploads"); d1._raw.run("PRAGMA foreign_keys=OFF"); d1._raw.run("DELETE FROM order_item_files WHERE itemId = 999999"); d1._raw.run("PRAGMA foreign_keys=ON"); R2.m.clear(); gate.hits = {}; };
+  gate.hits.customer_design_48h = 20;
+  ok("refused: an address that has stored 20 in 48 hours (429)", (await post(good)).status === 429 && R2.m.size === 0);
+  gate.hits.customer_design_48h = 19;
+  ok("the 20th is taken, and counted on a 48-hour window", (await post(good)).status === 200 && gate.hits.customer_design_48h === 20 && gate.windows.customer_design_48h === 48 * 3600);
+  resetCaps();
+  big("league", 500 * 1024 * 1024);
+  ok("refused: this shop is over 500 MB of unattached uploads in 48 hours", (await post(good)).status === 503 && R2.m.size === 0);
+  resetCaps();
+  big("other", 500 * 1024 * 1024);
+  ok("another shop's 500 MB doesn't pause this one", (await post(good)).status === 200);
+  resetCaps();
+  // 2 GB that are already on orders: kept files, not a flood — they count toward neither cap.
+  d1._raw.run("PRAGMA foreign_keys=OFF");
+  for (const [i, k] of ["order-files/pending/" + "a".repeat(32) + ".png", "order-files/pending/" + "b".repeat(32) + ".png"].entries()) {
+    big(i ? "other" : "league", 1024 * 1024 * 1024, k);
+    d1._raw.run("INSERT INTO order_item_files (itemId, fileKey, fileName, fileExt, uploadedBy, createdAt) VALUES (999999, ?, 'x.png', 'png', 'customer', ?)", [k, new Date().toISOString()]);
+  }
+  d1._raw.run("PRAGMA foreign_keys=ON");
+  ok("uploads already on an order count toward neither cap", (await post(good)).status === 200);
+  resetCaps();
   r = await post(good);
   const up1 = r.body.uploadId;
   const row1 = d1.q("SELECT * FROM customer_design_uploads WHERE id=?", up1)[0];

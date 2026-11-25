@@ -136,9 +136,12 @@ export async function onRequestPost({ request, env }){
     return jsonResponse({ status: "ok", online: !!p, lastSeenSec: p ? p.lastSeenSec : null, agentIp: p ? p.agentIp || "" : "" });
   }
   if(op === "submit"){
-    // Looking (list, read) needs only the gate above. Sending a design writes a file onto the machine: part of a run,
-    // or Edit on Machine files. Deleting a machine's file or scanning for machines needs more. Any one listed is enough.
-    const roleNeed = { send: [["run.runs", "edit"], ["production.machinefiles", "edit"]],
+    // Reading a file off a machine is Machine files' (the gate above also lets in Machines and run-only roles).
+    // Listing a machine's files is too, and part of a run: Run Order's Resend label names the file already there.
+    // Sending a design writes a file onto the machine: part of a run, or Edit on Machine files. Deleting a machine's
+    // file or scanning for machines needs more. Any one listed is enough.
+    const roleNeed = { read: [["production.machinefiles", "read"]], list: [["production.machinefiles", "read"], ["run.runs", "edit"]],
+      send: [["run.runs", "edit"], ["production.machinefiles", "edit"]],
       delete: [["production.machinefiles", "full"]], discover: [["production.machines", "edit"]] }[String(body.type || "")];
     if(roleNeed && typeof adminUser === "function" && (adminUser(request) || {}).roleInfo && !roleNeed.some(([fn, lvl]) => adminCan(request, fn, lvl)))
       return err("Your role can't do this. Ask an admin.", 403);

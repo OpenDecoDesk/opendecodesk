@@ -20,7 +20,7 @@
 //     in 60 s; never cached; images get a locked-down CSP).
 
 import { classifyHost } from "../_lib/hostConfig.js";
-import { requireAdmin, timingSafeEqual } from "../_lib/adminAuth.js";
+import { requireAdmin, timingSafeEqual, adminUser, adminCan } from "../_lib/adminAuth.js";
 import { jsonResponse, featureOffResponse, featureIsOff } from "../_lib/http.js";
 import { readBodyWithLimit, hasValidMagicBytes } from "../_lib/fileUpload.js";
 
@@ -34,8 +34,11 @@ export async function onRequestPost({ request, env }) {
   const url = new URL(request.url);
   const contentType = (request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
 
-  // Receipts belong to expenses, money entries and payments (functions/_lib/permissions.js).
-  const denied = await requireAdmin(env, classifyHost(url.hostname, null, env), request.headers.get("X-Admin-Key"), request, "Not available here.", [["finance.expenses", "edit"], ["finance.money", "edit"], ["orders.payments", "edit"]]);
+  // Receipts belong to expenses, money entries and payments (functions/_lib/permissions.js). Looking at one is for
+  // anyone who can see a screen that shows a receipt's View button (expenses, money, the account viewer, payments,
+  // brand approvals, blank stock movements); uploading one needs Edit on expenses, money or payments, checked below.
+  const denied = await requireAdmin(env, classifyHost(url.hostname, null, env), request.headers.get("X-Admin-Key"), request, "Not available here.",
+    [["finance.expenses", "read"], ["finance.money", "read"], ["finance.accountviewer", "read"], ["orders.payments", "read"], ["catalog.brandApprovals", "read"], ["inventory.blanks", "read"]]);
   if (denied) return denied;
   // Global settings → Features → Bookkeeping switched off: no receipt uploads or links.
   if (await featureIsOff(env, "bookkeeping")) return featureOffResponse("bookkeeping", "Bookkeeping");
@@ -54,7 +57,11 @@ export async function onRequestPost({ request, env }) {
     return jsonResponse({ status: "ok", url: `/api/receipt?key=${encodeURIComponent(key)}&exp=${exp}&sig=${sig}` });
   }
 
-  // ---- Upload ----
+  // ---- Upload ---- (a read-only role can open receipts but not add one; no role on the request means a
+  // test's stand-in for the admin gate, as in design.js)
+  const mayUpload = !(typeof adminUser === "function" && (adminUser(request) || {}).roleInfo) ||
+    adminCan(request, "finance.expenses", "edit") || adminCan(request, "finance.money", "edit") || adminCan(request, "orders.payments", "edit");
+  if (!mayUpload) return jsonResponse({ status: "error", message: "Your role can't do this. Ask an admin." }, 403);
   const ext = TYPES[contentType];
   if (!ext) return jsonResponse({ status: "error", message: "Receipts must be a JPEG, PNG, WebP image or a PDF." }, 400);
   let result;

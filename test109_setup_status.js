@@ -76,6 +76,11 @@ const FULL_SETTINGS = { business: { name: "Thread & Needle", ownerEmail: "owner@
     /not recorded/.test(st({ STRIPE_SECRET_KEY: "k" }).stripe.note) && st({}).stripe.note === "");
   ok("Turnstile: both keys; the secret alone warns that EVERY order is refused; the site key alone that it's off", st({ TURNSTILE_SECRET_KEY: "s", TURNSTILE_SITE_KEY: "k" }).turnstile.ready &&
     /EVERY order is refused/.test(st({ TURNSTILE_SECRET_KEY: "s" }).turnstile.note) && /check is off/.test(st({ TURNSTILE_SITE_KEY: "k" }).turnstile.note));
+  // A product that takes the customer's own design (review #87): the bot check on its uploads is recommended.
+  const tsUp = (env, cd) => lib.setupStatus(env, { customDesign: cd }).find(i => i.key === "turnstileUploads");
+  ok("customer design uploads without Turnstile: a recommended item that says uploads are only limited", !!tsUp({}, true) && !tsUp({}, true).ready && tsUp({}, true).level === "recommended" &&
+    /only limited per address and per shop/.test(tsUp({}, true).note) && !tsUp({ TURNSTILE_SITE_KEY: "k" }, true).ready);
+  ok("…ready with both Turnstile keys, and not listed at all when no product takes a design", tsUp({ TURNSTILE_SECRET_KEY: "s", TURNSTILE_SITE_KEY: "k" }, true).ready && !tsUp({}, false) && !tsUp({}));
   ok("Access: both values, or it isn't checked", st({ ACCESS_TEAM_DOMAIN: "t", ACCESS_AUD: "a" }).access.ready && /not being checked/.test(st({ ACCESS_AUD: "a" }).access.note) &&
     /env\.ACCESS_TEAM_DOMAIN && env\.ACCESS_AUD/.test(read("functions/_lib/access.js")));
   ok("automatic hostnames: the token, both ids and the Worker's name", st({ CF_API_TOKEN: "t", CF_ACCOUNT_ID: "a", CF_ZONE_ID: "z", CF_WORKER_NAME: "w" }).customDomains.ready &&
@@ -111,6 +116,13 @@ const FULL_SETTINGS = { business: { name: "Thread & Needle", ownerEmail: "owner@
   body = JSON.parse((await post("admin", { action: "getSetupStatus", key: "x" })).text); s = by(body.items);
   ok("filling in the business profile, the tax rate and the region turns those three ready", s.business.ready && s.salesTax.ready && s.timeZone.ready && body.summary.recommended === 2 && !s.paymentDetails.ready);
   ok("…while the payment details on emails still name what's missing: where to mail a check, Venmo, Zelle, a contact", /Mail checks to/.test(s.paymentDetails.note) && /Venmo/.test(s.paymentDetails.note) && /Zelle/.test(s.paymentDetails.note) && /contact/.test(s.paymentDetails.note));
+  d1._raw.exec(`INSERT INTO products (productId, orgId, type, name, pricingMode, createdAt, updatedAt, visible, customDesign) VALUES ('own','acme','Tee','Your design','flat','t','t',0,'transfer');`);
+  body = JSON.parse((await post("admin", { action: "getSetupStatus", key: "x" })).text); s = by(body.items);
+  ok("a hidden product that takes the customer's design doesn't list the upload bot check", !s.turnstileUploads && body.items.length === 18);
+  d1._raw.exec(`UPDATE products SET visible = 1 WHERE productId = 'own'`);
+  body = JSON.parse((await post("admin", { action: "getSetupStatus", key: "x" })).text); s = by(body.items);
+  ok("a shown one does, not ready while Turnstile is half set up, and counted as recommended", !!s.turnstileUploads && !s.turnstileUploads.ready && body.summary.recommended === 3);
+  d1._raw.exec(`DELETE FROM products WHERE productId = 'own'`);
   ok("the owner's email saved in the profile is not echoed back", !/owner@myshop\.com/.test(JSON.stringify(body)));
   const brokenEnv = { ...env, DB: { prepare(){ throw new Error("D1 is down"); } } };
   ok("it is an ordinary admin action: listed with the catalog-admin actions, and not behind any feature switch", /"getSetupStatus"/.test(read("functions/api/orders.js").match(/const CATALOG_ADMIN_ACTIONS = new Set\(\[([\s\S]*?)\]\);/)[1]) &&

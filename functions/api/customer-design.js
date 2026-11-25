@@ -14,11 +14,11 @@
  *   → {status:"ok", uploadId, width, height}
  *
  * Checks, in order: a shop's own address (never the admin or an unknown host); 10 uploads a minute
- * per address; the shop is open and the product is shown and takes a customer's design; the bot
- * check; the type, at most 10 MB, and bytes that really are that type; the pixel size read from the
- * header (functions/_lib/imageInfo.js) — at least 500 px on the long side so it can be reproduced,
- * at most 10,000 px on either side so it can't be an image bomb; and a cap of 2 GB uploaded across
- * the whole site in the last 48 hours.
+ * and 20 in 48 hours per address; the shop is open and the product is shown and takes a customer's
+ * design; the bot check; the type, at most 10 MB, and bytes that really are that type; the pixel size
+ * read from the header (functions/_lib/imageInfo.js) — at least 500 px on the long side so it can be
+ * reproduced, at most 10,000 px on either side so it can't be an image bomb; and caps on uploads from
+ * the last 48 hours that no order has taken yet: 500 MB for the shop, 2 GB across the whole site.
  *
  * Stored in the PRIVATE DESIGNS bucket at order-files/pending/<random>.<ext> — a key the admin's
  * signed download (design.js, DESIGN_KEY_RE) already serves. Nothing here is ever readable by the
@@ -29,7 +29,7 @@
 import { classifyHost } from "../_lib/hostConfig.js";
 import { getCatalogData } from "../_lib/catalogCache.js";
 import { jsonResponse } from "../_lib/http.js";
-import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
+import { rateLimited, rateLimitCheck, rateLimitHit, rateLimitResponse } from "../_lib/rateLimit.js";
 import { verifyTurnstile } from "../_lib/turnstile.js";
 import { readBodyWithLimit, hasValidMagicBytes } from "../_lib/fileUpload.js";
 import { imageSize } from "../_lib/imageInfo.js";
@@ -39,7 +39,9 @@ export const CUSTOMER_DESIGN_TYPES = { "image/png": "png", "image/jpeg": "jpg", 
 export const CUSTOMER_DESIGN_MAX_BYTES = 10 * 1024 * 1024;
 export const CUSTOMER_DESIGN_MIN_LONG_SIDE = 500;
 export const CUSTOMER_DESIGN_MAX_SIDE = 10000;
-export const CUSTOMER_DESIGN_SITE_CAP_BYTES = 2 * 1024 * 1024 * 1024;   // across every shop, last 48 hours
+export const CUSTOMER_DESIGN_SITE_CAP_BYTES = 2 * 1024 * 1024 * 1024;   // across every shop, last 48 hours, not yet on an order
+export const CUSTOMER_DESIGN_SHOP_CAP_BYTES = 500 * 1024 * 1024;         // one shop, the same
+export const CUSTOMER_DESIGN_PER_ADDRESS_48H = 20;                       // uploads from one address in 48 hours
 export const CUSTOMER_DESIGN_KEEP_HOURS = 48;
 const PRODUCT_RE = /^[a-z0-9-]{1,40}$/;
 
@@ -59,9 +61,12 @@ export async function onRequestPost({ request, env }) {
   const orgId = host.orgId;
   if (((catalog && catalog.features) || {}).storefront === false) return jsonResponse({ status: "error", feature: "storefront", message: "Online ordering isn't available here." }, 403);
 
-  // 2. Rate limit, before any more database work.
+  // 2. Rate limits, before any more database work: 10 a minute, and 20 stored in 48 hours (counted below, once
+  // one is stored, so a refused upload doesn't use one up).
   const rl = await rateLimited(env, "customer_design", request, 10);
   if (rl.blocked) return rateLimitResponse(rl.retryAfter);
+  const rlLong = await rateLimitCheck(env, "customer_design_48h", request, CUSTOMER_DESIGN_PER_ADDRESS_48H, CUSTOMER_DESIGN_KEEP_HOURS * 3600);
+  if (rlLong.blocked) return rateLimitResponse(rlLong.retryAfter);
 
   // 3. The shop is open and the product takes the customer's own design.
   const productId = url.searchParams.get("product") || "";
@@ -98,10 +103,16 @@ export async function onRequestPost({ request, env }) {
   if (size.width > CUSTOMER_DESIGN_MAX_SIDE || size.height > CUSTOMER_DESIGN_MAX_SIDE)
     return fail(`That image is too large (${size.width} × ${size.height} px) — please use one at most ${CUSTOMER_DESIGN_MAX_SIDE.toLocaleString("en-US")} px on each side.`);
 
-  // 7. The whole site's uploads in the last 48 hours stay under the cap.
+  // 7. The last 48 hours' uploads that no order has taken yet (the ones the clean-up would delete) stay under the
+  // caps: the shop's own, so one shop's flood can't pause the others, and the whole site's.
   const since = new Date(Date.now() - CUSTOMER_DESIGN_KEEP_HOURS * 3600 * 1000).toISOString();
-  const used = await env.DB.prepare("SELECT COALESCE(sum(bytes), 0) AS n FROM customer_design_uploads WHERE createdAt >= ?").bind(since).first();
-  if (Number(used && used.n) + bytes.byteLength > CUSTOMER_DESIGN_SITE_CAP_BYTES) {
+  const used = await env.DB.prepare(`SELECT COALESCE(sum(u.bytes), 0) AS site, COALESCE(sum(CASE WHEN u.orgId = ? THEN u.bytes ELSE 0 END), 0) AS shop
+    FROM customer_design_uploads u WHERE u.createdAt >= ? AND NOT EXISTS (SELECT 1 FROM order_item_files f WHERE f.fileKey = u.fileKey)`).bind(orgId, since).first();
+  if (Number(used && used.shop) + bytes.byteLength > CUSTOMER_DESIGN_SHOP_CAP_BYTES) {
+    console.error("Customer design uploads for shop " + orgId + " are over the 48-hour cap");
+    return fail("Uploads are paused for the moment — please try again later, or contact the shop.", 503);
+  }
+  if (Number(used && used.site) + bytes.byteLength > CUSTOMER_DESIGN_SITE_CAP_BYTES) {
     console.error("Customer design uploads are over the 48-hour cap");
     return fail("Uploads are paused for the moment — please try again later, or contact the shop.", 503);
   }
@@ -120,6 +131,7 @@ export async function onRequestPost({ request, env }) {
   await env.DB.prepare(`INSERT INTO customer_design_uploads (id, orgId, productId, fileKey, fileName, fileExt, contentType, bytes, width, height, createdAt)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(uploadId, orgId, productId, key, fileName, ext, contentType, bytes.byteLength, size.width, size.height, new Date().toISOString()).run();
+  await rateLimitHit(env, "customer_design_48h", request, CUSTOMER_DESIGN_KEEP_HOURS * 3600);
   return jsonResponse({ status: "ok", uploadId, width: size.width, height: size.height });
 }
 

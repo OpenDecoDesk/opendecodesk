@@ -6900,11 +6900,15 @@ async function showOrderDates_(orgId, orderId){
   const caches = window._ordersCache || {};
   const o = (caches[orgId] || []).find(x => x.orderId === orderId) || Object.values(caches).flat().find(x => x && x.orderId === orderId);
   if(!o){ showToast("Order not found — refresh the list.", true); return; }
+  // A step's date is the half of the steps it is in (the server's stageDenied_): a role with only the early
+  // steps sees the later dates but can't change them, and the other way round. The order date is the order's own.
+  const stepHalfOk = (col) => col === "placedAt" || adminCan_(FULFILLMENT_LATE_.includes(col.replace(/At$/, "")) ? "orders.stepsLate" : "orders.stepsEarly", "edit");
   const row = (col, label) => {
-    const v = o[col] || "", fixed = col === "placedAt" || (col === "manufacturedAt" && !v);
+    const v = o[col] || "", halfOk = stepHalfOk(col), fixed = col === "placedAt" || (col === "manufacturedAt" && !v) || !halfOk;
+    const off = col === "manufacturedAt" && !v ? "disabled title=\"Set by marking the order made\"" : !halfOk ? "disabled title=\"Your role can't change this step\"" : "";
     return `<tr data-date-row="${col}"><td style="padding:5px 8px 5px 0;font-size:13px;font-weight:600;white-space:nowrap;">${escapeHtml(label)}</td>
       <td style="padding:5px 0;"><input type="datetime-local" class="od-input" data-col="${col}" value="${escapeHtml(v ? localDateTime_(v) : "")}" data-shown="${escapeHtml(v ? localDateTime_(v) : "")}"
-        max="${localDateTime_(Date.now() + 60000)}" ${col === "manufacturedAt" && !v ? "disabled title=\"Set by marking the order made\"" : ""} style="font:inherit;font-size:13px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;">
+        max="${localDateTime_(Date.now() + 60000)}" ${off} style="font:inherit;font-size:13px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;">
         ${fixed ? "" : `<button type="button" class="od-clear" data-col="${col}" title="Clear — not done" style="background:none;border:none;color:#b03a2e;cursor:pointer;font-size:13px;">✕</button>`}</td></tr>`;
   };
   const { ov, close } = inventoryModal_(`Dates — ${escapeHtml(orderId)}`, `
@@ -9863,12 +9867,14 @@ async function renderGlobalSettings(app){
       const sd = await sr.json();
       if(sr.ok && sd.status === "ok" && Array.isArray(sd.items)) setupItems = sd.items;
     }catch(e){}
-    let pricing = { cardPct: 2.9, cardFixed: 0.3, supplies: 0, targetHourly: null, targetIncome: null };   // migrations/0067
-    try{
+    // Pricing (migrations/0067) is costs and targets: shown, and saved, only for a role with Money, costs and margins
+    // (costs.view) and only once it has loaded — saving the form's defaults would overwrite the real figures.
+    let pricing = { cardPct: 2.9, cardFixed: 0.3, supplies: 0, targetHourly: null, targetIncome: null }, pricingLoaded = false;
+    if(adminCan_("costs.view", "read")) try{
       const pr = await fetch("/api/orders", { method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({action: "getPricingSettings", key: adminKey}) });
       const pd = await pr.json();
-      if(pr.ok && pd.status === "ok") pricing = pd.pricing;
+      if(pr.ok && pd.status === "ok" && pd.pricing){ pricing = pd.pricing; pricingLoaded = true; }
     }catch(e){}
     let rush = { rule: { mode: "off" }, taxable: false };   // migrations/0082
     try{ const rr = await hoopApi_({ action: "getRushSettings" }); if(rr && rr.rush) rush = rr.rush; }catch(e){}
@@ -9975,7 +9981,7 @@ async function renderGlobalSettings(app){
         </div>
 
         <div id="gProductionExtra"${productionOn ? "" : ' style="display:none;"'}>
-        <h2 style="margin:22px 0 12px;">Pricing</h2>
+        ${pricingLoaded ? `<h2 style="margin:22px 0 12px;">Pricing</h2>
         <div class="admin-note" style="margin-bottom:14px;">What each product's Pricing panel takes off the price to show what an item leaves. Card processing is counted on every item as if paid by card (the worst case). The targets are optional — leave one blank to not be alerted on it. They're an <strong>or</strong>: an item that meets either one is fine (a $5 cap that makes $40/hr against a $10 / $40/hr pair isn't flagged; the hourly target counts only for products with a run time). An item that misses every target set is flagged on its product, on the Products list, in Price analysis and (once, when it slips) in the 6 AM email.</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
           <label style="flex:0 0 150px;">Card fee (%)
@@ -9996,7 +10002,7 @@ async function renderGlobalSettings(app){
           <label style="flex:0 0 220px;">Target income per item ($)
             <input type="number" id="gPriceTargetIncome" min="0" step="0.01" value="${pv(pricing.targetIncome)}" placeholder="optional">
           </label>
-        </div>
+        </div>` : ""}
 
         <h2 style="margin:22px 0 12px;">Rush orders</h2>
         <div class="admin-note" style="margin-bottom:14px;">What a customer pays to have an order rushed. Every shop uses this unless its own settings say otherwise (Shop settings → Rush orders). A <strong>fee to follow</strong> is for costs you can't know up front, like expedited shipping: the customer asks for rush, you work out the fee and set it on the order (Orders → Rush…), then send an invoice. The fee — known or to follow — can be changed on any order, and an unpaid rush fee never holds up production. Saving takes effect on every shop at once — no need to Publish.</div>
@@ -10292,7 +10298,8 @@ async function submitGlobalSettings(){
     }
     // The Machine Files setting is saved only if its section was shown when the page loaded.
     if(($g("gMachineSection") || {dataset: {}}).dataset.loaded === "1" && stillOn("production")) settings.machine = { showDeleteButton: $g("gMachShowDelete").checked };
-    settings.pricing = { cardPct: gv("gPriceCardPct"), cardFixed: gv("gPriceCardFixed"), supplies: gv("gPriceSupplies"), targetHourly: gv("gPriceTargetHourly"), targetIncome: gv("gPriceTargetIncome") };
+    // Pricing is sent only when its section was shown (a role with costs.view, and it loaded).
+    if($g("gPriceCardPct")) settings.pricing = { cardPct: gv("gPriceCardPct"), cardFixed: gv("gPriceCardFixed"), supplies: gv("gPriceSupplies"), targetHourly: gv("gPriceTargetHourly"), targetIncome: gv("gPriceTargetIncome") };
     const rushRule = readRushRule_("gRush");   // checked before anything was sent (globalSettingsProblem_)
     if(rushRule.error) return { error: "Rush fee: " + rushRule.error };
     settings.rush = { rule: rushRule.rule, taxable: $g("gRushTaxable").checked };

@@ -7,9 +7,8 @@
 //   - Production (none): no button, no page, no Quotes on a customer, and the server refuses even the list.
 //   - A role with Quotes at Edit but not what a step also needs: picking the customer (Customers), a typed price
 //     (Payments), making the order (Order details at Edit) and emailing its invoice (Invoices).
-//   - The Quotes switch under Settings → Global settings → Features: off hides the page and the button, the server
-//     refuses every quote action, and a sent link says quotes aren't available; on again, all of it is back.
-// Every shop, customer, quote and role here is this file's own. The switch is turned back on in a finally.
+// The Quotes feature switch is tested in gap-quotes-switch.spec.mjs, which runs after every other spec.
+// Every shop, customer, quote and role here is this file's own.
 import crypto from "node:crypto";
 import { request as playwrightRequest } from "@playwright/test";
 import { test, expect, ADMIN, shopUrl, openAdmin, toast, confirmDialog, signInThroughPage, callApi, apiContext, freshIp, slug, uniq } from "../fixtures.mjs";
@@ -524,117 +523,5 @@ test("A role with Quotes at Edit still needs Customers to start a quote, Payment
     }
     await api("deleteRole", { roleKey: role.key }, { ...USERS, allowError: true });
     expect((await api("listRoles", {}, USERS)).roles.filter(r => r.key === role.key), "this test's role is gone again").toEqual([]);
-  }
-});
-
-// ---- The Quotes feature switch ---------------------------------------------------------------------------------
-test("Quotes switched off in Global settings: no button or page, the server refuses every quote action, a sent link says quotes aren't available; on again, all back", async ({ page, api, as }, testInfo) => {
-  test.setTimeout(120_000);
-  const shop = await makeShop(api, { prefix: "qrf", products: [{ name: "Sample Tee", price: 20 }] });
-  const custId = await makeCustomer(api);
-  const q = await makeQuote(api, shop, custId);
-  const sent = await makeQuote(api, shop, custId);
-  const token = tokenOf(await sendQuote(api, sent.id));
-  const before = await api("getEstimate", { id: q.id });
-  expect((await api("getFeatures")).features.quotes).not.toBe(false);
-
-  const box = page.locator("#gFeatRow-quotes .gFeature");
-  const saveSettings = async () => {
-    await page.getByRole("button", { name: "Save global settings" }).click();
-    await expect(toast(page)).toContainText("Global settings saved.");
-  };
-  const customerPage = (p) => p.goto(shopUrl(shop.subdomain) + "/?estimate=" + token);
-  const publicApi = async (p) => {
-    const get = await p.request.get(shopUrl(shop.subdomain) + "/api/estimate?token=" + token);
-    const post = await p.request.post(shopUrl(shop.subdomain) + "/api/estimate", { data: { token, action: "changes", note: "Navy instead, please." } });
-    return { get: { status: get.status(), data: await get.json() }, post: { status: post.status(), data: await post.json() } };
-  };
-  let switchedOff = false;
-  try {
-    // -- Off, through the page.
-    await openAdmin(page, "settings");
-    await expect(page.locator("#gFeatRow-quotes")).toContainText("Quotes");
-    await expect(box).toBeChecked();
-    await expect(navBtn(page)).toBeVisible();
-    await box.uncheck();
-    switchedOff = true;
-    await saveSettings();
-    expect((await api("getFeatures")).features.quotes).toBe(false);
-    // The menu follows at once.
-    await expect(navBtn(page)).toHaveCount(0);
-
-    // The page and a quote's page say it's off; the customer's page has no Quotes section.
-    await openAdmin(page, "quotes");
-    await expect(page.locator("#featureOffPanel")).toContainText("Quotes is turned off.");
-    await expect(page.locator("#featureOffPanel")).toHaveAttribute("data-feature", "quotes");
-    await expect(page).toHaveTitle(/Quotes is turned off/);
-    await expect(page.locator("#qtPage")).toHaveCount(0);
-    await openAdmin(page, "quotes/" + q.id);
-    await expect(page.locator("#featureOffPanel")).toContainText("Quotes is turned off.");
-    await expect(page.locator("#qtForm")).toHaveCount(0);
-    await openAdmin(page, "customers/" + custId);
-    await expect(page.locator("#custForm")).toBeVisible();
-    await expect(quotesHeading(page)).toHaveCount(0);
-    await expect(page.locator("#custNewQuote")).toHaveCount(0);
-    // Back office loses the button too.
-    const sp = await as("staff");
-    await openAdmin(sp, "home");
-    expect(await topButtons(sp)).toContain("customers");
-    await expect(navBtn(sp)).toHaveCount(0);
-
-    // The server: every quote action, for a role that may use it, is refused as switched off; a role that may not
-    // hears only that.
-    const b = bodies(shop, custId, q);
-    for (const a of ACTIONS) {
-      const r = await api(a, b[a], { allowError: true, withStatus: true });
-      expect(r.status, a + " with Quotes off").toBe(403);
-      expect(r.data, a).toMatchObject({ status: "error", feature: "quotes", message: FEATURE_OFF });
-    }
-    const prod = await apiContext("production", testInfo.workerIndex);
-    try {
-      refused(await tryApi(prod, "listEstimates", {}), NO_ROLE, "listEstimates for Production with Quotes off");
-    } finally {
-      await prod.dispose();
-    }
-
-    // The customer's link: the page and the endpoint both say quotes aren't available, and nothing is answered.
-    const cust = await as(null);
-    await customerPage(cust);
-    await expect(cust.locator("#app .inv-err")).toHaveText("Quotes aren't available.");
-    await expect(cust.locator("#estAccept")).toHaveCount(0);
-    const off = await publicApi(cust);
-    for (const [k, v] of Object.entries(off)) {
-      expect(v.status, k + " /api/estimate with Quotes off").toBe(403);
-      expect(v.data, k).toMatchObject({ status: "error", feature: "quotes", message: "Quotes aren't available." });
-    }
-
-    // -- On again, through the page.
-    await openAdmin(page, "settings");
-    await expect(box).not.toBeChecked();
-    await box.check();
-    await saveSettings();
-    expect((await api("getFeatures")).features.quotes).toBe(true);
-    switchedOff = false;
-    await expect(navBtn(page)).toBeVisible();
-    await navBtn(page).click();
-    await listShown(page);
-    await openQuote(page, q.id);
-    await expect(page.locator("#qtTitle")).toHaveValue(before.estimate.title);
-    await openAdmin(page, "customers/" + custId);
-    await expect(quotesHeading(page)).toBeVisible();
-    // Nothing was lost while it was off.
-    expect(await quoteOf(api, sent.id), "the refused request for changes changed nothing").toMatchObject({ status: "sent", customerNote: "" });
-    const after = await api("getEstimate", { id: q.id });
-    expect(after.estimate).toMatchObject({ status: "draft", title: before.estimate.title });
-    expect(after.items).toEqual(before.items);
-    // The customer's link shows the quote again, with Accept.
-    await customerPage(cust);
-    await expect(cust.locator("#app")).toContainText(sent.number);
-    await expect(cust.locator("#estAccept")).toBeVisible();
-    const get = await cust.request.get(shopUrl(shop.subdomain) + "/api/estimate?token=" + token);
-    expect(get.status()).toBe(200);
-    expect((await get.json()).estimate).toMatchObject({ number: sent.number, status: "sent", canAccept: true });
-  } finally {
-    if (switchedOff || (await api("getFeatures")).features.quotes === false) await api("updateFeatures", { features: { quotes: true } });
   }
 });

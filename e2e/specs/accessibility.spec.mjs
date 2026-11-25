@@ -69,6 +69,11 @@ test("from the top of the page, Tab reaches the admin menu, with a visible focus
   expect(ring, "the focused menu button shows a focus ring").toBe(true);
 });
 
+// Catalog → Shop setup goes to #setup, which opens the shop last worked on (else the first) at #setup/<shop>, and the
+// wizard moves that to #wizard/<shop> (public/admin.js adminRoute, renderShopWizard). beforeAll makes sure a shop
+// exists, so it always ends there. Checking for #setup only passed when the check caught the address before the
+// wizard moved it, and failed when the page was quicker (seen in a full parallel run).
+const SHOP_SETUP_LANDS = /#wizard\/[^/]+$/;
 const PAGES = [...TOP.map(([h, l, t]) => ({ hash: h, menu: null, label: l, title: t })),
   ...Object.entries(GROUPS).flatMap(([menu, items]) => items.map(([h, l, t]) => ({ hash: h, menu, label: l, title: t })))];
 
@@ -94,7 +99,7 @@ for (const p of PAGES) {
     }
     await page.keyboard.press("Enter");
 
-    await expect(page).toHaveURL(new RegExp("#" + p.hash + "(/|$)"));
+    await expect(page).toHaveURL(p.hash === "setup" ? SHOP_SETUP_LANDS : new RegExp("#" + p.hash + "(/|$)"));
     // The page drew itself: its own title, not the one before.
     await expect(page).not.toHaveTitle(startTitle, { timeout: 5000 });
     await expect(page).toHaveTitle(new RegExp("— (?:[^—]* )?" + p.title.replace(/[()&]/g, (c) => "\\" + c), "i"));

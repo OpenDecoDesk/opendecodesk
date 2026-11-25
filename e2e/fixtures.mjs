@@ -136,10 +136,18 @@ export async function signInThroughPage(page, { email, password, totpSecret = nu
   return null;
 }
 
+// Leaves the admin page for a blank one. A form left with unsaved changes (window._prodFormDirty: a product or shop
+// form, Global settings) would ask the browser to stay; a test that is done with the page doesn't want that, so the
+// mark is cleared first.
+export async function leaveAdmin(page) {
+  await page.evaluate(() => { window._prodFormDirty = false; }).catch(() => {});
+  await page.goto("about:blank");
+}
+
 // Opens an admin page (#hash) and waits until the menu is there and the page has finished loading. Always a
 // fresh load: going to the address the page is already on would only move within it and keep old data.
 export async function openAdmin(page, hash = "home") {
-  if (page.url().startsWith(ADMIN)) await page.goto("about:blank");
+  if (page.url().startsWith(ADMIN)) await leaveAdmin(page);
   await page.goto(ADMIN + "/#" + hash);
   await expect(page.getByRole("navigation", { name: "Admin" })).toBeVisible();
   await expect(page.locator("#app")).not.toContainText(/^\s*Loading…\s*$/);

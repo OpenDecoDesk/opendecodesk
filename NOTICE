@@ -2,10 +2,10 @@ OpenDecoDesk
 
 This repository includes third-party software:
 
-- pdf.js (public/vendor/pdfjs/) — Copyright Mozilla Foundation and contributors.
+- pdf.js (public/vendor/pdfjs-5.6.205/) — Copyright Mozilla Foundation and contributors.
   Licensed under the Apache License, Version 2.0: https://www.apache.org/licenses/LICENSE-2.0
   Source: https://github.com/mozilla/pdf.js
-  The licence text is in public/vendor/pdfjs/LICENSE.
+  The licence text is in public/vendor/pdfjs-5.6.205/LICENSE.
 
 - QR Code Generator for JavaScript (public/admin-qr.js) — Copyright (c) 2009 Kazuhiko Arase.
   Licensed under the MIT license: http://www.opensource.org/licenses/mit-license.php
@@ -17,11 +17,11 @@ This repository includes third-party software:
   Licensed under the MIT license: https://opensource.org/licenses/MIT
   Source: https://github.com/EmbroidePy/pyembroidery
 
-- Fraunces (public/vendor/fonts/fraunces-*) — Copyright 2018 The Fraunces Project Authors.
-  IBM Plex Sans and IBM Plex Mono (public/vendor/fonts/ibm-plex-*) — Copyright 2017 IBM Corp.,
+- Fraunces (public/vendor/fonts-1/fraunces-*) — Copyright 2018 The Fraunces Project Authors.
+  IBM Plex Sans and IBM Plex Mono (public/vendor/fonts-1/ibm-plex-*) — Copyright 2017 IBM Corp.,
   with Reserved Font Name "Plex".
   Licensed under the SIL Open Font License, Version 1.1: https://openfontlicense.org
-  The licence texts are in public/vendor/fonts/OFL-*.txt.
+  The licence texts are in public/vendor/fonts-1/OFL-*.txt.
 
 The desktop program (desktop/, docs/desktop.md) also bundles, in its downloads:
 

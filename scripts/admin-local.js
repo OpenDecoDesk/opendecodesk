@@ -71,7 +71,7 @@ const buildHandler = () => new Function("sendTestEmail",
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async (env) => ({ subdomainMap: " + SHOP_MAP + ", features: await getFeatures(env.DB) });\n" +
   "const sendInvoiceEmail = async () => false;\n" +
-  "const sendOrderReceivedEmail = async () => false, sendOrderNotificationEmail = async () => false, sendPaymentConfirmedEmail = async () => false, sendCancellationEmail = async () => false, sendDesignVerificationEmail = async () => false, sendShippingPaymentEmail = async () => false, sendShippedEmail = async () => false;\n" +
+  "const sendOrderReceivedEmail = async () => false, sendOrderNotificationEmail = async () => false, sendPaymentConfirmedEmail = async () => false, sendCancellationEmail = async () => false, sendDesignVerificationEmail = async () => false, sendShippingPaymentEmail = async () => false, sendOrderAdjustmentPaymentEmail = async () => false, sendShippedEmail = async () => false;\n" +
   "const ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({ configured: false }), ensureWorkerHostname = async () => ({ steps: ['custom domain added'] });\n" +
   strip(read("functions/_lib/cloudflareSetup.js")) + "\n" +
   // Vendor blanks / connections: the image-fallback copy, the PromoStandards adapter, encrypted logins.

@@ -59,8 +59,10 @@ Orders are **not** priced from the cache's prices as shown in a browser: `priceI
 public/index.html         the storefront page, and the shell the admin loads into
 public/storefront.js      the storefront page's script
 public/admin.js           the admin panel (loaded only on the admin host)
-public/_headers           security headers for every response
-public/vendor/pdfjs/      Mozilla's pdf.js, vendored, for reading vendor invoices
+public/admin.css          the admin panel's styles (loaded with admin.js)
+public/_headers           security headers and cache rules for every response
+public/vendor/pdfjs-5.6.205/  Mozilla's pdf.js, vendored, for reading vendor invoices
+public/vendor/fonts-1/    the page's fonts (a folder's name changes with its files: cached for a year)
 
 src/worker.js             the Worker: routes /api/<name>, runs the hourly cron
 

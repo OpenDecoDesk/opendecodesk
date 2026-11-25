@@ -1,8 +1,21 @@
 /admin.js
   Cache-Control: no-cache
 
+/admin.css
+  Cache-Control: no-cache
+
 /storefront.js
   Cache-Control: no-cache
+
+# pdf.js and the fonts never change under the same address, so a browser keeps them for a year without asking
+# again. Their folder's name carries the version (vendor/pdfjs-5.6.205/, vendor/fonts-1/): when the files
+# change, the folder gets a new name (and the paths in index.html and admin.js with it), never new files in the old one.
+/vendor/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The site's own pictures (icons, placeholders) keep their names when they change: a day, then asked again.
+/images/*
+  Cache-Control: public, max-age=86400
 
 /*
   X-Content-Type-Options: nosniff

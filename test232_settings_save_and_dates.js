@@ -57,6 +57,40 @@ const tick = (ms) => new Promise(r => setTimeout(r, ms || 40));
   ok("Save sends every section in one request, and nothing else", calls.filter(a => /^update|^saveGlobal/.test(a)).join() === "saveGlobalSettingsAll");
   ok("a refusal says nothing was saved, naming the section and why", /^Nothing was saved\. Pricing: The card fee must be 0 to 10%\. Fix it and save again\.$/.test(err()));
 
+  console.log("\n=== Unsaved changes are guarded; Save and Discard stay on Global settings (#110) ===");
+  failPricing = false;
+  w.renderGlobalSettings(d.getElementById("app")); await tick(80);
+  const until = async (test) => { for (let i = 0; i < 80 && !test(); i++) await tick(25); return test(); };
+  ok("a freshly drawn page has nothing unsaved", w._prodFormDirty === false && w.location.hash === "#settings");
+  const rate = d.getElementById("gTaxRate");
+  rate.value = "7.25"; rate.dispatchEvent(new w.Event("input", { bubbles: true }));
+  ok("typing in the form marks the page as changed", w._prodFormDirty === true);
+  w._prodFormDirty = false;
+  d.getElementById("gPayVenmo").click();
+  ok("…so does ticking a box", w._prodFormDirty === true);
+  w._prodFormDirty = false;
+  const alone = d.createElement("div"); alone.setAttribute("data-no-dirty", ""); alone.innerHTML = `<input id="t232Alone">`;
+  d.querySelector("#adminPanel .admin-form").appendChild(alone);
+  d.getElementById("t232Alone").dispatchEvent(new w.Event("input", { bubbles: true }));
+  ok("a part that saves on its own (data-no-dirty) doesn't", w._prodFormDirty === false);
+  ok("…supplier connections are such a part", /<div data-no-dirty id="gSuppliersBody">/.test(adminJs));
+  rate.value = "7.25"; rate.dispatchEvent(new w.Event("input", { bubbles: true }));
+  w.location.hash = "#orders";
+  ok("leaving with a change asks first, and the page stays", await until(() => /Leave without saving\?/.test(d.body.textContent) && !!d.getElementById("cmOk")) && w.location.hash === "#settings" && !!d.getElementById("gTaxRate"));
+  d.getElementById("cmCancel").click(); await tick();
+  ok("…Stay keeps the change", d.getElementById("gTaxRate").value === "7.25" && w._prodFormDirty === true);
+  ok("the Cancel button is now Discard changes", d.getElementById("gDiscardChanges").textContent === "Discard changes" && !d.querySelector('#adminPanel [data-admin-action="goCatalog_"]'));
+  d.getElementById("gDiscardChanges").click();
+  ok("Discard changes asks first when something changed", await until(() => /Discard your changes\?/.test(d.body.textContent) && !!d.getElementById("cmOk")));
+  d.getElementById("cmOk").click();
+  ok("…then draws the page again from what is saved, still on Global settings", await until(() => d.getElementById("gTaxRate") && d.getElementById("gTaxRate").value === "6") &&
+    w.location.hash === "#settings" && w._prodFormDirty === false);
+  d.getElementById("gTaxRate").value = "6.5"; d.getElementById("gTaxRate").dispatchEvent(new w.Event("input", { bubbles: true }));
+  const toastText = () => [...d.querySelectorAll("#toastRegion .toast")].map(t => t.textContent).join(" | ");
+  await w.submitGlobalSettings(); await tick(80);
+  ok("a successful save clears the changed mark and stays on Global settings (not Manage catalog)", w._prodFormDirty === false && w.location.hash === "#settings" && !!d.getElementById("gTaxRate"));
+  ok("…with the saved toast there", /Global settings saved\./.test(toastText()));
+
   console.log("\n=== Today is the local day ===");
   // In a US evening (UTC already tomorrow) the admin's today must still be today.
   const realDate = w.Date;

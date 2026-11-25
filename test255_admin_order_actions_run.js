@@ -432,6 +432,50 @@ const pause = (ms) => new Promise(r => setTimeout(r, ms));
   ok("…and the window can be opened again afterwards", await (async () => { const again = w.createLocalSale("acme"); await wait(() => d.getElementById("localSaleForm"));
     d.getElementById("localSaleForm").querySelector(".admin-pass-cancel").click(); await again; return !d.getElementById("localSaleForm"); })());
 
+  console.log("\n=== Local sale with several items: one order, one line per item (#106) ===");
+  reset();
+  const multi = w.createLocalSale("acme");
+  await wait(() => d.getElementById("localSaleForm"));
+  const lsForm = d.getElementById("localSaleForm");
+  const lineEls = () => [...lsForm.querySelectorAll(".ls-line")];
+  ok("one item block to start, with the ids it always had, and no × on it", lineEls().length === 1 && lineEls()[0].contains(d.getElementById("lsProduct")) &&
+    lineEls()[0].contains(d.getElementById("lsQty")) && !lineEls()[0].querySelector(".ls-line-remove") && d.getElementById("lsAddLine").textContent === "+ Add another item");
+  const pick = (el, v) => { el.value = v; el.dispatchEvent(new w.Event("change", { bubbles: true })); };
+  const typeIn = (el, v) => { el.value = v; el.dispatchEvent(new w.Event("input", { bubbles: true })); };
+  pick(d.getElementById("lsProduct"), "cap"); typeIn(d.getElementById("lsQty"), "2");
+  ok("(one item: the price box as before)", d.getElementById("lsPricePreview").textContent === "$20.00 × 2 = $40.00");
+  d.getElementById("lsAddLine").click();
+  ok("+ Add another item adds a second block with its own fields, a × and item numbers", lineEls().length === 2 && !!d.getElementById("lsProduct-2") &&
+    lineEls()[1].querySelector(".ls-line-remove").getAttribute("aria-label") === "Remove item 2" && /Item 1/.test(lineEls()[0].textContent) && /Item 2/.test(lineEls()[1].textContent));
+  pick(d.getElementById("lsProduct-2"), "tee"); pick(d.getElementById("lsSize-2"), "L");
+  ok("…and the box shows the running total of both", d.getElementById("lsPricePreview").textContent === "Total for 2 items: $58.00");
+  d.getElementById("lsAddLine").click();
+  pick(d.getElementById("lsProduct-3"), "__custom__");
+  lineEls()[2].querySelector(".ls-line-remove").click();
+  ok("× takes an item off again", lineEls().length === 2 && !d.getElementById("lsProduct-3") && d.getElementById("lsPricePreview").textContent === "Total for 2 items: $58.00");
+  d.getElementById("lsAddLine").click(); pick(d.getElementById("lsProduct-4"), "__custom__");
+  d.getElementById("lsPayment").value = "Cash"; d.getElementById("lsName").value = "Walk-in Sam";
+  lsForm.querySelector(".admin-pass-submit").click();
+  ok("an item that can't be read says which item it is, and nothing is sent", /^Item 3: Enter a description for the custom item\.$/.test(d.getElementById("lsErr").textContent) && !actions().includes("createLocalSale"));
+  lineEls()[2].querySelector(".ls-line-remove").click();
+  lsForm.querySelector(".admin-pass-submit").click();
+  await multi;
+  await wait(() => actions().includes("getOrdersByIds")); await idle();
+  const multiSales = sent.filter(b => b.action === "createLocalSale");
+  const sam = d1.q("SELECT orderId, totalCents FROM orders WHERE customerName='Walk-in Sam'");
+  const samLines = sam.length ? d1.q("SELECT productId, size, qty FROM order_items WHERE orderId=? ORDER BY id", sam[0].orderId) : [];
+  ok("Record sale sends ONE request with both items", multiSales.length === 1 && multiSales[0].items.length === 2 &&
+    multiSales[0].items[0].productId === "cap" && multiSales[0].items[0].qty === 2 && multiSales[0].items[1].productId === "tee" && multiSales[0].items[1].size === "L");
+  ok("…which makes one order with two lines ($40 + $18)", sam.length === 1 && sam[0].totalCents === 5800 && samLines.length === 2 &&
+    samLines.map(l => l.productId + ":" + l.size + ":" + l.qty).join() === "cap:OSFA:2,tee:L:1");
+  {
+    const cap = w.createLocalSale("acme"); await wait(() => d.getElementById("localSaleForm"));
+    for (let i = 0; i < 25; i++) d.getElementById("lsAddLine").click();
+    ok("at most 20 items: the add button goes and says why", d.querySelectorAll("#localSaleForm .ls-line").length === 20 && d.getElementById("lsAddLine").style.display === "none" &&
+      d.getElementById("lsLineLimit").style.display === "" && /20 items is the most/.test(d.getElementById("lsLineLimit").textContent));
+    d.getElementById("localSaleForm").querySelector(".admin-pass-cancel").click(); await cap;
+  }
+
   console.log("\n=== The Payments window: Record refund, Shipping part…, Apply discount (whileSaving_) ===");
   reset();
   const pmOpen = w.showPaymentsModal("acme", "PAY1");

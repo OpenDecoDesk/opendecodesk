@@ -85,8 +85,9 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   console.log("\n=== The admin's script is kept by the browser between deploys ===");
   const page = storefrontPage();
   ok("index.html no longer loads admin.js under a new address on every visit", !/"admin\.js\?v=" \+ Date\.now\(\)/.test(page));
-  ok("…it loads it under the version /api/catalog gives (fresh only when none is known)", /adminScriptVersion_ = typeof data\.adminScript === "string"/.test(page) &&
-    /s\.src = "admin\.js" \+ \(adminScriptVersion_ \? "\?v=" \+ encodeURIComponent\(adminScriptVersion_\) : "\?t=" \+ Date\.now\(\)\)/.test(page));
+  ok("…it loads it, and admin.css with it, under the version /api/catalog gives (fresh only when none is known)", /adminScriptVersion_ = typeof data\.adminScript === "string"/.test(page) &&
+    /const version = adminScriptVersion_ \? "\?v=" \+ encodeURIComponent\(adminScriptVersion_\) : "\?t=" \+ Date\.now\(\);/.test(page) &&
+    /s\.src = "admin\.js" \+ version;/.test(page) && /l\.href = "admin\.css" \+ version;/.test(page));
   const { ADMIN_ORIGIN } = require("./testlib/hosts.js");
   const catalog = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
     "const getCatalogData = async () => ({ subdomainMap: {}, orgs: {}, business: {}, features: {} });\n" +

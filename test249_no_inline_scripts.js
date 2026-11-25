@@ -36,6 +36,20 @@ const hits = (re, s) => (s.match(re) || []);
   const desktopScript = desktop.split(";").map(d => d.trim()).find(d => d.startsWith("script-src "));
   ok("the desktop program's policy (the same one, rewritten) runs only its own files", desktopScript === "script-src 'self'");
 
+  console.log("\n=== Cache rules (review #104) ===");
+  const rule = (p) => { const m = headers.match(new RegExp("^" + p.replace(/[.*]/g, "\\$&") + "\\n((?:  .*\\n?)*)", "m")); return m ? m[1] : ""; };
+  ok("pdf.js and the fonts (/vendor/*) are kept for a year, never asked for again", /Cache-Control: public, max-age=31536000, immutable/.test(rule("/vendor/*")));
+  ok("the site's pictures (/images/*) for a day", /Cache-Control: public, max-age=86400\b/.test(rule("/images/*")) && !/immutable/.test(rule("/images/*")));
+  ok("admin.css, like admin.js and storefront.js, is checked every time (no-cache)", ["/admin.css", "/admin.js", "/storefront.js"].every(p => /Cache-Control: no-cache/.test(rule(p))));
+  // Kept for a year means a changed file must have a new address: each vendor folder's name carries its version.
+  const vendorRefs = [...new Set((read("public/index.html") + read("public/admin.js")).match(/\/vendor\/[^/"'`\s]+\//g) || [])];
+  ok("every /vendor/ folder the pages load has a version in its name (pdfjs-5.6.205, fonts-1)", vendorRefs.length >= 2 && vendorRefs.every(r => /^\/vendor\/[a-z]+-[\d.]+\/$/.test(r)) &&
+    vendorRefs.includes("/vendor/pdfjs-5.6.205/") && vendorRefs.includes("/vendor/fonts-1/"));
+  ok("…and is there", vendorRefs.every(r => fs.existsSync(path.join(__dirname, "public", r))) &&
+    fs.readdirSync(path.join(__dirname, "public/vendor")).every(dir => vendorRefs.includes("/vendor/" + dir + "/")));
+  ok("pdf.js's folder is the version the project depends on", require("./package.json").devDependencies["pdfjs-dist"].replace(/^\^/, "") === "5.6.205" &&
+    /"5\.6\.205"/.test(read("public/vendor/pdfjs-5.6.205/pdf.min.mjs")));
+
   console.log("\n=== No inline script in the HTML files ===");
   const htmlFiles = fs.readdirSync(path.join(__dirname, "public")).filter(f => f.endsWith(".html"));
   ok("public/ has its page", htmlFiles.includes("index.html"));

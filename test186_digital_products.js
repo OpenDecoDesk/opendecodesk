@@ -66,6 +66,8 @@ function fakeR2() {
   ok("the global defaults: 7 days, 5 downloads, email and attach on, 10 MB", JSON.stringify(await lib.getDigitalSettings(d1)) === JSON.stringify({ days: 7, downloads: 5, attachMb: 10, attach: true, email: true }));
   ok("a product's limits sit on top of the defaults", JSON.stringify(lib.digitalDeliveryFor(p, await lib.getDigitalSettings(d1))) === JSON.stringify({ days: 3, downloads: 2, attachMb: 10, attach: true, email: true }));
   ok("the storefront is told it's a download", /if\(p\.digital\) out\.digital = true;/.test(read("functions/api/catalog.js")) && /Instant download/.test(storefrontPage()));
+  ok("…and its cart line promises no email (an install may have none: #109), only that card goes straight to the files",
+    /Instant download — paying by card takes you straight to the files/.test(storefrontPage()) && !/files are emailed to you/.test(storefrontPage()));
   let r = await admin({ action: "updateProduct", org: "acme", productId: "rose", pricingMode: "sized", sizePricing: { M: 5 } });
   ok("a digital product can't have sizes", r.status === 400 && /one price/.test(r.body.message));
 

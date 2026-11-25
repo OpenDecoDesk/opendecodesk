@@ -122,6 +122,7 @@ const ADMIN_ACTIONS_ = {
   submitGlobalSettings(){ submitGlobalSettings(); },
   backfillStripeFees(){ backfillStripeFees(this); },
   goCatalog_(){ location.hash='#catalog'; },
+  discardGlobalSettings_(){ discardGlobalSettings_(); },
   showEmailPreview_(){ showEmailPreview_(); },
   showEmailPreviewPdf_(){ showEmailPreview_({ pdf: true }); },
   submitAccountSetup(event){ submitAccountSetup(event); },
@@ -2285,7 +2286,7 @@ function gEmailPanelHtml_(saved, { web = false } = {}){
 // Supplier connections (desktop): the vendors, once the program has them on.
 function gSuppliersPanelHtml_(on){
   return `<div class="admin-note" style="margin-bottom:10px;">Importing a supplier's files (product files, CSV, PDF invoices) always works. These need the internet; your logins with each supplier are saved encrypted on this computer, and shipment notices are checked every two hours while the program is open.</div>
-            <div id="gSuppliersBody">${on ? `<div class="admin-summary">Loading&hellip;</div>` : `<div class="admin-note"><strong>Save</strong> with this ticked to turn supplier connections on; then connect your vendors here.</div>`}</div>`;
+            <div data-no-dirty id="gSuppliersBody">${on ? `<div class="admin-summary">Loading&hellip;</div>` : `<div class="admin-note"><strong>Save</strong> with this ticked to turn supplier connections on; then connect your vendors here.</div>`}</div>`;
 }
 // The Features list: cloud rows in the server's order; the desktop version adds Email (with Design
 // approval under it) and Supplier connections, and leaves out the storefront (it can't be on there).
@@ -7237,7 +7238,7 @@ async function createLocalSaleOnce_(orgId){
 function showLocalSaleModal(products, blanks){
   return new Promise((resolve) => {
     const IS = (s) => `width:100%;padding:8px 10px;border:1px solid var(--border,#ccc);border-radius:5px;font-size:14px;box-sizing:border-box;background:var(--surface,#fff);color:var(--ink,#111);margin-bottom:10px;`;
-    const LS = (t, opt) => `<label style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">${t}${opt ? ` <span style="font-weight:400;color:var(--ink-soft,#888)">(optional)</span>` : ""}</label>`;
+    const LS = (t, opt, forId) => `<label${forId ? ` for="${forId}"` : ""} style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">${t}${opt ? ` <span style="font-weight:400;color:var(--ink-soft,#888)">(optional)</span>` : ""}</label>`;
 
     const blankOptions = (blanks || []).map(b => {
       const label = [b.brand, b.name, b.color].filter(Boolean).join(" · ");
@@ -7251,66 +7252,89 @@ function showLocalSaleModal(products, blanks){
         return `<option value="${escapeHtml(p.productId)}">${escapeHtml(p.name)}${p.versionGroup && p.versionLabel ? " — " + escapeHtml(p.versionLabel) : ""}${hidden}</option>`;
       }).join("");
 
+    // A sale can have several items (review #106): one block per item — product, size, qty, personalization,
+    // price override or a custom item — and "+ Add another item", up to the server's 20. The customer, payment,
+    // shipping, Paid / Delivered and the date are the sale's, once. The first item keeps the ids it always had
+    // (#lsProduct, #lsSize, #lsQty, …); each added one gets its own ("lsProduct-2"), and every field is also
+    // marked data-f="<name>" so one item's code finds its own fields.
+    const MAX_LINES = 20;
+    let lineSeq = 0;
+    const fid = (base, n) => n ? base + "-" + n : base;
+    const lineHtml = (n) => `
+      <div class="ls-line" data-line="${n}" style="${n ? "border-top:1px dashed var(--border,#ccc);padding-top:10px;margin-top:4px;" : ""}">
+        <div class="ls-line-head" style="display:none;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <strong class="ls-line-title" style="font-size:13px;">Item 1</strong>
+          ${n ? `<button type="button" class="ls-line-remove" data-f="remove" aria-label="Remove item" title="Remove this item" style="border:none;background:none;font-size:18px;line-height:1;cursor:pointer;color:var(--ink-soft,#666);padding:2px 6px;">&times;</button>` : ""}
+        </div>
+        ${LS("Product", false, fid("lsProduct", n))}
+        <select id="${fid("lsProduct", n)}" data-f="product" style="${IS()}">${productOptions}</select>
+
+        <div id="${fid("lsCustomWrap", n)}" data-f="customWrap" style="display:none;">
+          ${LS("Description", false, fid("lsCustomDesc", n))}
+          <input type="text" id="${fid("lsCustomDesc", n)}" data-f="customDesc" maxlength="200" placeholder="e.g. Extra hat, custom patch…" style="${IS()}">
+          ${LS("Blank", true, fid("lsCustomBlank", n))}
+          <select id="${fid("lsCustomBlank", n)}" data-f="customBlank" style="${IS()}">
+            <option value="">— none —</option>
+            ${blankOptions}
+          </select>
+          ${LS("Price per unit ($)", false, fid("lsCustomUnitPrice", n))}
+          <input type="number" id="${fid("lsCustomUnitPrice", n)}" data-f="customUnitPrice" min="0" step="0.01" placeholder="0.00" style="${IS()}">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:8px;">
+            <input type="checkbox" id="${fid("lsCustomTaxable", n)}" data-f="customTaxable" checked> Subject to sales tax
+          </label>
+        </div>
+
+        <div id="${fid("lsSizeWrap", n)}" data-f="sizeWrap" style="display:none;">
+          ${LS("Size", false, fid("lsSize", n))}
+          <select id="${fid("lsSize", n)}" data-f="size" style="${IS()}"></select>
+        </div>
+
+        ${LS("Qty", false, fid("lsQty", n))}
+        <input type="number" id="${fid("lsQty", n)}" data-f="qty" min="1" max="50" value="1" style="${IS()}">
+
+        <div id="${fid("lsPersWrap", n)}" data-f="persWrap" style="display:none;">
+          <label style="font-size:14px;font-weight:500;display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <input type="checkbox" id="${fid("lsPers", n)}" data-f="pers" style="width:auto;margin:0;">
+            Personalize <span id="${fid("lsPersPriceNote", n)}" data-f="persPriceNote" style="font-weight:400;color:var(--ink-soft,#888);font-size:13px;"></span>
+          </label>
+          <div id="${fid("lsPersFieldsWrap", n)}" data-f="persFieldsWrap" style="display:none;">
+            <div id="${fid("lsPersOptionWrap", n)}" data-f="persOptionWrap" style="display:none;margin-bottom:8px;">
+              ${LS("Placement / option", false, fid("lsPersOption", n))}
+              <select id="${fid("lsPersOption", n)}" data-f="persOption" style="${IS()}"></select>
+            </div>
+            ${LS("Personalization text", true, fid("lsPersName", n))}
+            <input type="text" id="${fid("lsPersName", n)}" data-f="persName" maxlength="200" placeholder="Name, number, or custom text" style="${IS()}">
+          </div>
+        </div>
+
+        <div data-f="linePrice" class="ls-line-price" style="display:none;font-size:13px;font-weight:600;margin-bottom:8px;"></div>
+
+        <div id="${fid("lsOverrideWrap", n)}" data-f="overrideWrap" style="margin-bottom:12px;">
+          <label style="font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="${fid("lsOverridePrice", n)}" data-f="override" style="width:auto;margin:0;">
+            Override price
+          </label>
+          <div id="${fid("lsOverridePriceWrap", n)}" data-f="overridePriceWrap" style="display:none;margin-top:8px;">
+            ${LS("Custom unit price ($)", false, fid("lsCustomPrice", n))}
+            <input type="number" id="${fid("lsCustomPrice", n)}" data-f="customPrice" min="0" step="0.01" placeholder="0.00"
+                   style="${IS()}">
+          </div>
+        </div>
+      </div>`;
+
     const overlay = document.createElement("div");
     overlay.className = "admin-pass-overlay";
     overlay.innerHTML = `
       <form class="admin-pass-box" id="localSaleForm" style="max-width:480px;max-height:90vh;overflow-y:auto;">
         <div style="font-weight:600;font-size:15px;margin-bottom:14px;">Record local sale</div>
 
-        ${LS("Product")}
-        <select id="lsProduct" style="${IS()}">${productOptions}</select>
-
-        <div id="lsCustomWrap" style="display:none;">
-          ${LS("Description")}
-          <input type="text" id="lsCustomDesc" maxlength="200" placeholder="e.g. Extra hat, custom patch…" style="${IS()}">
-          ${LS("Blank", true)}
-          <select id="lsCustomBlank" style="${IS()}">
-            <option value="">— none —</option>
-            ${blankOptions}
-          </select>
-          ${LS("Price per unit ($)")}
-          <input type="number" id="lsCustomUnitPrice" min="0" step="0.01" placeholder="0.00" style="${IS()}">
-          <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:8px;">
-            <input type="checkbox" id="lsCustomTaxable" checked> Subject to sales tax
-          </label>
-        </div>
-
-        <div id="lsSizeWrap" style="display:none;">
-          ${LS("Size")}
-          <select id="lsSize" style="${IS()}"></select>
-        </div>
-
-        ${LS("Qty")}
-        <input type="number" id="lsQty" min="1" max="50" value="1" style="${IS()}">
-
-        <div id="lsPersWrap" style="display:none;">
-          <label style="font-size:14px;font-weight:500;display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-            <input type="checkbox" id="lsPers" style="width:auto;margin:0;">
-            Personalize <span id="lsPersPriceNote" style="font-weight:400;color:var(--ink-soft,#888);font-size:13px;"></span>
-          </label>
-          <div id="lsPersFieldsWrap" style="display:none;">
-            <div id="lsPersOptionWrap" style="display:none;margin-bottom:8px;">
-              ${LS("Placement / option")}
-              <select id="lsPersOption" style="${IS()}"></select>
-            </div>
-            ${LS("Personalization text", true)}
-            <input type="text" id="lsPersName" maxlength="200" placeholder="Name, number, or custom text" style="${IS()}">
-          </div>
+        <div id="lsLines">${lineHtml(0)}</div>
+        <div style="margin:0 0 12px;">
+          <button type="button" id="lsAddLine" style="font-size:13px;padding:5px 12px;border:1px dashed var(--border,#ccc);border-radius:5px;cursor:pointer;background:var(--surface,#fff);color:var(--ink,#111);">+ Add another item</button>
+          <span id="lsLineLimit" style="display:none;font-size:12px;color:var(--ink-soft,#888);margin-left:6px;">${MAX_LINES} items is the most one sale can have.</span>
         </div>
 
         <div id="lsPricePreview" style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:5px;padding:8px 12px;font-size:14px;margin-bottom:8px;font-weight:600;"></div>
-
-        <div id="lsOverrideWrap" style="margin-bottom:12px;">
-          <label style="font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;">
-            <input type="checkbox" id="lsOverridePrice" style="width:auto;margin:0;">
-            Override price
-          </label>
-          <div id="lsOverridePriceWrap" style="display:none;margin-top:8px;">
-            ${LS("Custom unit price ($)")}
-            <input type="number" id="lsCustomPrice" min="0" step="0.01" placeholder="0.00"
-                   style="${IS()}">
-          </div>
-        </div>
 
         ${LS("Payment method")}
         <select id="lsPayment" style="${IS()}">
@@ -7393,21 +7417,23 @@ function showLocalSaleModal(products, blanks){
     document.body.appendChild(overlay);
 
     const productMap = Object.fromEntries(products.map(p => [p.productId, p]));
+    const linesEl = overlay.querySelector("#lsLines");
+    const lines = () => [...linesEl.querySelectorAll(".ls-line")];
+    const f = (line, name) => line.querySelector(`[data-f="${name}"]`);
+    const isSized_ = (p) => !!p && p.pricingMode !== "flat" && p.sizePricing && Object.keys(p.sizePricing).length > 0;
 
-    function isCustom(){ return overlay.querySelector("#lsProduct").value === "__custom__"; }
-
-    function updateForProduct(){
-      const pid = overlay.querySelector("#lsProduct").value;
+    function updateForProduct(line){
+      const pid = f(line, "product").value;
       const custom = pid === "__custom__";
 
-      overlay.querySelector("#lsCustomWrap").style.display = custom ? "" : "none";
-      overlay.querySelector("#lsOverrideWrap").style.display = custom ? "none" : "";
+      f(line, "customWrap").style.display = custom ? "" : "none";
+      f(line, "overrideWrap").style.display = custom ? "none" : "";
 
       if(custom){
-        overlay.querySelector("#lsSizeWrap").style.display = "none";
-        overlay.querySelector("#lsPersWrap").style.display = "none";
-        overlay.querySelector("#lsOverridePrice").checked = false;
-        overlay.querySelector("#lsOverridePriceWrap").style.display = "none";
+        f(line, "sizeWrap").style.display = "none";
+        f(line, "persWrap").style.display = "none";
+        f(line, "override").checked = false;
+        f(line, "overridePriceWrap").style.display = "none";
         updatePricePreview();
         return;
       }
@@ -7415,122 +7441,184 @@ function showLocalSaleModal(products, blanks){
       const p = productMap[pid];
       if(!p) return;
 
-      const isSized = p.pricingMode !== "flat" && p.sizePricing && Object.keys(p.sizePricing).length > 0;
+      const isSized = isSized_(p);
       const hasPers = p.personalizationPrice != null;
 
-      const sizeWrap = overlay.querySelector("#lsSizeWrap");
-      sizeWrap.style.display = isSized ? "" : "none";
+      f(line, "sizeWrap").style.display = isSized ? "" : "none";
       if(isSized){
-        const sizeEl = overlay.querySelector("#lsSize");
-        sizeEl.innerHTML = productSizes_(p.sizePricing)
+        f(line, "size").innerHTML = productSizes_(p.sizePricing)
           .map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)} — $${Number(p.sizePricing[s]).toFixed(2)}</option>`)
           .join("");
       }
 
-      const persWrap = overlay.querySelector("#lsPersWrap");
-      persWrap.style.display = hasPers ? "" : "none";
+      f(line, "persWrap").style.display = hasPers ? "" : "none";
       if(hasPers){
-        overlay.querySelector("#lsPersPriceNote").textContent = `(+$${Number(p.personalizationPrice).toFixed(2)})`;
+        f(line, "persPriceNote").textContent = `(+$${Number(p.personalizationPrice).toFixed(2)})`;
         const hasOptions = p.personalizationOptions && p.personalizationOptions.length > 0;
-        const optWrap = overlay.querySelector("#lsPersOptionWrap");
-        optWrap.style.display = hasOptions ? "" : "none";
+        f(line, "persOptionWrap").style.display = hasOptions ? "" : "none";
         if(hasOptions){
-          overlay.querySelector("#lsPersOption").innerHTML = p.personalizationOptions
+          f(line, "persOption").innerHTML = p.personalizationOptions
             .map(o => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`)
             .join("");
         }
-        overlay.querySelector("#lsPers").checked = false;
-        overlay.querySelector("#lsPersFieldsWrap").style.display = "none";
+        f(line, "pers").checked = false;
+        f(line, "persFieldsWrap").style.display = "none";
       }
 
-      overlay.querySelector("#lsOverridePrice").checked = false;
-      overlay.querySelector("#lsOverridePriceWrap").style.display = "none";
-      overlay.querySelector("#lsCustomPrice").value = "";
+      f(line, "override").checked = false;
+      f(line, "overridePriceWrap").style.display = "none";
+      f(line, "customPrice").value = "";
 
       updatePricePreview();
     }
 
-    // The line's price, and the shipping charge after it when the order ships.
-    function showPreview(text){
-      const shipCost = overlay.querySelector("#lsShip").checked ? (parseFloat(overlay.querySelector("#lsShipCost").value) || 0) : 0;
-      overlay.querySelector("#lsPricePreview").textContent = text && shipCost > 0 ? text + ` + $${shipCost.toFixed(2)} shipping` : text;
-    }
-    function updatePricePreview(){
-      const pid = overlay.querySelector("#lsProduct").value;
-      const qty = Math.max(1, parseInt(overlay.querySelector("#lsQty").value) || 1);
+    // One item's price: { text, total } — the text as the price box always showed it for one item.
+    function linePrice(line){
+      const pid = f(line, "product").value;
+      const qty = Math.max(1, parseInt(f(line, "qty").value) || 1);
 
       if(pid === "__custom__"){
-        const unitPrice = parseFloat(overlay.querySelector("#lsCustomUnitPrice").value) || 0;
+        const unitPrice = parseFloat(f(line, "customUnitPrice").value) || 0;
         const total = unitPrice * qty;
-        const preview = unitPrice > 0
-          ? `$${unitPrice.toFixed(2)}${qty > 1 ? " × " + qty : ""} = $${total.toFixed(2)}`
-          : "";
-        showPreview(preview);
-        return;
+        return { total, text: unitPrice > 0 ? `$${unitPrice.toFixed(2)}${qty > 1 ? " × " + qty : ""} = $${total.toFixed(2)}` : "" };
       }
 
       const p = productMap[pid];
-      if(!p){ showPreview(""); return; }
+      if(!p) return { total: 0, text: "" };
 
-      const isSized = p.pricingMode !== "flat" && p.sizePricing && Object.keys(p.sizePricing).length > 0;
-      const sizeEl = overlay.querySelector("#lsSize");
-      const size = isSized && sizeEl ? sizeEl.value : "OSFA";
+      const isSized = isSized_(p);
+      const size = isSized ? f(line, "size").value : "OSFA";
       const catalogUnitPrice = isSized ? Number((p.sizePricing || {})[size] || 0) : Number(p.flatPrice || 0);
-      const persEl = overlay.querySelector("#lsPers");
-      const personalized = p.personalizationPrice != null && persEl && persEl.checked;
+      const personalized = p.personalizationPrice != null && f(line, "pers").checked;
       const persFee = personalized ? Number(p.personalizationPrice) : 0;
 
-      const overrideEl = overlay.querySelector("#lsOverridePrice");
-      const customPriceEl = overlay.querySelector("#lsCustomPrice");
-      const isOverride = overrideEl && overrideEl.checked;
-      const customUnitPrice = isOverride ? (parseFloat(customPriceEl.value) || 0) : 0;
-
-      if(isOverride){
+      if(f(line, "override").checked){
+        const customUnitPrice = parseFloat(f(line, "customPrice").value) || 0;
         const total = customUnitPrice * qty;
-        let preview = `$${customUnitPrice.toFixed(2)} (custom)`;
-        if(qty > 1) preview += ` × ${qty}`;
-        preview += ` = $${total.toFixed(2)}`;
-        showPreview(preview);
-      } else {
-        const total = (catalogUnitPrice + persFee) * qty;
-        let preview = `$${catalogUnitPrice.toFixed(2)}`;
-        if(persFee) preview += ` + $${persFee.toFixed(2)} personalization`;
-        if(qty > 1) preview += ` × ${qty}`;
-        preview += ` = $${total.toFixed(2)}`;
-        showPreview(preview);
+        let text = `$${customUnitPrice.toFixed(2)} (custom)`;
+        if(qty > 1) text += ` × ${qty}`;
+        return { total, text: text + ` = $${total.toFixed(2)}` };
       }
+      const total = (catalogUnitPrice + persFee) * qty;
+      let text = `$${catalogUnitPrice.toFixed(2)}`;
+      if(persFee) text += ` + $${persFee.toFixed(2)} personalization`;
+      if(qty > 1) text += ` × ${qty}`;
+      return { total, text: text + ` = $${total.toFixed(2)}` };
     }
 
-    overlay.querySelector("#lsProduct").addEventListener("change", updateForProduct);
+    // The price box: one item, its price as before; several, each item's price on its own block and the running
+    // total here. The shipping charge follows when the order ships.
+    function updatePricePreview(){
+      const all = lines();
+      const many = all.length > 1;
+      let sum = 0;
+      all.forEach(line => {
+        const lp = linePrice(line);
+        sum += lp.total;
+        const el = f(line, "linePrice");
+        el.textContent = many ? lp.text : "";
+        el.style.display = many && lp.text ? "" : "none";
+      });
+      const text = many ? `Total for ${all.length} items: $${sum.toFixed(2)}` : linePrice(all[0]).text;
+      const shipCost = overlay.querySelector("#lsShip").checked ? (parseFloat(overlay.querySelector("#lsShipCost").value) || 0) : 0;
+      overlay.querySelector("#lsPricePreview").textContent = text && shipCost > 0 ? text + ` + $${shipCost.toFixed(2)} shipping` : text;
+    }
+
+    // Item numbers, the × buttons' names and the add button follow the list.
+    function renumber(){
+      const all = lines();
+      all.forEach((line, i) => {
+        const head = line.querySelector(".ls-line-head");
+        head.style.display = all.length > 1 ? "flex" : "none";
+        line.querySelector(".ls-line-title").textContent = "Item " + (i + 1);
+        const rm = f(line, "remove");
+        if(rm) rm.setAttribute("aria-label", "Remove item " + (i + 1));
+      });
+      const full = all.length >= MAX_LINES;
+      overlay.querySelector("#lsAddLine").style.display = full ? "none" : "";
+      overlay.querySelector("#lsLineLimit").style.display = full ? "" : "none";
+    }
+
+    function wireLine(line){
+      f(line, "product").addEventListener("change", () => updateForProduct(line));
+      f(line, "size").addEventListener("change", updatePricePreview);
+      f(line, "qty").addEventListener("input", updatePricePreview);
+      f(line, "customUnitPrice").addEventListener("input", updatePricePreview);
+      f(line, "pers").addEventListener("change", function(){
+        f(line, "persFieldsWrap").style.display = this.checked ? "" : "none";
+        updatePricePreview();
+      });
+      f(line, "override").addEventListener("change", function(){
+        f(line, "overridePriceWrap").style.display = this.checked ? "" : "none";
+        if(this.checked) f(line, "customPrice").focus();
+        updatePricePreview();
+      });
+      f(line, "customPrice").addEventListener("input", updatePricePreview);
+      const rm = f(line, "remove");
+      if(rm) rm.addEventListener("click", () => {
+        const all = lines(), at = all.indexOf(line);
+        line.remove();
+        renumber(); updatePricePreview();
+        const next = lines()[Math.min(at, lines().length - 1)];
+        if(next) f(next, "product").focus();
+      });
+      updateForProduct(line);
+    }
+
+    overlay.querySelector("#lsAddLine").addEventListener("click", () => {
+      if(lines().length >= MAX_LINES) return;
+      const n = ++lineSeq + 1;   // ids from -2 up: the first item is the one without a number
+      linesEl.insertAdjacentHTML("beforeend", lineHtml(n));
+      const line = linesEl.lastElementChild;
+      wireLine(line);
+      renumber(); updatePricePreview();
+      f(line, "product").focus();
+    });
     overlay.querySelector("#lsShip").addEventListener("change", (e) => { overlay.querySelector("#lsShipWrap").style.display = e.target.checked ? "" : "none"; updatePricePreview(); });
     overlay.querySelector("#lsShipCost").addEventListener("input", updatePricePreview);
-    const sizeEl2 = overlay.querySelector("#lsSize");
-    if(sizeEl2) sizeEl2.addEventListener("change", updatePricePreview);
-    overlay.querySelector("#lsQty").addEventListener("input", updatePricePreview);
-    overlay.querySelector("#lsCustomUnitPrice").addEventListener("input", updatePricePreview);
-    overlay.querySelector("#lsPers").addEventListener("change", function(){
-      overlay.querySelector("#lsPersFieldsWrap").style.display = this.checked ? "" : "none";
-      updatePricePreview();
-    });
-    overlay.querySelector("#lsOverridePrice").addEventListener("change", function(){
-      const wrap = overlay.querySelector("#lsOverridePriceWrap");
-      wrap.style.display = this.checked ? "" : "none";
-      if(this.checked) overlay.querySelector("#lsCustomPrice").focus();
-      updatePricePreview();
-    });
-    overlay.querySelector("#lsCustomPrice").addEventListener("input", updatePricePreview);
 
-    updateForProduct();
+    wireLine(lines()[0]);
+    renumber();
 
     const finish = (result) => { document.body.removeChild(overlay); resolve(result); };
+
+    // One item read from its block: { item } or { error, focus }.
+    function readLine(line){
+      const pid = f(line, "product").value;
+      const qty = Math.max(1, Math.min(50, parseInt(f(line, "qty").value) || 1));
+      if(pid === "__custom__"){
+        const desc = f(line, "customDesc").value.trim();
+        if(!desc) return { error: "Enter a description for the custom item.", focus: f(line, "customDesc") };
+        const unitPrice = parseFloat(f(line, "customUnitPrice").value);
+        if(isNaN(unitPrice) || unitPrice < 0) return { error: "Enter a valid price per unit (0 or more).", focus: f(line, "customUnitPrice") };
+        const blankId = f(line, "customBlank").value || null;
+        return { item: { productId: "__custom__", name: desc, type: "custom", size: "OSFA",
+                 qty, personalized: false, persName: "", customUnitPrice: unitPrice,
+                 taxable: f(line, "customTaxable").checked,
+                 ...(blankId ? { blankId: Number(blankId) } : {}) } };
+      }
+      const p = productMap[pid];
+      const size = isSized_(p) ? f(line, "size").value : "OSFA";
+      const personalized = !!(p && p.personalizationPrice != null && f(line, "pers").checked);
+      let persName = "";
+      if(personalized){
+        const optVal = f(line, "persOptionWrap").style.display !== "none" ? f(line, "persOption").value.trim() : "";
+        persName = f(line, "persName").value.trim() || optVal;
+      }
+      let customUnitPrice = null;
+      if(f(line, "override").checked){
+        customUnitPrice = parseFloat(f(line, "customPrice").value);
+        if(isNaN(customUnitPrice) || customUnitPrice < 0) return { error: "Enter a valid custom price (0 or more).", focus: f(line, "customPrice") };
+      }
+      return { item: { productId: p.productId, name: p.name, type: p.type,
+               size, qty, personalized, persName,
+               ...(customUnitPrice !== null ? { customUnitPrice } : {}) } };
+    }
 
     overlay.querySelector("#localSaleForm").addEventListener("submit", (e) => {
       e.preventDefault();
       const errEl = overlay.querySelector("#lsErr");
       errEl.style.display = "none";
-
-      const pid = overlay.querySelector("#lsProduct").value;
-      const qty = Math.max(1, Math.min(50, parseInt(overlay.querySelector("#lsQty").value) || 1));
 
       // Emailing an invoice: the customer picks how to pay on its page, so no method is needed here.
       const wantsInvoice = overlay.querySelector("#lsInvoice").checked;
@@ -7582,64 +7670,21 @@ function showLocalSaleModal(products, blanks){
         shipping = { address: addr, cost, method: [overlay.querySelector("#lsShipCarrier").value, v("#lsShipService")].filter(Boolean).join(" ") };
       }
 
-      let item;
-      if(pid === "__custom__"){
-        const desc = overlay.querySelector("#lsCustomDesc").value.trim();
-        if(!desc){
-          errEl.textContent = "Enter a description for the custom item.";
+      // Every item, in order; the first one that can't be read says which item it is (when there are several).
+      const all = lines(), items = [];
+      for(let i = 0; i < all.length; i++){
+        const r = readLine(all[i]);
+        if(r.error){
+          errEl.textContent = (all.length > 1 ? "Item " + (i + 1) + ": " : "") + r.error;
           errEl.style.display = "";
-          overlay.querySelector("#lsCustomDesc").focus();
+          r.focus.focus();
           return;
         }
-        const unitPrice = parseFloat(overlay.querySelector("#lsCustomUnitPrice").value);
-        if(isNaN(unitPrice) || unitPrice < 0){
-          errEl.textContent = "Enter a valid price per unit (0 or more).";
-          errEl.style.display = "";
-          overlay.querySelector("#lsCustomUnitPrice").focus();
-          return;
-        }
-        const blankId = overlay.querySelector("#lsCustomBlank").value || null;
-        item = { productId: "__custom__", name: desc, type: "custom", size: "OSFA",
-                 qty, personalized: false, persName: "", customUnitPrice: unitPrice,
-                 taxable: overlay.querySelector("#lsCustomTaxable").checked,
-                 ...(blankId ? { blankId: Number(blankId) } : {}) };
-      } else {
-        const p = productMap[pid];
-        const isSized = p && p.pricingMode !== "flat" && p.sizePricing && Object.keys(p.sizePricing).length > 0;
-        const sizeEl = overlay.querySelector("#lsSize");
-        const size = isSized && sizeEl ? sizeEl.value : "OSFA";
-
-        const persEl = overlay.querySelector("#lsPers");
-        const personalized = p && p.personalizationPrice != null && persEl && persEl.checked;
-        let persName = "";
-        if(personalized){
-          const optEl = overlay.querySelector("#lsPersOption");
-          const nameEl = overlay.querySelector("#lsPersName");
-          const optVal = (optEl && optEl.closest("#lsPersOptionWrap") && optEl.closest("#lsPersOptionWrap").style.display !== "none") ? optEl.value.trim() : "";
-          const nameVal = nameEl ? nameEl.value.trim() : "";
-          persName = nameVal || optVal;
-        }
-
-        const overrideEl = overlay.querySelector("#lsOverridePrice");
-        const isOverride = overrideEl && overrideEl.checked;
-        let customUnitPrice = null;
-        if(isOverride){
-          customUnitPrice = parseFloat(overlay.querySelector("#lsCustomPrice").value);
-          if(isNaN(customUnitPrice) || customUnitPrice < 0){
-            errEl.textContent = "Enter a valid custom price (0 or more).";
-            errEl.style.display = "";
-            overlay.querySelector("#lsCustomPrice").focus();
-            return;
-          }
-        }
-
-        item = { productId: p.productId, name: p.name, type: p.type,
-                 size, qty, personalized, persName,
-                 ...(customUnitPrice !== null ? { customUnitPrice } : {}) };
+        items.push(r.item);
       }
 
       finish({
-        items: [item],
+        items,
         paymentMethod,
         customerName: overlay.querySelector("#lsName").value.trim() || "",
         contact,
@@ -7811,7 +7856,7 @@ function renderPackingLabels(orgId, selectedIds){
     if(!pw){ showToast("Allow popups to print labels", true); return; }
     pw.document.write(`<!DOCTYPE html><html><head>
 <meta charset="utf-8">
-<link rel="stylesheet" href="${location.origin}/vendor/fonts/fonts.css">
+<link rel="stylesheet" href="${location.origin}/vendor/fonts-1/fonts.css">
 <style>
 @page{size:letter;margin:0;}
 *{box-sizing:border-box;}
@@ -8028,7 +8073,7 @@ function renderBrandedLabels(orgId, selectedIds){
     if(!pw){ showToast("Allow popups to print labels", true); return; }
     pw.document.write(`<!DOCTYPE html><html><head>
 <meta charset="utf-8">
-<link rel="stylesheet" href="${location.origin}/vendor/fonts/fonts.css">
+<link rel="stylesheet" href="${location.origin}/vendor/fonts-1/fonts.css">
 <style>
 @page{size:4.25in 10in;margin:0;}
 *{box-sizing:border-box;}
@@ -8132,7 +8177,7 @@ body{margin:0;padding:0;background:#fff;color:#000;}
     if(!pw){ showToast("Allow popups to print labels", true); return; }
     pw.document.write(`<!DOCTYPE html><html><head>
 <meta charset="utf-8">
-<link rel="stylesheet" href="${location.origin}/vendor/fonts/fonts.css">
+<link rel="stylesheet" href="${location.origin}/vendor/fonts-1/fonts.css">
 <style>${POPUP_CSS}</style></head><body>${html}</body></html>`);
     pw.document.close();
     printPopupWhenReady_(pw);
@@ -10054,12 +10099,20 @@ async function renderGlobalSettings(app){
         <div class="admin-actions" style="margin-top:16px;">
           <button class="admin-btn" data-admin-action="submitGlobalSettings">Save global settings</button>
           ${adminDesktop_() ? "" : `<button class="admin-btn" type="button" data-need="settings.global:edit" data-admin-action="backfillStripeFees" title="Look up Stripe's processing fee and charge date for card payments (safe to run again)">Sync Stripe fees &amp; dates</button>`}
-          <button class="admin-btn" data-admin-action="goCatalog_">Cancel</button>
+          <button class="admin-btn" type="button" id="gDiscardChanges" data-admin-action="discardGlobalSettings_">Discard changes</button>
         </div>
       </div>
     `;
     wireRushRule_("gRush");
     wireGlobalFeatures_(ctx);
+    // Unsaved changes (review #110): typing or ticking anything in the form marks the page, so leaving it (the
+    // menu, a link, back, closing the tab) asks first, as the product and shop forms do. A part that saves on its
+    // own (data-no-dirty: supplier connections) doesn't; buttons that act at once (Send a test email, Preview,
+    // Sync Stripe fees) aren't typing, so they never do.
+    window._prodFormDirty = false;
+    { const panel = document.getElementById("adminPanel");
+      if (panel) { const dirty = (e) => { if (!(e.target && e.target.closest && e.target.closest("[data-no-dirty]"))) window._prodFormDirty = true; };
+        panel.addEventListener("input", dirty); panel.addEventListener("change", dirty); } }
     try { if (sessionStorage.getItem("oddSettingsSaved")) { sessionStorage.removeItem("oddSettingsSaved"); showToast("Global settings saved."); } } catch (e) {}
   }catch(e){
     document.getElementById("adminPanel").innerHTML = `<div class="admin-empty">Could not reach the server.</div>`;
@@ -10392,14 +10445,27 @@ async function submitGlobalSettings(){
     // New fees / targets re-check every product: say which are now below a target.
     if((data.belowTarget || []).length) setTimeout(() => belowTargetToast_(data.belowTarget, "With these settings, "), 1200);
     // The program restarted with new settings: reload, so the menu and pages follow them.
+    window._prodFormDirty = false;   // saved: leaving (or the reload below) no longer asks
     if(programSaved){ try { sessionStorage.setItem("oddSettingsSaved", "1"); } catch (e) {} location.hash = "#settings"; location.reload(); return; }
+    // Stay on Global settings (review #110), drawn again from what was saved, so it can be checked; the page
+    // keeps its place.
+    const y = window.scrollY || 0;
+    await renderGlobalSettings(document.getElementById("app"));
+    if (y) try { window.scrollTo(0, y); } catch (e) {}
     showToast(adminDesktop_() ? "Global settings saved." : needPublish
       ? "Global settings saved. The payment-method change reaches the storefront when you click Publish on the Manage catalog screen; everything else is already live."
       : "Global settings saved. The changes are already live — no need to Publish.", false);
-    location.hash = "#catalog";
   }catch(e){
     say((programSaved ? "The program's settings are saved; nothing else was" : "Nothing was saved") + " — could not reach the server. Try again.");
   }
+}
+// Global settings → Discard changes (review #110): the page drawn again from what is saved, after asking when
+// something was changed. It stays on Global settings (Cancel used to go to Manage catalog).
+async function discardGlobalSettings_(){
+  if(window._prodFormDirty && !await askConfirm_("Discard your changes?\n\nGlobal settings goes back to what is saved.", { confirmLabel: "Discard changes", cancelLabel: "Keep editing", danger: true })) return;
+  window._prodFormDirty = false;
+  await renderGlobalSettings(document.getElementById("app"));
+  showToast("Changes discarded.", false);
 }
 
 // ---- QR code library lazy loader ----
@@ -15795,8 +15861,8 @@ function showStockCount_(kind, onDone){
 let _pdfjsLib = null;
 async function loadPdfjsLib_(){
   if (!_pdfjsLib) {
-    _pdfjsLib = await import("/vendor/pdfjs/pdf.min.mjs");
-    _pdfjsLib.GlobalWorkerOptions.workerSrc = "/vendor/pdfjs/pdf.worker.min.mjs";
+    _pdfjsLib = await import("/vendor/pdfjs-5.6.205/pdf.min.mjs");
+    _pdfjsLib.GlobalWorkerOptions.workerSrc = "/vendor/pdfjs-5.6.205/pdf.worker.min.mjs";
   }
   return _pdfjsLib;
 }
@@ -26871,6 +26937,9 @@ function showEditOrderModal(order, products, ctx){
       if(newTotalEl) newTotalEl.textContent = "$" + newTotal.toFixed(2) + (taxOnTop ? " + sales tax" : "");
       if(payBtn) payBtn.style.display = diff > 0 && mayRequestPay_ ? "inline-block" : "none";
       if(payBtn) payBtn.textContent = "Save & request payment (+" + diff.toFixed(2) + (taxOnTop ? " + tax" : "") + ")";
+      // The payment email's own message goes with the payment button: shown only when it is.
+      const emailWrap = overlay.querySelector("#editOrderEmailWrap");
+      if(emailWrap) emailWrap.style.display = diff > 0 && mayRequestPay_ ? "" : "none";
     }
 
     const overlay = document.createElement("div");
@@ -26899,6 +26968,10 @@ function showEditOrderModal(order, products, ctx){
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;font-size:13px;">
           <span>New total: <strong id="editOrderNewTotal">$0.00</strong></span>
           <span id="editOrderDiff" style="font-weight:600;"></span>
+        </div>
+        <div id="editOrderEmailWrap" style="display:none;margin-bottom:12px;font-size:13px;">
+          <label for="editOrderEmailBody" style="display:block;font-weight:600;margin-bottom:4px;">Message in the payment email <span style="font-weight:400;color:var(--ink-soft,#666);">(optional — leave blank for a standard note about the balance for the changes)</span></label>
+          <textarea id="editOrderEmailBody" rows="3" maxlength="3000" style="width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--border,#ccc);border-radius:4px;"></textarea>
         </div>
         ${(order.catalogDrift || []).length ? `<div class="edit-order-drift" style="font-size:13px;color:#92400e;background:#fef3c7;border:1px solid #f59e0b;border-radius:5px;padding:8px 10px;margin-bottom:12px;">⚠ ${order.catalogDrift.map(x => `<strong>${escapeHtml(x.name || "A line")}</strong>: ${x.problems.map(escapeHtml).join("; ")}`).join("<br>⚠ ")}<br>Pick the graphic on the line, or use <strong>Update from catalog…</strong> below.</div>` : ""}
         <div class="admin-pass-actions" style="flex-wrap:wrap;gap:8px;">
@@ -27090,8 +27163,11 @@ function showEditOrderModal(order, products, ctx){
         }
       }
 
+      // The typed message goes out with the payment request (#91); blank means the standard note.
+      const bodyEl = overlay.querySelector("#editOrderEmailBody");
+      const emailBody = requestPayment && bodyEl ? bodyEl.value.trim() : "";
       document.body.removeChild(overlay);
-      resolve({ removals, updates, additions, requestPayment, emailBody: "" });
+      resolve({ removals, updates, additions, requestPayment, emailBody });
     }
 
     overlay.querySelector("#editOrderCancel").addEventListener("click", () => {

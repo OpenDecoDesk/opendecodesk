@@ -248,7 +248,7 @@ async function sendViaCloudflare_(env, { to, subject, html, text, attachments },
 // the usual mistakes — what to do. Never records an email_failed issue (it's a deliberate test).
 // Secrets are never returned: a key is described (set or not, its length, whether it looks right).
 // Whether this install can send email at all (a provider is set up), for pages that would otherwise promise one —
-// the order confirmation's "A copy of your order was emailed to …". Not whether a given email will arrive.
+// the order confirmation's "We'll email a copy to …". Not whether a given email will arrive.
 export async function emailCanSend(env) {
   const desktop = desktopEmail_(env);
   if (desktop === "on") return true;
@@ -1275,6 +1275,34 @@ export async function sendShippingPaymentEmail(env, { customerName, customerEmai
   </div>`;
   const text = `Shipping Payment for Order ${orderId}\n\n${bodyText}\n\n${paymentUrl}\n\n%%FOOTER_TEXT%%`;
   return send_(env, { to: customerEmail, subject, html, text });
+}
+
+// Sent to the customer when the shop changed their order (Edit items) and asked them to pay the
+// difference. Not the shipping email: that one says the order is ready to ship, which is wrong here.
+// `customBody` is the shop's own text from the Edit items dialog; without one, a plain note about the
+// balance for the changes.
+export async function sendOrderAdjustmentPaymentEmail(env, args) {
+  return send_(env, buildOrderAdjustmentEmail(args));
+}
+export function buildOrderAdjustmentEmail({ customerName, customerEmail, orderId, amountDue, newTotal, paymentUrl, customBody }) {
+  const subject = `Payment for changes to order ${orderId}`;
+  const name = String(customerName || "").trim();
+  const hello = name && name !== "Local Sale" ? `Hi ${name},` : "Hello,";
+  const totalNote = Number(newTotal) > 0 ? ` The new order total is ${fmt$(newTotal)}.` : "";
+  const bodyText = String(customBody || "").trim() ||
+    `${hello}\n\nYour order ${orderId} has been updated.${totalNote} The balance for the changes is ${fmt$(amountDue)}. Please pay it using the secure link below.`;
+  const bodyHtml = escHtml(bodyText).replace(/\n/g, "<br>");
+  const html = `<div style="font-family:sans-serif;max-width:600px;margin:auto">
+    <h2 style="color:#1d4ed8">Order updated</h2>
+    <p>${bodyHtml}</p>
+    <div style="margin:24px 0;text-align:center">
+      <a href="${escHtml(paymentUrl)}" style="display:inline-block;background:#1d4ed8;color:#fff;font-size:16px;font-weight:bold;padding:14px 32px;border-radius:6px;text-decoration:none">Pay balance &rarr;</a>
+    </div>
+    <p style="font-size:13px;color:#555">If the button doesn't work, copy this link: ${escHtml(paymentUrl)}</p>
+    %%FOOTER_HTML%%
+  </div>`;
+  const text = `Order updated — ${orderId}\n\n${bodyText}\n\nPay balance: ${paymentUrl}\n\n%%FOOTER_TEXT%%`;
+  return { to: customerEmail, subject, html, text };
 }
 
 // Sent to the customer with a link to their invoice page (/?invoice=<token>), where they choose how

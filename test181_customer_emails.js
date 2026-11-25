@@ -31,7 +31,7 @@ const M = new Function(hostSrc + "\n" + httpSrc + "\n" + strip(read("functions/_
   "const ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({});\n" +
   "const checkShippedDeliveries = async () => ({}), checkBlankShipments = async () => ({});\n" +
   dbSrc + "\n" + pdfSrc + "\n" + emailSrc + "\n" + strip(read("functions/api/orders.js")) + "\n" +
-  "return { post: onRequestPost, receiptLines_, howToPay_, businessBlock_, buildOrderReceivedEmail, buildPaymentReceivedEmail, buildInvoiceEmail, orderPdf, previewMessage, send_, " +
+  "return { post: onRequestPost, receiptLines_, howToPay_, businessBlock_, buildOrderReceivedEmail, buildOrderAdjustmentEmail, buildPaymentReceivedEmail, buildInvoiceEmail, orderPdf, previewMessage, send_, " +
   "  pdfDocument, pdfWrap, pdfTextWidth, setBusinessProfile, getBusinessProfile, setSalesTaxSettings, setGlobalSettings, getEmailSettings, setEmailSettings, setupStatus, sampleOrder_ };")();
 
 let pass = 0, fail = 0;
@@ -214,6 +214,31 @@ const order = (o = {}) => Object.assign({
   ok("the order's invoice as a PDF, priced before tax", r.status === 200 && r.body.file.filename === `Invoice ${saleId}.pdf` && /\$47\.17/.test(t.text) && /Sales tax \(6%\) \$2\.83/.test(t.text) && /\$50\.00/.test(t.text));
   r = await post({ action: "getOrderPdf", org: "other", orderId: saleId });
   ok("…not for another shop's order", r.status === 404);
+
+  console.log("\n=== Edit items → Save & request payment: the order-change email, not the shipping one (#91) ===");
+  let adj = M.buildOrderAdjustmentEmail({ customerName: "Alex Sample", customerEmail: "alex@example.net", orderId: "ACME-9", amountDue: 12.5, newTotal: 62.5, paymentUrl: "https://pay.example.test/x" });
+  ok("subject 'Payment for changes to order …', heading 'Order updated', a 'Pay balance' button",
+    adj.subject === "Payment for changes to order ACME-9" && /<h2[^>]*>Order updated<\/h2>/.test(adj.html) && /Pay balance &rarr;/.test(adj.html) && adj.to === "alex@example.net");
+  ok("…the default text greets by name and names the balance for the changes and the new total",
+    /^Hi Alex Sample,/.test(adj.text.split("\n\n")[1]) && /balance for the changes is \$12\.50/.test(adj.text) && /new order total is \$62\.50/.test(adj.text));
+  ok("…nothing about shipping or 'ready to ship'", !/ship/i.test(adj.subject + adj.html + adj.text));
+  adj = M.buildOrderAdjustmentEmail({ customerName: "Local Sale", customerEmail: "a@example.net", orderId: "ACME-9", amountDue: 3, paymentUrl: "https://pay.example.test/x" });
+  ok("…a counter sale with no name is greeted 'Hello,' (as the invoice email)", /\n\nHello,\n/.test(adj.text));
+  adj = M.buildOrderAdjustmentEmail({ customerName: "Alex", customerEmail: "a@example.net", orderId: "ACME-9", amountDue: 3, paymentUrl: "https://pay.example.test/x", customBody: "Added the <b>cap</b> you asked for." });
+  ok("…the shop's own message replaces the default text, escaped", /Added the &lt;b&gt;cap&lt;\/b&gt; you asked for\./.test(adj.html) && !/balance for the changes/.test(adj.text));
+  env.STRIPE_SECRET_KEY = "sk_test_x";
+  const realFetch = global.fetch;
+  global.fetch = async (url, init) => /api\.stripe\.com\/v1\/checkout\/sessions$/.test(String(url))
+    ? { ok: true, status: 200, json: async () => ({ id: "cs_test_1", url: "https://checkout.example.test/cs_test_1" }) } : realFetch(url, init);
+  d1._raw.exec(`INSERT INTO products (productId, orgId, type, name, pricingMode, flatPriceCents, visible, createdAt, updatedAt) VALUES ('cap','acme','cap','Cap','flat',1800,1,'t','t');`);
+  sent.length = 0;
+  r = await post({ action: "editOrder", org: "acme", orderId: saleId, requestPayment: true, emailBody: "We added the cap, as asked.",
+    additions: [{ productId: "cap", size: "", qty: 1 }] });
+  const mail = sent.find(m => /Payment for changes to order/.test(m.subject || ""));
+  ok("editOrder with requestPayment sends 'Payment for changes to order …' with the typed message and the card link",
+    r.status === 200 && r.body.priceDiff > 0 && r.body.emailSent === true && !!mail && mail.subject === `Payment for changes to order ${saleId}` &&
+    /We added the cap, as asked\./.test(mail.text) && /checkout\.example\.test\/cs_test_1/.test(mail.text) && !sent.some(m => /Shipping payment/.test(m.subject || "")));
+  global.fetch = realFetch; delete env.STRIPE_SECRET_KEY;
 
   console.log("\n=== Setup status names what's missing ===");
   const st = (biz, payments) => M.setupStatus({ DB: {} }, { business: biz, payments, salesTax: {}, locale: {} }).find(i => i.key === "paymentDetails");

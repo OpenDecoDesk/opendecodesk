@@ -22,7 +22,7 @@ const SUBS = { shipper: "shipper" };
 const STUBS = "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const getCatalogData = async () => ({ subdomainMap: " + JSON.stringify(SUBS) + ", orgs: {} });\n";
 const orders = new Function("selectBox", hostSrc + "\n" + httpSrc + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + quoteSrc + "\n" + STUBS +
-  "const requireAdmin = async () => null; const adminActor = () => 'test'; const invalidateCatalogVersionCache = () => {};\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test'; const invalidateCatalogVersionCache = () => {};\n" + require("./testlib/roles").adminAs() + "\n" +
   "const ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({});\n" +
   dbSrc + "\n" + strip(read("functions/_lib/email.js")) + "\n" + strip(read("functions/api/orders.js")) + "\nreturn { post: onRequestPost, signQuote, verifyQuote, canonicalItems };")(selectBox);
 const shipping = new Function("selectBox", hostSrc + "\n" + httpSrc + "\n" + quoteSrc + "\n" + STUBS + dbSrc + "\n" + strip(read("functions/api/shipping.js")) + "\nreturn onRequestPost;")(selectBox);

@@ -17,7 +17,7 @@ const dbSrc = strip(read("functions/_lib/db.js"));
 const lib = new Function(dbSrc + "\nreturn { insertOrder, listAccounts, matchStatementLine, getCardPaymentsMissingFees };")();
 const api = new Function(
   strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" + require("./testlib/roles").adminAs() + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const sendOrderReceivedEmail = async () => false, sendOrderNotificationEmail = async () => false, sendPaymentConfirmedEmail = async () => false,\n" +
@@ -156,7 +156,7 @@ const CHECKING = 1, VENMO = 3, CASH = 4;
   const k9 = await pay("check9", "check", 4000);
   ln = await line("CHECK MATCHED BY HAND", 40);
   const hand = await lib.matchStatementLine(d1, ln.id, [`payment:${k9.id}`]);
-  console.log("a check already matched to a statement line by hand isn't offered again:", hand.ok && !(await listed()).some(p => p.id === k9.id));
+  console.log("a check already matched to a statement line by hand isn't offered again:", !!(hand.ok && !(await listed()).some(p => p.id === k9.id)));
   const c8 = await pay("cash8", "cash", 3000);
   ln = await line("CASH DEPOSIT 30", 30);
   r = await deposit(ln.id, [{ id: c8.id, amount: 30 }]);
@@ -268,9 +268,9 @@ const CHECKING = 1, VENMO = 3, CASH = 4;
   const chk = rowOf(m, p2.orderId).querySelector("input[data-cov]");
   tick(rowOf(m, p2.orderId).querySelector("input[data-pid]"));
   console.log("a check's 'covers' is fixed at its full $50.00 (it can't be split):", chk.value === "50.00" && chk.disabled === true);
-  console.log("checks alone ($50) against a $110 deposit say they're short:", /short of the deposit/.test(m.q("#vmSum").textContent) && m.q("#rccOk").disabled);
+  console.log("checks alone ($50) against a $110 deposit say they're short:", !!(/short of the deposit/.test(m.q("#vmSum").textContent) && m.q("#rccOk").disabled));
   m.q("#vmFilter").value = "cash"; m.q("#vmFilter").dispatchEvent(new w.Event("change"));
-  console.log("filtering to Cash hides the other rows but keeps the check ticked:", rowOf(m, p2.orderId).style.display === "none" && rowOf(m, p1.orderId).style.display !== "none" && rowOf(m, p2.orderId).querySelector("input[data-pid]").checked);
+  console.log("filtering to Cash hides the other rows but keeps the check ticked:", !!(rowOf(m, p2.orderId).style.display === "none" && rowOf(m, p1.orderId).style.display !== "none" && rowOf(m, p2.orderId).querySelector("input[data-pid]").checked));
   tick(rowOf(m, p1.orderId).querySelector("input[data-pid]"));
   console.log("ticking the cash: it defaults to what the deposit still needs ($60.00 of the cash), and $50 + $60 = $110 matches exactly:",
     rowOf(m, p1.orderId).querySelector("input[data-cov]").value === "60.00" && /matches exactly/.test(m.q("#vmSum").textContent) && m.q("#rccOk").disabled === false);
@@ -327,8 +327,8 @@ const CHECKING = 1, VENMO = 3, CASH = 4;
   console.log("a 'STRIPE TRANSFER' line starts on Deposit, filtered to Stripe (cards):", qS("#rccKind").value === "deposit" && qS("#vmFilter").value === "card" &&
     [...qS("#vmFilter").options].some(o => o.value === "card" && /Stripe/.test(o.textContent)));
   const sRow = (id) => [...qS("#vmList").querySelectorAll("tr[data-method]")].find(t => t.textContent.includes(id));
-  console.log("card payments are badged STRIPE and can't be split (covers is fixed at the full amount once ticked):", /STRIPE/.test(sRow(sp1.orderId).textContent) &&
-    (() => { tick(sRow(sp1.orderId).querySelector("input[data-pid]")); return sRow(sp1.orderId).querySelector("input[data-cov]").disabled && sRow(sp1.orderId).querySelector("input[data-cov]").value === "60.00"; })());
+  console.log("card payments are badged STRIPE and can't be split (covers is fixed at the full amount once ticked):", !!(/STRIPE/.test(sRow(sp1.orderId).textContent) &&
+    (() => { tick(sRow(sp1.orderId).querySelector("input[data-pid]")); return sRow(sp1.orderId).querySelector("input[data-cov]").disabled && sRow(sp1.orderId).querySelector("input[data-cov]").value === "60.00"; })()));
   tick(sRow(sp2.orderId).querySelector("input[data-pid]"));
   console.log("$100 of charges with no fee recorded against a $96.10 payout: shows Stripe fees $3.90 (3.9%) and says the fee goes on the payments — no category to choose:",
     /Stripe fees \$3\.90 \(3\.9%\)/.test(qS("#vmSum").textContent) && /recorded on the card payments/.test(qS("#vmSum").textContent) && qS("#vmFeeRow").style.display === "none" && qS("#rccOk").disabled === false);

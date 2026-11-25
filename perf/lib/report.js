@@ -96,10 +96,15 @@ function why(a) {
   return bits;
 }
 
+// What local SQLite hides: on Cloudflare each statement (each batch) is a round trip to D1. The modeled D1 time is
+// trips × PERF_D1_RTT_MS (profile.js records the value it used); for requests sent at once, the longest of them.
+const modeledD1 = (p, rtt) => p.trips == null ? "" : ` · ${p.trips} D1 round trips · modeled D1 time = ${p.parts > 1 ? `${p.tripsLongest} (the longest of the ${p.parts} requests sent at once)` : p.trips} × ${rtt} ms = ${fmtMs((p.parts > 1 ? p.tripsLongest : p.trips) * rtt)}`;
 function profileSection(profile) {
   if (!profile) return `<p class="muted">No query profile yet. Run <code>npm run perf:profile -- --data &lt;kept data folder&gt;</code> after a run with <code>--keep-data</code>.</p>`;
+  const rtt = profile.rttMs || 10;
   return `<p class="muted">Run on a copy of the ${fmtN(profile.orders)}-order database through the real handler code on native SQLite (${esc(profile.sqlite)}). Statements are grouped by their text. "Full scan" reads a whole table; "Wide search" uses an index but still takes over 20 ms a call, which usually means the index matches most of the table.</p>` +
-    profile.ops.map(p => `<section class="prof"><h3>${esc(p.title)} <span class="muted">${fmtMs(p.totalMs)} total · ${p.statements} statements</span></h3>
+    `<p class="muted">Local SQLite answers in microseconds; on Cloudflare every statement is a round trip from the Worker to D1. Each operation's <b>modeled D1 time = trips × PERF_D1_RTT_MS</b> (${rtt} ms in this profile; set PERF_D1_RTT_MS when running <code>npm run perf:profile</code>) — a floor, before any query work, that this run's timings don't include.</p>` +
+    profile.ops.map(p => `<section class="prof"><h3>${esc(p.title)} <span class="muted">${fmtMs(p.totalMs)} total · ${p.statements} statements${modeledD1(p, rtt)}</span></h3>
       <div class="scroll"><table><thead><tr><th>Statement</th><th class="num">Calls</th><th class="num">Total</th><th>Plan</th></tr></thead><tbody>
       ${p.top.map(s => `<tr><td><code>${esc(s.sql.slice(0, 220))}${s.sql.length > 220 ? "…" : ""}</code></td><td class="num">${s.calls}</td><td class="num">${fmtMs(s.ms)}</td>
         <td>${s.scans.length ? `<span class="pill critical"><span aria-hidden="true">✕</span> Full scan</span> <code>${esc(s.scans.join("; ").slice(0, 160))}</code>`
@@ -313,4 +318,4 @@ function compareTable(now, before) {
   return lines.join("\n");
 }
 
-module.exports = { writeReport, summaryTable, compareTable, analyse, growth };
+module.exports = { modeledD1, writeReport, summaryTable, compareTable, analyse, growth };

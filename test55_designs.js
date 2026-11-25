@@ -259,7 +259,7 @@ function makeDesignsBucket(){
   console.log("a line-item upload takes any embroidery format too:", up.status === "ok" && /^order-files\/5\//.test(up.key));
   up = await okUp("?designId=9&role=machine&ext=hus&name=logo.hus", "text/html");
   const stored = env.DESIGNS._store.get(up.key);
-  console.log("a non-image upload is always stored as application/octet-stream, whatever Content-Type was sent:", up.status === "ok" && stored && stored.httpMetadata.contentType === "application/octet-stream");
+  console.log("a non-image upload is always stored as application/octet-stream, whatever Content-Type was sent:", !!(up.status === "ok" && stored && stored.httpMetadata.contentType === "application/octet-stream"));
 
   console.log("\n=== functions/api/design.js: order-item upload accepts an image too, WITH magic-byte check ===");
   env = { PROXY_ADMIN_PASSPHRASE: "proxy-pass-for-tests", DESIGNS: makeDesignsBucket() };

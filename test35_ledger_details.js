@@ -107,7 +107,7 @@ function signed(event){
     amount_total: 3200, metadata: { orderId: "S1", orgId: "prime" } } } };
   await webhook({ request: signed(paid), env });
   o = await lib.getOrderById(d1, "S1");
-  console.log("card payment recorded with Stripe's $1.23 fee:", o.payments.length === 1 && o.payments[0].method === "card" && o.payments[0].fee === 1.23 && o.processorFees === 1.23 && o.paid);
+  console.log("card payment recorded with Stripe's $1.23 fee:", !!(o.payments.length === 1 && o.payments[0].method === "card" && o.payments[0].fee === 1.23 && o.processorFees === 1.23 && o.paid));
 
   const refundEvt = (id) => ({ id, type: "charge.refunded", data: { object: { id: "ch_S1", payment_intent: "pi_S1", amount_refunded: 1600, metadata: { orderId: "S1", orgId: "prime" } } } });
   refundsList = [{ id: "re_1", amount: 1600, status: "succeeded", created: 1790000000 }];

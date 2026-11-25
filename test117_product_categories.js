@@ -139,7 +139,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 60));
   const P = (o) => Object.assign({ sku: "", category: "", name: "", price: "", sizes: "" }, o);
   let imp = await lib.importProductsCsv(d1, "club", [P({ sku: "PATCH-A", category: "Patches", name: "Round Patch", price: "6.00" })], { dryRun: false });
   let made = (await lib.getProductsByOrg(d1, "club", false)).find(p => p.productId === "patch-a");
-  console.log("a Patches row with no sizes imports as a flat-priced Patch:", imp.created === 1 && made && made.type === "patch" && made.pricingMode === "flat" && made.flatPrice === 6);
+  console.log("a Patches row with no sizes imports as a flat-priced Patch:", !!(imp.created === 1 && made && made.type === "patch" && made.pricingMode === "flat" && made.flatPrice === 6));
   imp = await lib.importProductsCsv(d1, "club", [P({ sku: "TEE-A", category: "T Shirt", name: "Tee", price: "15.00" })], { dryRun: true });
   console.log("a T Shirt row with no sizes is still a problem (a garment needs its sizes):", imp.results[0].problems.some(x => /No sizes/.test(x)));
   imp = await lib.importProductsCsv(d1, "club", [P({ sku: "MUG-A", category: "Mugs", name: "Mug", price: "9.00" })], { dryRun: true });

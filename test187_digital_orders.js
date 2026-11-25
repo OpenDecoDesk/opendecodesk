@@ -21,7 +21,7 @@ const lib = new Function(hostSrc + "\n" + httpSrc + "\n" + dbSrc + "\n" + emailS
   `\nreturn { createProduct, addProductFile, getOrderById, stagePrereqError, whyNotCompletable_, getPaidUnrunOrders, getProductionQueue,
     getCatalogIssues, getPublicCatalogData };`)();
 const api = new Function(hostSrc + "\n" + httpSrc + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'test'; const adminUser = () => null;\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test'; " + require("./testlib/roles").adminAs() + "\n" + strip(read("functions/_lib/permissions.js")) + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async (env) => ({ subdomainMap: { acme: 'acme' }, orgs: {}, features: globalThis.__features || {} });\n" +

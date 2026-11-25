@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Exports a D1 database (full schema + data, as SQL) and uploads it, gzipped,
-# to a PRIVATE R2 bucket as  <db>/<UTC timestamp>.sql.gz
+# to a PRIVATE R2 bucket as  <db>/daily/<UTC timestamp>.sql.gz  — and on the 1st of
+# each month (UTC) also as  <db>/monthly/<YYYY-MM>.sql.gz
+# The daily copies are meant to expire: a lifecycle rule on the bucket deletes them after 35 days
+# (docs/operations.md, "Backups"). The monthly ones have no rule and are kept.
 # Run nightly by .github/workflows/d1-backup.yml, or by hand: npm run db:backup:now
 #
 # Needs CLOUDFLARE_ACCOUNT_ID and credentials (CLOUDFLARE_API_TOKEN in CI; your
@@ -29,6 +32,14 @@ grep -q "CREATE TABLE" "$OUT" || { echo "Export has no CREATE TABLE statements �
 grep -q "INSERT INTO" "$OUT"  || { echo "Export has no data — refusing to upload." >&2; exit 1; }
 
 gzip -9 "$OUT"
-$WRANGLER r2 object put "$BUCKET/$DB/$STAMP.sql.gz" --file "$OUT.gz" --remote \
-  --content-type application/gzip </dev/null
-echo "Backed up $DB → r2://$BUCKET/$DB/$STAMP.sql.gz ($(wc -c < "$OUT.gz" | tr -d ' ') bytes)"
+put() {
+  $WRANGLER r2 object put "$BUCKET/$1" --file "$OUT.gz" --remote \
+    --content-type application/gzip </dev/null
+  echo "Backed up $DB → r2://$BUCKET/$1 ($(wc -c < "$OUT.gz" | tr -d ' ') bytes)"
+}
+put "$DB/daily/$STAMP.sql.gz"
+# On the 1st of the month (read from the daily file's own timestamp, so the two always agree),
+# the month's copy too, which no lifecycle rule touches.
+if [ "${STAMP:8:2}" = "01" ]; then
+  put "$DB/monthly/${STAMP:0:7}.sql.gz"
+fi

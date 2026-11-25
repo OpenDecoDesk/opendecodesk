@@ -74,10 +74,11 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
     /npm pkg set build\.buildVersion="\$SEMVER" build\.mac\.bundleShortVersion="\$MAC_SHORT" build\.mac\.bundleVersion="\$MAC_BUILD"/.test(job("build")) &&
     /MAC_SHORT: \$\{\{ needs\.version\.outputs\.macshort \}\}/.test(job("build")) && /macbuild: \$\{\{ steps\.v\.outputs\.macbuild \}\}/.test(job("version")) && /if: needs\.version\.outputs\.release == 'true'/.test(job("build")));
   ok("the release is desktop-v<version>, titled OpenDecoDesk Desktop <version>, with the website's file names and the notes", /gh release create "desktop-v\$VERSION"/.test(job("release")) &&
-    /--title "OpenDecoDesk Desktop \$VERSION" --notes-file desktop\/RELEASE_NOTES\.md/.test(job("release")) && /needs: \[version, build\]/.test(job("release")) &&
+    /--title "OpenDecoDesk Desktop \$VERSION" --notes-file desktop\/RELEASE_NOTES\.md/.test(job("release")) && /needs: \[version, build, tests\]/.test(job("release")) &&
     ["OpenDecoDesk-Windows.zip", "OpenDecoDesk-macOS-AppleSilicon.zip", "OpenDecoDesk-macOS-Intel.zip"].every(n => job("release").includes("release/" + n)));
   ok("…and no longer asks for a bumped package.json or refuses a version", !/bump|GITHUB_REF_NAME|already released/i.test(wf));
-  ok("every action is pinned to a commit", [...wf.matchAll(/uses: (\S+)/g)].length >= 6 && [...wf.matchAll(/uses: (\S+)/g)].every(m => /@[0-9a-f]{40}$/.test(m[1])));
+  // (./.github/workflows/test.yml is this repository's own test suite, run before a release: the same commit.)
+  ok("every action is pinned to a commit", [...wf.matchAll(/uses: (\S+)/g)].length >= 6 && [...wf.matchAll(/uses: (\S+)/g)].every(m => m[1] === "./.github/workflows/test.yml" || /@[0-9a-f]{40}$/.test(m[1])));
   const docs = read("docs/desktop.md");
   ok("docs/desktop.md says how to release and what the version is", /\*\*Actions → Desktop builds → Run workflow\*\*, on `main`, with \*\*Publish a release\*\*\s+ticked/.test(docs) &&
     /`YYYY\.MM\.DD\.NN`/.test(docs) && /`2026\.11\.01\.01` is `2026\.11\.101`/.test(docs) && !/set the new `version` in `desktop\/package\.json`/.test(docs) && !/push a tag/.test(docs));

@@ -9,6 +9,13 @@
 
 set -uo pipefail
 
+# A failed check, in any of the shapes one can print:
+#   "…: false" or "… false"   a check whose description doesn't end in a colon fails too
+#   "…: 0", "…: undefined", "…: null"   a check written `"desc:", a && b` prints a's falsy value, not false
+#   "…:" with nothing after it   the same with an empty string ("desc:", "")
+# So no passing test may print a line in these shapes for any other reason. test272 checks this pattern.
+FAIL_LINE='(^|[[:space:]])false$|: (0|undefined|null)$|:[[:space:]]*$'
+
 fail=0
 for f in test*.js; do
   out=$(node "$f" 2>&1)
@@ -19,7 +26,7 @@ for f in test*.js; do
     fail=1
     continue
   fi
-  bad=$(echo "$out" | grep -E ': false$')
+  bad=$(echo "$out" | grep -E "$FAIL_LINE")
   if [ -n "$bad" ]; then
     echo "FAIL (assertion returned false): $f"
     echo "$bad"

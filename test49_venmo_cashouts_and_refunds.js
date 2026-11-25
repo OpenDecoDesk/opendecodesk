@@ -54,7 +54,7 @@ const CHECKING = 1, CARD = 2, VENMO = 3;
   console.log("every existing expense (incl. a deleted one) survives the table rebuild unchanged:", JSON.stringify(before) === JSON.stringify(after) && after.length === 2);
   d1._raw.run("INSERT INTO expenses (expenseDate, description, categoryId, amountCents, createdAt, updatedAt, refundOfId) VALUES ('2026-08-20','Adobe refund',?,-1299,'t','t',1)", [cat("Software%")]);
   let rejected = false; try { d1._raw.run("INSERT INTO expenses (expenseDate, description, categoryId, amountCents, createdAt, updatedAt) VALUES ('2026-08-20','zero',?,0,'t','t')", [cat("Software%")]); } catch (e) { rejected = true; }
-  console.log("a negative amount (refund) is accepted, zero is refused:", rejected && d1.q("SELECT amountCents a FROM expenses WHERE id=3")[0].a === -1299);
+  console.log("a negative amount (refund) is accepted, zero is refused:", !!(rejected && d1.q("SELECT amountCents a FROM expenses WHERE id=3")[0].a === -1299));
   d1._raw.run("DELETE FROM expenses WHERE id=1");
   console.log("deleting the original just unlinks its refund (refundOfId → NULL):", d1.q("SELECT refundOfId r FROM expenses WHERE id=3")[0].r === null);
   console.log("order_payments has cashoutTransferId, empty for existing payments:", d1.q("SELECT name FROM pragma_table_info('order_payments') WHERE name='cashoutTransferId'").length === 1);
@@ -77,7 +77,7 @@ const CHECKING = 1, CARD = 2, VENMO = 3;
   let r = await call({ action: "saveExpense", expense: { date: "2026-09-02", description: "Adobe refund", categoryId: software, amount: 12.99, refund: true, refundOfId: adobe.id, accountId: CARD } });
   L = await list();
   const ref = L.expenses.find(e => e.description === "Adobe refund");
-  console.log("saving a refund stores it as a negative expense linked to the purchase:", r.status === 200 && ref.amount === -12.99 && ref.isRefund && ref.refundOfId === adobe.id);
+  console.log("saving a refund stores it as a negative expense linked to the purchase:", !!(r.status === 200 && ref.amount === -12.99 && ref.isRefund && ref.refundOfId === adobe.id));
   const sw = L.summary.byLine.find(x => x.line === "27a");
   console.log("the refund reduces the SAME Schedule C line (line 27a nets to $0.00 for the Adobe purchase + refund):", !!sw && sw.amount === 0 && sw.deductible === 0);
   console.log("total spent is net of the refund:", L.summary.totals.amount === 10.05);
@@ -107,8 +107,8 @@ const CHECKING = 1, CARD = 2, VENMO = 3;
   const ex = (await call({ action: "getAccountantExport", dateFrom: "2026-01-01", dateTo: "2026-12-31" })).body;
   const exRef = ex.expenses.find(e => e.description === "Adobe refund (edited)");
   console.log("the accountant export marks refunds (Type = Refund, negative amount) and the monthly deduction nets them:",
-    !!exRef && exRef.type === "Refund" && exRef.amount === -10 && ex.expenses.find(e => e.description === "Lunch").type === "Expense" &&
-    ex.summary.find(m => m.month === "2026-09").expensesDeductible < 0);
+    !!(!!exRef && exRef.type === "Refund" && exRef.amount === -10 && ex.expenses.find(e => e.description === "Lunch").type === "Expense" &&
+    ex.summary.find(m => m.month === "2026-09").expensesDeductible < 0));
 
   // =====================================================================
   console.log("\n=== Reconcile → Create… → Refund of an expense ===");
@@ -306,7 +306,7 @@ const CHECKING = 1, CARD = 2, VENMO = 3;
   console.log("lists the Venmo payments waiting (order, customer, amount), Create disabled until something is ticked:",
     m.q("#vmList").querySelectorAll("input[data-pid]").length === 2 && /Wes|Wren/.test(m.q("#vmList").textContent) && m.q("#rccOk").disabled === true);
   tick(m.q("#vmList input[data-pid]"));
-  console.log("one $46 payment against an $88 deposit says it's short and stays disabled:", /short of the deposit/.test(m.q("#vmSum").textContent) && m.q("#rccOk").disabled);
+  console.log("one $46 payment against an $88 deposit says it's short and stays disabled:", !!(/short of the deposit/.test(m.q("#vmSum").textContent) && m.q("#rccOk").disabled));
   m.q("#vmOldest").click();
   const covs = () => [...m.q("#vmList").querySelectorAll("input[data-cov]")];
   console.log("'Tick oldest first until it covers the deposit' ticks both; the second only covers what's still needed ($46 + $42 = $88):",
@@ -347,7 +347,7 @@ const CHECKING = 1, CARD = 2, VENMO = 3;
   covP.value = "46.00"; covP.dispatchEvent(new w.Event("input", { bubbles: true }));
   console.log("entering the payment's real $46.00 share shows the Venmo fee ($2.00, 4.3%) and enables Create:", /Venmo fees \$2\.00 \(4\.3%\)/.test(qP("#vmSum").textContent) && qP("#rccOk").disabled === false);
   qP("#rccOk").click(); await new Promise(x => setTimeout(x, 20));
-  console.log("submits just that payment's covered amount:", acted2 && acted2.allocations.length === 1 && acted2.allocations[0].amount === 46);
+  console.log("submits just that payment's covered amount:", !!(acted2 && acted2.allocations.length === 1 && acted2.allocations[0].amount === 46));
   const done = await call(acted2);
   console.log("...and the server finishes the payment off (nothing left to offer):", done.status === 200 && (await call({ action: "listCashoutPayments" })).body.payments.every(p => p.orderId !== "PH"));
 

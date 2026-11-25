@@ -117,17 +117,17 @@ const addMonths = (ymd, n) => { const [y, m] = ymd.split("-").map(Number); const
 
   console.log("\n=== Refusals ===");
   const refuse = async (extra, re, status = 400) => { const x = await call({ action: "saveRecurringExpense", recurring: { ...base, startDate: today, ...extra } }); return x.status === status && re.test(x.body.message); };
-  console.log("no frequency / an unknown one:", await refuse({ frequency: "" }, /how often/) && await refuse({ frequency: "daily" }, /how often/));
+  console.log("no frequency / an unknown one:", !!(await refuse({ frequency: "" }, /how often/) && await refuse({ frequency: "daily" }, /how often/)));
   console.log("an end date before the first date:", await refuse({ endDate: addDays(today, -1) }, /end date/));
   console.log("a first date more than a year ahead:", await refuse({ startDate: addDays(today, 400) }, /year/));
   console.log("a Depreciation category:", await refuse({ categoryId: depreciation }, /Capital equipment/));
   console.log("a refund:", await refuse({ refund: true }, /refund/));
-  console.log("no amount / no description / no account:", await refuse({ amount: 0 }, /Amount/) && await refuse({ description: " " }, /Description/) && await refuse({ accountId: 0 }, /account/));
+  console.log("no amount / no description / no account:", !!(await refuse({ amount: 0 }, /Amount/) && await refuse({ description: " " }, /Description/) && await refuse({ accountId: 0 }, /account/)));
   console.log("a vendor that isn't on the vendor list:", await refuse({ vendor: "Nobody Inc" }, /list/));
   const lastMonth = addMonths(firstOfMonth, -1).slice(0, 7);
   await call({ action: "closePeriod", month: lastMonth });
-  console.log("a first date that would record into a closed month:", await refuse({ startDate: lastMonth + "-10" }, /closed/, 409) &&
-    q("SELECT count(*) n FROM recurring_expenses WHERE startDate = ?", lastMonth + "-10")[0].n === 0);
+  console.log("a first date that would record into a closed month:", !!(await refuse({ startDate: lastMonth + "-10" }, /closed/, 409) &&
+    q("SELECT count(*) n FROM recurring_expenses WHERE startDate = ?", lastMonth + "-10")[0].n === 0));
   await call({ action: "reopenPeriod", month: lastMonth });
 
   console.log("\n=== Vendors and categories ===");
@@ -145,8 +145,8 @@ const addMonths = (ymd, n) => { const [y, m] = ymd.split("-").map(Number); const
   console.log("\n=== Stop and delete ===");
   r = await call({ action: "stopRecurringExpense", id: ruleF.id });
   const stopped = (r.body.recurring || []).find(x => x.id === ruleF.id);
-  console.log("Stop ends it today and keeps it (and what it recorded):", r.status === 200 && stopped && stopped.endDate === today && stopped.ended &&
-    q("SELECT count(*) n FROM expenses WHERE recurringId = ? AND deletedAt IS NULL", ruleF.id)[0].n === 3);
+  console.log("Stop ends it today and keeps it (and what it recorded):", !!(r.status === 200 && stopped && stopped.endDate === today && stopped.ended &&
+    q("SELECT count(*) n FROM expenses WHERE recurringId = ? AND deletedAt IS NULL", ruleF.id)[0].n === 3));
   r = await lib.recordDueRecurringExpenses(d1, addDays(today, 60), { ids: [ruleF.id] });
   console.log("…nothing more is recorded after it:", r.recorded.length === 0);
   r = await call({ action: "deleteRecurringExpense", id: ruleF.id });
@@ -213,11 +213,11 @@ const addMonths = (ymd, n) => { const [y, m] = ymd.split("-").map(Number); const
   const wait = async (fn) => { for (let i = 0; i < 200 && !fn(); i++) await new Promise(res => setTimeout(res, 10)); return fn(); };
   await w.renderExpenses(doc.getElementById("app"));
   const shown = (id) => doc.getElementById(id).style.display !== "none";
-  console.log("Repeats starts at Doesn't repeat: no Ends box, receipt and refund shown:", doc.getElementById("expRepeat").value === "" && !shown("expEndsWrap") && shown("expReceiptWrap") && shown("expRefundWrap"));
+  console.log("Repeats starts at Doesn't repeat: no Ends box, receipt and refund shown:", !!(doc.getElementById("expRepeat").value === "" && !shown("expEndsWrap") && shown("expReceiptWrap") && shown("expRefundWrap")));
   doc.getElementById("expRepeat").value = "biweekly";
   doc.getElementById("expRepeat").dispatchEvent(new w.Event("change"));
   console.log("repeating: Ends appears, receipt and refund go, the date is the First date and may be ahead:",
-    shown("expEndsWrap") && !shown("expReceiptWrap") && !shown("expRefundWrap") && doc.getElementById("expDateLbl").textContent === "First date" && doc.getElementById("expDate").max > today);
+    !!(shown("expEndsWrap") && !shown("expReceiptWrap") && !shown("expRefundWrap") && doc.getElementById("expDateLbl").textContent === "First date" && doc.getElementById("expDate").max > today));
   doc.getElementById("expDate").value = addDays(today, -14);
   doc.getElementById("expDesc").value = "Cleaning service";
   doc.getElementById("expCat").value = String(supplies); doc.getElementById("expCat").dispatchEvent(new w.Event("change"));
@@ -231,7 +231,7 @@ const addMonths = (ymd, n) => { const [y, m] = ymd.split("-").map(Number); const
     sv.recurring.endDate === addDays(today, 60) && sv.recurring.accountId === card && sv.recurring.amount === 45 && !sent.some(b => b.action === "saveExpense"));
   const row = [...doc.querySelectorAll("#expRecurring tr[data-recurring-row]")].find(tr => /Cleaning service/.test(tr.textContent));
   console.log("the Recurring section lists it: Every 2 weeks, 2 recorded, next date:", !!row && /Every 2 weeks/.test(row.textContent) && /2 · \$90\.00/.test(row.textContent));
-  console.log("the form went back to a single expense:", doc.getElementById("expRepeat").value === "" && shown("expReceiptWrap"));
+  console.log("the form went back to a single expense:", !!(doc.getElementById("expRepeat").value === "" && shown("expReceiptWrap")));
   await wait(() => doc.querySelector('#expList [title*="Recorded automatically"]'));
   console.log("recorded expenses carry the 🔁 RECURRING tag in the list:", [...doc.querySelectorAll("#expList tr[data-expense-row]")].filter(tr => /RECURRING/.test(tr.textContent) && /Cleaning service/.test(tr.textContent)).length === 2);
   const exRow = [...doc.querySelectorAll("#expList tr[data-expense-row]")].find(tr => /Cleaning service/.test(tr.textContent));
@@ -241,7 +241,7 @@ const addMonths = (ymd, n) => { const [y, m] = ymd.split("-").map(Number); const
   const ruleId = Number(row.dataset.recurringRow);
   row.querySelector('button[data-admin-action="expEditRecurring_"]').click();
   const modal = await wait(() => doc.querySelector("#erAmount") && doc.querySelector("#erAmount").closest(".admin-modal, div"));
-  console.log("Edit… opens a window with the first date locked (something's recorded):", !!modal && doc.querySelector("#erStart").disabled && doc.querySelector("#erFreq").value === "biweekly");
+  console.log("Edit… opens a window with the first date locked (something's recorded):", !!(!!modal && doc.querySelector("#erStart").disabled && doc.querySelector("#erFreq").value === "biweekly"));
   doc.querySelector("#erAmount").value = "50";
   doc.querySelector("#erSave").click();
   await wait(() => sent.some(b => b.action === "saveRecurringExpense" && b.recurring.id === ruleId));

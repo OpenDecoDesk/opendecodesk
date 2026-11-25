@@ -41,7 +41,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
     console.log("=== M-1: cleanImageUrl / isValidAccent ===");
     const ok = (u) => typeof V.cleanImageUrl(u) === "string" && V.cleanImageUrl(u) !== "";
     console.log("https, http and site paths are accepted:",
-      ok("https://images.example.com/uploads/x.png") && ok("http://example.com/a.jpg") && ok("images/foo.jpg") && ok("/images/foo.jpg"));
+      !!(ok("https://images.example.com/uploads/x.png") && ok("http://example.com/a.jpg") && ok("images/foo.jpg") && ok("/images/foo.jpg")));
     console.log("blank is allowed (no image):", V.cleanImageUrl("") === "" && V.cleanImageUrl(null) === "");
     console.log("javascript:/data:/vbscript: are refused:",
       [ "javascript:alert(1)", "JAVASCRIPT:alert(1)", "data:text/html,x", "vbscript:x" ].every(u => V.cleanImageUrl(u) === null));
@@ -81,7 +81,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
     console.log("nothing was written for any refused create:", d1.q("SELECT count(*) n FROM orgs WHERE orgId='new-org'")[0].n === 0);
     r = await call(org({ designImageShirtUrl: "  https://images.example/a.png  " }));
     const created = d1.q("SELECT subdomain, designImageShirt FROM orgs WHERE orgId='new-org'")[0];
-    console.log("a valid createOrg succeeds and stores the trimmed URL:", r.status === 200 && created && created.designImageShirt === "https://images.example/a.png");
+    console.log("a valid createOrg succeeds and stores the trimmed URL:", !!(r.status === 200 && created && created.designImageShirt === "https://images.example/a.png"));
     r = await call({ action: "updateOrg", orgId: "new-org", name: "New Org", subdomain: "", designImageCapUrl: "images/cap.jpg" });
     console.log("updateOrg with a blank subdomain keeps the current one:",
       r.status === 200 && d1.q("SELECT subdomain FROM orgs WHERE orgId='new-org'")[0].subdomain === "neworg");

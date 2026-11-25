@@ -1,7 +1,9 @@
 name: Nightly D1 backup
 
-# Exports the D1 database to a private R2 bucket every night (and on demand from the Actions tab).
-# See scripts/d1-backup.sh and docs/operations.md ("Backups") for setup and restoring.
+# Exports the D1 database to a private R2 bucket every night (and on demand from the Actions tab):
+# <db>/daily/<timestamp>.sql.gz, plus <db>/monthly/<YYYY-MM>.sql.gz on the 1st of the month. The daily
+# copies are deleted after 35 days by a lifecycle rule you add to the bucket once; the monthly ones are kept.
+# See scripts/d1-backup.sh and docs/operations.md ("Backups") for setup, the rule, and restoring.
 #
 # OFF BY DEFAULT. A fork or a copy of this repository has neither your Cloudflare token nor your
 # database, so the job below is skipped unless the repository VARIABLE D1_BACKUP_ENABLED is "true"

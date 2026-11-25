@@ -281,9 +281,9 @@ function makeContext(bodyObj, env, url){
     };
     const res = await onRequestPost(makeContext({action:"createTestTransaction", org:"league-101", amount:7.50, key:"proxy-passphrase"}, BASE_ENV, "https://admin.example.com/api/orders"));
     const data = JSON.parse(await res.text());
-    console.log("Returns ok with checkout URL:", data.status === "ok" && data.checkoutUrl && data.checkoutUrl.includes("checkout.stripe.com"));
-    console.log("Test order inserted with TEST- prefix orderId:", insertedOrder && insertedOrder.orderId.startsWith("TEST-"));
-    console.log("Amount was inserted correctly:", insertedOrder && insertedOrder.total === 7.50);
+    console.log("Returns ok with checkout URL:", !!(data.status === "ok" && data.checkoutUrl && data.checkoutUrl.includes("checkout.stripe.com")));
+    console.log("Test order inserted with TEST- prefix orderId:", !!(insertedOrder && insertedOrder.orderId.startsWith("TEST-")));
+    console.log("Amount was inserted correctly:", !!(insertedOrder && insertedOrder.total === 7.50));
     global.insertOrder = async () => {};
   }
 
@@ -406,8 +406,8 @@ function makeContext(bodyObj, env, url){
     global.insertOrder = async (db, order) => { ins = order; };
     await onRequestPost(makeContext({orderId:"S1", customerName:"C", orgId:"league-101", contact:"a@b.com",
       items: baseItems, shippingCost: -40, total: 10, subtotal: 10}, QUOTE_ENV, PP_URL));
-    console.log("Stored shippingCost is 0, not -40:", ins && ins.shippingCost === 0);
-    console.log("Stored total is server subtotal ($50), not client total:", ins && ins.total === 50);
+    console.log("Stored shippingCost is 0, not -40:", !!(ins && ins.shippingCost === 0));
+    console.log("Stored total is server subtotal ($50), not client total:", !!(ins && ins.total === 50));
     global.insertOrder = async () => {};
   }
 
@@ -417,7 +417,7 @@ function makeContext(bodyObj, env, url){
     global.insertOrder = async (db, order) => { ins = order; };
     await onRequestPost(makeContext({orderId:"S2", customerName:"C", orgId:"league-101", contact:"a@b.com",
       items: baseItems, placedAt: "2020-01-01T00:00:00.000Z"}, QUOTE_ENV, PP_URL));
-    console.log("placedAt is server time:", ins && ins.placedAt.slice(0,4) !== "2020" && Math.abs(Date.parse(ins.placedAt) - Date.now()) < 60000);
+    console.log("placedAt is server time:", !!(ins && ins.placedAt.slice(0,4) !== "2020" && Math.abs(Date.parse(ins.placedAt) - Date.now()) < 60000));
     global.insertOrder = async () => {};
   }
 
@@ -429,9 +429,9 @@ function makeContext(bodyObj, env, url){
     const res = await onRequestPost(makeContext({orderId:"S3", customerName:"C", orgId:"league-101", contact:"a@b.com",
       items: baseItems, shippingAddress: addr, shippingQuoteToken: tok, shippingCost: 0.01}, QUOTE_ENV, PP_URL));
     console.log("Accepted:", res.status === 200);
-    console.log("Shipping comes from the quote ($12.34), not the client ($0.01):", ins && ins.shippingCost === 12.34);
-    console.log("Total = $50 + $12.34:", ins && Math.abs(ins.total - 62.34) < 1e-9);
-    console.log("Method comes from the quote:", ins && ins.shippingMethod === "USPS Ground");
+    console.log("Shipping comes from the quote ($12.34), not the client ($0.01):", !!(ins && ins.shippingCost === 12.34));
+    console.log("Total = $50 + $12.34:", !!(ins && Math.abs(ins.total - 62.34) < 1e-9));
+    console.log("Method comes from the quote:", !!(ins && ins.shippingMethod === "USPS Ground"));
     global.insertOrder = async () => {};
   }
 

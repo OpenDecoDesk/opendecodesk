@@ -164,7 +164,7 @@ function makeStorageMock(){
   console.log("\n=== Remove from cart test ===");
   window.removeFromCart(0, "league-101");
   await new Promise(r=>setTimeout(r,20));
-  console.log("Cart length after remove (expect 0):", window.eval("cart").length);
+  console.log("Cart is empty after remove:", window.eval("cart").length === 0);
 
   console.log("\n=== CSV export test ===");
   // re-add and place an order first

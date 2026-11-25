@@ -18,7 +18,7 @@ const lib = new Function(dbSrc + `\nreturn { insertOrder, getOrderById, createPr
   createThread, saveDesign, addDesignVersion, setProductDesign, getCatalogIssues, stagePrereqError, setFulfillmentStage, getProductionQueue,
   getPaidUnrunOrders, getBlanksToOrder, getCogsReport, getOrdersAwaitingBlanks, importProductsCsv, saveMachine };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" + require("./testlib/roles").adminAs() + "\n" + strip(read("functions/_lib/permissions.js")) + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +

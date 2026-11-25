@@ -67,7 +67,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
       /Pick-list option with no design: CAPTAIN/.test(prod.picklist.map(x => x.text).join()) && prod.picklist.some(x => /Closure COACH.*no stitch/.test(x.text)));
     console.log("no weight when the shop ships → an error:", codes("noweight").split(",").includes("noWeight"));
     console.log("no blank link → a warning, not an error:", prod.noweight.find(x => x.code === "noBlankLink").level === "warn");
-    console.log("“No embroidery design needed” products aren't flagged for a design…", !prod.dtf.some(x => x.code === "noDesign"));
+    console.log("“No embroidery design needed” products aren't flagged for a design:", !prod.dtf.some(x => x.code === "noDesign"));
     console.log("…but unlinked sizes still are (a DTF tee is still a blank to track):", codes("dtf") === "noBlankLink" && prod.dtf[0].level === "warn");
     console.log("hidden products are checked too, as warnings until shown — unless on an open order (and they say so):",
       prod.hidden && prod.hidden.every(x => x.level === "warn" && /hidden — fix before showing it/.test(x.text)) && /hidden, but on an open order/.test(prod.hiddenopen[0].text));

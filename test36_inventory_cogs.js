@@ -48,7 +48,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   const old = d1.q("SELECT productId, cogsCents, cogsSource FROM order_items WHERE orderId='OLD' ORDER BY id");
   console.log("already-manufactured linked line gets an estimated COGS (2 × $3.49):", old[0].cogsCents === 698 && old[0].cogsSource === "estimate");
   console.log("unlinked line stays unknown (NULL):", old[1].cogsCents === null);
-  console.log("estimates didn't move stock:", qty("M") === 4 && ledgerMatchesStock());
+  console.log("estimates didn't move stock:", !!(qty("M") === 4 && ledgerMatchesStock()));
   const legacy = d1.q("SELECT productId, cogsCents FROM order_items WHERE name='Polo — Kelly'")[0];
   console.log("legacy line with no productId recovered by name (em dash vs hyphen) and costed:", legacy.productId === "polo" && legacy.cogsCents === 349);
 

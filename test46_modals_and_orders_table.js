@@ -72,7 +72,7 @@ const { storefrontPage } = require("./testlib/storefront-page");
   w.document.getElementById("editOrderSave").click();
   const result = await pending;
   console.log("saving sends the personalization text even though qty/size/product never changed:",
-    result && result.updates.length === 1 && result.updates[0].personalized === true && result.updates[0].persName === "Robert");
+    !!(result && result.updates.length === 1 && result.updates[0].personalized === true && result.updates[0].persName === "Robert"));
 
   // A product with no personalization price offers no checkbox at all.
   const order2 = { orderId: "O2", customerName: "Bo", total: 10, shippingCost: 0, items: [
@@ -120,7 +120,7 @@ const { storefrontPage } = require("./testlib/storefront-page");
   w.document.getElementById("woSave").click();
   await new Promise(res => setTimeout(res, 50));
   console.log("saving sends the test/scrap reason as the note, with the size, qty and date:",
-    lastWriteOff && lastWriteOff.action === "writeOffBlanks" && lastWriteOff.size === "OSFA" &&
-    lastWriteOff.qty === 2 && lastWriteOff.note === "Used for testing, samples, or shop scrap" && !!lastWriteOff.occurredAt);
+    !!(lastWriteOff && lastWriteOff.action === "writeOffBlanks" && lastWriteOff.size === "OSFA" &&
+    lastWriteOff.qty === 2 && lastWriteOff.note === "Used for testing, samples, or shop scrap" && !!lastWriteOff.occurredAt));
   w.fetch = origFetch;
 })();

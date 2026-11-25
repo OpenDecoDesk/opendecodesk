@@ -55,7 +55,7 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
   const stillOpen = !!w.document.querySelector(".pm-inner");
   w.document.getElementById("pmCloseBottom").click();
   await open1;
-  console.log("…a background click leaves it open; Close closes it:", stillOpen && !w.document.querySelector(".pm-inner"));
+  console.log("…a background click leaves it open; Close closes it:", !!(stillOpen && !w.document.querySelector(".pm-inner")));
 
   // Escape closes only the window on top: a confirm window over another window leaves the one below open.
   const below = w.inventoryModal_("Below", "<p>x</p>").ov;

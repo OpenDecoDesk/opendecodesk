@@ -63,16 +63,28 @@ Your orders, customers and books live in one D1 database. Back it up somewhere y
 ### The backup script
 
 `scripts/d1-backup.sh` exports the whole database as SQL, compresses it, and uploads it to a
-**private** R2 bucket as `<database>/<UTC timestamp>.sql.gz`. It refuses to upload an export that
-has no tables or no data in it.
+**private** R2 bucket as `<database>/daily/<UTC timestamp>.sql.gz`. On the 1st of each month (UTC)
+it also uploads the same file as `<database>/monthly/<YYYY-MM>.sql.gz`. It refuses to upload an
+export that has no tables or no data in it.
 
-One-time setup:
+One-time setup: the bucket, and a rule that deletes each daily copy after 35 days (so a nightly
+backup doesn't pile up forever). There is no rule for `monthly/`: one copy a month is kept
+indefinitely, for the records that need years.
 
 ```bash
 npx wrangler r2 bucket create opendecodesk-db-backups
+npx wrangler r2 bucket lifecycle add opendecodesk-db-backups expire-daily-backups "opendecodesk-db/daily/" --expire-days 35
 ```
 
+(With another bucket or database name, use those names; the rule's prefix is `<database>/daily/`.
+`npx wrangler r2 bucket lifecycle list opendecodesk-db-backups` shows the rules.)
+
 Keep that bucket **private**: the files contain your customers' names, emails and addresses.
+
+**Backups from before this layout** sit directly under `<database>/` (`<database>/<UTC timestamp>.sql.gz`).
+The rule doesn't touch them, because they aren't under `daily/`. Keep one from the start of each
+month you want kept and delete the rest by hand in the dashboard (R2 → the bucket), or leave them;
+nothing new is written there.
 
 Run it by hand:
 
@@ -109,7 +121,8 @@ Restore into a **new** database first, look at it, and only then switch over.
 
 ```bash
 # 1. Get a backup and unpack it
-npx wrangler r2 object get opendecodesk-db-backups/opendecodesk-db/<file>.sql.gz --remote --file backup.sql.gz
+npx wrangler r2 object get opendecodesk-db-backups/opendecodesk-db/daily/<file>.sql.gz --remote --file backup.sql.gz
+# (or …/opendecodesk-db/monthly/<YYYY-MM>.sql.gz for an older one)
 gunzip backup.sql.gz
 
 # 2. Load it into a new database
@@ -211,6 +224,21 @@ aren't here: copy them to your pictures bucket and point the products at them.
    `npx wrangler deploy` on an installed site: it detaches any shop hostname that isn't listed in
    `wrangler.toml` ([shops-and-domains.md](shops-and-domains.md#by-hand)), and code deployed
    before its migration has run refuses sign-in until the migration is applied.
+
+   **A restore point before migrations.** When the database has migrations to apply, `npm run deploy`
+   first asks D1 Time Travel for a bookmark of the database as it is, and prints it with the command
+   that puts the database back:
+
+   ```bash
+   npx wrangler d1 time-travel restore opendecodesk-db --bookmark=<bookmark>
+   ```
+
+   If the bookmark can't be had, it stops before changing anything. `npm run deploy -- --no-backup`
+   applies the migrations without one (the nightly backup above is then what you go back to). If the
+   deploy itself fails after the migrations ran, the message names the migrations that were applied,
+   gives that restore command, and says whether `wrangler.toml` was updated. Restoring also undoes
+   anything written to the database after the bookmark, so use it only when the old version can't run
+   on the new tables; usually it is enough to fix the problem and run `npm run deploy` again.
 5. Open the admin, look at Settings → Global settings → Setup status, and check a shop's page loads.
 
 **Coming from a version with one shared admin password:** nothing is lost. Everyone is signed

@@ -96,17 +96,17 @@ let htmlOff = storefrontPage();
   getSelectOn().dispatchEvent(new wOn.Event("change",{bubbles:true}));
   console.log("Hint contains '2% discount':", getHintOn().textContent.includes("2% discount"));
 
-  console.log("Hint shows discount for Check:");
+  console.log("Hint shows discount for Check");
   getSelectOn().value = "Check";
   getSelectOn().dispatchEvent(new wOn.Event("change",{bubbles:true}));
   console.log("  Check hint has discount note:", getHintOn().textContent.includes("2% discount"));
 
-  console.log("Hint does NOT show discount for Venmo:");
+  console.log("Hint does NOT show discount for Venmo");
   getSelectOn().value = "Venmo";
   getSelectOn().dispatchEvent(new wOn.Event("change",{bubbles:true}));
   console.log("  Venmo hint has no discount:", !getHintOn().textContent.includes("discount"));
 
-  console.log("Hint does NOT show discount for Card:");
+  console.log("Hint does NOT show discount for Card");
   getSelectOn().value = "Card";
   getSelectOn().dispatchEvent(new wOn.Event("change",{bubbles:true}));
   console.log("  Card hint has no discount:", !getHintOn().textContent.includes("discount"));

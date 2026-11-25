@@ -14,6 +14,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, p), "utf8");
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 const hex = (n, ch) => ch.repeat(n);
+const BOOKMARK = "00000085-0000024c-00004c6d-" + "8e61117bf38d7adb".repeat(2);   // the shape D1 Time Travel's bookmarks have
 const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")].map((s, i) => s.slice(0, [8, 4, 4, 4, 12][i])).join("-");
 
 (async () => {
@@ -174,21 +175,28 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
         if (st.buckets.includes(w[3])) return bad("X [ERROR] The bucket you tried to create already exists, and you own it. [code: 10004]");
         st.buckets.push(w[3]); return okOut("Created bucket");
       }
+      // st.extra: migrations a later version would add ({ name: sql }), beyond the repository's own.
+      const allMigrations = () => MIGRATIONS.concat(Object.keys(st.extra || {}).sort());
       if (is("d1", "migrations", "apply")) {
         st.tomlAtMigrate = fs.readFileSync(w[w.indexOf("--config") + 1], "utf8");
         let applied = [];
         try { applied = st.db.q("SELECT name FROM d1_migrations").map(r => r.name); } catch (err) { /* no record yet: wrangler would create it, empty */ }
-        const todo = MIGRATIONS.filter(m => !applied.includes(m));
+        const todo = allMigrations().filter(m => !applied.includes(m));
         st.migrateTodo = todo.length;
-        for (const m of todo) { try { st.db.execFile(read("migrations/" + m)); } catch (err) { return bad("Migration " + m + " failed: " + err.message); } }
+        for (const m of todo) {
+          try { st.db.execFile((st.extra || {})[m] || read("migrations/" + m)); } catch (err) { return bad("Migration " + m + " failed: " + err.message); }
+          if ((st.extra || {})[m]) st.db._raw.run("INSERT INTO d1_migrations (name) VALUES (?)", [m]);
+        }
         st.migrated++; return okOut(todo.length ? "applied " + todo.length : "No migrations to apply!");
       }
       if (is("d1", "migrations", "list")) {
         let applied = [];
         try { applied = st.db.q("SELECT name FROM d1_migrations").map(r => r.name); } catch (err) { /* none */ }
-        const todo = MIGRATIONS.filter(m => !applied.includes(m));
-        return okOut(todo.length ? "Migrations to be applied:\n" + todo.join("\n") : "✅ No migrations to apply!");
+        const todo = allMigrations().filter(m => !applied.includes(m));
+        // wrangler's own shape: a table of names
+        return okOut(todo.length ? "Migrations to be applied:\n┌────────┐\n│ Name   │\n├────────┤\n" + todo.map(n => "│ " + n + " │").join("\n") + "\n└────────┘" : "✅ No migrations to apply!");
       }
+      if (is("d1", "time-travel", "info")) { st.bookmarks = (st.bookmarks || 0) + 1; return okOut(JSON.stringify({ bookmark: BOOKMARK, timestamp: "2026-11-24T10:00:00.000Z" }, null, 2)); }
       if (is("d1", "execute")) {
         const fi = w.indexOf("--file"), ci = w.indexOf("--command");
         try {
@@ -369,7 +377,7 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     addShop("league-101", "league"); addShop("club-7", "club");
     const lines = [], from = st.calls.length;
     const up = async (opts = {}) => { lines.length = 0; let error = null, result = null;
-      try { result = await S.upgrade({ print: (l) => lines.push(String(l)), run: S.createRunner({ dryRun: !!opts.dryRun, exec: st.exec, print: (l) => lines.push(String(l)) }), files: S.realFiles, configPath: opts.config || p }); } catch (e) { error = e; }
+      try { result = await S.upgrade({ print: (l) => lines.push(String(l)), run: S.createRunner({ dryRun: !!opts.dryRun, exec: st.exec, print: (l) => lines.push(String(l)) }), files: S.realFiles, configPath: opts.config || p, noBackup: !!opts.noBackup }); } catch (e) { error = e; }
       return { error, result, text: lines.join("\n") }; };
     let u = await up({ dryRun: true });
     ok("a dry run shows the three steps and changes nothing", !u.error && /would run: npx wrangler d1 migrations apply/.test(u.text) && /SELECT subdomain FROM orgs/.test(u.text) && /would run: npx wrangler deploy/.test(u.text) &&
@@ -377,11 +385,12 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     u = await up();
     const after = S.readWranglerToml(fs.readFileSync(p, "utf8"));
     const did = st.calls.slice(from).map(c => c.replace("npx wrangler ", "").replace(p, "CFG").replace(/--command .*/, "--command SQL"));
-    ok("it looks at the database, runs the migrations, reads the site and the shops, then deploys — in that order", !u.error && did.join(" | ") === ["d1 execute DB --remote --json --yes --config CFG --command SQL", "d1 execute DB --remote --json --yes --config CFG --command SQL",
-      "d1 migrations apply DB --remote --config CFG", "d1 execute DB --remote --json --yes --config CFG --command SQL", "d1 execute DB --remote --json --yes --config CFG --command SQL", "deploy --config CFG"].join(" | "));
+    ok("it looks at the database, lists the migrations still to run (none: so no restore point), runs them, reads the site and the shops, then deploys — in that order", !u.error && did.join(" | ") === ["d1 execute DB --remote --json --yes --config CFG --command SQL", "d1 execute DB --remote --json --yes --config CFG --command SQL",
+      "d1 migrations list DB --remote --config CFG", "d1 migrations apply DB --remote --config CFG", "d1 execute DB --remote --json --yes --config CFG --command SQL", "d1 execute DB --remote --json --yes --config CFG --command SQL", "deploy --config CFG"].join(" | "));
     ok("every shop's hostname is in wrangler.toml before the deploy, beside the admin's, and the deploy saw that file", after.hosts.join() === "admin.myshop.com,club.myshop.com,league.myshop.com" && st.tomlAtDeploy === fs.readFileSync(p, "utf8") &&
       /2 shops in the database; added to .*: club\.myshop\.com, league\.myshop\.com\. 3 hostnames in all/.test(u.text));
     ok("nothing else in the file moved: the database id, the settings and the secrets are as they were", after.databaseId === UUID && after.vars.ROOT_DOMAIN === "myshop.com" && st.secretsSeen === null);
+    ok("…and it says what it changed: no migrations, the file written", !!u.result && Array.isArray(u.result.applied) && u.result.applied.length === 0 && u.result.bookmark === "" && u.result.tomlWritten === true && !st.bookmarks);
     const tomlNow = fs.readFileSync(p, "utf8");
     u = await up();
     ok("running it again adds nothing and says so", !u.error && fs.readFileSync(p, "utf8") === tomlNow && /all already listed/.test(u.text));
@@ -393,12 +402,62 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     st.failOn = "d1 execute DB --remote --json --yes --config " + p + " --command SELECT subdomain";
     u = await up();
     ok("if the shops can't be read it does NOT deploy: deploying without the list would take shops offline", u.error instanceof S.SetupError && /Could not read the shops/.test(u.error.message) && /take shops offline/.test(u.error.message) && st.deployed === deploys);
-    st.failOn = "d1 migrations";
+    st.failOn = "d1 migrations apply";
     u = await up();
     ok("if a migration fails it stops there: no deploy on a database the new code doesn't fit", u.error instanceof S.SetupError && /Applying the database migrations failed/.test(u.error.message) && st.deployed === deploys);
     st.failOn = null;
     u = await up({ config: copy("fresh.toml") });
     ok("a copy that was never installed is told to run the installer, and nothing is run", u.error instanceof S.SetupError && /npm run setup/.test(u.error.message) && st.deployed === deploys);
+
+    console.log("\n=== A restore point before migrations ===");
+    // A later version brings a migration (st.extra). Before it is applied, D1 Time Travel's bookmark for the database
+    // as it is is taken and printed with the command that puts it back; without one, nothing is applied.
+    const restoreCmd = "npx wrangler d1 time-travel restore opendecodesk-db --bookmark=" + BOOKMARK;
+    const callsFrom = (n) => st.calls.slice(n).map(c => c.replace("npx wrangler ", "").replace(p, "CFG").replace(/--command .*/, "--command SQL"));
+    st.extra = { "9990_example_add.sql": "CREATE TABLE example_added (id INTEGER PRIMARY KEY);" };
+    let at = st.calls.length, bm = st.bookmarks || 0;
+    st.failOn = "d1 time-travel";
+    u = await up();
+    ok("no bookmark: it stops before any migration is applied, and says --no-backup goes ahead without one", u.error instanceof S.SetupError && /Could not save a restore point/.test(u.error.message) && /--no-backup/.test(u.error.message) &&
+      !callsFrom(at).some(c => /migrations apply|^deploy/.test(c)) && st.db.q("SELECT count(*) n FROM sqlite_master WHERE name='example_added'")[0].n === 0);
+    st.failOn = null; at = st.calls.length;
+    u = await up();
+    let did2 = callsFrom(at);
+    ok("with migrations to apply: the list, then the bookmark, then the migrations", !u.error && did2.indexOf("d1 migrations list DB --remote --config CFG") >= 0 &&
+      did2.indexOf("d1 migrations list DB --remote --config CFG") < did2.indexOf("d1 time-travel info DB --json --config CFG") &&
+      did2.indexOf("d1 time-travel info DB --json --config CFG") < did2.indexOf("d1 migrations apply DB --remote --config CFG") && st.bookmarks === bm + 1);
+    ok("…it prints the bookmark and the exact restore command, and names the migration", u.text.includes("bookmark " + BOOKMARK) && u.text.includes(restoreCmd) && /Migrations to apply: 9990_example_add\.sql/.test(u.text));
+    ok("…and returns what it applied, with the bookmark", u.result.applied.join() === "9990_example_add.sql" && u.result.bookmark === BOOKMARK && u.result.restore === restoreCmd &&
+      st.db.q("SELECT count(*) n FROM sqlite_master WHERE name='example_added'")[0].n === 1);
+    at = st.calls.length;
+    u = await up();
+    ok("run again with nothing new: no bookmark is taken", !u.error && !callsFrom(at).some(c => /time-travel/.test(c)) && u.result.bookmark === "" && u.result.applied.length === 0);
+    // --no-backup: the migrations go ahead without a bookmark, and it says so.
+    st.extra["9991_example_more.sql"] = "CREATE TABLE example_more (id INTEGER PRIMARY KEY);";
+    st.failOn = "d1 time-travel"; at = st.calls.length;
+    u = await up({ noBackup: true });
+    ok("--no-backup applies them without asking for a bookmark, and says there is no restore point", !u.error && !callsFrom(at).some(c => /time-travel/.test(c)) && /No restore point \(--no-backup\)/.test(u.text) &&
+      u.result.applied.join() === "9991_example_more.sql" && u.result.bookmark === "");
+    st.failOn = null;
+    // The deploy fails after the migrations ran: the message says what was changed, and how to undo it.
+    st.extra["9992_example_last.sql"] = "CREATE TABLE example_last (id INTEGER PRIMARY KEY);";
+    addShop("band-3", "band");
+    const tomlBeforeFail = fs.readFileSync(p, "utf8");
+    st.failOn = "deploy"; const deploysBefore = st.deployed;
+    u = await up();
+    ok("a failed deploy no longer says nothing else was changed: it names the migrations applied and gives the restore command", u.error instanceof S.SetupError && /The deploy failed/.test(u.error.message) &&
+      !/Nothing else was changed/.test(u.error.message) && /the migrations 9992_example_last\.sql were applied/.test(u.error.message) && u.error.message.includes(restoreCmd) && st.deployed === deploysBefore);
+    ok("…and that wrangler.toml was updated (the new shop's hostname), which is to be kept", new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + " was updated").test(u.error.message) && /keep it/.test(u.error.message) &&
+      fs.readFileSync(p, "utf8") !== tomlBeforeFail && /band\.myshop\.com/.test(fs.readFileSync(p, "utf8")));
+    u = await up();
+    ok("a failed deploy with nothing new still says nothing else was changed", u.error instanceof S.SetupError && /Nothing else was changed/.test(u.error.message) && !/Already changed/.test(u.error.message));
+    st.failOn = null; st.extra = null;
+    ok("the bookmark is read from wrangler's --json answer (or its sentence), and only a plain token is accepted", S.parseBookmark(" ⛅️ wrangler\n" + JSON.stringify({ bookmark: BOOKMARK })) === BOOKMARK &&
+      S.parseBookmark("⚠️ The current bookmark is '" + BOOKMARK + "'") === BOOKMARK && S.parseBookmark(JSON.stringify({ bookmark: "x; rm -rf /" })) === "" && S.parseBookmark("") === "");
+    ok("the pending list is read from wrangler's table; an answer it can't read counts as some", S.parseMigrationsList("Migrations to be applied:\n│ 0090_a.sql │\n│ 0091_b.sql │").join() === "0090_a.sql,0091_b.sql" &&
+      S.parseMigrationsList("✅ No migrations to apply!").length === 0 && S.parseMigrationsList("something else") === null);
+    ok("npm run deploy takes --no-backup, and its help says so", /const noBackup = args\.includes\("--no-backup"\)/.test(read("scripts/deploy.mjs")) && /check, skipHostnameCheck, noBackup, api:/.test(read("scripts/deploy.mjs")) &&
+      /\[-- --no-backup\]/.test(read("scripts/deploy.mjs")) && S.parseArgs(["--no-backup"]).noBackup === true);
     ok("the hostnames come from the shops' subdomains and the root domain, lower-cased, once each", S.shopHostnames([{ subdomain: "League" }, { subdomain: "league" }, { subdomain: "" }, {}, null, { subdomain: "a.b" }, { subdomain: "-x" }, { subdomain: "images" }], "MyShop.com").join() === "league.myshop.com" &&
       S.shopHostnames([{ subdomain: "league" }], "").length === 0 && S.parseD1AllRows(' ⛅️ wrangler\n[{"results":[],"success":true}]').length === 0 && S.parseD1AllRows("not json") === null);
     ok("npm run deploy is that command", JSON.parse(read("package.json")).scripts.deploy === "node scripts/deploy.mjs" && /import \{ upgrade, createRunner, createCloudflareApi, realExec, realFiles, SetupError \} from "\.\/setup\.mjs";/.test(read("scripts/deploy.mjs")) &&
@@ -585,6 +644,8 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     x = await go({ answers: BASE, state: older, config: copy("h.toml") });
     ok("an existing install that is behind gets exactly the migrations it's missing, and its tables are not rebuilt", !x.error && older.files.length === 0 && older.migrateTodo === MIGRATIONS.filter(m => m >= "0006").length &&
       older.db.q("SELECT name FROM sqlite_master WHERE type='table' AND name='expenses'").length === 1);
+    ok("…after a restore point, whose restore command it prints", older.bookmarks === 1 && x.io.text().includes("npx wrangler d1 time-travel restore opendecodesk-db --bookmark=" + BOOKMARK) &&
+      x.result.ok === true && older.calls.findIndex(c => / d1 time-travel info /.test(c)) < older.calls.findIndex(c => / d1 migrations apply /.test(c)));
     const st = cloud({ failOn: "deploy" });
     const realExec = st.exec; let seenPath = "";
     st.exec = (f, a) => { const i = a.indexOf("--secrets-file"); if (i >= 0) seenPath = a[i + 1]; return realExec(f, a); };

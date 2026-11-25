@@ -23,8 +23,8 @@ const lib = new Function(strip(read("functions/_lib/db.js")) + "\nreturn { getDa
   const cats = await lib.listExpenseCategories(d1);
   const by = (n) => cats.find(c => c.name === n);
   console.log("Equipment & machines (Depreciation) is capital:", by("Equipment & machines").capital === true && one("SELECT capital FROM expense_categories WHERE name = 'Equipment & machines'") === 1);
-  console.log("Small equipment & tools is added: deducted now, line 22, capital:", by("Small equipment & tools") && by("Small equipment & tools").deductionType === "deductible"
-    && by("Small equipment & tools").scheduleCLine === "22" && by("Small equipment & tools").capital === true);
+  console.log("Small equipment & tools is added: deducted now, line 22, capital:", !!(by("Small equipment & tools") && by("Small equipment & tools").deductionType === "deductible"
+    && by("Small equipment & tools").scheduleCLine === "22" && by("Small equipment & tools").capital === true));
   console.log("every other category is a running cost:", cats.filter(c => c.capital).map(c => c.name).sort().join() === "Equipment & machines,Small equipment & tools");
 
   console.log("\n=== Saving a category (db.js) ===");

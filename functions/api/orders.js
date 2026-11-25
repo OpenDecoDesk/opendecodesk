@@ -2794,6 +2794,8 @@ async function handleOrdersPost_(context, listBefore = null) {
       orgId: org,
       customerName: String(body.customerName || "Local Sale").slice(0, 200),
       contact:       String(body.contact       || "").slice(0, 200),
+      // Not stored on the order (it has no phone column unless shipped): a customer made from this sale keeps it.
+      phone:         String(body.phone         || "").trim().slice(0, 50),
       paymentMethod: String(body.paymentMethod || "").slice(0, 50),
       subtotal, shippingCost: 0, total: subtotal,
       shippingMethod: "", shippingAddress: null, totalWeightOz: 0,

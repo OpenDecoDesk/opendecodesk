@@ -432,7 +432,7 @@ test("+ New customer: needs a name or a company, a real email and an email no ot
   expect(await getCustomer(api, coId)).toMatchObject({ name: "", company: "Club " + t, email: "", phone: "" });
 });
 
-test("+ New customer from the keyboard: focus starts on Name, Tab goes field to field and stays inside, Escape closes it and focus goes back; typing is not thrown away without asking; Cancel", async ({ page, api }) => {
+test("+ New customer from the keyboard: focus starts on Name, Tab goes field to field and stays inside, Escape closes it and focus goes back; typing is not thrown away without asking, by Escape or Cancel", async ({ page, api }) => {
   const t = token();
   await openAdmin(page, "customers");
   const sent = recordActions(page, "saveCustomer");
@@ -475,10 +475,14 @@ test("+ New customer from the keyboard: focus starts on Name, Tab goes field to 
   await ask.getByRole("button", { name: "Discard" }).click();
   await expect(dlg).toHaveCount(0);
 
-  // Cancel closes it without asking and without saving; ✕ closes an untouched one.
+  // Cancel asks too once something is typed, and Discard closes it without saving; ✕ closes an untouched one.
   await newBtn.click();
   await dlg.getByLabel("Name").fill("Kit " + t);
   await dlg.getByRole("button", { name: "Cancel" }).click();
+  await ask.getByRole("button", { name: "Keep editing" }).click();
+  await expect(dlg.getByLabel("Name")).toHaveValue("Kit " + t);
+  await dlg.getByRole("button", { name: "Cancel" }).click();
+  await ask.getByRole("button", { name: "Discard" }).click();
   await expect(dlg).toHaveCount(0);
   await newBtn.click();
   await expect(dlg.getByLabel("Name")).toHaveValue("");     // a new window each time, not the last one's typing

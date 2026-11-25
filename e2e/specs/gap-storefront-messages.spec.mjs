@@ -78,4 +78,25 @@ test("with no email set up, the confirmation tells the customer to keep the orde
   await expect(conf.locator(".order-number")).toContainText(order.orderId);
   await expect(conf).toContainText("Keep your order number for any question about this order.");
   await expect(conf).not.toContainText("emailed to");
+  await expect(conf).not.toContainText("email a copy");
+});
+
+// Review #109: the copy is emailed after the server has answered, and that send can fail, so with email set up the
+// confirmation says a copy WILL be emailed and points to the order number in case it doesn't arrive — never that it
+// already was. This install has no email provider, so the order's answer is made to say emailOn: true, as an
+// install with one would.
+test("with email set up, the confirmation says a copy will be emailed and to keep the order number", async ({ as, api }) => {
+  const shop = await makeShop(api, { prefix: "willemail", products: PRODUCTS });
+  const page = await as(null);
+  await page.route("**/api/orders", async (route) => {
+    const res = await route.fetch();
+    let body = await res.text();
+    try { const j = JSON.parse(body); if (route.request().method() === "POST" && j && j.status === "ok" && "emailOn" in j) body = JSON.stringify({ ...j, emailOn: true }); } catch (_) {}
+    await route.fulfill({ response: res, body });
+  });
+  const order = await placeOrder(page, shop, { payment: "Check", customer: uniq("Casey Willemail"), email: "willemail@example.test" });
+  const conf = page.locator(".confirmation");
+  await expect(conf).toContainText(`We'll email a copy to willemail@example.test — keep your order number ${order.orderId} in case it doesn't arrive.`);
+  await expect(conf).not.toContainText("was emailed");
+  await expect(conf).not.toContainText("Keep your order number for any question about this order.");
 });

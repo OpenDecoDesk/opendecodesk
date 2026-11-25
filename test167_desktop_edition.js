@@ -409,7 +409,7 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
   ok("Local sale has a Ship this order section with the address, carrier and charge", ["lsShip", "lsShipLine1", "lsShipCity", "lsShipZip", "lsShipCarrier", "lsShipService", "lsShipCost"].every(id => adminJs.includes(`id="${id}"`)) && !adminJs.includes('id="lsAddress"'));
   w.eval('siteEdition = ""');
   ok("…while a cloud install's admin keeps all of them", /resendEmail/.test(w.adminActionCell({ orgId: "shop" }, { orderId: "X1", paid: false, items: [{}], balanceDue: 20 })) && /showSendInvoiceModal/.test(w.adminActionCell({ orgId: "shop" }, { orderId: "X1", paid: false, items: [{}], balanceDue: 20 })) && /Not published yet/.test(w.publishStateHtml_({ state: "never" })));
-  ok("the page loads its fonts from this site, not Google", /href="\/vendor\/fonts\/fonts\.css"/.test(storefrontPage()) && !/googleapis|gstatic/.test(storefrontPage() + adminJs + read("public/_headers")) && fs.existsSync(__dirname + "/public/vendor/fonts/OFL-Fraunces.txt"));
-  ok("every font file the stylesheet names is there", (read("public/vendor/fonts/fonts.css").match(/url\(([^)]+)\)/g) || []).every(u => fs.existsSync(__dirname + "/public/vendor/fonts/" + u.slice(4, -1))));
+  ok("the page loads its fonts from this site, not Google", /href="\/vendor\/fonts-1\/fonts\.css"/.test(storefrontPage()) && !/googleapis|gstatic/.test(storefrontPage() + adminJs + read("public/_headers")) && fs.existsSync(__dirname + "/public/vendor/fonts-1/OFL-Fraunces.txt"));
+  ok("every font file the stylesheet names is there", (read("public/vendor/fonts-1/fonts.css").match(/url\(([^)]+)\)/g) || []).every(u => fs.existsSync(__dirname + "/public/vendor/fonts-1/" + u.slice(4, -1))));
   w.close();
 })().catch(e => { console.error(e); process.exit(1); });

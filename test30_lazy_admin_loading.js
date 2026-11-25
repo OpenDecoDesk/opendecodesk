@@ -1,8 +1,10 @@
 const { JSDOM, ResourceLoader } = require("jsdom");
 const { storefrontPage } = require("./testlib/storefront-page");
 const fs = require("fs");
-let html = storefrontPage();
+// The page as a visitor gets it: without the admin's styles, which loadAdminScript adds (review #104).
+let html = storefrontPage({ adminCss: false });
 const adminJsSource = fs.readFileSync(__dirname + "/public/admin.js", "utf8");
+const adminCssSource = fs.readFileSync(__dirname + "/public/admin.css", "utf8");
 
 // index.html doesn't ship the admin panel to every storefront
 // visitor — it's lazily loaded from admin.js via
@@ -29,17 +31,33 @@ async function waitUntil(check, timeoutMs = LOAD_TIMEOUT_MS){
   return v;
 }
 
+const requested = [];
 class AdminResourceLoader extends ResourceLoader {
   fetch(url, options){
+    requested.push(url);
     if(url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJsSource, "utf-8"));
+    if(url.includes("/admin.css")) return Promise.resolve(Buffer.from(adminCssSource, "utf-8"));
     return super.fetch(url, options);
   }
 }
 class FailingAdminResourceLoader extends ResourceLoader {
   fetch(url, options){
     if(url.includes("/admin.js")) return Promise.reject(new Error("simulated network failure"));
+    if(url.includes("/admin.css")) return Promise.resolve(Buffer.from(adminCssSource, "utf-8"));
     return super.fetch(url, options);
   }
+}
+// admin.css held back until release(), or refused: the admin waits for it, or goes on without it.
+function cssLoader(mode){
+  let release; const held = new Promise(r => { release = r; });
+  class L extends ResourceLoader {
+    fetch(url, options){
+      if(url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJsSource, "utf-8"));
+      if(url.includes("/admin.css")) return mode === "fail" ? Promise.reject(new Error("simulated network failure")) : held.then(() => Buffer.from(adminCssSource, "utf-8"));
+      return super.fetch(url, options);
+    }
+  }
+  return { loader: new L(), release: () => release() };
 }
 
 function orgCatalogFetchMock(){
@@ -76,6 +94,11 @@ function adminCatalogFetchMock(){
     console.log("Storefront rendered normally:", window.document.getElementById("app").innerHTML.includes("Option A"));
     console.log("No <script src=admin.js> was ever injected:", !window.document.querySelector('script[src^="admin.js"]'));
     console.log("Admin-only functions are NOT defined in this window:", typeof window.renderAdminPicker === "undefined");
+    console.log("…and admin.css isn't asked for either: a shop's visitor downloads none of the admin's styles:", !window.document.querySelector("[data-admin-css]") && !requested.some(u => u.includes("/admin.css")));
+    const page = fs.readFileSync(__dirname + "/public/index.html", "utf8");
+    console.log("index.html carries no admin-only rule (#adminNav, .admin-hero, .home-tiles live in admin.css):", !/\n\s*(#adminNav|\.admin-hero|\.home-tiles)\s*\{/.test(page) &&
+      /#adminNav\s*\{/.test(adminCssSource) && /\.admin-hero\s*\{/.test(adminCssSource) && /\.home-tiles\s*\{/.test(adminCssSource));
+    console.log("…while what the storefront uses stays in it (buttons, toasts, the loading note):", /\.admin-btn\s*\{/.test(page) && /\.toast\s*\{/.test(page) && /\.admin-summary\s*\{/.test(page) && !/\.toast\s*\{/.test(adminCssSource));
   }
 
   console.log("\n=== Admin subdomain: boot() -> render() automatically triggers the load ===");
@@ -95,6 +118,32 @@ function adminCatalogFetchMock(){
     console.log("Admin functions became callable globals once it loaded:", typeof window.renderAdminPicker === "function");
     await waitUntil(() => window.document.getElementById("adminPassInput"));
     console.log("The real admin UI replaced the loading state:", !!window.document.getElementById("adminPassInput"));
+    const link = window.document.querySelector("link[data-admin-css]"), tag = window.document.querySelector('script[src^="admin.js"]');
+    console.log("admin.css was added with it, as a stylesheet under the same version as admin.js:", !!link && link.rel === "stylesheet" &&
+      link.getAttribute("href").replace(/^admin\.css/, "") === tag.getAttribute("src").replace(/^admin\.js/, "") && /^\?(v|t)=/.test(link.getAttribute("href").replace(/^admin\.css/, "")));
+  }
+
+  console.log("\n=== The admin waits for admin.css, so it never draws unstyled (#104) ===");
+  {
+    const { loader, release } = cssLoader("hold");
+    const dom = new JSDOM(html, { runScripts: "dangerously", resources: loader, url: "https://admin.example.com/x.html", pretendToBeVisual: true,
+      beforeParse(win){ win.fetch = adminCatalogFetchMock(); } });
+    const { window } = dom;
+    await waitUntil(() => window.document.querySelector('script[src^="admin.js"]') && window.document.querySelector("link[data-admin-css]"));
+    await new Promise(r => setTimeout(r, 1000));
+    console.log("with admin.css still on its way the page still says Loading, a second later:", !window.document.getElementById("adminPassInput") && window.document.getElementById("app").innerHTML.includes("Loading"));
+    release();
+    await waitUntil(() => window.document.getElementById("adminPassInput"));
+    console.log("…and the admin draws once it is in:", !!window.document.getElementById("adminPassInput"));
+  }
+  {
+    const { loader } = cssLoader("fail");
+    const dom = new JSDOM(html, { runScripts: "dangerously", resources: loader, url: "https://admin.example.com/x.html", pretendToBeVisual: true,
+      virtualConsole: new (require("jsdom").VirtualConsole)(),
+      beforeParse(win){ win.fetch = adminCatalogFetchMock(); } });
+    const { window } = dom;
+    await waitUntil(() => window.document.getElementById("adminPassInput"));
+    console.log("admin.css failing to load doesn't stop the admin (it works, plainly):", !!window.document.getElementById("adminPassInput"));
   }
 
   console.log("\n=== loadAdminScript() is idempotent — repeated calls don't inject a second <script> tag ===");
@@ -111,6 +160,7 @@ function adminCatalogFetchMock(){
     await window.loadAdminScript();
     const tags = window.document.querySelectorAll('script[src^="admin.js"]');
     console.log("Exactly one <script> tag after 3 calls:", tags.length === 1);
+    console.log("…and one admin.css link:", window.document.querySelectorAll("link[data-admin-css]").length === 1);
   }
 
   console.log("\n=== A failed load is handled gracefully, not left as an unhandled rejection ===");

@@ -101,8 +101,9 @@ const tick = () => new Promise(r => setTimeout(r, 30));
   d.getElementById("placeOrderBtn").click(); await new Promise(r => setTimeout(r, 80));
   const conf = d.querySelector(".confirmation");
   ok("the confirmation lists the items, the delivery and the total", !!conf && /Cap/.test(conf.querySelector(".conf-items").textContent) && /Local pickup[\s\S]*Free/.test(conf.textContent) && /Total[\s\S]*\$16\.00/.test(conf.textContent));
-  ok("…tells a check payer what happens next, and where the copy was emailed",
-    /Please pay using the details below/.test(conf.textContent) && /emailed to pat@example\.com/.test(conf.textContent) && !/Payment is handled separately/.test(conf.textContent));
+  ok("…tells a check payer what happens next, and where a copy will be emailed (not that it already was: #109)",
+    /Please pay using the details below/.test(conf.textContent) && /We'll email a copy to pat@example\.com — keep your order number \S+ in case it doesn't arrive\./.test(conf.textContent) &&
+    !/was emailed/.test(conf.textContent) && !/Payment is handled separately/.test(conf.textContent));
   ok("…and the saved cart is emptied", JSON.parse(w.sessionStorage.getItem("cart:o1")).length === 0);
 
   console.log("\n=== Paying by card: Cancel on Stripe, then Pay by card ===");

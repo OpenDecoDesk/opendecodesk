@@ -134,7 +134,7 @@ import { deliverOrderDownloads } from "../_lib/digital.js";
 import {
   sendOrderReceivedEmail,
   sendPaymentConfirmedEmail, sendCancellationEmail, sendShippedEmail,
-  sendDesignVerificationEmail, sendShippingPaymentEmail, sendInvoiceEmail, sendTestEmail, invoiceDocument,
+  sendDesignVerificationEmail, sendShippingPaymentEmail, sendOrderAdjustmentPaymentEmail, sendInvoiceEmail, sendTestEmail, invoiceDocument,
   buildOrderReceivedEmail, buildPaymentReceivedEmail, buildShippedEmail, buildInvoiceEmail, previewMessage, sendSampleMessage, orderPdfFile,
   emailCanSend,
 } from "../_lib/email.js";
@@ -3280,12 +3280,13 @@ async function handleOrdersPost_(context, listBefore = null) {
       const session = { url: page.url };
       paymentUrl = session.url;
       const emailBody = String(body.emailBody || "").trim().slice(0, 3000) || null;
-      emailSent = await sendShippingPaymentEmail(env, {
+      // The order-change email ("Payment for changes to order …"), not the shipping one (#91).
+      emailSent = await sendOrderAdjustmentPaymentEmail(env, {
         customerName: order.customerName,
         customerEmail: order.contact,
         orderId,
-        shippingCost: priceDiff,
-        shippingMethod: "",
+        amountDue: priceDiff,
+        newTotal: total,
         paymentUrl: session.url,
         customBody: emailBody,
       });

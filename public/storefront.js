@@ -149,8 +149,16 @@ function escapeHtml(str){
 // Replaces alert() with a dismissible, non-blocking toast tied to an
 // aria-live region — alert() can't be styled, blocks the whole page, and
 // its accessible behavior varies across screen readers/browsers in a way
-// a real aria-live region doesn't. Auto-dismisses after a few seconds;
-// clicking it dismisses immediately too.
+// a real aria-live region doesn't. Clicking it, or its ✕, dismisses it.
+// An error stays until it is dismissed or the screen changes: it is often the only
+// explanation of why something didn't happen, and someone who looked away (or a
+// screen reader still reading something else) must not miss it (review #111).
+// Anything else goes by itself after 6–15 seconds, longer for longer text, and
+// waits while the pointer or keyboard focus is on it.
+const TOAST_MAX_ = 3;   // at most this many at once: the oldest goes first
+function toastDuration_(message){
+  return Math.min(15000, Math.max(6000, 60 * String(message == null ? "" : message).length));
+}
 function showToast(message, isError){
   let region = document.getElementById("toastRegion");
   if(!region){
@@ -161,13 +169,49 @@ function showToast(message, isError){
     region.setAttribute("aria-live", "assertive");
     document.body.appendChild(region);
   }
+  if(!showToast.watching_){
+    // A new screen clears the errors left from the one before. One shown just before the change
+    // (under a second) stays: it is the reason for the change ("…, so you're back on Orders").
+    showToast.watching_ = true;
+    window.addEventListener("hashchange", () => {
+      const now = Date.now();
+      document.querySelectorAll("#toastRegion .toast-error").forEach(t => {
+        if(now - Number(t.dataset.shownAt || 0) >= 1000) t.remove();
+      });
+    });
+  }
+  const text = String(message == null ? "" : message);
+  // The same error twice (a button clicked again) isn't stacked: the one already showing stays.
+  if(isError){
+    const same = [...region.querySelectorAll(".toast-error")].find(t => t.dataset.message === text);
+    if(same) return;
+  }
   const toast = document.createElement("div");
   toast.className = "toast" + (isError ? " toast-error" : "");
-  toast.textContent = message;
+  if(isError) toast.setAttribute("role", "alert");
+  toast.dataset.message = text;
+  toast.dataset.shownAt = String(Date.now());
+  // The message alone is the toast's text; the ✕ draws its mark from the style sheet (.toast-close::before),
+  // so reading the toast's text gives the message and nothing else.
+  toast.appendChild(document.createTextNode(text));
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "toast-close";
+  close.setAttribute("aria-label", "Dismiss");
+  toast.appendChild(close);
   region.appendChild(toast);
-  const dismiss = () => { if(toast.parentNode) toast.parentNode.removeChild(toast); };
+  let timer = null, left = isError ? 0 : toastDuration_(text), startedAt = 0;
+  const dismiss = () => { clearTimeout(timer); if(toast.parentNode) toast.parentNode.removeChild(toast); };
+  const start = () => { if(!left) return; clearTimeout(timer); startedAt = Date.now(); timer = setTimeout(dismiss, left); };
+  const pause = () => { if(!left || timer == null) return; clearTimeout(timer); timer = null; left = Math.max(2000, left - (Date.now() - startedAt)); };
   toast.addEventListener("click", dismiss);
-  setTimeout(dismiss, 6000);
+  toast.addEventListener("mouseenter", pause);
+  toast.addEventListener("focusin", pause);
+  toast.addEventListener("mouseleave", start);
+  toast.addEventListener("focusout", start);
+  start();
+  const shown = region.querySelectorAll(".toast");
+  for(let i = 0; i < shown.length - TOAST_MAX_; i++) shown[i].remove();
 }
 
 // A quieter, invisible aria-live announcer for routine status changes
@@ -319,14 +363,30 @@ async function resolveCurrentOrg(){
 let adminScriptPromise = null;
 function loadAdminScript(){
   if(adminScriptPromise) return adminScriptPromise;
-  adminScriptPromise = new Promise((resolve, reject) => {
+  // Under its version (adminScriptVersion_), so it's kept between visits; with none known, fresh every time.
+  const version = adminScriptVersion_ ? "?v=" + encodeURIComponent(adminScriptVersion_) : "?t=" + Date.now();
+  // The admin's styles (admin.css, review #104) come with it, under the same version, and the admin is shown
+  // only once both are in, so its screens never draw unstyled. A stylesheet that fails to load doesn't stop the
+  // admin (it works, plainly); a script that fails does.
+  const styled = new Promise((done) => {
+    if(document.querySelector("[data-admin-css]")) return done();   // already on the page (a retry after a failed script)
+    const l = document.createElement("link");
+    l.rel = "stylesheet";
+    l.href = "admin.css" + version;
+    l.setAttribute("data-admin-css", "");
+    l.onload = () => done();
+    l.onerror = () => { console.error("Could not load admin.css"); done(); };
+    document.head.appendChild(l);
+  });
+  const script = new Promise((resolve, reject) => {
     const s = document.createElement("script");
-    // Under its version (adminScriptVersion_), so it's kept between visits; with none known, fresh every time.
-    s.src = "admin.js" + (adminScriptVersion_ ? "?v=" + encodeURIComponent(adminScriptVersion_) : "?t=" + Date.now());
+    s.src = "admin.js" + version;
     s.onload = resolve;
-    s.onerror = () => { adminScriptPromise = null; reject(new Error("Could not load admin.js")); };
+    s.onerror = () => reject(new Error("Could not load admin.js"));
     document.head.appendChild(s);
   });
+  adminScriptPromise = Promise.all([script, styled]).then(() => {});
+  adminScriptPromise.catch(() => { adminScriptPromise = null; });
   return adminScriptPromise;
 }
 
@@ -1826,7 +1886,7 @@ function renderShippingSection(org){
   if(cartDigitalOnly_(org)) return `
     <div class="shipping-section">
       <div class="shipping-section-label">Delivery</div>
-      <div class="shipping-option">Instant download — the files are emailed to you, and paying by card takes you straight to them.</div>
+      <div class="shipping-option">Instant download — paying by card takes you straight to the files; otherwise the shop sends them once your payment is in.</div>
     </div>`;
   const options = deliveryOptions_(org);
   if(options.length === 1 && options[0].type === "pickup") return "";
@@ -2799,7 +2859,7 @@ function showConfirmation(orgId, order){
       ${order.cardStartFailed && unpaidCardNotice ? unpaidCardBannerHtml_() : ""}
       ${paymentHtml}
       ${order.noEmail ? `<p style="font-size:13px;opacity:.8;">Keep your order number for any question about this order.</p>`
-        : `<p style="font-size:13px;opacity:.8;">A copy of your order was emailed to ${escapeHtml(order.contact)}.</p>`}
+        : `<p style="font-size:13px;opacity:.8;">We'll email a copy to ${escapeHtml(order.contact)} — keep your order number ${escapeHtml(order.orderId)} in case it doesn't arrive.</p>`}
       <br>
       <button class="confirmation-back" data-action="go-org" data-org="${orgId}" style="background:none; border:none; margin-top:12px;">&larr; Back to ${escapeHtml(org.name)}</button>
     </div>

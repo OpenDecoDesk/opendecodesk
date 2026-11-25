@@ -99,8 +99,8 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   r = await call({ action: "reconcileMonth", accountId: 1, month: "2026-08", statementBalance: 960 });
   console.log("a balance that's off is refused, with the difference:", r.status === 400 && /off by -6\.00/.test(r.body.message));
   r = await call({ action: "reconcileMonth", accountId: 1, month: "2026-08", statementBalance: 966 });
-  console.log("August reconciled at $966.00 (audited):", r.status === 200 && r.body.reconciled && r.body.reconciled.statementBalance === 966 &&
-    d1.q("SELECT count(*) n FROM audit_log WHERE action='statement.reconciled'")[0].n === 1);
+  console.log("August reconciled at $966.00 (audited):", !!(r.status === 200 && r.body.reconciled && r.body.reconciled.statementBalance === 966 &&
+    d1.q("SELECT count(*) n FROM audit_log WHERE action='statement.reconciled'")[0].n === 1));
   r = await call({ action: "unmatchStatementLine", lineId: deposit.id });
   console.log("a reconciled month's lines are locked:", r.status === 400 && /reopen/.test(r.body.message));
   r = await call({ action: "unreconcileMonth", accountId: 1, month: "2026-08" });
@@ -114,7 +114,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   await call({ action: "saveExpense", expense: { date: "2026-08-12", description: "Stabilizer", categoryId: 2, amount: 30, accountId: 2 } });
   r = await call({ action: "importStatement", accountId: 2, lines: [{ date: "2026-08-13", description: "SUPPLIER", amount: -30 }] });
   r = await call({ action: "reconcileMonth", accountId: 2, month: "2026-08", statementBalance: 30 });
-  console.log("credit card reconciled by entering the amount owed ($30):", r.status === 200 && r.body.reconciled && r.body.reconciled.statementBalance === -30);
+  console.log("credit card reconciled by entering the amount owed ($30):", !!(r.status === 200 && r.body.reconciled && r.body.reconciled.statementBalance === -30));
   const thread = d1.q("SELECT id FROM expenses WHERE description='Thread'")[0].id;
   await call({ action: "deleteExpense", expenseId: thread });
   d = (await call({ action: "getReconciliation", accountId: 1, month: "2026-08" })).body;
@@ -185,9 +185,9 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   const rdExp = d1.q("SELECT amountCents, description, categoryId, accountId FROM expenses WHERE expenseDate='2026-09-08'")[0];
   const draw = d1.q("SELECT amountCents, kind, note, accountId FROM owner_transactions WHERE txDate='2026-09-08'")[0];
   // $8 shipping spread by value over $60 / $20 / $12 → $5.22 / $1.74 / $1.04
-  console.log("$100 line → inventory $65.22 (landed), R&D expense $21.74, owner draw $13.04:", r.status === 200 &&
+  console.log("$100 line → inventory $65.22 (landed), R&D expense $21.74, owner draw $13.04:", !!(r.status === 200 &&
     mixMv.reduce((x, m) => x + m.qtyDelta * m.unitCostCents, 0) === 6522 && rdExp && rdExp.amountCents === 2174 && rdExp.categoryId === suppliesCat &&
-    /R&D \/ testing — SanMar #5601/.test(rdExp.description) && draw && draw.amountCents === 1304 && draw.kind === "draw" && /Personal items/.test(draw.note));
+    /R&D \/ testing — SanMar #5601/.test(rdExp.description) && draw && draw.amountCents === 1304 && draw.kind === "draw" && /Personal items/.test(draw.note)));
   console.log("all three matched to the one line, paid from its account:", r.body.lines.find(l => l.id === mixLine.id).status === "matched" &&
     d1.q("SELECT count(*) n FROM statement_matches WHERE lineId = ?", mixLine.id)[0].n === mixMv.length + 2 && rdExp.accountId === 2 && draw.accountId === 2);
   r = await call({ action: "createFromStatementLine", lineId: sampLine.id, kind: "blanks", rdAmount: 25, rdCategoryId: suppliesCat, personalAmount: 5, lines: [] });
@@ -366,7 +366,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   typeIn(rq("#roTotal"), "31");
   const blockedAt31 = rq("#roSave").disabled;
   typeIn(rq("#roTotal"), "30");
-  console.log("…with an order total it must match ($31 blocks, $30 allows):", blockedAt31 && !rq("#roSave").disabled);
+  console.log("…with an order total it must match ($31 blocks, $30 allows):", !!(blockedAt31 && !rq("#roSave").disabled));
   rq("#roSave").click();
   for (let i = 0; i < 100 && ro.isConnected; i++) await new Promise(res => setTimeout(res, 10));
   console.log("Record order receives both blanks from the card and closes:", !ro.isConnected &&

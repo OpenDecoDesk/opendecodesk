@@ -94,8 +94,8 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 20));
   Object.defineProperty(dsgFile, "files", { value: [{ name: "logo.emb" }], configurable: true });
   w.fetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "ok", key: "k", name: "f", ext: "dst" }) });
   [...doc.querySelectorAll("#dsgvSave")].pop().click(); await tick(50);
-  console.log("Upload saves the copied map onto the new version:", saved && saved.designId === 5 &&
-    JSON.stringify(saved.threadColors) === JSON.stringify([{ needle: 1, threadId: 1 }, { needle: 2, threadId: 2 }]));
+  console.log("Upload saves the copied map onto the new version:", !!(saved && saved.designId === 5 &&
+    JSON.stringify(saved.threadColors) === JSON.stringify([{ needle: 1, threadId: 1 }, { needle: 2, threadId: 2 }])));
   closeAll();
 
   await open();

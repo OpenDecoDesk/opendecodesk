@@ -136,7 +136,11 @@ const sec = text["SECURITY.md"], con = text["CONTRIBUTING.md"];
 ok("SECURITY: report privately through the repository host — no email address is given", /private vulnerability reporting/i.test(sec) && !/[\w.+-]+@[\w-]+\.\w+/.test(sec) && /don't open a public issue/i.test(sec));
 ok("SECURITY: says what is in scope and what isn't", /## What is in scope/.test(sec) && /## What is out of scope/.test(sec));
 ok("CONTRIBUTING: how to run the tests and the scan", /npm test/.test(con) && /scan-private\.sh --strict/.test(con));
-ok("CONTRIBUTING: the ': false' convention, exactly as run-tests.sh applies it", /: false/.test(con) && /exits non-zero/.test(con) && /grep -E ': false\$'/.test(read("run-tests.sh")));
+ok("CONTRIBUTING: the ': false' convention, exactly as run-tests.sh applies it (with the other shapes a failed check prints, and testlib/check.js)", /: false/.test(con) && /exits non-zero/.test(con) &&
+  /^FAIL_LINE='\(\^\|\[\[:space:\]\]\)false\$\|: \(0\|undefined\|null\)\$\|:\[\[:space:\]\]\*\$'$/m.test(read("run-tests.sh")) && /grep -E "\$FAIL_LINE"/.test(read("run-tests.sh")) &&
+  ["`: 0`", "`: undefined`", "`: null`", "testlib/check.js", "test272"].every(s => con.includes(s)));
+ok("CONTRIBUTING: access checks fail closed in a harness, and testlib/roles.js adminAs() signs one in", /Access checks fail closed in a harness/.test(con) && /adminAs\(\)/.test(con) && /test273/.test(con) &&
+  typeof require("./testlib/roles").adminAs === "function");
 ok("CONTRIBUTING: the glued-source harness and its pitfalls (exports, unique names, new imports)", /imports removed/i.test(con) && /export default/.test(con) && /unique across files/.test(con) && /ReferenceError/.test(con));
 ok("CONTRIBUTING: migrations and the schema.sql drift rule, cents with db.js the only converter, audit-first, style", /schema\.sql/.test(con) && /test33/.test(con) && /only place that\s+converts/.test(con) && /auditStrict/.test(con) && /refuse the action if the audit row can't be written/.test(con) && /## Style/.test(con));
 ok("…and those are real: the names it uses exist in the code", /const toCents = /.test(dbSrc) && /const fromCents = /.test(dbSrc) && /const auditStrict = /.test(read("functions/api/orders.js")) && /const periodGuard = /.test(read("functions/api/orders.js")) &&
@@ -151,7 +155,45 @@ ok("read-only repository token, actions pinned to commits, wrangler pinned in th
 ok("the database and bucket can be changed with variables; the defaults are the names in wrangler.toml and the script", /vars\.D1_BACKUP_DATABASE \|\| 'opendecodesk-db'/.test(wf) && /database_name = "opendecodesk-db"/.test(wrangler) &&
   /vars\.D1_BACKUP_BUCKET \|\| 'opendecodesk-db-backups'/.test(wf) && /BACKUP_BUCKET:-opendecodesk-db-backups/.test(read("scripts/d1-backup.sh")));
 ok("docs/operations.md explains switching it on, the two secrets, restoring, migrations and upgrading", ["D1_BACKUP_ENABLED", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "### Restoring", "## Migrations", "## Upgrading to a newer version", "npm run db:migrate"].every(s => text["docs/operations.md"].includes(s)));
+{
+  // The script itself, run with a stand-in wrangler and a stand-in clock: where each backup lands.
+  const { spawnSync } = require("child_process"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "odd-backup-"));
+  fs.mkdirSync(path.join(dir, "bin"));
+  fs.writeFileSync(path.join(dir, "bin", "date"), "#!/bin/sh\necho \"$FAKE_STAMP\"\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, "wrangler.sh"), [
+    "#!/bin/bash",
+    'if [ "$1 $2" = "d1 export" ]; then out=""; while [ $# -gt 0 ]; do [ "$1" = "--output" ] && out="$2"; shift; done; printf "CREATE TABLE t(x);\\nINSERT INTO t VALUES(1);\\n" > "$out"; exit 0; fi',
+    'if [ "$1 $2 $3" = "r2 object put" ]; then echo "$4" >> "$PUT_LOG"; exit 0; fi',
+    "exit 1", ""].join("\n"), { mode: 0o755 });
+  const backup = (stamp) => {
+    const log = path.join(dir, "puts-" + stamp + ".txt");
+    const r = spawnSync("bash", [path.join(__dirname, "scripts/d1-backup.sh"), "shopdb"], { encoding: "utf8",
+      env: { ...process.env, PATH: path.join(dir, "bin") + ":" + process.env.PATH, FAKE_STAMP: stamp, PUT_LOG: log, CLOUDFLARE_ACCOUNT_ID: "acct-test",
+        BACKUP_BUCKET: "bk", WRANGLER: "bash " + path.join(dir, "wrangler.sh") } });
+    return { status: r.status, puts: fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : [], out: r.stdout + r.stderr };
+  };
+  const mid = backup("2026-11-14T030000Z"), first = backup("2026-12-01T030000Z");
+  ok("a nightly backup goes under <db>/daily/, where the lifecycle rule expires it", mid.status === 0 && mid.puts.join() === "bk/shopdb/daily/2026-11-14T030000Z.sql.gz");
+  ok("on the 1st of the month it is also kept as <db>/monthly/<YYYY-MM>.sql.gz, which no rule touches", first.status === 0 &&
+    first.puts.join() === "bk/shopdb/daily/2026-12-01T030000Z.sql.gz,bk/shopdb/monthly/2026-12.sql.gz");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const ops = text["docs/operations.md"];
+  ok("docs/operations.md gives the one-time 35-day rule on daily/ only, keeps monthly/, and says what to do with older flat files",
+    /npx wrangler r2 bucket lifecycle add opendecodesk-db-backups \S+ "opendecodesk-db\/daily\/" --expire-days 35/.test(ops) && /no rule for `monthly\/`/.test(ops) &&
+    /Backups from before this layout/.test(ops) && /opendecodesk-db\/daily\/<file>\.sql\.gz/.test(ops));
+  ok("…and the nightly workflow says the same", /<db>\/daily\/<timestamp>\.sql\.gz/.test(wf) && /monthly\/<YYYY-MM>\.sql\.gz/.test(wf) && /35 days/.test(wf));
+  ok("docs/operations.md: npm run deploy saves a restore point before migrations, and --no-backup skips it",
+    /npx wrangler d1 time-travel restore opendecodesk-db --bookmark=<bookmark>/.test(ops) && /npm run deploy -- --no-backup/.test(ops) && read("scripts/deploy.mjs").includes('args.includes("--no-backup")'));
+}
 ok("the test workflow runs the scan in strict mode", /scan-private\.sh --strict/.test(read(".github/workflows/test.yml")));
+{
+  // A desktop release runs the whole test suite (test.yml, as a reusable workflow) and waits for it.
+  const desk = read(".github/workflows/desktop.yml"), tw = read(".github/workflows/test.yml");
+  const job = (name) => (desk.match(new RegExp("\\n  " + name + ":\\n((?:    .*\\n|\\s*\\n)+)")) || [])[1] || "";
+  ok("a desktop release can't be published unless the test suite passes on the same run", /^on:\n(?:  .*\n)*  workflow_call:/m.test(tw) &&
+    /if: inputs\.release\n/.test(job("tests")) && /uses: \.\/\.github\/workflows\/test\.yml\n/.test(job("tests")) && /needs: \[version, build, tests\]/.test(job("release")));
+}
 const pkg = JSON.parse(read("package.json"));
 ok("every npm script the docs mention exists", [...new Set([...all.matchAll(/npm run ([a-z:]+)/g)].map(m => m[1]))].every(s => s in pkg.scripts));
 ok("every script flag the docs mention is one the installer accepts", [...new Set([...all.matchAll(/(--[a-z][a-z-]+)/g)].map(m => m[1]))].filter(f => ["--dry-run", "--config", "--skip-deploy", "--new-passphrase", "--print-fresh-sql"].includes(f)).length === 5 &&

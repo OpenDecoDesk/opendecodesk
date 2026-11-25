@@ -98,8 +98,11 @@ const at = (day) => day + "T12:00:00.000Z";
   const api = new Function(
     strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
     "const requireAdmin = async (env, host) => host.kind === 'admin' ? null : jsonResponse({ status: 'error', message: 'Admin only' }, 403); const adminActor = () => 'test';\n" +
-    "const adminUser = () => globalThis.__homeUser || null;\n" +
-    "const adminCan = (request, fn, level) => globalThis.__homeCan ? globalThis.__homeCan(fn, level) : true;\n" +
+    // Signed in as a built-in role (globalThis.__homeUser.role; the admin when unset) with the real role tables; a custom
+    // role is __homeCan's answer.
+    "const builtIn_ = (() => { " + require("./testlib/roles").adminAs({ roleFrom: "globalThis.__homeUser ? globalThis.__homeUser.role : 'admin'" }) + " return { adminUser, adminCan }; })();\n" +
+    "const adminUser = (request) => globalThis.__homeUser && globalThis.__homeUser.roleInfo ? globalThis.__homeUser : builtIn_.adminUser(request);\n" +
+    "const adminCan = (request, fn, level) => globalThis.__homeCan ? globalThis.__homeCan(fn, level) : builtIn_.adminCan(request, fn, level);\n" +
     "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
     "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
     "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +
@@ -192,16 +195,16 @@ const at = (day) => day + "T12:00:00.000Z";
   const pies = [...w.document.querySelectorAll(".home-pie")];
   const legend = (pie) => [...pie.querySelectorAll(".home-legend tr")].map(tr => [...tr.cells].map(c => c.textContent).join("|"));
   const cat1 = d1._raw.exec("SELECT name FROM expense_categories WHERE id = ?", [cat])[0].values[0][0];
-  console.log("Where the money went: a pie for the year and one for the month, between the totals and product sales:", pies.length === 2
+  console.log("Where the money went: a pie for the year and one for the month, between the totals and product sales:", !!(pies.length === 2
     && /Year to date/.test(pies[0].textContent) && /Month to date/.test(pies[1].textContent)
-    && w.document.querySelector(".home-tiles-4").compareDocumentPosition(pies[0]) & 4 && pies[1].compareDocumentPosition(w.document.querySelector(".home-table")) & 4);
+    && w.document.querySelector(".home-tiles-4").compareDocumentPosition(pies[0]) & 4 && pies[1].compareDocumentPosition(w.document.querySelector(".home-table")) & 4));
   console.log("…each with a legend by type: amount and share:", legend(pies[0]).join(",") === `${cat1}|$120|87%,Cost of goods|$18|13%`);
   console.log("…a slice per type with its amount on hover, and the total in the middle:", pies[0].querySelectorAll("svg circle").length === 2
     && pies[0].querySelector("svg circle title").textContent === `${cat1} $120 (87%)` && pies[0].querySelector(".home-pie-total").textContent === "$138");
   const inout = w.document.querySelector(".home-inout");
   const months = Number(today.slice(5, 7));
-  console.log("Money in and out: a pair of bars per month so far, above the pies:", !!inout && inout.querySelectorAll("svg > g").length === 2 * months
-    && inout.compareDocumentPosition(pies[0]) & 4 && /Money in and out/.test(inout.previousElementSibling.textContent));
+  console.log("Money in and out: a pair of bars per month so far, above the pies:", !!(!!inout && inout.querySelectorAll("svg > g").length === 2 * months
+    && inout.compareDocumentPosition(pies[0]) & 4 && /Money in and out/.test(inout.previousElementSibling.textContent)));
   const tot = [...inout.querySelectorAll(".home-inout-total .home-val")].map(e => e.textContent);
   // In: this year's payments ($46 × 7 paid orders) + $30 other income; out: the $120 expense.
   console.log("…with the year's in, out and what's left:", tot.join(",") === "$352,$120,$232");
@@ -246,7 +249,7 @@ const at = (day) => day + "T12:00:00.000Z";
   console.log("opening Home again within the hour shows the kept figures (the new order isn't counted):", tile("new").querySelector(".home-num").textContent === "3");
   const reloads = []; w.addEventListener("beforeunload", () => reloads.push(1));
   w.document.getElementById("homeRefresh").click();
-  console.log("Refresh data shows it's working (button busy):", w.document.getElementById("homeRefresh").disabled && /Refreshing/.test(w.document.getElementById("homeRefresh").textContent));
+  console.log("Refresh data shows it's working (button busy):", !!(w.document.getElementById("homeRefresh").disabled && /Refreshing/.test(w.document.getElementById("homeRefresh").textContent)));
   await wait(() => tile("new").querySelector(".home-num").textContent === "4" && /^Data last updated/.test(updText()));
   console.log("…asks the server to work the figures out again and redraws them, without reloading the page:",
     tile("new").querySelector(".home-num").textContent === "4" && !reloads.length && !w.document.getElementById("homeRefresh").disabled && /^Data last updated/.test(updText()));

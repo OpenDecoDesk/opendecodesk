@@ -182,8 +182,8 @@ global.rateLimitCheckGlobal = async () => ({ blocked: false, retryAfter: 0 }); g
     const rate = data.rates && data.rates[0];
     console.log("Rate carries a quoteToken:", !!(rate && rate.quoteToken));
     const v = rate && await ns.verifyQuote(env, rate.quoteToken);
-    console.log("Token verifies and binds org/zip/cart/amount:", !!v && v.ok && v.orgId === "league-101" &&
-      v.zip === "15213" && v.items === ns.canonicalItems(items) && v.amountCents === 1000);
+    console.log("Token verifies and binds org/zip/cart/amount:", !!(!!v && v.ok && v.orgId === "league-101" &&
+      v.zip === "15213" && v.items === ns.canonicalItems(items) && v.amountCents === 1000));
 
     console.log("\n=== shipping.js: admin parcel-override quotes are NOT signed ===");
     const res2 = await ns.post({ env, request: jsonReq("https://league101.example.com/api/shipping",

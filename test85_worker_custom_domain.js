@@ -46,7 +46,7 @@ const ENV = { CF_API_TOKEN: "tok", CF_ACCOUNT_ID: "ACCT", CF_ZONE_ID: "ZONE", CF
   const put = calls.find(c => c.method === "PUT");
   console.log("PUTs the Workers custom domain for the shop's hostname:", !!put && put.body.hostname === "club404.example.com" && put.body.service === "opendecodesk" && put.body.zone_id === "ZONE");
   console.log("creates no DNS record itself (Cloudflare does):", !calls.some(c => c.method === "POST"));
-  console.log("reports it as added:", d.configured && d.exists && d.status === "active" && /custom domain added/.test(d.steps.join("|")));
+  console.log("reports it as added:", !!(d.configured && d.exists && d.status === "active" && /custom domain added/.test(d.steps.join("|"))));
 
   console.log("\n=== Idempotent ===");
   calls = [];
@@ -62,7 +62,7 @@ const ENV = { CF_API_TOKEN: "tok", CF_ACCOUNT_ID: "ACCT", CF_ZONE_ID: "ZONE", CF
   console.log("\n=== A domain attached to a different Worker ===");
   reset(); workerDomains = [{ hostname: "rec.example.com", service: "opendecodesk-staging" }];
   const st = await dom.getOrgDomainStatus(ENV, "rec");
-  console.log("status flags the mismatch:", st.exists && st.status === "error" && /different Worker/.test(st.error));
+  console.log("status flags the mismatch:", !!(st.exists && st.status === "error" && /different Worker/.test(st.error)));
   d = await dom.ensureOrgDomain(ENV, "rec");
   console.log("ensure moves it to this Worker:", workerDomains[0].service === "opendecodesk" && /moved/.test(d.steps.join("|")));
 
@@ -73,7 +73,7 @@ const ENV = { CF_API_TOKEN: "tok", CF_ACCOUNT_ID: "ACCT", CF_ZONE_ID: "ZONE", CF
   console.log("\n=== Hosts served by a Worker ROUTE (a route in front of an existing DNS record) ===");
   reset(); routes = [{ pattern: "league101.example.com/*", script: "opendecodesk" }, { pattern: "other.example.com/*", script: "someone-else" }];
   let st2 = await dom.getOrgDomainStatus(ENV, "league101");
-  console.log("a routed host reports as set up, via the route:", st2.exists && st2.status === "active" && st2.via === "Worker route");
+  console.log("a routed host reports as set up, via the route:", !!(st2.exists && st2.status === "active" && st2.via === "Worker route"));
   console.log("a route for a DIFFERENT Worker doesn't count:", (await dom.getOrgDomainStatus(ENV, "other")).exists === false);
   calls = []; d = await dom.ensureOrgDomain(ENV, "league101");
   console.log("ensure leaves a routed host alone (no PUT, no DNS write):", !calls.some(c => c.method === "PUT" || c.method === "POST") && /Worker route/.test(d.steps.join("|")));

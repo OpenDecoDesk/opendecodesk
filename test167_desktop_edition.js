@@ -401,7 +401,7 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
   ok("the Windows download is a zip of the program's folder (nothing unpacked into Temp on every start)", pkgWin.target === "zip" && /windows-x64\.zip$/.test(pkgWin.artifactName) &&
     /builder: --win zip --x64/.test(read(".github/workflows/desktop.yml")) && !/portable/.test(read("desktop/package.json") + read(".github/workflows/desktop.yml")));
   const wf = read(".github/workflows/desktop.yml");
-  ok("a release publishes the three builds under the website's download names, with desktop/RELEASE_NOTES.md", /release:\n    if: needs\.version\.outputs\.release == 'true' && github\.ref == 'refs\/heads\/main'\n    needs: \[version, build\]/.test(wf) &&
+  ok("a release publishes the three builds under the website's download names, with desktop/RELEASE_NOTES.md", /release:\n    if: needs\.version\.outputs\.release == 'true' && github\.ref == 'refs\/heads\/main'\n    needs: \[version, build, tests\]/.test(wf) &&
     ["OpenDecoDesk-Windows.zip", "OpenDecoDesk-macOS-AppleSilicon.zip", "OpenDecoDesk-macOS-Intel.zip"].every(n => wf.includes("release/" + n)) &&
     /--notes-file desktop\/RELEASE_NOTES\.md/.test(wf) && fs.existsSync(path.join(__dirname, "desktop/RELEASE_NOTES.md")) &&
     /contents: write/.test(wf.slice(wf.indexOf("\n  release:\n"))) && /permissions:\n  contents: read/.test(wf));

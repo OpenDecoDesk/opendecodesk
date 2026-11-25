@@ -135,7 +135,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   const scannedId = r.body.id;
   r = await call({ action: "recordMachineDiscovery", discovered: [{ mac: "DEADBEEF0001", ip: "192.168.1.222" }] });
   const scanned = (r.body.machines || []).find(x => x.id === scannedId);
-  console.log("recordMachineDiscovery action refreshes IP + verifiedAt and returns machines:", r.status === 200 && scanned && scanned.ipAddress === "192.168.1.222" && !!scanned.verifiedAt);
+  console.log("recordMachineDiscovery action refreshes IP + verifiedAt and returns machines:", !!(r.status === 200 && scanned && scanned.ipAddress === "192.168.1.222" && !!scanned.verifiedAt));
   await call({ action: "deleteMachine", id: scannedId });
 
   console.log("\n=== Screen wiring ===");

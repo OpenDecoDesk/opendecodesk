@@ -16,7 +16,7 @@ const lib = new Function(dbSrc + "\nreturn { getLocaleSettings, setLocaleSetting
 const SUBS = { acme: "acme", shipper: "shipper" };
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" +
   strip(read("functions/_lib/quoteToken.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" + require("./testlib/roles").adminAs() + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => { global.__inval105 = (global.__inval105 || 0) + 1; }; const getCatalogData = async () => ({ subdomainMap: " + JSON.stringify(SUBS) + ", orgs: {} });\n" +
   "const ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({});\n" +

@@ -74,7 +74,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
     d1._raw.run("UPDATE orders SET paid=1, blankReceivedAt='2026-09-03' WHERE orderId='L2-1'");
     const job = (await lib.getProductionQueue(d1)).find(j => j.orderId === "L2-1");
     console.log("Run Order runs the shared closure design for the other shop's order:",
-      job && job.steps.length === 2 && job.steps[1].designName === "Closure COACH" && job.steps[1].machineFileName === "COACH.DST");
+      !!(job && job.steps.length === 2 && job.steps[1].designName === "Closure COACH" && job.steps[1].machineFileName === "COACH.DST"));
 
     console.log("\n=== One design, edited once ===");
     r = await call({ action: "saveDesign", org: "league2", design: { id: coach, name: "Closure COACH (crest)", hoopIds: [flat], isGlobal: true } });
@@ -86,7 +86,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
 
     console.log("\n=== Back to shop-only ===");
     r = await call({ action: "saveDesign", org: "league1", design: { id: coach, name: "Closure COACH", hoopIds: [flat], isGlobal: false } });
-    console.log("refused while another shop's product uses it:", r.status === 400 && /Other shops' products use this global design/.test(r.body.message) && (await lib.getDesign(d1, coach)).isGlobal);
+    console.log("refused while another shop's product uses it:", !!(r.status === 400 && /Other shops' products use this global design/.test(r.body.message) && (await lib.getDesign(d1, coach)).isGlobal));
     const solo = (await call({ action: "saveDesign", org: "league1", design: { name: "Unused global", hoopIds: [], isGlobal: true } })).body.id;
     r = await call({ action: "saveDesign", org: "league1", design: { id: solo, name: "Unused global", hoopIds: [], isGlobal: false } });
     console.log("an unused global design can go back to shop-only (audited):", r.status === 200 && !(await lib.getDesign(d1, solo)).isGlobal &&

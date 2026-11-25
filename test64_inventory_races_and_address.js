@@ -132,7 +132,7 @@ const api = A.post;
     console.log("the storefront's copy of the ZIP table is the same as the server's:",
       zipTable(storefrontPage()) === zipTable(read("functions/_lib/db.js")) && zipTable(storefrontPage()).length > 500);
     let c = C({ name: "A", line1: "1 Main", city: "Toledo", state: "ohio", zip: "43601", evil: "<script>", nested: { a: 1 } });
-    console.log("a good address: state name normalised to its code, unknown fields dropped:", c.address && c.address.state === "OH" && !("evil" in c.address) && !("nested" in c.address));
+    console.log("a good address: state name normalised to its code, unknown fields dropped:", !!(c.address && c.address.state === "OH" && !("evil" in c.address) && !("nested" in c.address)));
     const bad = C({ line1: "1", city: "Toledo", state: "IN", zip: "43601" }).error || "";
     console.log("a home-state (Ohio) ZIP with state IN is refused (it would drop the order's tax), naming the ZIP's state:", /43601 is in OH, but the state says IN/.test(bad));
     console.log("…the other way round too — another state's ZIP with the home state:", /46201 is in IN, but the state says OH/.test(C({ line1: "1", city: "Indianapolis", state: "OH", zip: "46201" }).error || ""));

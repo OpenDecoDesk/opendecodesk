@@ -212,7 +212,7 @@ const role = (key, fns) => ({ key, name: key, rank: 10, locked: false, builtIn: 
     global.fetch = async (url, init) => {
       if (String(url) !== "https://challenges.cloudflare.com/turnstile/v0/siteverify") throw new Error("unexpected fetch " + url);
       const token = init.body.get("response"); verified.push(token);
-      return { json: async () => ({ success: /^good-/.test(token) }) };
+      return { json: async () => (/^good-/.test(token) ? { success: true } : { success: false, "error-codes": ["invalid-input-response"] }) };
     };
 
     // One account, many addresses.

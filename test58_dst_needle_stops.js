@@ -98,9 +98,9 @@ const s = (n) => Array.from({ length: n }, () => STITCH);
   doc.getElementById("dsgcSave").click();
   await new Promise(res => setTimeout(res, 20));
   console.log("Save sends only the colors (versionId + threadColors), nothing else:",
-    saved && saved.action === "updateDesignVersionColors" && saved.versionId === 7 &&
+    !!(saved && saved.action === "updateDesignVersionColors" && saved.versionId === 7 &&
     JSON.stringify(saved.threadColors) === JSON.stringify([{ needle: 1, threadId: 1 }, { needle: 2, threadId: 1 }]) &&
-    !("machineFileKey" in saved) && !("designFileKey" in saved));
+    !("machineFileKey" in saved) && !("designFileKey" in saved)));
 
   console.log("\n=== Main design page renders the current version ===");
   w._dsgCtx = { orgId: "acme", orgName: "Acme", hoops: [], designs: [{ id: 3, name: "Logo" }],

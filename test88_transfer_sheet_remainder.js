@@ -63,7 +63,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   const lastMove = d1.q("SELECT COALESCE(MAX(id),0) m FROM transfer_movements")[0].m;
   r = await call({ ...base, total: 100.01, rows: [{ transferId: A, count: 7, pctOfSheet: 70 }], writeoff: { pct: 30, description: "test prints and scrap", categoryId: supplies } });
   const exp = expenses().at(-1);
-  console.log("saves:", r.status === 200 && r.body.writeoff && r.body.writeoff.pct === 30 && r.body.personal === null);
+  console.log("saves:", !!(r.status === 200 && r.body.writeoff && r.body.writeoff.pct === 30 && r.body.personal === null));
   console.log("rows take 70% and the write-off 30%, to the cent ($70.01 + $30.00 = $100.01):", invCents() - before === 7001 && exp.amountCents === 3000);
   console.log("the expense carries the description, the chosen category and the paid-from account:", /test prints and scrap/.test(exp.description) && /INV-1/.test(exp.description) && exp.categoryId === supplies && exp.accountId === acct && !exp.paidPersonally);
   const perUnit = d1.q("SELECT qtyDelta q, unitCostCents c FROM transfer_movements WHERE id > ? AND kind='purchase'", lastMove);

@@ -106,19 +106,22 @@ function makeStorageMock(){
   console.log("Placeholder still says 'Email address' after cycling every payment method:", getContact().placeholder === "Email address");
 
   console.log("\n=== placeOrder() blocks submission without a valid email ===");
+  // The checkout says why on the page (checkoutError_: the #checkoutMsg line, or a toast) and puts the cursor in the
+  // email box; it no longer uses alert().
+  const blockedForEmail = () => /email/i.test(window.eval("checkoutMsg_") || "") && window.document.activeElement === getContact() && !window.__lastAlert;
   window.document.getElementById("custName").value = "Aaron";
   getContact().value = "";
   window.__lastAlert = null;
   await window.placeOrder("league-101");
-  console.log("Blocked with an alert when contact is blank:", window.__lastAlert && window.__lastAlert.toLowerCase().includes("email"));
+  console.log("Blocked with a message about the email when contact is blank:", blockedForEmail());
 
   getContact().value = "not-an-email";
   window.__lastAlert = null;
   await window.placeOrder("league-101");
-  console.log("Blocked with an alert when contact isn't a valid email:", window.__lastAlert && window.__lastAlert.toLowerCase().includes("email"));
+  console.log("Blocked with a message about the email when contact isn't a valid email:", blockedForEmail());
 
   getContact().value = "614-555-0100";
   window.__lastAlert = null;
   await window.placeOrder("league-101");
-  console.log("Blocked when contact is a phone number, not an email:", window.__lastAlert && window.__lastAlert.toLowerCase().includes("email"));
+  console.log("Blocked when contact is a phone number, not an email:", blockedForEmail());
 })();

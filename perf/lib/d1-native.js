@@ -4,6 +4,9 @@
 // plans them (EXPLAIN QUERY PLAN).
 //
 //   const D = openNativeD1(file);   D.d1 → the binding;  D.reset();  D.report() → per-statement totals
+//
+// It also counts round trips, the cost local SQLite hides: on Cloudflare every first/all/run and every batch is one
+// request from the Worker to D1, so an operation's D1 time is at least trips × that request's latency.
 const { DatabaseSync } = require("node:sqlite");
 const { performance } = require("perf_hooks");
 
@@ -12,6 +15,7 @@ function openNativeD1(file) {
   db.exec("PRAGMA foreign_keys = ON");
   const cache = new Map();
   let stats = new Map();
+  let trips = 0;   // D1 round trips: each first/all/run, each batch, each exec
   const norm = (sql) => sql.replace(/\s+/g, " ").trim();
 
   function stmt(sql) {
@@ -48,14 +52,15 @@ function openNativeD1(file) {
   function bound(sql, list) {
     return {
       _sql: sql, _params: list,
-      async first(col) { const r = exec(sql, list, "all")[0]; return r === undefined ? null : (col ? r[col] : r); },
-      async all() { return { results: exec(sql, list, "all"), success: true, meta: { ...lastMeta } }; },
-      async run() { exec(sql, list, "run"); return { success: true, meta: { ...lastMeta } }; },
+      async first(col) { trips++; const r = exec(sql, list, "all")[0]; return r === undefined ? null : (col ? r[col] : r); },
+      async all() { trips++; return { results: exec(sql, list, "all"), success: true, meta: { ...lastMeta } }; },
+      async run() { trips++; exec(sql, list, "run"); return { success: true, meta: { ...lastMeta } }; },
     };
   }
   const d1 = {
     prepare(sql) { return Object.assign(bound(sql, []), { bind: (...list) => bound(sql, list) }); },
     async batch(stmts) {
+      trips++;   // the whole batch is one request
       db.exec("SAVEPOINT d1_batch");
       try {
         const out = [];
@@ -64,7 +69,7 @@ function openNativeD1(file) {
         return out;
       } catch (e) { db.exec("ROLLBACK TO d1_batch"); db.exec("RELEASE d1_batch"); throw e; }
     },
-    async exec(sql) { timed(sql, [], () => db.exec(sql)); return { count: 1 }; },
+    async exec(sql) { trips++; timed(sql, [], () => db.exec(sql)); return { count: 1 }; },
   };
 
   // The query plan of one statement, with the parameters it was last run with.
@@ -77,13 +82,14 @@ function openNativeD1(file) {
 
   return {
     d1, db,
-    reset() { stats = new Map(); },
+    reset() { stats = new Map(); trips = 0; },
+    trips: () => trips,
     report(top = 12) {
       const all = [...stats.values()].sort((a, b) => b.ms - a.ms);
       const totalMs = all.reduce((n, s) => n + s.ms, 0);
       const statements = all.reduce((n, s) => n + s.calls, 0);
       return {
-        totalMs, statements, distinct: all.length,
+        totalMs, statements, distinct: all.length, trips,
         top: all.slice(0, top).map(s => { const p = /^\s*(select|with|update|delete)/i.test(s.sql) ? plan(s.sql, s.params) : []; return { sql: s.sql, calls: s.calls, ms: s.ms, plan: p, scans: scans(p) }; }),
       };
     },

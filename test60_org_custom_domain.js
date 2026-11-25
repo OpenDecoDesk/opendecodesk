@@ -68,7 +68,7 @@ const ENV = { CF_API_TOKEN: "tok", CF_ACCOUNT_ID: "ACCT", CF_ZONE_ID: "ZONE", CF
   console.log("a domain stuck in error gets its validation retried:", calls.some(c => c.method === "PATCH") && d.status === "pending" && d.steps.includes("validation retried"));
   domains["club404.example.com"].status = "active";
   const st = await dom.getOrgDomainStatus(ENV, "club404");
-  console.log("status check reads without changing anything:", st.exists && st.status === "active" && calls.filter(c => c.method !== "GET").length === 1);
+  console.log("status check reads without changing anything:", !!(st.exists && st.status === "active" && calls.filter(c => c.method !== "GET").length === 1));
   console.log("status for a domain not added yet:", (await dom.getOrgDomainStatus(ENV, "nothere")).exists === false);
 
   reset(); dns.push({ id: "x", type: "A", name: "clash.example.com", content: "1.2.3.4" });

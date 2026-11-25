@@ -93,4 +93,55 @@ const agoIso = (n) => new Date(Date.now() - n * DAY).toISOString();
     && q(`SELECT count(*) n FROM orders WHERE orderId IN (${pool.made.map(() => "?").join(",")}) AND placedAt > ?`, ...pool.made.map(o => o.orderId), agoIso(3.1))[0].n === 5);
   const stage = await A.orders({ action: "setFulfillmentStage", org: "acme", orderId: pool.made[0].orderId, stage: "digitizingComplete" }, cookie);
   ok("the real handler accepts a stage change on a pool order", stage.status === 200 && stage.body.status !== "error");
+
+  console.log("=== The Orders page is timed as the page loads it (perf/lib/ops.js) ===");
+  // renderAdminOrders (public/admin.js) sends getOrders and three companion requests at once; the page is drawn when
+  // the last answers. The scale test times them together, by the wall clock, and each companion on its own.
+  const { READS, callOp, rowsOf } = require("./perf/lib/ops.js");
+  const { timeOp } = require("./perf/lib/measure.js");
+  const pageOp = READS.find(o => o.name === "orders-page");
+  const ctx = { shops: ["acme"], today: agoIso(0).slice(0, 10), d30: agoIso(30).slice(0, 10) };
+  const sent = pageOp ? pageOp.bodies(ctx, 0) : [];
+  ok("the orders-page operation sends getOrders with getBlanks (stock only), getBlankLinks and listDesignVerifications",
+    sent.map(b => b.action).join() === "getOrders,getBlanks,getBlankLinks,listDesignVerifications" && sent[1].stockOnly === true && sent.every(b => b.action === "getBlanks" || b.org === "acme"));
+  const adminSrc = require("fs").readFileSync(__dirname + "/public/admin.js", "utf8");
+  const render = adminSrc.slice(adminSrc.indexOf("const blanksAsked = listCacheAsk_({action:\"getBlanks\", stockOnly:true"), adminSrc.indexOf("]).then(([orders, verifData, blankLinksData, blanksData])"));
+  ok("…which are the ones renderAdminOrders sends alongside the list", render.length > 100 && /fetchOrders\(org\.orgId\)/.test(render) &&
+    /action:"listDesignVerifications"/.test(render) && /action:"getBlankLinks"/.test(render) && /JSON\.stringify\(blanksAsked\)/.test(render));
+  ok("…and each companion is timed on its own too", ["blanks-stock", "blank-links", "design-verifications"].every(n => { const o = READS.find(x => x.name === n); return o && o.body && sent.some(b => JSON.stringify(b) === JSON.stringify(o.body(ctx, 0))); }));
+  const sentHere = [];
+  const timed = await timeOp((i) => callOp(pageOp, ctx, i, (b) => { sentHere.push(b.action); return A.orders(b, cookie).then(r => ({ ...r, ms: 0, bytes: JSON.stringify(r.body).length })); }), { runs: 2, warmup: 1, rowsOf });
+  ok("all four go through the real handler, and the time is the wall clock around them (not 0, the parts' own)", !timed.error && timed.n === 2 && timed.median > 0 &&
+    sentHere.length === 12 && timed.rows === (await call(sent[0])).orders.length && timed.rows > 0 && timed.bytes > 0);
+  // Requests sent at once overlap: three that each take ~60 ms take ~60 ms together, not 180.
+  const later = (ms, r) => new Promise(res => setTimeout(() => res(r), ms));
+  const answerOk = { status: 200, ms: 60, bytes: 10, body: { status: "ok", orders: [1, 2] } };
+  const par = await timeOp(() => Promise.all([later(60, answerOk), later(60, answerOk), later(60, answerOk)]), { runs: 1, warmup: 0, rowsOf });
+  ok("requests sent at once are timed together by the wall clock", !par.error && par.median >= 55 && par.median < 150 && par.bytes === 30 && par.rows === 2);
+  const bad = await timeOp(() => Promise.all([later(1, answerOk), later(1, { status: 403, ms: 1, bytes: 5, body: { status: "error", message: "Your role can't do this." } })]), { runs: 1, warmup: 0, rowsOf });
+  ok("…and one of them failing fails the operation, with its message", /HTTP 403: Your role can't do this/.test(String(bad.error)));
+
+  console.log("=== D1 round trips (perf/lib/d1-native.js) ===");
+  const { openNativeD1 } = require("./perf/lib/d1-native.js");
+  const os = require("os"), fs = require("fs"), path = require("path");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "odd-trips-"));
+  try {
+    const D = openNativeD1(path.join(tmp, "t.sqlite"));
+    await D.d1.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+    D.reset();
+    await D.d1.prepare("INSERT INTO t (v) VALUES (?)").bind("a").run();
+    await D.d1.prepare("SELECT * FROM t").all();
+    await D.d1.prepare("SELECT v FROM t WHERE id = ?").bind(1).first("v");
+    await D.d1.batch([1, 2, 3].map(n => D.d1.prepare("INSERT INTO t (v) VALUES (?)").bind("b" + n)));
+    const rep = D.report();
+    ok("each first/all/run is one round trip and a batch of three is one more (4), though it ran 6 statements", D.trips() === 4 && rep.trips === 4 && rep.statements === 6);
+    D.reset();
+    ok("…and reset() starts the count again", D.trips() === 0);
+    D.close();
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  const { modeledD1 } = require("./perf/lib/report.js");
+  ok("the report shows modeled D1 time = trips × PERF_D1_RTT_MS, and for requests sent at once the longest of them",
+    /12 D1 round trips · modeled D1 time = 12 × 10 ms = 120 ms/.test(modeledD1({ trips: 12, parts: 1, tripsLongest: 12 }, 10)) &&
+    /20 D1 round trips · modeled D1 time = 9 \(the longest of the 4 requests sent at once\) × 25 ms = 225 ms/.test(modeledD1({ trips: 20, parts: 4, tripsLongest: 9 }, 25)) &&
+    /PERF_D1_RTT_MS/.test(fs.readFileSync(__dirname + "/perf/profile.js", "utf8")) && /PERF_D1_RTT_MS/.test(fs.readFileSync(__dirname + "/perf/README.md", "utf8")));
 })().catch((e) => { console.error(e); console.log("test188 crashed: false"); process.exit(1); });

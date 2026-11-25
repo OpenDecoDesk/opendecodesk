@@ -196,7 +196,7 @@ function makeGsMock(calls){ return async (url, opts) => {
   });
   const d1 = JSON.parse(await co1.text());
   console.log("Returns ok:", d1.status === "ok");
-  console.log("Returns checkout URL:", d1.url && d1.url.includes("checkout.stripe.com"));
+  console.log("Returns checkout URL:", !!(d1.url && d1.url.includes("checkout.stripe.com")));
   console.log("getOrderTotal was called from D1:", getOrderTotalCalled);
   console.log("Stripe called with correct auth:", capturedStripeReq.opts.headers["Authorization"] === "Bearer sk_test_fake");
   const params = new URLSearchParams(capturedStripeReq.opts.body);
@@ -585,7 +585,7 @@ function makeGsMock(calls){ return async (url, opts) => {
     env:{DB:{}, STRIPE_WEBHOOK_SECRET:"whsec_test", SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}
   });
   console.log("PaymentIntent fetched to resolve metadata:", piFetched);
-  console.log("setOrderRefunded called on D1 with recovered orderId:", brD1Written && brD1OrderId === "ORD-R1");
+  console.log("setOrderRefunded called on D1 with recovered orderId:", !!(brD1Written && brD1OrderId === "ORD-R1"));
   console.log("Returns 200 on success:", whBare.status === 200);
   global.setOrderRefunded = async () => {};
 

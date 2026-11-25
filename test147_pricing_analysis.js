@@ -17,7 +17,7 @@ const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'
 const dbSrc = strip(read("functions/_lib/db.js"));
 const lib = new Function(dbSrc + `\nreturn { insertOrder, createProduct, createBlank, setBlankLink, analyzePricing, getPricingSettings, setPricingSettings, getCatalogIssues, getNewPricingAlerts, pricingBelowTargetForBlanks, avgRunMinutesByProduct_ };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + strip(read("functions/_lib/fileUpload.js")) + "\n" + strip(read("functions/_lib/vendorImages.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'owner@test'; const adminUser = () => (globalThis.__role ? { role: globalThis.__role } : null);\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'owner@test'; " + require("./testlib/roles").adminAs({ roleFrom: "globalThis.__role || 'admin'" }) + "\n\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +

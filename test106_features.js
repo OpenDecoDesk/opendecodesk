@@ -22,7 +22,7 @@ const lib = new Function(dbSrc + "\n" + emailSrc + "\n" + strip(read("functions/
 const SUBS = { acme: "acme" };
 // The API reads the switches the way the deployed site does: from the catalog data (here always fresh).
 const api = new Function("catalogData", hostSrc + "\n" + httpSrc + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + strip(read("functions/_lib/quoteToken.js")) + "\n" +
-  "const requireAdmin = async (env, host, key) => key === 'x' ? null : jsonResponse({ status: 'error', message: 'Unauthorized' }, 401); const adminActor = () => 'test';\n" +
+  "const requireAdmin = async (env, host, key) => key === 'x' ? null : jsonResponse({ status: 'error', message: 'Unauthorized' }, 401); const adminActor = () => 'test';\n" + require("./testlib/roles").adminAs() + "\n" + strip(read("functions/_lib/permissions.js")) + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => { global.__inval106 = (global.__inval106 || 0) + 1; }; const getCatalogData = (env) => catalogData(env);\n" +
   "const ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({});\n" +

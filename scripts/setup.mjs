@@ -278,6 +278,8 @@ export const commands = {
   r2Create: (name) => ["r2", "bucket", "create", name],
   migrate: (config) => ["d1", "migrations", "apply", "DB", "--remote", "--config", config],
   migrationsList: (config) => ["d1", "migrations", "list", "DB", "--remote", "--config", config],
+  // D1 Time Travel: the bookmark for the database as it is now, to restore to (always the remote database).
+  timeTravelInfo: (config) => ["d1", "time-travel", "info", "DB", "--json", "--config", config],
   authToken: () => ["auth", "token", "--json"],
   d1Query: (config, sql) => ["d1", "execute", "DB", "--remote", "--json", "--yes", "--config", config, "--command", sql],
   d1File: (config, file) => ["d1", "execute", "DB", "--remote", "--yes", "--config", config, "--file", file],
@@ -567,8 +569,8 @@ export async function setup({ io, run, files, configPath = "wrangler.toml", flag
 
   // ---- 6. Tables ------------------------------------------------------------------------------
   step(6, "Creating / updating the database tables");
-  const { isNew } = prepareTables({ run, files, configPath, say, fail });
-  done.push("database tables " + (dry ? "would be created or updated" : isNew ? "created" : "are up to date"));
+  const { isNew, applied } = prepareTables({ run, files, configPath, say, fail, databaseName: cfg.databaseName, noBackup: !!flags.noBackup });
+  done.push("database tables " + (dry ? "would be created or updated" : isNew ? "created" : "are up to date" + (!applied ? " (migrations applied)" : applied.length ? " (applied " + applied.join(", ") + ")" : "")));
 
   // An install that already has shops: list their hostnames, or this deploy would detach them.
   {
@@ -703,8 +705,25 @@ export async function setup({ io, run, files, configPath = "wrangler.toml", flag
 // it; an EXISTING one gets only the migrations it doesn't have. (Running the migrations on an empty
 // database would fail at the first one: it alters a table that only schema.sql creates.) Shared by
 // the installer and by `npm run deploy`, which is also what Cloudflare runs after the Deploy button
-// has made an empty database. Returns { isNew }.
-export function prepareTables({ run, files, configPath, say, fail }){
+// has made an empty database.
+// Before migrations change an EXISTING database, a restore point: D1 Time Travel's bookmark for the
+// database as it is now, printed with the command that puts it back. Without one (wrangler can't get
+// it) nothing is applied, unless noBackup (--no-backup) says to go ahead without.
+//   databaseName  for the restore command (wrangler.toml's database_name)
+// Returns { isNew, applied, bookmark, restore }: the migrations this run applied (null: there were
+// some, but wrangler's list couldn't be read), the bookmark from before them and its restore command.
+export function parseMigrationsList(stdout) {
+  const s = String(stdout || "");
+  const names = [...new Set([...s.matchAll(/\b\d{4}_[\w.-]*?\.sql\b/g)].map(m => m[0]))];
+  if (names.length) return names;
+  return /No migrations to apply/i.test(s) ? [] : null;
+}
+export function parseBookmark(stdout) {
+  const j = jsonIn(stdout);
+  const b = String((j && j.bookmark) || (/bookmark is '([^']+)'/.exec(String(stdout || "")) || [])[1] || "").trim();
+  return /^[A-Za-z0-9-]{8,200}$/.test(b) ? b : "";   // it goes into a command we print: nothing a shell would read
+}
+export function prepareTables({ run, files, configPath, say, fail, databaseName = "", noBackup = false }){
   const dry = !!run.dryRun;
   let r;
   const query = (sql, what) => {
@@ -739,12 +758,35 @@ export function prepareTables({ run, files, configPath, say, fail }){
       r = run(commands.d1File(configPath, sqlFile), { stream: true });
     } finally { if (!dry) files.remove(sqlFile); }
     if (!r.skipped && !r.ok) fail("Creating the tables failed.", r, "Nothing after this step was done. Fix the problem and run it again.");
-    if (dry) say("   [dry run] an EXISTING database skips that, and gets only migrations it doesn't have yet:");
+    if (dry) say("   [dry run] an EXISTING database skips that, and gets only migrations it doesn't have yet — when it has any, after a restore point (`npx wrangler " +
+      commands.timeTravelInfo(configPath).join(" ") + "`)" + (noBackup ? ", which --no-backup skips" : "") + ":");
+  }
+  let applied = [], bookmark = "", restore = "";
+  if (!isNew) {
+    const l = run(commands.migrationsList(configPath));
+    if (!l.skipped && !l.ok && !noBackup) fail("Could not list the migrations still to run, so none was applied.", l,
+      "Fix the problem and run it again, or run it with --no-backup to apply them without a restore point.");
+    applied = l.ok && !l.skipped ? parseMigrationsList(l.stdout) : null;
+    if (applied && applied.length) say(`   Migrations to apply: ${applied.join(", ")}`);
+    else if (!applied) say("   Migrations to apply: wrangler's list couldn't be read, so this counts as some.");
+    if (!applied || applied.length) {
+      if (noBackup) say("   ⚠ No restore point (--no-backup): if a migration goes wrong, the nightly backup or Time Travel's history is what's left.");
+      else {
+        const t = run(commands.timeTravelInfo(configPath));
+        bookmark = t.ok ? parseBookmark(t.stdout) : "";
+        if (!bookmark) fail("Could not save a restore point (D1 Time Travel) before the migrations, so none was applied.", t,
+          "Fix the problem and run it again, or run it with --no-backup to apply them without a restore point.");
+        restore = `npx wrangler d1 time-travel restore ${databaseName || "DB --config " + configPath} --bookmark=${bookmark}`;
+        say(`   Restore point before the migrations: bookmark ${bookmark}`);
+        say(`   To put the database back as it is now (this also undoes anything written after it): ${restore}`);
+      }
+    }
   }
   // Always: on a new database this finds nothing to do, which confirms wrangler recognises the record.
   r = run(commands.migrate(configPath), { stream: true });
-  if (!r.skipped && !r.ok) fail("Applying the database migrations failed.", r, "Nothing after this step was done. Fix the problem and run it again — migrations that were applied are not repeated.");
-  return { isNew };
+  if (!r.skipped && !r.ok) fail("Applying the database migrations failed.", r, "Nothing after this step was done. Fix the problem and run it again — migrations that were applied are not repeated." +
+    (restore ? `\nTo undo the ones that were applied: ${restore}` : ""));
+  return { isNew, applied: isNew ? [] : applied, bookmark, restore };
 }
 
 // ---- what a deploy would drop ------------------------------------------------------------------------
@@ -814,6 +856,9 @@ export function createCloudflareApi({ run, env = process.env, fetchImpl = global
 //             hostname the Worker has would be dropped (hostnameProblems). Without it the check is skipped.
 //   check     check only: list the migrations still to run and do the hostname check — change nothing
 //   skipHostnameCheck  deploy without the Cloudflare check (it says so)
+//   noBackup  apply migrations without first saving a restore point (see prepareTables)
+// Returns what it changed: the migrations applied (applied, bookmark, restore) and whether the file was
+// written (tomlWritten). A failed deploy's message names the same.
 export const SITE_SETTING_SQL = "SELECT value FROM global_settings WHERE key = 'site'";
 export function parseSiteSetting(row) {
   let v = null;
@@ -822,7 +867,7 @@ export function parseSiteSetting(row) {
   const root = String((v && v.rootDomain) || "").trim().toLowerCase();
   return { rootDomain: validateDomain(root).value || "", adminSubdomain: label(v && v.adminSubdomain) || "admin", adminHostSeen: !!(v && v.adminHostSeen) };
 }
-export async function upgrade({ print, run, files, configPath = "wrangler.toml", ci = false, diagnose = false, api = null, check = false, skipHostnameCheck = false }) {
+export async function upgrade({ print, run, files, configPath = "wrangler.toml", ci = false, diagnose = false, api = null, check = false, skipHostnameCheck = false, noBackup = false }) {
   const stop = (what, r, hint) => {
     const lines = (t) => String(t || "").split("\n").map(l => l.trimEnd()).filter(l => l.trim());
     const tail = r ? [...lines(r.stdout).slice(-4), ...lines(r.stderr).slice(-10)].join("\n") : "";
@@ -839,11 +884,12 @@ export async function upgrade({ print, run, files, configPath = "wrangler.toml",
   }
 
   print(""); print("── 1. Database tables");
+  let tables = { isNew: false, applied: [], bookmark: "", restore: "" };
   if (check) {
     print("   Check only — the migrations still to run (none is applied):");
     const m = run(commands.migrationsList(configPath), { stream: true });
     if (!m.skipped && !m.ok) stop("Could not list the database's migrations.", m);
-  } else prepareTables({ run, files, configPath, say: print, fail: stop });
+  } else tables = prepareTables({ run, files, configPath, say: print, fail: stop, databaseName: cfg.databaseName, noBackup });
 
   print(""); print("── 2. Hostnames");
   // Where the domain comes from: wrangler.toml (installed from the command line) or the database
@@ -918,17 +964,26 @@ export async function upgrade({ print, run, files, configPath = "wrangler.toml",
     print(""); print("Check only — nothing was changed or deployed." + (next !== original ? ` (A deploy would first add the new shops to ${configPath}.)` : ""));
     return { ok: true, check: true, hosts: readWranglerToml(next).hosts.length + readWranglerToml(next).zoneRoutes.length };
   }
-  if (next !== original && !run.dryRun) files.write(configPath, next);
+  const tomlWritten = next !== original && !run.dryRun;
+  if (tomlWritten) files.write(configPath, next);
 
   print(""); print("── 3. Deploying");
   r = run(commands.deploy(configPath, ""), { stream: true });
-  if (!r.skipped && !r.ok) stop("The deploy failed.", r, "Nothing else was changed. Fix the problem above and run `npm run deploy` again.");
+  if (!r.skipped && !r.ok) {
+    // Steps 1 and 2 have already changed things: say exactly what, so nobody thinks the database is as it was.
+    const { applied, restore } = tables, changed = [];
+    if (!applied || applied.length) changed.push("The database: " + (applied ? "the migrations " + applied.join(", ") + " were applied" : "the migrations still to run were applied") +
+      ". The site still runs the version from before them." + (restore ? ` If it can't run on the new tables, this puts the database back as it was (and undoes anything written since): ${restore}` : ""));
+    if (tomlWritten) changed.push(`${configPath} was updated (its hostnames or workers.dev setting) — keep it: the next deploy needs it.`);
+    stop("The deploy failed.", r, (changed.length ? "Already changed before the deploy:\n  - " + changed.join("\n  - ") + "\n\nFix the problem above and run `npm run deploy` again (applied migrations are not repeated)."
+      : "Nothing else was changed. Fix the problem above and run `npm run deploy` again."));
+  }
   print(""); print(run.dryRun ? "Dry run finished — nothing was changed." : "Done. A hostname attached for the first time can take a few minutes to get its certificate.");
-  return { ok: true, hosts: readWranglerToml(next).hosts.length, workersDev };
+  return { ok: true, hosts: readWranglerToml(next).hosts.length, workersDev, applied: tables.applied, bookmark: tables.bookmark, restore: tables.restore, tomlWritten };
 }
 
 export function parseArgs(argv) {
-  const flags = { dryRun: false, skipDeploy: false, newPassphrase: false, help: false, printFreshSql: false, config: "wrangler.toml" };
+  const flags = { dryRun: false, skipDeploy: false, newPassphrase: false, help: false, printFreshSql: false, noBackup: false, config: "wrangler.toml" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") flags.dryRun = true;
@@ -936,6 +991,7 @@ export function parseArgs(argv) {
     else if (a === "--new-passphrase") flags.newPassphrase = true;
     else if (a === "--help" || a === "-h") flags.help = true;
     else if (a === "--print-fresh-sql") flags.printFreshSql = true;
+    else if (a === "--no-backup") flags.noBackup = true;
     else if (a === "--config") { flags.config = argv[++i]; if (!flags.config) throw new SetupError("--config needs a path"); }
     else throw new SetupError("Unknown option: " + a + " (try --help)");
   }
@@ -1000,6 +1056,8 @@ ONE REAL INSTALL SO FAR, THE SMALLEST ONE — try --dry-run first.
   --config <path>    the wrangler.toml to use (default: ./wrangler.toml)
   --skip-deploy      do everything except the deploy (secrets are not stored)
   --new-passphrase   replace the admin passphrase: gets a locked-out admin back in, and voids every user's password
+  --no-backup        an existing database's new migrations go ahead without a restore point (a D1 Time
+                     Travel bookmark); without it, one that can't be saved stops the run
   --print-fresh-sql  print the SQL that builds a NEW database (schema.sql plus the record that
                      every migration is already in it) and stop — for installing by hand
 `;

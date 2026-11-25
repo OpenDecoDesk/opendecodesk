@@ -78,7 +78,7 @@ const setState = (d1, orderId, s) => {
   console.log("existing owner notices survive the table rebuild:", d1.q("SELECT summary FROM owner_notices")[0].summary === "old notice");
   d1._raw.run("INSERT INTO owner_notices (kind, orderId, summary, createdAt) VALUES ('delivered','DONE','x','2026-09-24T00:00:00Z')");
   let rejected = false; try { d1._raw.run("INSERT INTO owner_notices (kind, summary, createdAt) VALUES ('bogus','x','t')"); } catch (e) { rejected = true; }
-  console.log("the new 'delivered' kind is accepted, an unknown kind is still refused:", rejected && d1.q("SELECT count(*) n FROM owner_notices")[0].n === 2);
+  console.log("the new 'delivered' kind is accepted, an unknown kind is still refused:", !!(rejected && d1.q("SELECT count(*) n FROM owner_notices")[0].n === 2));
 
   // =====================================================================
   console.log("\n=== Completing orders: the rules ===");
@@ -204,7 +204,7 @@ const setState = (d1, orderId, s) => {
   const ordersSrc = strip(read("functions/api/orders.js"));
   const api = new Function(
     strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
-    "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
+    "const requireAdmin = async () => null; const adminActor = () => 'test';\n" + require("./testlib/roles").adminAs() + "\n" + strip(read("functions/_lib/permissions.js")) + "\n" +
     "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
     "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
     "const sendOrderReceivedEmail = async () => false, sendOrderNotificationEmail = async () => false, sendPaymentConfirmedEmail = async () => false,\n" +
@@ -287,7 +287,7 @@ const setState = (d1, orderId, s) => {
   w.document.getElementById("ordIncludeCompleted").click();
   await settle();
   console.log("ticking it shows the completed order and the summary now counts it (4 orders, $184.00, still $92.00 due):",
-    ids().join(",") === "DONE1,OPEN1,PAID1,UNP1" && /^4 orders · \$184\.00 active total · \$92\.00 balance due/.test(summary()) && w.document.getElementById("ordIncludeCompleted").checked);
+    !!(ids().join(",") === "DONE1,OPEN1,PAID1,UNP1" && /^4 orders · \$184\.00 active total · \$92\.00 balance due/.test(summary()) && w.document.getElementById("ordIncludeCompleted").checked));
   console.log("...and the breakdown follows (more units than before):", bd() !== bdDefault);
   const doneRow = w.document.querySelector('tr[data-order="DONE1"]');
   console.log("the Completed column shows the date; the action cell says Completed + offers Reopen:",

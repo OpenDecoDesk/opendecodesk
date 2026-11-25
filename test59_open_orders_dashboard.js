@@ -118,7 +118,7 @@ const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString();
   console.log("ticked: the voided order appears (with its VOID tag):", shopIds() === "PAID1,PART1,VOID1" && /VOID/.test(w.document.querySelector('tr[data-order="VOID1"]').textContent));
   console.log("…but still isn't counted in the totals:", /^2 orders/.test(w.document.getElementById("ordSummaryBar").textContent.replace(/\s+/g, " ").trim()));
   await paintShop(prime);
-  console.log("the choice carries to other shops: fully-cancelled CANC1 shows, completed DONE1 still hidden:", cancBox().checked && shopIds() === "CANC1,SHIP1,TEST-1,UNPAID1");
+  console.log("the choice carries to other shops: fully-cancelled CANC1 shows, completed DONE1 still hidden:", !!(cancBox().checked && shopIds() === "CANC1,SHIP1,TEST-1,UNPAID1"));
   cancBox().click();
   await new Promise(x => setTimeout(x, 30)); await wait(() => w.document.getElementById("ordSummaryBar"));
   console.log("unticked: cancelled orders hidden again:", shopIds() === "SHIP1,TEST-1,UNPAID1");

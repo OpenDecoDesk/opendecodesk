@@ -3,6 +3,7 @@
 const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const { performance } = require("perf_hooks");
 
 function stats(values) {
   const v = [...values].sort((a, b) => a - b);
@@ -11,15 +12,27 @@ function stats(values) {
   return { median: q(0.5), p95: q(0.95), min: v[0], max: v[v.length - 1], n: v.length };
 }
 
-// Times one operation. `call(i)` makes call i and returns perf/lib/server.js's { status, ms, bytes, body, timeout }.
+// Several answers to requests sent at once (ops.js callOp) as one: the time from the first sent to the last
+// answered (wallMs, measured around them), the bytes of all, the first failure, and the first answer's body (the
+// screen's main list, for its row count).
+function combine(parts, wallMs) {
+  const bad = parts.find(p => p.timeout) || parts.find(p => p.status !== 200 || (p.body && p.body.status === "error")) || parts[0];
+  return { status: bad.status, ms: wallMs, bytes: parts.reduce((n, p) => n + (p.bytes || 0), 0), timeout: parts.some(p => p.timeout),
+    body: bad === parts[0] ? parts[0].body : bad.body, text: bad.text, parts: parts.length };
+}
+
+// Times one operation. `call(i)` makes call i and returns perf/lib/server.js's { status, ms, bytes, body, timeout } —
+// or an array of them, for requests sent at once: those are timed together, by the wall clock.
 // A failed answer stops the operation (its error is kept); a timeout the same.
 async function timeOp(call, { runs = 5, warmup = 1, rowsOf }) {
   const times = [];
   let bytes = 0, rows = 0, error = null, timeout = false;
   for (let i = 0; i < warmup + runs; i++) {
     let r;
+    const t = performance.now();
     try { r = await call(i); }
     catch (e) { error = String(e && e.message || e); break; }
+    if (Array.isArray(r)) r = combine(r, performance.now() - t);
     if (r.timeout) { timeout = true; error = "timed out after " + Math.round(r.ms / 1000) + " s"; break; }
     const bad = r.status !== 200 || (r.body && (r.body.status === "error" || (Array.isArray(r.body.skipped) && r.body.skipped.length && !r.body.updated)));
     if (bad) { error = "HTTP " + r.status + ": " + String((r.body && (r.body.message || JSON.stringify(r.body.skipped || r.body.errors || "").slice(0, 200))) || r.text || "").slice(0, 300); break; }
@@ -63,4 +76,4 @@ function folderBytes(dir) {
   return total;
 }
 
-module.exports = { stats, timeOp, memorySampler, folderBytes };
+module.exports = { stats, timeOp, combine, memorySampler, folderBytes };

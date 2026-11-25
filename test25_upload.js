@@ -93,7 +93,7 @@ if(!global.crypto.randomUUID) global.crypto.randomUUID = () => "11111111-2222-33
   let res = await uploadHandler(ctx({key:"proxy-pass-for-tests", org:"league-101", contentType:"image/png", body:validBuf("image/png",1234)}, env));
   let data = JSON.parse(await res.text());
   console.log("Returns ok:", data.status === "ok");
-  console.log("Returns a public URL under R2_PUBLIC_BASE:", data.url && data.url.indexOf("https://images.example.com/") === 0);
+  console.log("Returns a public URL under R2_PUBLIC_BASE:", !!(data.url && data.url.indexOf("https://images.example.com/") === 0));
   console.log("Key is under uploads/<org>/ and ends with the content-type's extension (.png), not a client-picked name:",
     /^https:\/\/images\.example\.com\/uploads\/league-101\/[a-z0-9]+\.png$/i.test(data.url));
   console.log("Returns uploadId (32-char hex, no dashes) so client can upload thumbnail:", /^[a-f0-9]{32}$/.test(data.uploadId || ""));

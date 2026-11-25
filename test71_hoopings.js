@@ -18,7 +18,7 @@ const lib = new Function(dbSrc + `\nreturn { insertOrder, getOrderById, createHo
   addDesignVersion, setProductDesign, setProductDesigns, listProductDesigns, createProduct, getProductsByOrg, saveMachine, getMachine,
   getProductionQueue, addOrderItemDesign, getRunReportByDesign };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" + require("./testlib/roles").adminAs() + "\n" + strip(read("functions/_lib/permissions.js")) + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +
@@ -86,7 +86,7 @@ const migrationsUpTo = (upTo) => fs.readdirSync(__dirname + "/migrations").filte
     await lib.createProduct(d1, "prime", { productId: "cap", type: "cap", name: "Cap", pricingMode: "flat", flatPrice: 25, personalizationPrice: 5, visible: true });
     let r = await call({ action: "setProductDesigns", org: "prime", productId: "cap", designs: [{ designId: front, placement: "Front", isMain: true }, { designId: back, placement: "Back" }] });
     const pds = await lib.listProductDesigns(d1, "prime", "cap");
-    console.log("saved in run order with placements and one main:", r.status === 200 && pds.map(x => x.placement).join(",") === "Front,Back" && pds[0].isMain && !pds[1].isMain);
+    console.log("saved in run order with placements and one main:", !!(r.status === 200 && pds.map(x => x.placement).join(",") === "Front,Back" && pds[0].isMain && !pds[1].isMain));
     console.log("products.designId mirrors the main design:", (await d1.prepare("SELECT designId FROM products WHERE productId='cap'").first()).designId === front);
     r = await call({ action: "setProductDesigns", org: "prime", productId: "cap", designs: [{ designId: otherShop }] });
     console.log("another shop's design is refused:", r.status === 400 && /doesn't belong/.test(r.body.message));

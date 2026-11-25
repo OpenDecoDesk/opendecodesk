@@ -7,6 +7,10 @@
 //   npm run perf -- --keep-data                                  (prints the data folder)
 //   npm run perf:profile -- --data <that folder>                 profile.json + the report again
 //   npm run perf:profile -- --data <folder> --ops open-orders,production-queue
+//   PERF_D1_RTT_MS=25 npm run perf:profile -- --data <folder>    the modeled D1 time at 25 ms a round trip
+//
+// It also counts each operation's D1 round trips (each statement or batch is one request to D1 on Cloudflare)
+// and shows the modeled D1 time, trips × PERF_D1_RTT_MS (default 10 ms), which local SQLite doesn't have.
 //
 // It works on a copy of the database, so the kept data is left as it was.
 const fs = require("fs");
@@ -20,7 +24,7 @@ const { writeReport } = require("./lib/report.js");
 const { migrate, readSources } = require("../desktop/migrate.js");
 
 const ROOT = path.join(__dirname, "..");
-const DEFAULT_OPS = ["open-orders", "production-queue", "transfer-queue", "blanks-to-order", "orders-30d", "orders-all-shops-30d",
+const DEFAULT_OPS = ["open-orders", "production-queue", "transfer-queue", "blanks-to-order", "orders-30d", "orders-page", "orders-all-shops-30d",
   "revenue-year", "sales-tax-year", "accountant-export-year", "orders-full-history", "bulk-stage-20"];
 
 function parseArgs(argv) {
@@ -72,20 +76,32 @@ async function main() {
   if (fresh.length < 100) fresh.push(...D.db.prepare("SELECT orderId, orgId FROM orders WHERE isTest = 0 ORDER BY placedAt DESC LIMIT ?").all(100 - fresh.length).map(r => ({ ...r })));
   ctx.pool = { bulk: fresh, stage: fresh.slice(100), info: fresh.slice(100), pay: [] };
 
-  const out = { orders, sqlite, at: new Date().toISOString(), ops: [] };
+  const rttMs = Number(process.env.PERF_D1_RTT_MS) > 0 ? Number(process.env.PERF_D1_RTT_MS) : 10;
+  const out = { orders, sqlite, rttMs, at: new Date().toISOString(), ops: [] };
   for (const name of args.ops) {
     const op = [...READS, ...WRITES].find(o => o.name === name);
     if (!op) { console.log("  (no operation " + name + ")"); continue; }
+    // The request, or a screen's requests sent at once (ops.js bodies): here one after another, so each one's round
+    // trips are its own; on Cloudflare they overlap, so the longest of them is what the page waits for.
+    const parts = op.bodies ? op.bodies(ctx, 0) : [op.body(ctx, 0)];
     // Once to warm SQLite's cache (not for a write: it would use up its orders), then the timed run.
-    if (op.cls !== "bulk" && op.cls !== "write") await A.orders(op.body(ctx, 0), s.cookie);
+    if (op.cls !== "bulk" && op.cls !== "write") for (const b of parts) await A.orders(b, s.cookie);
     D.reset();
     const t = Date.now();
-    const r = await A.orders(op.body(ctx, 0), s.cookie);
+    let err = null;
+    const partTrips = [];
+    for (const b of parts) {
+      const before = D.trips();
+      const r = await A.orders(b, s.cookie);
+      partTrips.push(D.trips() - before);
+      if (!err && r.status !== 200) err = (parts.length > 1 ? b.action + ": " : "") + ((r.body && (r.body.message || r.body.threw)) || "HTTP " + r.status);
+    }
     const wall = Date.now() - t;
     const rep = D.report();
-    const err = r.status !== 200 ? (r.body && (r.body.message || r.body.threw)) || "HTTP " + r.status : null;
-    out.ops.push({ name, title: op.title, wallMs: wall, error: err, ...rep });
-    console.log(`\n${op.title}: ${wall} ms, ${rep.statements} statements (${rep.distinct} different), ${rep.totalMs.toFixed(0)} ms in SQLite${err ? "  ERROR " + err : ""}`);
+    const tripsLongest = Math.max(...partTrips);
+    out.ops.push({ name, title: op.title, wallMs: wall, error: err, parts: parts.length, tripsLongest, ...rep });
+    console.log(`\n${op.title}: ${wall} ms, ${rep.statements} statements (${rep.distinct} different), ${rep.totalMs.toFixed(0)} ms in SQLite, ` +
+      `${rep.trips} D1 round trips${parts.length > 1 ? " (longest request " + tripsLongest + ")" : ""} ≈ ${(tripsLongest * rttMs).toFixed(0)} ms modeled D1 time at ${rttMs} ms each${err ? "  ERROR " + err : ""}`);
     for (const st of rep.top.slice(0, 6)) {
       console.log(`  ${st.ms.toFixed(0).padStart(7)} ms  ×${String(st.calls).padEnd(5)} ${st.sql.slice(0, 110)}`);
       for (const sc of st.scans) console.log("            SCAN: " + sc);

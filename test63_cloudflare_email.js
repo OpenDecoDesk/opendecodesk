@@ -40,7 +40,7 @@ const isCf = (c) => c.url.startsWith("https://api.cloudflare.com/");
   calls = [];
   let ok = await send_(cf, msg);
   const c = calls[0];
-  console.log("sends through Cloudflare, one request:", ok === true && calls.length === 1 && isCf(c));
+  console.log("sends through Cloudflare, one request:", !!(ok === true && calls.length === 1 && isCf(c)));
   console.log("to the account's send endpoint with the API token:",
     c.url === "https://api.cloudflare.com/client/v4/accounts/acct123/email/sending/send" && c.headers.Authorization === "Bearer tok");
   console.log("from orders@<root domain> under the business name:", c.body.from.address === "orders@example.com" && c.body.from.name === "Example Stitch Co");
@@ -67,7 +67,7 @@ const isCf = (c) => c.url.startsWith("https://api.cloudflare.com/");
   ]) {
     cfReply = reply; calls = [];
     ok = await send_(cf, msg);
-    console.log(label + " → reported as not sent, one attempt:", ok === false && calls.length === 1 && isCf(calls[0]));
+    console.log(label + " → reported as not sent, one attempt:", !!(ok === false && calls.length === 1 && isCf(calls[0])));
   }
   console.log("each failure is recorded for the 6 AM roll-up (email_failed, with the subject):",
     global.__issues.filter(x => x.kind === "email_failed").length === 3 && global.__issues[0].sample === "Order received");

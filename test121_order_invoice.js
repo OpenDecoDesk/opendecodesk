@@ -30,7 +30,7 @@ const M = new Function(
   strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" +
   strip(read("functions/_lib/db.js")) + "\n" + strip(read("functions/_lib/email.js")) + "\n" + strip(read("functions/_lib/quoteToken.js")) + "\n" +
   strip(read("functions/_lib/boxSize.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" + require("./testlib/roles").adminAs() + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: { club: 'club', guild: 'guild' }, orgs: {}, features: globalThis.__features || {} });\n" +
@@ -405,8 +405,8 @@ const plain = (html) => String(html || "").replace(/<[^>]+>/g, " ").replace(/&am
   for (let i = 0; i < 80 && adoc.getElementById("siDone").hidden; i++) await tick(25);
   const sentReq = sentAdmin.find(b => b.action === "sendInvoice");
   if (adoc.getElementById("siDone").hidden) console.error("Send invoice window error:", adoc.getElementById("siErr").textContent, JSON.stringify(sentAdmin));
-  console.log("Send emails the invoice and shows the link to copy:", sentReq && sentReq.message === "Thank you!" && sentReq.allowDelivery === true && mail.length === 1
-    && /\?invoice=[a-z0-9]{32}/.test(adoc.getElementById("siLink").value) && /Sent to/.test(adoc.getElementById("siDone").textContent));
+  console.log("Send emails the invoice and shows the link to copy:", !!(sentReq && sentReq.message === "Thank you!" && sentReq.allowDelivery === true && mail.length === 1
+    && /\?invoice=[a-z0-9]{32}/.test(adoc.getElementById("siLink").value) && /Sent to/.test(adoc.getElementById("siDone").textContent)));
   cell = aw.invoiceCell_(org, await fresh(A1));
   console.log("afterwards the row says when it went out and that it hasn't been opened, and offers Resend:", /Resend invoice…/.test(cell) && /Invoice sent \d+\/\d+ · not opened yet/.test(cell.replace(/<[^>]+>/g, "")));
   await invGet((await M.getOrderInvoiceByOrder(d1, A1)).token);

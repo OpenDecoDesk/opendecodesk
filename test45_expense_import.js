@@ -92,7 +92,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   fileEl.dispatchEvent(new w.Event("change"));
   for (let i = 0; i < 100 && !modal.querySelector("#eiReviewBtn"); i++) await new Promise(res => setTimeout(res, 10));
   console.log("mapping guessed for a card export (flip signs, category column); payment row skipped:",
-    modal.querySelector('[data-k="flip"]').checked && /Review 2 expenses/.test(modal.querySelector("#eiReviewBtn").textContent) && /1 money-in row/.test(modal.textContent));
+    !!(modal.querySelector('[data-k="flip"]').checked && /Review 2 expenses/.test(modal.querySelector("#eiReviewBtn").textContent) && /1 money-in row/.test(modal.textContent)));
   modal.querySelector("#eiReviewBtn").click();
   for (let i = 0; i < 100 && !modal.querySelector("#eiGo"); i++) await new Promise(res => setTimeout(res, 10));
   const rowsEl = [...modal.querySelectorAll("#eiReview tbody tr")];

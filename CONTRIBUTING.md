@@ -41,18 +41,26 @@ There is no test framework. Each `test*.js` file is a plain Node script.
 
 ### A test passes or fails by what it prints
 
-A check is a line `description: true` or `description: false`:
+A check is a line `description: true` or `description: false`. In a new test, use
+`testlib/check.js`, which always prints a boolean and also makes the file exit non-zero on a
+false check:
 
 ```js
-const ok = (d, c) => { console.log(d + ":", !!c); };
+const { ok } = require("./testlib/check");
 ok("a new install has it on", (await lib.getFeatures(d1)).storefront === true);
 ```
 
-`run-tests.sh` runs every `test*.js` and **fails if a file exits non-zero or prints any line ending
-in `: false`.** So:
+(Older tests define the same `ok` themselves, as `console.log(d + ":", !!c)`.)
+
+`run-tests.sh` runs every `test*.js` and **fails if a file exits non-zero or prints a line ending
+in `false` (with or without the colon), `: 0`, `: undefined`, `: null`, or a colon with nothing
+after it.** The last four are what `console.log("desc:", a && b)` prints when `a` is 0, undefined,
+null or an empty string — so a check written that way still fails — but print a boolean anyway:
+`!!(a && b)`, or `ok(…)`. So:
 
 - A check that prints `false` fails the build even though nothing threw.
-- Never print a line ending `: false` for any other reason (a log message, a dumped value).
+- Never print a line in any of those shapes for any other reason (a log message, a dumped value,
+  a heading ending in a colon). `test272` checks the runner's pattern.
 - A check must be able to fail. Read the description as a sentence and make sure the condition
   really tests it. Avoid `|| true`, and avoid conditions that pass when the thing is missing.
 - Write the description as the behaviour in plain words — the output of a test file should read
@@ -90,6 +98,22 @@ Every file's contents end up in **one scope**. That has consequences for the cod
 - **Some tests replace functions one at a time** (a stub declared before the real source, or the
   real source declared after a stub). Renaming or re-ordering a function can change which one wins.
 - The regex only strips an import whose braces close before `from`. Keep imports in that shape.
+- **Access checks fail closed in a harness, too.** A harness usually stubs the sign-in
+  (`const requireAdmin = async () => null;`) and leaves `adminAuth.js` out. The permission checks in
+  `orders.js` (costs and expenses shown, step changes, the extra checks inside an action) then find
+  no `adminCan` and **refuse**, as they would for a request nobody signed in to — they never fall
+  back to "allowed". Sign the harness in as a built-in role with `testlib/roles.js`, which declares
+  `adminUser`, `adminLevel` and `adminCan` from the real role tables (`permissions.js`):
+
+  ```js
+  const { adminAs } = require("./testlib/roles");
+  const api = new Function("const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
+    adminAs() + "\n" + /* … */ strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")();
+  ```
+
+  `adminAs("staff")` signs in as Back office; `adminAs({ roleFrom: "globalThis.__role" })` reads the
+  role on every request. Don't add a branch to production code that only a harness takes; `test273`
+  keeps `orders.js` free of "no `adminCan`, so allow".
 
 `testlib/d1-shim.js` gives tests a database with the same interface as D1
 (`prepare().bind().first()/all()/run()`, `batch()`), and it is strict about the things D1 is strict

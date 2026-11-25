@@ -89,5 +89,5 @@ const lib = new Function(strip(read("functions/_lib/db.js")) + "\nreturn { inser
 
   console.log("\n=== Part of Home's answer (getDashboard) ===");
   const dash = await lib.getDashboard(d1, { today: "2026-12-31", fresh: true });
-  console.log("getDashboard carries the year's months:", dash.inOut && dash.inOut.months.length === 12 && dash.inOut.taxPaid === 13.3);
+  console.log("getDashboard carries the year's months:", !!(dash.inOut && dash.inOut.months.length === 12 && dash.inOut.taxPaid === 13.3));
 })().catch(e => { console.log("test195 crashed:", false); console.error(e); process.exit(1); });

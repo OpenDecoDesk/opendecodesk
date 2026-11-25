@@ -76,12 +76,12 @@ const path = require("path");
       return true;
     };
     console.log("across 365 days it runs exactly once per day:", oncePerDay(env));
-    console.log("with nothing set the zone is UTC — 06:00 UTC, once a day:", sch.isDigestHour({}, new Date("2026-07-15T06:00:00Z")) === true
-      && sch.isDigestHour({}, new Date("2026-07-15T10:00:00Z")) === false && oncePerDay({}));
-    console.log("a zone passed in (the saved Region zone) wins over TIMEZONE:", sch.isDigestHour(env, new Date("2026-07-14T21:00:00Z"), "Asia/Tokyo") === true
-      && sch.isDigestHour(env, new Date("2026-07-15T10:00:00Z"), "Asia/Tokyo") === false && oncePerDay(env, "Asia/Tokyo"));
-    console.log("a half-hour zone still runs once a day:", oncePerDay({}, "Asia/Kolkata") && sch.isDigestHour({}, new Date("2026-07-15T00:00:00Z"), "Asia/Kolkata") === false
-      && sch.isDigestHour({}, new Date("2026-07-15T01:00:00Z"), "Asia/Kolkata") === true);
+    console.log("with nothing set the zone is UTC — 06:00 UTC, once a day:", !!(sch.isDigestHour({}, new Date("2026-07-15T06:00:00Z")) === true
+      && sch.isDigestHour({}, new Date("2026-07-15T10:00:00Z")) === false && oncePerDay({})));
+    console.log("a zone passed in (the saved Region zone) wins over TIMEZONE:", !!(sch.isDigestHour(env, new Date("2026-07-14T21:00:00Z"), "Asia/Tokyo") === true
+      && sch.isDigestHour(env, new Date("2026-07-15T10:00:00Z"), "Asia/Tokyo") === false && oncePerDay(env, "Asia/Tokyo")));
+    console.log("a half-hour zone still runs once a day:", !!(oncePerDay({}, "Asia/Kolkata") && sch.isDigestHour({}, new Date("2026-07-15T00:00:00Z"), "Asia/Kolkata") === false
+      && sch.isDigestHour({}, new Date("2026-07-15T01:00:00Z"), "Asia/Kolkata") === true));
     console.log("TIMEZONE/DIGEST_HOUR are honoured:", sch.isDigestHour({ TIMEZONE: "America/Los_Angeles", DIGEST_HOUR: "7" }, new Date("2026-07-15T14:00:00Z")) === true);
     console.log("a bad time zone falls back to UTC instead of never sending:", sch.isDigestHour({ TIMEZONE: "Not/AZone" }, new Date("2026-07-15T06:00:00Z")) === true);
     console.log("a bad hour falls back to 6:", sch.digestHour({ DIGEST_HOUR: "banana" }) === 6 && sch.digestHour({ DIGEST_HOUR: "25" }) === 6);

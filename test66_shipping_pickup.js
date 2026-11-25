@@ -23,7 +23,7 @@ const dbSrc = strip(read("functions/_lib/db.js")), emailSrc = strip(read("functi
 const L = new Function(dbSrc + "\n" + emailSrc + "\n" + delSrc + `\nreturn { insertOrder, getOrderById, setFulfillmentStage, stagePrereqError,
   recordShippingLabel, getLabeledAwaitingShipment, checkShippedDeliveries, sendDailyDigestEmail, sendShippedEmail, trackingUrl, carrierToken };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" + require("./testlib/roles").adminAs() + "\n" + strip(read("functions/_lib/permissions.js")) + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +

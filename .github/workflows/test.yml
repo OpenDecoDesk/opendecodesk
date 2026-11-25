@@ -3,6 +3,8 @@ name: Test suite
 on:
   push:
   pull_request:
+  # Desktop builds (desktop.yml) runs this same suite before it publishes a release.
+  workflow_call:
 
 # The suite only reads the repo; never give this job write access.
 permissions:

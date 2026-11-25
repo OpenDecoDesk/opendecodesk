@@ -619,38 +619,30 @@ async function handleOrdersPost_(context, listBefore = null) {
   const noDomainResponse = () => jsonResponse({ status: "error", code: "no_domain", message: NO_DOMAIN_MSG }, 409);
   // Costs and margins (pricing awareness, migrations/0067) are a manager's, and so is the business's money
   // (Home's totals, getDashboard). Staff save products and blanks
-  // too, so those replies leave the analysis / below-target list out for them. (No user behind the request —
-  // only a test's stand-in for the sign-in check — sees everything.)
+  // too, so those replies leave the analysis / below-target list out for them.
+  // These checks fail closed: with no permission check to ask (adminCan, missing from a test harness built
+  // without adminAuth.js) or no user behind the request, nothing is shown and nothing is allowed. A harness
+  // signs in with testlib/roles.js adminAs() instead.
   // Money, costs and margins (permissions.js costs.view): a role without it gets counts, not money.
-  const seesPricing_ = () => {
-    const u = typeof adminUser === "function" ? adminUser(request) : null;
-    if (!u || !u.role) return true;
-    if (u.roleInfo && typeof adminCan === "function") return adminCan(request, "costs.view", "read");
-    return u.role === "manager" || u.role === "admin";   // a user without the role's details (tests' stand-ins): the built-in rule
-  };
+  const seesPricing_ = () => typeof adminCan === "function" && adminCan(request, "costs.view", "read");
   // Recorded expenses item by item or by category (permissions.js finance.expenses): Home's pies, getDashboard.
-  const seesExpenses_ = () => {
-    const u = typeof adminUser === "function" ? adminUser(request) : null;
-    if (!u || !u.role) return true;
-    if (u.roleInfo && typeof adminCan === "function") return adminCan(request, "finance.expenses", "read");
-    return u.role === "manager" || u.role === "admin";
-  };
+  const seesExpenses_ = () => typeof adminCan === "function" && adminCan(request, "finance.expenses", "read");
   // A step change needs the half of the steps it is in (permissions.js stageFn): Production can move an
   // order made → shipped but not order or receive its blanks.
-  const stageDenied_ = (stage) => typeof adminCan !== "function" || adminCan(request, stageFn(stage), "edit") ? null
+  const stageDenied_ = (stage) => typeof adminCan === "function" && adminCan(request, stageFn(stage), "edit") ? null
     : jsonResponse({ status: "error", code: "forbidden", message: "Your role can't set that step. Ask an admin." }, 403);
   // An action that does more than its own level (permissions.js ACTION_PERM) asks again for the part that needs more:
   // a removal in Edit items is a cancel, a paid local sale is a payment. Called after the action's sign-in check.
-  const can_ = (fn, level) => typeof adminCan !== "function" || adminCan(request, fn, level);
+  const can_ = (fn, level) => typeof adminCan === "function" && adminCan(request, fn, level);
   // Whether the user may use another action of this file, as its own ACTION_PERM entry says: for an action made of
   // other actions' parts (saveGlobalSettingsAll), each part needs what its own action would. An action missing
-  // there is an admin's alone. (No user behind the request — a test's stand-in for the sign-in check — may.)
+  // there is an admin's alone.
   const mayUse_ = (action) => {
     const spec = ACTION_PERM_[action];
     if (spec === "*") return true;
     if (Array.isArray(spec) && spec.length) return spec.some(e => Array.isArray(e) && e.length === 2 && can_(e[0], e[1]));
     const u = typeof adminUser === "function" ? adminUser(request) : null;
-    return !u || !u.roleInfo || (u.roleInfo.locked === true && u.roleInfo.key === "admin");
+    return !!(u && u.roleInfo && u.roleInfo.locked === true && u.roleInfo.key === "admin");
   };
   const forbidden_ = (message) => jsonResponse({ status: "error", code: "forbidden", message }, 403);
   // Products now below a target or a blank's MAP: all of it for a manager; a worker hears only of MAP (a vendor's

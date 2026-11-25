@@ -16,7 +16,7 @@ const lib = new Function(dbSrc + "\n" + emailSrc + "\n" + delSrc + `\nreturn { i
   getProductionQueue, getOrdersAwaitingBlanks, addBlankShipment, updateBlankShipment, deleteBlankShipment,
   getBlankShipmentsForOrder, listActiveBlankShipments, checkBlankShipments };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'test'; const audit = () => {};\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test'; const audit = () => {};\n" + require("./testlib/roles").adminAs() + "\n" + strip(read("functions/_lib/permissions.js")) + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +

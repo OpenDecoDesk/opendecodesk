@@ -79,7 +79,8 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
-      # The tests run in the "Test suite" workflow (test.yml) on every push; the program runs that same code.
+      # The tests run in the "Test suite" workflow (test.yml) on every push, and again below (tests)
+      # before a release; the program runs that same code.
       - run: npm ci ${{ matrix.npm_flags }}   # exact versions from desktop/package-lock.json
         working-directory: desktop
       # A release's version, in package.json's semver form (2026.11.01.01 → 2026.11.101, version.js),
@@ -106,12 +107,20 @@ jobs:
           path: desktop/dist/*.zip
           if-no-files-found: error
 
+  # A release runs the whole test suite (test.yml) on the commit it publishes: a failing test
+  # blocks the release even when that commit's own push run was missed or ignored.
+  tests:
+    if: inputs.release
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
   # The release desktop-v<version>: the three builds under the names the website's download buttons
   # link to (https://github.com/OpenDecoDesk/opendecodesk/releases/latest/download/<name>), and the
   # notes in desktop/RELEASE_NOTES.md.
   release:
     if: needs.version.outputs.release == 'true' && github.ref == 'refs/heads/main'
-    needs: [version, build]
+    needs: [version, build, tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write   # to create the release (and its tag)

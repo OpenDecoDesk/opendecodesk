@@ -23,7 +23,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { openServer, sqlitePath } = require("./lib/server.js");
 const { buildTemplates, growCatalog } = require("./lib/templates.js");
 const { cloneOrders, fromNodeSqlite } = require("./lib/clone.js");
-const { READS, WRITES, CLASSES, poolNeeds, rowsOf, makeContext } = require("./lib/ops.js");
+const { READS, WRITES, CLASSES, poolNeeds, rowsOf, makeContext, callOp } = require("./lib/ops.js");
 const { timeOp, memorySampler, folderBytes } = require("./lib/measure.js");
 const { writeReport, summaryTable, compareTable } = require("./lib/report.js");
 
@@ -160,7 +160,7 @@ async function main() {
     const mem = memorySampler().start();
     for (const op of READS.filter(o => ops.includes(o))) {
       if (skip.has(op.name)) { tier.ops[op.name] = { skipped: true }; continue; }
-      const r = await timeOp((i) => S.orders(op.body(ctx, i)), { runs: args.runs, rowsOf });
+      const r = await timeOp((i) => callOp(op, ctx, i, (b) => S.orders(b)), { runs: args.runs, rowsOf });
       tier.ops[op.name] = r;
       log(`  ${op.name.padEnd(24)} ${r.error ? "ERROR " + r.error : (r.median.toFixed(0) + " ms median, " + r.p95.toFixed(0) + " ms p95, " + r.rows + " rows, " + (r.bytes / 1024).toFixed(0) + " KB")}`);
       if (r.error || r.median > args.slowSkipS * 1000) skip.add(op.name);
@@ -194,7 +194,7 @@ async function main() {
       S = await openServer(dataDir, { timeoutMs: args.timeoutS * 1000 });
       const memW = memorySampler().start();
       for (const op of writes) {
-        const r = await timeOp((i) => S.orders(op.body(ctx, i)), { runs: args.runs, rowsOf });
+        const r = await timeOp((i) => callOp(op, ctx, i, (b) => S.orders(b)), { runs: args.runs, rowsOf });
         tier.ops[op.name] = r;
         log(`  ${op.name.padEnd(24)} ${r.error ? "ERROR " + r.error : (r.median.toFixed(0) + " ms median, " + r.p95.toFixed(0) + " ms p95")}`);
         if (r.error || r.median > args.slowSkipS * 1000) skip.add(op.name);

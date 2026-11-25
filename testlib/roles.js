@@ -23,3 +23,27 @@ const asRole = (role, extra) => role == null ? "adminMe = null; adminPerms = nul
   : `adminMe = ${JSON.stringify(Object.assign({ role }, extra || {}))}; adminPerms = ${JSON.stringify(P.effectivePermissions(P.DEFAULT_ROLES[role]))}; adminAreas = ${JSON.stringify(P.PERMISSION_AREAS)};`;
 module.exports.pageLowest = pageLowest;
 module.exports.asRole = asRole;
+
+// Code for a harness that glues functions/api/*.js into one scope WITHOUT adminAuth.js: who is signed in
+// (adminUser) and the permission check (adminLevel, adminCan), answering as adminAuth.js does after requireAdmin
+// for a built-in role (resolveRole's defaults, permissions.js effectiveLevel). The access checks in orders.js
+// fail closed when adminCan is missing, so a harness declares these in place of its own adminUser:
+//   "const requireAdmin = async () => null; const adminActor = () => 'test';\n" + adminAs() + "\n" + …
+// adminAs() is the admin; adminAs("staff") Back office; adminAs({ roleFrom: "globalThis.__role" }) reads the role
+// key on every call (null, "" or an unknown key: nobody signed in — adminUser null and every adminCan false).
+const adminAs = (role = "admin") => {
+  const roles = {}, levels = {};
+  for (const k of Object.keys(P.DEFAULT_ROLES)) { roles[k] = P.DEFAULT_ROLES[k]; levels[k] = P.effectivePermissions(P.DEFAULT_ROLES[k]); }
+  const key = role && typeof role === "object" && role.roleFrom ? "(" + role.roleFrom + ")" : JSON.stringify(role);
+  return `const { adminUser, adminLevel, adminCan } = (() => {
+  const ROLES = ${JSON.stringify(roles)}, LEVELS = ${JSON.stringify(levels)};
+  const rank = (l) => l === "full" ? 3 : l === "edit" ? 2 : l === "read" ? 1 : 0;
+  const adminUser = (request) => { const k = ${key}; const r = typeof k === "string" && Object.prototype.hasOwnProperty.call(ROLES, k) ? ROLES[k] : null;
+    return r ? { id: 1, email: k + "@example.test", name: r.name, role: k, roleInfo: r, pending: null, bootstrap: false } : null; };
+  const adminLevel = (request, fn) => { const u = adminUser(request); if (!u) return "none";
+    return u.roleInfo.locked && u.roleInfo.key === "admin" ? "full" : (LEVELS[u.role][fn] || "none"); };
+  const adminCan = (request, fn, level) => rank(adminLevel(request, fn)) >= rank(level || "read");
+  return { adminUser, adminLevel, adminCan };
+})();`;
+};
+module.exports.adminAs = adminAs;

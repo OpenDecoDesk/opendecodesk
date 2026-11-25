@@ -11,6 +11,7 @@ npm run perf -- --tiers 1000,5000 --only open-orders,orders-30d
 npm run perf -- --max 1000000                  # adds 500k and 1M steps (hours, several GB)
 npm run perf -- --keep-data                    # keep the database, for the profiler
 npm run perf:profile -- --data <folder>        # where the time goes, query by query
+PERF_D1_RTT_MS=25 npm run perf:profile -- --data <folder>   # …with D1 round trips modeled at 25 ms
 npm run perf -- --compare perf/results/<run>/results.json    # after a fix: this run ÷ that one
 ```
 
@@ -44,6 +45,8 @@ That folder is git-ignored. The databases go to `~/Library/Caches/opendecodesk-p
 
 Every operation is the same request `public/admin.js` sends to `/api/orders`. Each is run once to warm up and then 5 times; the report keeps the median, p95, answer size and row count. The list and the limits are in `perf/lib/ops.js`:
 
+- **A screen that sends several requests at once is timed as one.** `orders-page` is the Orders page of one shop as `renderAdminOrders` loads it: `getOrders` with the three requests it sends alongside (`getBlanks` with `stockOnly`, `getBlankLinks`, `listDesignVerifications`), all sent together and timed by the wall clock from the first sent to the last answered, which is when the page is drawn. An operation does this by giving `bodies(ctx, i)` (a list) instead of `body(ctx, i)`. Each companion is also timed alone: `blanks-stock`, `blank-links`, `design-verifications`.
+
 | Group | Limit (p95) | Judged up to |
 |---|---|---|
 | Screens people wait on: order lists, open orders, queues, PDFs, audit log | 1 s | 25k orders |
@@ -63,4 +66,5 @@ Every operation is the same request `public/admin.js` sends to `/api/orders`. Ea
 
 - **Growth** is the slope of log(time) against log(orders): about 0 is flat, 1 grows in step with the history, and above 1.2 is flagged.
 - **A fixed window that slows down** is the clearest kind of problem. This is a 30-day list, open orders or a queue whose answer stays the same size while it takes longer: it reads more than its window.
+- **Modeled D1 time.** The desktop program's SQLite answers a statement in microseconds; on Cloudflare every statement (and every batch) is a round trip from the Worker to D1. The profile counts each operation's round trips and shows **modeled D1 time = trips × `PERF_D1_RTT_MS`** (default 10 ms). For requests sent at once it uses the longest of them, since they overlap. That is a floor the scale timings don't include: an operation with 200 trips is 2 s on Cloudflare however fast its queries are.
 - **Where the time goes** comes from `npm run perf:profile`. It runs the same requests through the app's handler code on Node's own SQLite against a copy of the kept database, timing every statement, and shows each statement's call count and query plan. A full table scan is marked. Migrations added since the data was kept (a new index, say) are applied to the copy first, so a fix can be profiled on the old data.

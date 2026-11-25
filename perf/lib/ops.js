@@ -7,6 +7,8 @@
 //   windowed     the answer covers a fixed window (last 30 days, open orders), so it should stay
 //                about as fast while the history behind it grows
 //   body(ctx, i) the request for call i (writes use a different order on each call)
+//   bodies(ctx, i)  instead of body: the requests a screen sends AT ONCE (in parallel), timed from the
+//                first sent to the last answered — what the person waits for (callOp below)
 //
 // ctx (scale.js): { shops, today, d30, y1, m1, recentOrderId, oldOrderId, pool: { stage, pay, info }, doneIds }
 const CLASSES = {
@@ -23,11 +25,28 @@ const take = (list, i, n = 1) => {
   return out;
 };
 
+// What the Orders page sends beside getOrders (renderAdminOrders, public/admin.js).
+const ORDERS_PAGE_COMPANIONS = (c) => [
+  { action: "getBlanks", stockOnly: true },
+  { action: "getBlankLinks", org: c.shops[0] },
+  { action: "listDesignVerifications", org: c.shops[0], dateFrom: c.d30, dateTo: c.today },
+];
+
 const READS = [
   { name: "orders-30d", cls: "interactive", windowed: true, title: "Orders list, last 30 days (one shop)",
     body: (c) => ({ action: "getOrders", org: c.shops[0], dateFrom: c.d30, dateTo: c.today }) },
   { name: "orders-all-shops-30d", cls: "interactive", windowed: true, title: "Orders list, all shops, last 30 days",
     body: (c) => ({ action: "getOrdersAllShops", dateFrom: c.d30, dateTo: c.today }) },
+  // The Orders page of one shop, as renderAdminOrders (public/admin.js) loads it: the list and the three requests
+  // it sends alongside, all at once. The page is drawn when the last of them answers.
+  { name: "orders-page", cls: "interactive", windowed: true, title: "Orders page, one shop, last 30 days (the list and its 3 companion requests)",
+    bodies: (c) => [{ action: "getOrders", org: c.shops[0], dateFrom: c.d30, dateTo: c.today }, ...ORDERS_PAGE_COMPANIONS(c)] },
+  { name: "blanks-stock", cls: "interactive", title: "Blanks' stock on hand (the Orders page's breakdown)",
+    body: (c) => ORDERS_PAGE_COMPANIONS(c)[0] },
+  { name: "blank-links", cls: "interactive", title: "Blank links of one shop's products (Orders page)",
+    body: (c) => ORDERS_PAGE_COMPANIONS(c)[1] },
+  { name: "design-verifications", cls: "interactive", windowed: true, title: "Design approvals, last 30 days (Orders page)",
+    body: (c) => ORDERS_PAGE_COMPANIONS(c)[2] },
   { name: "open-orders", cls: "interactive", windowed: true, title: "Open orders (admin home)",
     body: () => ({ action: "getOpenOrders" }) },
   { name: "production-queue", cls: "interactive", windowed: true, title: "Production queue",
@@ -95,6 +114,10 @@ function makeContext(db, shops, now = Date.now()) {
   };
 }
 
+// Makes call i of an operation with post(body) → a promise of server.js's answer: one request, or for an operation
+// with bodies, all of them at once (an array of answers, which measure.js timeOp times from start to the last).
+const callOp = (op, ctx, i, post) => op.bodies ? Promise.all(op.bodies(ctx, i).map(b => post(b))) : post(op.body(ctx, i));
+
 // How many orders the work pool needs, for `calls` calls of each write (warm-up included).
 const poolNeeds = (calls) => ({ pay: calls, stage: calls, info: calls, bulk: calls * 20 });
 
@@ -113,4 +136,4 @@ function rowsOf(body) {
   return best;
 }
 
-module.exports = { CLASSES, READS, WRITES, poolNeeds, rowsOf, makeContext };
+module.exports = { CLASSES, READS, WRITES, poolNeeds, rowsOf, makeContext, callOp, ORDERS_PAGE_COMPANIONS };

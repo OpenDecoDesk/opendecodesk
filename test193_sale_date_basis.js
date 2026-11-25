@@ -110,7 +110,7 @@ const from = (d) => d + "T00:00:00.000Z", to = (d) => d + "T23:59:59.999Z";
   r = await call({ action: "getInventoryReport", dateFrom: "2026-10-01", dateTo: "2026-10-31" });
   console.log("Inventory & COGS (shipped): October COGS is B's blank, and A's and C's show as made, not yet shipped:",
     r.status === 200 && r.body.saleDate === "shipped" && r.body.totals.cogs === 10 && r.body.notYetSold.beginning === 0 && r.body.notYetSold.ending === 20);
-  console.log("…and the roll-forward still adds up to $0.00:", r.body.rollForward && Math.abs(r.body.rollForward.check) < 0.005);
+  console.log("…and the roll-forward still adds up to $0.00:", !!(r.body.rollForward && Math.abs(r.body.rollForward.check) < 0.005));
   console.log("…transfer stock shows A's transfer as not yet sold:", r.body.transfers.notYetSold.ending === 0.5);
   r = await call({ action: "getRevenueReport", dateFrom: "2026-11-01", dateTo: "2026-11-30" });
   console.log("Revenue report (shipped): November's three orders, and it says which date it used:", r.status === 200 && r.body.total.orderCount === 3 && r.body.saleDate === "shipped");
@@ -130,7 +130,7 @@ const from = (d) => d + "T00:00:00.000Z", to = (d) => d + "T23:59:59.999Z";
   const m = await lib.getDashboardMoney(d1, { yearFrom: "2026-01-01", monthFrom: "2026-11-01", to: "2026-11-30" });
   console.log("Home's money follows the setting and says which it used:", m.saleDate === "placed" && m.month.productRevenue === 60 && m.month.cogs === 10);
   const audit = d1._raw.exec("SELECT COUNT(*) FROM audit_log WHERE action = 'settings.accounting_set'");
-  console.log("the change is in the audit log:", audit.length && audit[0].values[0][0] === 1);
+  console.log("the change is in the audit log:", !!(audit.length && audit[0].values[0][0] === 1));
 
   const src = read("functions/api/orders.js");
   const list = (name) => (src.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`)) || [])[1] || "";

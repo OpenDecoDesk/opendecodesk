@@ -54,8 +54,14 @@ and the tax and shipping features are built around a US business (see [Region](#
 - Customers: a record for each customer, made from the email on their orders, with their order
   history, what they've spent and what they owe. Search, edit, archive and merge duplicates; pick a
   customer on a local sale; link an order to a customer by hand.
-- Local sales and orders entered by hand; payment links and invoices emailed to a customer (the
-  invoice page lets them choose delivery and pay).
+- Local sales and orders entered by hand, up to 5,000 pieces a line and 100 lines for a bulk order;
+  payment links and invoices emailed to a customer (the invoice page lets them choose delivery and pay).
+- Quotes: build one for a customer from the shop's products, custom lines and one-time fees (setup,
+  digitizing, art), with a note and an expiry date, and email it. The customer accepts it or asks for
+  changes from a link; an accepted quote becomes an order at the prices quoted, and its invoice can
+  go out straight away.
+- Quantity breaks: a product can cost less per piece from a number of pieces up ("12+ pieces: $2.00
+  off each"), on the shop page, local sales and quotes.
 - Orders from another store: **Import orders…** on Orders reads an Etsy "Order Items" file, a Shopify
   orders export or a sheet of your own, matches each item to a product by SKU, and skips orders
   already imported.
@@ -183,8 +189,8 @@ without it.
 
 ## Feature switches
 
-Five parts of the site are optional. Each has a switch in the admin under Settings → Global settings →
-Features. **All five are on by default.** Turning one off hides its pages in the admin menu (opening one
+Seven parts of the site are optional. Each has a switch in the admin under Settings → Global settings →
+Features. **All seven are on by default.** Turning one off hides its pages in the admin menu (opening one
 of them directly shows a "this feature is turned off" page), and the server refuses its actions. Nothing
 is deleted — every table and row stays — so turning it back on brings everything back as it was. Each
 change is written to the audit log.
@@ -221,6 +227,9 @@ change is written to the audit log.
   paid, a download page for the order (straight after paying by card) and an email with the link and the
   files, within a time and download limit (see docs/shops-and-domains.md). Off: digital products can't
   be ordered and their download links don't open.
+- **Quotes** — building quotes for customers, emailing them, and the page where a customer accepts one
+  or asks for changes (see docs/shops-and-domains.md). Off: the Quotes page is hidden, and a quote link
+  already emailed says "Quotes aren't available." Orders made from quotes stay as they are.
 
 **Inventory is always on.** Stock of blanks and transfers, and cost of goods, are part of making an order
 (marking it manufactured uses the blanks), so there is no switch for them in this release.

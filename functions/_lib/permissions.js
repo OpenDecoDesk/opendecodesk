@@ -33,6 +33,8 @@ export const PERMISSION_AREAS = [
       ["orders.import", "Import orders"]] } ] },
   { key: "customers", label: "Customers", items: [
     { hash: "customers", label: "Customers", fns: [["customers.records", "Customer records"]] } ] },
+  { key: "quotes", label: "Quotes", items: [
+    { hash: "quotes", label: "Quotes", fns: [["quotes.estimates", "Quotes"]] } ] },
   { key: "runorder", label: "Run Order", items: [
     { hash: "runorder", label: "Run Order", fns: [["run.queue", "Production queue"], ["run.runs", "Start, finish and abort runs"], ["run.markMade", "Mark pieces made"]] } ] },
   { key: "runtransfer", label: "Run Transfer Sheets", items: [
@@ -115,6 +117,12 @@ const BY_FN = {
     read: ["listCustomers", "getCustomer"],
     edit: ["saveCustomer", "setCustomerArchived", "setOrderCustomer"],
     full: ["mergeCustomers"] },
+  // Quotes (migrations/0109; "estimates" in code). Converting one makes an order, so convertEstimate also asks for
+  // orders.details Edit itself (as a Local sale needs). Cancelling can't be taken back from the page: Full.
+  "quotes.estimates": {
+    read: ["listEstimates", "getEstimate"],
+    edit: ["createEstimate", "saveEstimate", "sendEstimate", "convertEstimate"],
+    full: ["cancelEstimate"] },
   "run.queue": { read: ["getProductionQueue", "listActiveRuns", "getRunStats", "getBlankReadyCounts"] },
   "run.runs": { edit: ["startRun", "completeRun", "abortRun", "markHoopingDone"] },
   "run.markMade": { edit: ["markManufacturedOnMachine"] },
@@ -255,7 +263,7 @@ const MANAGER_FNS = Object.assign(all_("full"), {
 const STAFF_FNS = only_({
   "home.counts": "read",
   "orders.details": "edit", "orders.stepsEarly": "edit", "orders.stepsLate": "edit", "orders.shipping": "edit", "orders.payments": "edit", "orders.invoices": "edit",
-  "customers.records": "edit",
+  "customers.records": "edit", "quotes.estimates": "edit",
   "run.queue": "read", "run.runs": "edit", "run.markMade": "edit", "transfer.queue": "read", "transfer.mark": "edit",
   "catalog.products": "edit", "catalog.designs": "edit", "catalog.graphics": "edit", "catalog.categories": "edit", "catalog.locations": "edit",
   "production.machines": "edit", "production.maintenance": "edit", "production.maintenanceLog": "edit", "production.machinefiles": "edit",

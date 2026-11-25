@@ -284,6 +284,16 @@ no Customers button, no customer search on a local sale, and no link from an ord
 customer. A role you made yourself, or a built-in one whose permissions you have changed, starts
 without it: set it under Settings → Users → Roles and permissions.
 
+**Quotes** is a permission of its own too, "Quotes". Back office can open, make, edit, send and
+convert quotes; Manager and Admin can also cancel one (the full level); Production can't open them.
+Converting a quote makes an order, so it also needs the edit level of order details, and a price of
+your own on a quote's product line needs the edit level of payments, discounts and refunds, as on a
+local sale. A role without the permission sees no Quotes button and no quotes on a customer's page.
+As with Customers, a role you made yourself, or a built-in one you have changed, starts without it.
+The page also needs the **Quotes** feature (Global settings → Features), on unless you turned it off:
+off, the page is hidden for everyone and a quote link a customer already has answers "Quotes aren't
+available." Turning it back on brings every quote back as it was.
+
 - **Adding someone:** name, email, role. You are shown a temporary password once; give it to
   them. They must choose their own the first time they sign in.
 - **Someone leaves:** disable them. They are signed out at once and can't sign in. Users are

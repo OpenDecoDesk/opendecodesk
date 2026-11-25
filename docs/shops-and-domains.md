@@ -237,6 +237,33 @@ Order lines are named with the version — "Club Tee (Long sleeve)". Both versio
 category (the card sits in one section); the catalog check warns when they aren't. The Products list
 keeps them together, the second one indented.
 
+## Quantity breaks
+
+A product can cost less per piece in bulk. On the product form, **Quantity breaks** → add a row for
+each step: from how many pieces, and how much comes off each piece — "from 12 pieces, $2.00 off
+each; from 48, $3.50 off each". Up to six rows. Each row starts at more pieces than the one before
+(from 2 up to 100,000) and takes more off, and no row can take a piece down to nothing: the amount
+off has to be less than the product's lowest price.
+
+- **What counts.** The pieces of that product in one order, across all its sizes and colors, added
+  together. Other products don't count towards it, and neither do cancelled lines. A version of a
+  product (short and long sleeve) is a product of its own, so its pieces are counted on their own.
+- **What it takes off.** The deepest break the order reaches, from every piece of that product.
+  It comes off the product's own price only: personalization and add-ons cost the same as ever.
+- **Where it applies.** On the shop page, local sales and quotes. The shop page shows the breaks on
+  the product ("12+ pieces: $2.00 off each"), and the cart shows each line at its price after the
+  break, with the price it was. What the page shows is only a preview: the server works every price
+  out again when the order is placed, as it does for a local sale when it is recorded.
+- **Edit items** counts the order as it will be after the edit. Only the lines you change or add
+  are priced again: a line already on the order keeps the price it was sold at, even if the edit
+  takes the order past a break.
+- **MAP.** The deepest break is a price like any other: a break that takes a piece under the
+  blank's MAP is refused when you save, and one that falls under a MAP that rose later is flagged in
+  Price analysis. Managers see the deepest break's price and what it leaves in the pricing panel
+  ([Pricing](#pricing-what-an-item-costs-and-leaves)).
+- Like prices, a change to the breaks reaches the shop page, and the orders priced from it, when the
+  shop is published.
+
 ## Copying products from another shop
 
 Manage catalog → the shop → Products → **Copy from another shop…**: pick the shop, tick its products,
@@ -630,6 +657,60 @@ number opens that order.
 
 There is no customer sign-in: the records are for the back office, and nothing about them is sent
 to the storefront.
+
+## Quotes
+
+**Quotes**, next to Customers, is for an order you price before the customer says yes: a team's
+shirts with a setup fee, say. A quote belongs to one customer (a customer record — make one first
+if they're new) and one shop, and is numbered Q-00001, Q-00002 and on. **+ New quote** asks for
+both; **New quote for this customer**, on a customer's page, starts one with them picked, and the
+customer's page lists their quotes. The list filters by status and shop, and searches as you type.
+
+A quote has a title, a **message** to the customer, an **internal note** they never see, an
+**expiry date** (the last day it can be accepted; leave it empty for none) and up to 100 lines:
+
+- **A product** from the shop, with its size, quantity (up to 5,000) and personalization, priced
+  as a local sale would be: quantity breaks count every product line on the quote
+  ([Quantity breaks](#quantity-breaks)), and the line shows the list price, the break and the price
+  each. A price of your own for the line needs the payments permission (payments, discounts and
+  refunds) at Edit.
+- **A custom line**: a description, quantity, price each, and whether it is taxable.
+- **A fee**: setup, digitizing, art or other, with a description and one amount, taxable or not. A
+  fee is charged once, whatever the quantity.
+
+The totals follow each **Save**.
+
+**Send** emails the customer a link to the quote on the shop's own address, with your message: to
+the customer's email, or another address you type. On it they see the shop, the lines and fees (a
+line with a break shows the price it was), the totals and the expiry date, and can **Accept** it
+(after a confirmation) or **Ask for changes** with a message. Each answer is emailed to you.
+Sending fixes the prices: a product's price or break changed afterwards doesn't change the quote,
+and neither does the tax rate ([sales-tax.md](sales-tax.md#quotes)).
+
+- **Once sent, a quote can't be edited** (only its internal note) — until the customer asks for changes. Their message is
+  shown on the quote; change it, **Revise** (which saves it), and send it again. Sending again
+  keeps the same link. To change a sent quote they haven't answered, cancel it and make a new one.
+- **Accepted** — the customer's yes makes the order straight away and, when the site sends email,
+  emails them its invoice ([Invoices](#invoices)) to choose delivery and pay. **Convert to order**
+  does the same from the back office (tick the box to email the invoice), when the customer says
+  yes another way.
+- **The order** is a local sale in the quote's shop, linked to the customer (so their tax
+  exemption applies), at the prices quoted. Each fee becomes a line of its own ("Setup fee — …").
+  The order shows **From quote Q-…**, and the quote links to the order. A quote makes one order:
+  converting it again only gives you the same order, and the customer's link, once accepted, names it.
+  Staff can convert a quote whatever its expiry date; only a cancelled one can't be.
+- **What can't be accepted:** a quote that has expired (from the day after its expiry date, in the
+  business's time zone), was cancelled, or has already become an order. The link says which.
+- **Cancel quote** (Manager and Admin by default): the customer's link then says it was cancelled
+  and can't be accepted. A cancelled quote stays in the list.
+
+Making a quote needs the Quotes permission, and converting one also needs to be allowed to enter
+orders ([operations.md](operations.md#users-and-roles)). With the Quotes feature switched off, the
+page is hidden and the links answer "Quotes aren't available."
+
+A local sale takes as large an order as a quote: up to 5,000 pieces a line and 100 lines. The shop
+page keeps its own limits — 50 of an item at a time and 20 lines in the cart, with a note to contact
+the shop for more.
 
 ## Rush orders
 

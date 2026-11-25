@@ -109,6 +109,8 @@ To customers, as things happen:
 - **Your order has shipped** — once, when an order becomes shipped (Shipping feature).
 - **Design proof** — when you send a design for approval (Design approval feature).
 - **Payment request** — when you email a payment link.
+- **Quote** — when you send a quote (Quotes feature): your message, the lines, fees and totals, the
+  expiry date, and the link where the customer accepts it or asks for changes.
 - **Cancellation** — when you cancel items on an order that has an email address.
 
 ### What's in the order emails
@@ -147,6 +149,8 @@ To you:
 
 - **The morning roll-up** — one email a day with everything new. See
   [operations.md](operations.md).
+- **A quote answered** — when a customer accepts a quote (with the order it became) or asks for
+  changes (with their message).
 
 ## Checking it works
 

@@ -104,6 +104,9 @@ CREATE TABLE IF NOT EXISTS products (
   -- migrations/0086: sold as files (digital) and its own delivery settings ('{}' = the global ones).
   digital                   INTEGER NOT NULL DEFAULT 0 CHECK (digital IN (0, 1)),
   digitalDeliveryJson       TEXT NOT NULL DEFAULT '{}',
+  -- migrations/0109: quantity breaks — [{minQty, offCents}] sorted by minQty; from minQty pieces of this product in
+  -- one order, each piece costs offCents less (the deepest break that applies). '[]' = none.
+  qtyBreaksJson             TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(qtyBreaksJson)),
   PRIMARY KEY (orgId, productId)
 );
 
@@ -384,6 +387,64 @@ CREATE TABLE IF NOT EXISTS order_invoices (
   deliveryChosenAt TEXT,
   deliveryChoice   TEXT NOT NULL DEFAULT ''
 );
+
+-- Quotes (migrations/0109) — "estimates" in the code, since a "quote" there is a shipping-rate quote. One per quote for
+-- a customer in a shop: draft → sent → changes / accepted → converted (orderId = the order it became), or cancelled.
+-- number is what people see ("Q-00012"); token is the emailed link's credential once sent, like order_invoices.token;
+-- expiresOn is the last day it can be accepted (NULL = no end); taxMode / taxRateBps are the tax it was sent with.
+CREATE TABLE IF NOT EXISTS estimates (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  number         TEXT NOT NULL UNIQUE,
+  orgId          TEXT NOT NULL REFERENCES orgs(orgId),
+  customerId     INTEGER NOT NULL REFERENCES customers(id),
+  status         TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','sent','changes','accepted','converted','cancelled')),
+  title          TEXT NOT NULL DEFAULT '',
+  message        TEXT NOT NULL DEFAULT '',
+  internalNote   TEXT NOT NULL DEFAULT '',
+  expiresOn      TEXT,
+  token          TEXT UNIQUE,
+  sentAt         TEXT,
+  sentTo         TEXT NOT NULL DEFAULT '',
+  sendCount      INTEGER NOT NULL DEFAULT 0,
+  viewedAt       TEXT,
+  respondedAt    TEXT,
+  customerNote   TEXT NOT NULL DEFAULT '',
+  acceptedAt     TEXT,
+  orderId        TEXT REFERENCES orders(orderId),
+  convertedAt    TEXT,
+  cancelledAt    TEXT,
+  taxMode        TEXT NOT NULL DEFAULT 'inclusive' CHECK (taxMode IN ('inclusive','exclusive')),
+  taxRateBps     INTEGER NOT NULL DEFAULT 0,
+  createdAt      TEXT NOT NULL,
+  updatedAt      TEXT NOT NULL,
+  createdBy      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_estimates_org_status ON estimates(orgId, status);
+CREATE INDEX IF NOT EXISTS idx_estimates_customer ON estimates(customerId);
+-- A quote's lines: a catalog product, a custom line or a one-time fee (feeKind). Prices in cents as quoted —
+-- unitPriceCents after any quantity break, listUnitCents before it — and never repriced once the quote is sent.
+CREATE TABLE IF NOT EXISTS estimate_items (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  estimateId     INTEGER NOT NULL REFERENCES estimates(id) ON DELETE CASCADE,
+  position       INTEGER NOT NULL DEFAULT 0,
+  kind           TEXT NOT NULL CHECK (kind IN ('product','custom','fee')),
+  productId      TEXT NOT NULL DEFAULT '',
+  name           TEXT NOT NULL,
+  type           TEXT NOT NULL DEFAULT '',
+  size           TEXT NOT NULL DEFAULT '',
+  configJson     TEXT NOT NULL DEFAULT '',
+  personalized   INTEGER NOT NULL DEFAULT 0,
+  persName       TEXT NOT NULL DEFAULT '',
+  feeKind        TEXT NOT NULL DEFAULT '' CHECK (feeKind IN ('','setup','digitizing','art','other')),
+  qty            INTEGER NOT NULL DEFAULT 1 CHECK (qty > 0 AND qty <= 5000),
+  unitPriceCents INTEGER NOT NULL DEFAULT 0 CHECK (unitPriceCents >= 0),
+  listUnitCents  INTEGER NOT NULL DEFAULT 0,
+  personalizationFeeCents INTEGER NOT NULL DEFAULT 0,
+  customPrice    INTEGER NOT NULL DEFAULT 0 CHECK (customPrice IN (0,1)),
+  taxable        INTEGER NOT NULL DEFAULT 1 CHECK (taxable IN (0,1)),
+  lineTotalCents INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_estimate_items_estimate ON estimate_items(estimateId, position);
 
 -- Legacy inventory table (superseded by blanks/blank_sizes — kept for existing data)
 CREATE TABLE IF NOT EXISTS inventory (

@@ -50,10 +50,10 @@ global.getLocaleSettings = async () => ({ timeZone: "", country: "US" });
 global.cleanShippingAddress = new Function(require("fs").readFileSync(__dirname + "/functions/_lib/db.js", "utf8")
   .replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1")
   + "\nreturn cleanShippingAddress;")();
-// …and the REAL quantity rule, ZIP table and "quote pending" marker from db.js.
+// …and the REAL quantity rule, ZIP table, "quote pending" marker and quantity-break counter from db.js.
 Object.assign(global, new Function(require("fs").readFileSync(__dirname + "/functions/_lib/db.js", "utf8")
   .replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1")
-  + "\nreturn { lineQty, QTY_MESSAGE, zipStates, SHIPPING_QUOTE_PENDING };")());
+  + "\nreturn { lineQty, QTY_MESSAGE, zipStates, SHIPPING_QUOTE_PENDING, orderBreakQty_ };")());
 global.createOrg = async () => ({});
 global.updateOrg = async () => {};
 global.getProductsByOrg = async () => [];

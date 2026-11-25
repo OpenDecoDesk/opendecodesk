@@ -68,7 +68,7 @@ const P = new Function(read("functions/_lib/permissions.js").replace(/export (as
   const gateCalls = [...ordersJs.matchAll(/requireAdmin\(([^\n]*)\)/g)].map(m => m[1]).filter(a => a.trim());
   ok("every gate call in the orders endpoint passes that action's permission", /const ACTION_PERM_ = typeof ACTION_PERM !== "undefined" \? ACTION_PERM : Object\.create\(null\);/.test(ordersJs) && gateCalls.length > 50 && gateCalls.every(a => /, ACTION_PERM_\[body\.action\]$/.test(a)));
   // Every API file is either open to the public on purpose, or names what it needs.
-  const PUBLIC = ["admin-session", "catalog", "checkout", "customer-design", "daily-digest", "download", "image-proxy", "invoice", "shipping", "stripe-webhook", "upload-verify", "verify"];
+  const PUBLIC = ["admin-session", "catalog", "checkout", "customer-design", "daily-digest", "download", "estimate", "image-proxy", "invoice", "shipping", "stripe-webhook", "upload-verify", "verify"];
   const NEEDS = { "orders": /ACTION_PERM_\[body\.action\]/, "admin-users": /\n\s*need, self \? \{ pending/, "admin-2fa": /"staff", \{ pending: \["2fa"\] \}/, "admin-password": /"staff", \{ pending: \["account", "password"\] \}/,
     "agent": /\[\["production\./, "design": /\[\.\.\.DESIGN_VIEW_NEEDS, |\[\["catalog\./, "receipt": /\[\["finance\.expenses", "read"\]/, "shippo-label": /\[\["orders\.shipping", "edit"\]\]$/, "upload": /\[\["catalog\.products", "edit"\]/ };
   const files = fs.readdirSync(__dirname + "/functions/api").filter(f => f.endsWith(".js")).map(f => f.replace(/\.js$/, ""));

@@ -391,7 +391,7 @@ there, if you prefer to list them:
 
 | Path | What it is |
 |---|---|
-| `/`, `/storefront.js`, `/admin.js`, `/admin-qr.js`, `/admin-stitch.js`, `/admin-customers.js`, `/vendor/pdfjs-5.6.205/` | The admin page and its scripts |
+| `/`, `/storefront.js`, `/admin.js`, `/admin-qr.js`, `/admin-stitch.js`, `/admin-customers.js`, `/admin-quotes.js`, `/vendor/pdfjs-5.6.205/` | The admin page and its scripts |
 | `/api/admin-session`, `/api/admin-password`, `/api/admin-2fa`, `/api/admin-users` | Signing in, your account, users |
 | `/api/orders`, `/api/shippo-label`, `/api/upload`, `/api/design`, `/api/receipt`, `/api/agent` | The back office's own work |
 | `/api/catalog`, `/api/shipping`, `/api/image-proxy` | Shared with the storefront, also called from the admin |

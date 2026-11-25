@@ -42,12 +42,14 @@ try {
     "test5_undef.js": 'const saved = undefined; console.log("it was saved:", saved && saved.id === 1);',
     "test6_empty.js": 'const name = ""; console.log("it has a name:", name && name.length > 2);',
     "test7_exit.js": 'console.log("it works:", true); process.exit(3);',
+    "test9_stack.js": 'console.log("it works:", true); console.error("Error: Could not load link\\n    at process.processTicksAndRejections (node:internal) AggregateError [ECONNREFUSED]: ");',
     "test8_check.js": 'const { ok } = require(' + JSON.stringify(path.join(__dirname, "testlib/check.js")) + '); ok("it was saved", undefined && 1);',
   };
   for (const [f, src] of Object.entries(tests)) fs.writeFileSync(path.join(dir, f), src + "\n");
   const r = spawnSync("bash", ["run-tests.sh"], { cwd: dir, encoding: "utf8" });
   const result = (f) => (r.stdout.match(new RegExp("^(PASS|FAIL)[^\\n]*: " + f.replace(".", "\\.") + "$", "m")) || [])[1];
   ok("the runner passes a passing test", result("test1_pass.js") === "PASS");
+  ok("…and one that logs an error's stack, whose line ends in a colon (a stack line is never a check)", result("test9_stack.js") === "PASS");
   ok("…and fails each failing shape: false, no colon, 0, undefined, an empty string, a non-zero exit",
     ["test2_false.js", "test3_nocolon.js", "test4_zero.js", "test5_undef.js", "test6_empty.js", "test7_exit.js"].every(f => result(f) === "FAIL"));
   ok("…and the run as a whole fails", r.status === 1);

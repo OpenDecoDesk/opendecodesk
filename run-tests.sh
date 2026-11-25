@@ -14,7 +14,10 @@ set -uo pipefail
 #   "…: 0", "…: undefined", "…: null"   a check written `"desc:", a && b` prints a's falsy value, not false
 #   "…:" with nothing after it   the same with an empty string ("desc:", "")
 # So no passing test may print a line in these shapes for any other reason. test272 checks this pattern.
+# Stack-trace lines ("    at …") are left out first: an error a test logs and carries on from (jsdom saying a
+# stylesheet couldn't load, say) can end "AggregateError [ECONNREFUSED]: ", and it is not a check.
 FAIL_LINE='(^|[[:space:]])false$|: (0|undefined|null)$|:[[:space:]]*$'
+STACK_LINE='^[[:space:]]+at '
 
 fail=0
 for f in test*.js; do
@@ -26,7 +29,7 @@ for f in test*.js; do
     fail=1
     continue
   fi
-  bad=$(echo "$out" | grep -E "$FAIL_LINE")
+  bad=$(echo "$out" | grep -vE "$STACK_LINE" | grep -E "$FAIL_LINE")
   if [ -n "$bad" ]; then
     echo "FAIL (assertion returned false): $f"
     echo "$bad"

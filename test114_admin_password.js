@@ -107,7 +107,8 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU";
     (await B.password({ action: "account", name: "Pat Owner", email: "pat@myshop.com", next: "a brand new password", current: "not the old one" }, patCookie)).status === 401 && old.q("SELECT email FROM users")[0].email === "");
   ok("…asked once for a name and an email, and nothing else", (a = await B.password({ action: "account", name: "Pat Owner", email: "pat@myshop.com" }, patCookie)).status === 200 && a.body.pending === null && B.sessions() === 1);
   ok("…the same code can't be used twice", (await B.signIn("pat@myshop.com", "the owner's old password", totpNow(SECRET))).status === 401);
-  ok("the old settings rows are left where they were", old.q("SELECT count(*) n FROM global_settings WHERE key IN ('adminPassword','totpSecret')")[0].n === 2);
+  ok("the old password row is left where it was, and the old plain two-step secret is gone (it is kept sealed in the user's row)",
+    old.q("SELECT count(*) n FROM global_settings WHERE key = 'adminPassword'")[0].n === 1 && old.q("SELECT count(*) n FROM global_settings WHERE key = 'totpSecret'")[0].n === 0);
 
   // An owner who never chose a password but did turn on two-step: the passphrase must NOT clear it.
   B = await makeAuth();

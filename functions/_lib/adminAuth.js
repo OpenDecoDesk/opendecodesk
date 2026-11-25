@@ -441,6 +441,9 @@ export async function bootstrapState(env){
       const totpSecret = !oldTotp ? null : env.PROXY_ADMIN_PASSPHRASE ? await sealTotp(env, oldTotp) : oldTotp;
       await insertFirstAdmin(env.DB, { password: oldPassword ? JSON.stringify(oldPassword) : null, totpSecret, totpLastCounter: Number.isInteger(counter) ? counter : null });
       if(oldPassword && oldPassword.mark && !(await getSettingRaw(env.DB, SECRET_MARK_SETTING))) await setSettingRaw(env.DB, SECRET_MARK_SETTING, oldPassword.mark);
+      // Once it is in the user's row sealed, the old shared row would be the one plain copy of the
+      // secret left in the database, so it goes. (The old password row stays: it is only a hash.)
+      if(totpSecret && totpSecret !== oldTotp) await clearTotpSecret(env);
       st = await getBootstrapState(env.DB);
     }
   }

@@ -234,7 +234,10 @@ aren't here: copy them to your pictures bucket and point the products at them.
    ```
 
    If the bookmark can't be had, it stops before changing anything. `npm run deploy -- --no-backup`
-   applies the migrations without one (the nightly backup above is then what you go back to). If the
+   applies the migrations without one (the nightly backup above is then what you go back to). In
+   Cloudflare's build (an install made with the Deploy button, deploying on each push) a missing
+   bookmark is only a warning, since nobody is there to add the flag: the migrations go ahead, and
+   Time Travel can still restore to a time before the deploy. If the
    deploy itself fails after the migrations ran, the message names the migrations that were applied,
    gives that restore command, and says whether `wrangler.toml` was updated. Restoring also undoes
    anything written to the database after the bookmark, so use it only when the old version can't run

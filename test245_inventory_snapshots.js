@@ -17,7 +17,8 @@ const L = new Function(dbSrc + `\nreturn { getInventoryValuations, getTransferVa
   closePeriod, reopenPeriod, setAccountingSettings, monthEndMoment_, voidTransferMovement, restoreTransferMovement, voidInventoryMovement, restoreInventoryMovement,
   voidFinishedGoodsMovement, saleDateSql_ };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'owner@test'; const adminUser = () => null;\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'owner@test';\n" + require("./testlib/roles").adminAs() + "\n" +
+  strip(read("functions/_lib/permissions.js")) + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +

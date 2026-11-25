@@ -376,8 +376,8 @@ function makeGsMock(calls){ return async (url, opts) => {
     global.fetch = (url) => { asked++; return new Promise(() => {}); };
     let t0 = Date.now();
     const hung = await checkoutHandler({
-      request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
-      env: { DB: {}, STRIPE_SECRET_KEY:"sk_test_fake" }
+      request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
+      env: { DB: {}, SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake" }
     });
     const hungData = JSON.parse(await hung.text());
     console.log("Pay by card: the customer gets the usual 'couldn't reach Stripe' answer after the limit, not a page that never loads:",

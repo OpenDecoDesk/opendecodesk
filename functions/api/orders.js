@@ -1188,7 +1188,9 @@ async function handleOrdersPost_(context, listBefore = null) {
   if (body.action === "listOrgs") {
     const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_PERM_[body.action]);
     if (denied) return denied;
-    return listAnswer_("orgs", "orgs", (orgs) => orgs.map((o) => ({ orgId: o.orgId, name: o.name, subdomain: o.subdomain || "" })));
+    return listAnswer_("orgs", "orgs", (orgs) => orgs.map((o) => ({ orgId: o.orgId, name: o.name, subdomain: o.subdomain || "",
+      // Who the shop's fundraiser supports, for the Orders page's "Raises $x for …" (no amounts: those are on each order).
+      fundraiserLabel: (o.fundraiser && o.fundraiser.label) || "" })));
   }
 
   // ---- getOrders -------------------------------------------------------------
@@ -2302,11 +2304,12 @@ async function handleOrdersPost_(context, listBefore = null) {
   // A fundraiser is inside the shop's prices: customers pay the same, and each order line keeps what it raised when it
   // was priced (order_items.fundraiserCents), so changing the setting changes new orders only.
   // A database without 0110: the writers would fail on the missing columns. Say so plainly instead of a 500.
+  const fundraisingNotReady_ = () => jsonResponse({ status: "error", message: "Fundraising isn't ready yet: the database is still being updated. Try again in a minute." }, 503);
   const fundraisingReady_ = async (run) => {
     try { return await run(); }
     catch (e) {
       if (!/no such column: (\w+\.)?(fundraiserJson|fundraiserCents|fundraiserOrgId)/i.test(String(e && e.message))) throw e;
-      return jsonResponse({ status: "error", message: "Fundraising isn't ready yet: the database is still being updated. Try again in a minute." }, 503);
+      return fundraisingNotReady_();
     }
   };
   const fundraisingYmd_ = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) && !isNaN(Date.parse(v + "T00:00:00Z")) &&
@@ -2373,6 +2376,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     }
     return fundraisingReady_(async () => {
       const r = await setOrgFundraiser(env.DB, org.orgId, fundraiser);
+      if (r && r.error) return r.notReady ? fundraisingNotReady_() : jsonResponse({ status: "error", message: r.error }, 400);
       const from = r && r.before !== undefined ? r.before : (org.fundraiser || null);
       if (JSON.stringify(from) !== JSON.stringify(fundraiser)) {
         audit({ orgId: org.orgId, orderId: null, action: "org.fundraiser_set", detail: { from, to: fundraiser } });
@@ -2403,6 +2407,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     { const locked = await periodGuard(body); if (locked) return locked; }
     return fundraisingReady_(async () => {
       const r = await recordFundraiserPayout(env.DB, { orgId: org.orgId, amount, date, accountId: acct.id, note, actor: adminActor(request) });
+      if (r && r.notReady) return fundraisingNotReady_();
       if (!r || r.error) return bad((r && r.error) || "The payout couldn't be recorded.");
       audit({ orgId: org.orgId, orderId: null, action: "fundraiser.payout_recorded", detail: { expenseId: r.id, amount, date, accountId: acct.id, note,
         label: (org.fundraiser && org.fundraiser.label) || org.name || org.orgId } });

@@ -358,8 +358,8 @@ const PER = (amount, extra = {}) => ({ mode: "perPiece", amount, label: "Example
   ok("so does the whole-install catalog", (await lib.getPublicCatalogData(pre)).orgs.club.fundraiser === null);
   await lib.publishShop(pre, "club", "test");
   ok("publish state still works", (await lib.getPublishState(pre)).club.state === "current" && (await lib.planDiscardShopChanges(pre, "club")).anything === false);
-  ok("saving a fundraiser is refused with a message saying to apply the migrations", same(await lib.setOrgFundraiser(pre, "club", PER(2)), { error: NOT_READY }));
-  ok("so is ending one", same(await lib.setOrgFundraiser(pre, "club", null), { error: NOT_READY }));
+  ok("saving a fundraiser is refused with a message saying to apply the migrations", same(await lib.setOrgFundraiser(pre, "club", PER(2)), { error: NOT_READY, notReady: true }));
+  ok("so is ending one", same(await lib.setOrgFundraiser(pre, "club", null), { error: NOT_READY, notReady: true }));
   ok("an invalid setup still gets its own message first", same(await lib.setOrgFundraiser(pre, "club", PER(0)), { error: MSG.amount }));
   ok("the readers' pure helpers don't need the database", lib.parseFundraiser_("") === null && lib.fundraiserLineCents_(null, { qty: 1, unitCents: 100 }) === 0);
   ok("and the shop row is untouched", pre.q("SELECT updatedAt FROM orgs WHERE orgId = 'club'")[0].updatedAt === "t0");

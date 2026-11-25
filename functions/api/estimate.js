@@ -49,9 +49,11 @@ function estimateDay_(day) {
   return isNaN(d) ? String(day || "") : d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
 }
 
-// Expired once the business's own calendar day is past its last day (expiresOn is that last day, inclusive).
+// Expired once the business's own calendar day is past its last day (expiresOn is that last day, inclusive) — and
+// only while the quote is still open, as db.js counts it (parseEstimate_): an accepted, converted or cancelled quote
+// stays what it is.
 async function estimateIsExpired_(env, est) {
-  if (!est.expiresOn) return false;
+  if (!est.expiresOn || !["draft", "sent", "changes"].includes(est.status)) return false;
   return (await localToday(env)) > String(est.expiresOn).slice(0, 10);
 }
 
@@ -141,9 +143,11 @@ export async function onRequestPost(context) {
   if (note.length > ESTIMATE_NOTE_MAX_) return jsonResponse({ status: "error", message: "Please keep your message under 2,000 characters." }, 400);
   if (!accept && !note) return jsonResponse({ status: "error", message: "Please tell us what you'd like changed." }, 400);
 
+  // A refusal sends the quote as it is now, too: it may have expired, been withdrawn or accepted since the page was
+  // drawn, and the page redraws from it so it stops offering what can't be done.
   const est = got.full.estimate;
   const why = estimateRefusal_(est, got.expired, action);
-  if (why) return jsonResponse({ status: "error", message: why }, got.expired && !["cancelled", "accepted", "converted"].includes(est.status) ? 410 : 409);
+  if (why) return jsonResponse({ status: "error", message: why, estimate: await estimateView_(env, got) }, got.expired ? 410 : 409);
 
   // db.js has the last word (another tab may have answered a moment ago): its refusal is said in the
   // customer's words from the quote as it is now, never as the database's own text.
@@ -151,7 +155,7 @@ export async function onRequestPost(context) {
   if (!r || r.error || !r.ok) {
     const now = await loadEstimate_(env, token);
     const msg = (!now.error && estimateRefusal_(now.full.estimate, now.expired, action)) || "This quote can't be answered online right now — contact us.";
-    return jsonResponse({ status: "error", message: msg }, 409);
+    return jsonResponse({ status: "error", message: msg, estimate: now.error ? null : await estimateView_(env, now) }, 409);
   }
 
   // Accepted: the order, through the one path staff's "Convert to order" uses too (idempotent, so a retry

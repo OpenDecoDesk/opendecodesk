@@ -11502,8 +11502,15 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
     orderCustomer_(db, order, opts),
   ]);
   // opts.taxExempt: an order from another store (importOrdersCsv), whose sales tax that store charged — none is added here.
-  const taxExempt = opts.taxExempt || (orgRow && orgRow.taxExempt) || customer.exempt ? 1 : 0;
-  const orderRateBps = Number(taxSettings.rateBps) || 0;
+  const exemptNow = opts.taxExempt || (orgRow && orgRow.taxExempt) || customer.exempt ? 1 : 0;
+  // opts.taxRateBps: a rate fixed in advance, already allowing for any exemption — a sent quote's (convertEstimateToOrder_
+  // in orders.js), whose customer accepted a total worked out at that rate. Today's rate and exemptions don't change
+  // it. It is marked exempt only when it charges nothing and the shop or customer is exempt now, so the sales-tax
+  // report files it with the exempt sales rather than as taxable sales that took no tax.
+  const fixedRate = opts.taxRateBps === undefined || opts.taxRateBps === null || !Number.isFinite(Number(opts.taxRateBps)) ? null
+    : Math.max(0, Math.round(Number(opts.taxRateBps)));
+  const taxExempt = fixedRate === null ? exemptNow : (fixedRate === 0 && exemptNow ? 1 : 0);
+  const orderRateBps = fixedRate === null ? Number(taxSettings.rateBps) || 0 : fixedRate;
   // Tax in the listed prices, or added to them: today's setting, kept on the order (migrations/0057).
   const mode = taxMode_(order.taxMode || taxSettings.taxMode);
   const outOfState = isOutOfState(stateOf_(order.shippingAddress), taxSettings.jurisdiction);

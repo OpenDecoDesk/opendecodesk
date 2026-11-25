@@ -255,10 +255,12 @@
     let busy = false, headDirty = false;
     const e0 = d.estimate, cust = d.customer || { id: e0.customerId };
     const number = e0.number || "Quote " + e0.id;
-    // Lines change while it's a draft or the customer asked for changes; once sent, only its title, notes and expiry
-    // (saveEstimate without items), so its prices stay as they were sent.
+    // Lines, title, note to the customer and expiry change while it's a draft or the customer asked for changes. Once
+    // sent, only its internal note (saveEstimate without items): the server refuses the rest (db.js setEstimateFields),
+    // so the customer accepts exactly what they were sent.
     const editable = ["draft", "changes"].includes(e0.status) && adminCan_(FN, "edit");
     const fieldsEditable = ["draft", "sent", "changes"].includes(e0.status) && adminCan_(FN, "edit");
+    const noteOnly = fieldsEditable && !editable;
     const open = ["draft", "sent", "changes"].includes(e0.status);
     document.title = adminTitle_(number);
     const custLink = canOpenCustomers() && cust.id != null
@@ -286,7 +288,7 @@
           <b>The customer asked for changes${e0.respondedAt ? " on " + escapeHtml(adminDate_(e0.respondedAt)) : ""}.</b>
           ${e0.customerNote ? `<div class="qt-quote-text">${escapeHtml(e0.customerNote)}</div>` : ""}
           <div>Change the quote, press Revise, then send it again.</div></div>` : ""}
-        ${e0.status === "sent" ? `<div class="cust-note">This quote has been sent, so its lines and prices are fixed; its title, notes and expiry can still change. Its lines can change again if the customer asks for changes.</div>` : ""}
+        ${e0.status === "sent" ? `<div class="cust-note">This quote has been sent, so it is fixed as the customer has it: its lines, prices, title, note to the customer and expiry. Only the internal note can change. The rest can change again if the customer asks for changes.</div>` : ""}
         ${e0.orderId ? `<div class="qt-callout" role="note">${e0.status === "converted" ? "Converted to order" : "Order"} ${canOpenOrders()
           ? `<a class="cust-link" href="#orders/${encodeURIComponent(e0.orgId)}" id="qtOrderLink">${escapeHtml(e0.orderId)}</a>` : `<b>${escapeHtml(e0.orderId)}</b>`}${e0.convertedAt ? " on " + escapeHtml(adminDate_(e0.convertedAt)) : ""}.</div>` : ""}
         ${e0.status === "accepted" && !e0.orderId ? `<div class="qt-callout qt-callout-changes" role="note">The customer accepted this quote${e0.acceptedAt ? " on " + escapeHtml(adminDate_(e0.acceptedAt)) : ""}, but its order wasn't made. Use Convert to order.</div>` : ""}
@@ -318,6 +320,7 @@
     const root = document.getElementById("qtPage");
     const form = root.querySelector("#qtForm"), errEl = root.querySelector("#qtErr");
     if (!fieldsEditable) form.querySelectorAll("input, textarea, select").forEach(f => { f.disabled = true; });
+    else if (noteOnly) ["#qtTitle", "#qtExpires", "#qtMessage"].forEach(sel => { root.querySelector(sel).disabled = true; });
     const reload = () => { if (stillOn(hash)) renderOne(app, id); };
 
     function lineRow(it, i) {
@@ -364,13 +367,16 @@
 
     const headFields = () => {
       const v = (fid) => root.querySelector("#" + fid).value;
+      // A sent quote saves its internal note alone: the other fields are fixed.
+      if (noteOnly) return { internalNote: v("qtInternal").trim() };
       return { title: v("qtTitle").trim(), message: v("qtMessage").trim(), internalNote: v("qtInternal").trim(), expiresOn: v("qtExpires") || null };
     };
     // Saves the quote with `next` as its lines (and what is typed above them), and draws the server's answer: it is
     // the server that prices the lines (quantity breaks across the whole quote, tax). `next` undefined saves the fields
     // alone (a sent quote). Answers "" or the problem.
+    const STILL_SAVING = "Still saving — try again in a moment.";
     async function persist(next) {
-      if (busy) return "Still saving — try again in a moment.";
+      if (busy) return STILL_SAVING;
       const head = headFields();
       if (head.expiresOn && head.expiresOn < localToday_() && head.expiresOn !== (state.estimate.expiresOn || null)) return "The last day to accept can't be in the past.";
       busy = true; errEl.textContent = "";
@@ -386,7 +392,11 @@
         return "";
       } catch (ex) {
         return ex.message || "Couldn't save the quote.";
-      } finally { busy = false; }
+      } finally {
+        busy = false;
+        // A change refused while this save ran said to try again: now it can be, so that no longer stands.
+        if (errEl.textContent === STILL_SAVING) errEl.textContent = "";
+      }
     }
 
     form.addEventListener("input", (e) => {

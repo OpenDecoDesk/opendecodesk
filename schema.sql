@@ -398,7 +398,9 @@ CREATE TABLE IF NOT EXISTS blanks (
   featuresJson TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(featuresJson)),
   sourceJson   TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(sourceJson)),
   -- migrations/0065: the vendor connection its prices and content come from.
-  vendorConnectionId INTEGER
+  vendorConnectionId INTEGER,
+  -- migrations/0104: when it was archived (retired) — off the Blanks screen, product linking and vendor matching.
+  archivedAt TEXT
 );
 
 -- A blank's colors (migrations/0037): authoritative per-color record — name,
@@ -792,6 +794,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_done_per_step
   ON production_runs(itemId, pieceNo, stepNo) WHERE status = 'done' AND pieceNo IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_running_per_piece
   ON production_runs(itemId, pieceNo) WHERE status = 'running' AND pieceNo IS NOT NULL;
+-- migrations/0104: the finished runs by when they finished (the pricing analysis' last 12 months).
+CREATE INDEX IF NOT EXISTS idx_runs_done_finished ON production_runs(finishedAt) WHERE status = 'done';
 
 -- migrations/0032: a design's hoops (on its own / with a typed-in name), a product's designs in
 -- run order (one MAIN), and the order-specific design for a typed-in-personalization line.
@@ -1216,6 +1220,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_log_createdAt ON audit_log(createdAt DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_log_orgId     ON audit_log(orgId);
 CREATE INDEX IF NOT EXISTS idx_audit_log_orderId   ON audit_log(orderId);
+CREATE INDEX IF NOT EXISTS idx_audit_log_action    ON audit_log(action, createdAt);   -- migrations/0104
 
 -- Rate-limit counters (see migrations/0005 and functions/_lib/rateLimit.js)
 CREATE TABLE IF NOT EXISTS rate_limits (

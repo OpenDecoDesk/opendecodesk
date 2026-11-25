@@ -135,6 +135,38 @@ function countQueries(d1) {
   api.setUser(null);
   ok("…and the cached copy itself still has them for those who may see them", (await call({ action: "getBlanks" })).body.blanks[0].sizes[0].purchasePrice === 3.5);
 
+  console.log("\n=== A change's answer sends only the blanks that moved (review #82) ===");
+  const capId = d1.q("SELECT id FROM blanks")[0].id;
+  const visor = await lib.createBlank(d1, { name: "Visor", brand: "Generic", color: "White", productType: "cap" }, [{ size: "OSFA", quantity: 2, purchasePrice: 2 }]);
+  await settle();
+  const held = await call({ action: "getBlanks" });
+  const vHeld = held.body.version;
+  ok("(the page holds the list at its current version, two blanks)", vHeld === version("blanks") && held.body.blanks.length === 2);
+  const delta = await call({ action: "setBlankArchived", id: visor.id, archived: true, listHeld: { blanks: vHeld } });
+  ok("the page holding the version the change started from gets only the changed blank, its id and both versions", delta.status === 200 &&
+    delta.body.blanks.length === 1 && delta.body.blanks[0].id === visor.id && !!delta.body.blanks[0].archivedAt &&
+    JSON.stringify(delta.body.changedBlankIds) === JSON.stringify([visor.id]) && delta.body.cacheVersions.blanks.from === vHeld && delta.body.cacheVersions.blanks.to === version("blanks"));
+  await settle();
+  const full = await call({ action: "setBlankArchived", id: visor.id, archived: false });
+  ok("a change from a page that holds no copy (or an older script) gets the whole list and one version, as before", full.body.blanks.length === 2 &&
+    typeof full.body.cacheVersions.blanks === "number" && !("changedBlankIds" in full.body));
+  await settle();
+  const stale = await call({ action: "setBlankArchived", id: visor.id, archived: true, listHeld: { blanks: vHeld } });
+  ok("…and so does a page whose copy is older than where the change started", stale.body.blanks.length === 2 && typeof stale.body.cacheVersions.blanks === "number");
+  await settle();
+  const before3 = version("blanks");
+  await call({ action: "getBlanks" });   // this isolate keeps that version
+  api.resetMemory();                     // …and another isolate answers the change: the copy comes from the Cache API
+  const merged = await call({ action: "mergeBlanks", targetId: capId, sourceIds: [visor.id], listHeld: { blanks: before3 } });
+  ok("a blank removed by the change is in changedBlankIds but not in blanks (another isolate, the copy from the Cache API)", merged.status === 200 &&
+    merged.body.changedBlankIds.includes(visor.id) && merged.body.changedBlankIds.includes(capId) && merged.body.blanks.length === 1 && merged.body.blanks[0].id === capId);
+  await settle();
+  store.clear(); api.resetMemory();
+  const vNow = version("blanks");
+  const cold = await call({ action: "setBlankArchived", id: capId, archived: false, listHeld: { blanks: vNow } });
+  ok("when no copy at that version is kept anywhere, the whole list goes back", Array.isArray(cold.body.blanks) && typeof cold.body.cacheVersions.blanks === "number");
+  await settle();
+
   console.log("\n=== A database not yet migrated ===");
   const old = await migratedDb("0102");
   const oldRes = await api.post({ env: { DB: old }, waitUntil: () => {}, request: { url: "https://admin.example.com/api/orders", json: async () => ({ key: "x", action: "listHoops", cacheVersion: 3 }), headers: { get: () => null } } });
@@ -144,11 +176,12 @@ function countQueries(d1) {
   console.log("\n=== The page's copies ===");
   const adminJs = read("public/admin.js");
   const sent = [];
+  let tamper = null;   // changes the next answer on its way to the page
   class L extends ResourceLoader { fetch(url, o) { if (url.includes("/admin.js")) return Promise.resolve(Buffer.from(adminJs)); return super.fetch(url, o); } }
   const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: new L(), url: "https://admin.example.com/", pretendToBeVisual: true,
     beforeParse(win) { win.fetch = async (u, init) => {
       if (!String(u).includes("/api/orders")) return { ok: true, status: 200, json: async () => ({}), text: async () => "{}" };
-      const b = init && typeof init.body === "string" ? JSON.parse(init.body) : {}; sent.push(b); const x = await call(b); await settle();
+      const b = init && typeof init.body === "string" ? JSON.parse(init.body) : {}; sent.push(b); const x = await call(b); await settle(); if (tamper) { x.body = tamper(x.body); tamper = null; }
       return { ok: x.status < 400, status: x.status, json: async () => x.body, text: async () => JSON.stringify(x.body) }; }; } });
   const w = dom.window, d = w.document;
   w.CSS = { escape: (x) => String(x).replace(/[^a-zA-Z0-9_-]/g, "\\$&") };
@@ -192,6 +225,27 @@ function countQueries(d1) {
   await wait(() => sent.filter(b => b.action === "getBlanks").length === 2);
   const stockAsks = sent.filter(b => b.action === "getBlanks");
   ok("the Orders list asks for stock only, then sends the version of the stock it holds", stockAsks.length === 2 && stockAsks.every(b => b.stockOnly === true) && !("cacheVersion" in stockAsks[0]) && stockAsks[1].cacheVersion === version("blanks"));
+
+  console.log("\n=== The page patches its blanks copy from a change's answer (review #82) ===");
+  const extra = await lib.createBlank(d1, { name: "Beanie", brand: "Generic", color: "Black", productType: "cap" }, [{ size: "OSFA", quantity: 4, purchasePrice: 4 }]);
+  const pb1 = await w.hoopApi_({ action: "getBlanks" });
+  sent.length = 0;
+  const arch = await w.hoopApi_({ action: "setBlankArchived", id: extra.id, archived: true });
+  ok("a change sends the version of the blanks copy it holds (listHeld)", sent[0].action === "setBlankArchived" && sent[0].listHeld && sent[0].listHeld.blanks === pb1.version);
+  ok("…the server sent only that blank, and the caller still gets the whole list, patched", arch.blanks.length === pb1.blanks.length &&
+    arch.blanks.find(b => b.id === extra.id).archivedAt && !("changedBlankIds" in arch) && sent.length === 1);
+  sent.length = 0;
+  const pb2 = await w.hoopApi_({ action: "getBlanks" });
+  ok("…and the patched copy is current: the next read sends its new version and gets 'unchanged'", sent.length === 1 && sent[0].cacheVersion === version("blanks") &&
+    pb2.blanks.length === pb1.blanks.length && !!pb2.blanks.find(b => b.id === extra.id).archivedAt);
+  ok("…in the server's order", JSON.stringify(pb2.blanks.map(b => b.id)) === JSON.stringify((await call({ action: "getBlanks" })).body.blanks.map(b => b.id)));
+  sent.length = 0;
+  tamper = (body) => ({ ...body, cacheVersions: { blanks: { from: -1, to: body.cacheVersions.blanks.to } } });   // as if the copy had moved meanwhile
+  const doubt = await w.hoopApi_({ action: "setBlankArchived", id: extra.id, archived: false });
+  ok("a copy that isn't at the answer's starting version is dropped and the whole list is read again for the caller", sent.length === 2 && sent[1].action === "getBlanks" &&
+    !("cacheVersion" in sent[1]) && doubt.blanks.length === pb1.blanks.length && !doubt.blanks.find(b => b.id === extra.id).archivedAt);
+  const direct = w.eval(`listCacheTake_({ action: "deleteBlank" }, { status: "ok", blanks: [{ id: 1 }], changedBlankIds: [1], cacheVersions: { blanks: { from: -5, to: 3 } } })`);
+  ok("…(listCacheTake_ on its own: no partial list handed on, marked for the re-read)", direct.blanks === undefined && direct.listRefetch_ === "blanks");
 
   console.log("\n=== Session ends ===");
   w.eval("clearAdminAuth()");

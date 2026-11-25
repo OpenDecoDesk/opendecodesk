@@ -96,7 +96,9 @@ test("Audit log: a crafted order ID is dropped and shown as —, nothing runs; a
   const paidRow = results.locator("tbody tr", { has: page.getByRole("link", { name: orderId, exact: true }) });
   await expect(paidRow).toHaveCount(1);
   await expect(paidRow).toContainText("Marked paid");
-  await expect(cell(paidRow, 1)).toHaveText(shop.orgId);
+  // The Shop column shows the shop's name, its id as the tooltip (review #108).
+  await expect(cell(paidRow, 1)).toHaveText(shop.name);
+  await expect(cell(paidRow, 1).locator("span")).toHaveAttribute("title", shop.orgId);
   const filtered = page.waitForResponse(r => r.url().endsWith("/api/orders")
     && /"action":"getAuditLog"/.test(r.request().postData() || "") && (r.request().postData() || "").includes('"orderId":"' + orderId + '"'));
   await paidRow.getByRole("link", { name: orderId, exact: true }).click();

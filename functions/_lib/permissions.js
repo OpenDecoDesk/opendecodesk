@@ -143,7 +143,7 @@ const BY_FN = {
     // its save removes any). Merging deletes blanks: Full. Counts and average cost are Full's too: the blank form
     // changes them only with Full (updateBlank), and correcting a finished-stock count is setReadyToShipQty.
     edit: ["createInventoryItem", "updateInventoryItem", "createBlank", "updateBlank", "receiveBlanks", "receiveBlankOrder", "addBlankSizes",
-      "readInvoiceWithAi", "markBlankPricesChecked", "setBlankLink", "saveBlankLinks", "applyBlankCatchUp", "makeForStock", "importBlanks",
+      "readInvoiceWithAi", "markBlankPricesChecked", "setBlankArchived", "setBlankLink", "saveBlankLinks", "applyBlankCatchUp", "makeForStock", "importBlanks",
       "applyVendorBlanks", "copyVendorImage", "removeBlankImages", "restoreInventoryMovement"],
     full: ["deleteInventoryItem", "deleteBlank", "deleteBlankLink", "mergeBlanks", "writeOffBlanks", "countBlankStock", "setReadyToShipQty", "voidInventoryMovement", "voidFinishedGoodsMovement",
       "recomputeBlankAverageCosts"] },

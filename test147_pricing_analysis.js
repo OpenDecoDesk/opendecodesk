@@ -15,7 +15,7 @@ const { createD1 } = require("./testlib/d1-shim.js");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1");
 const dbSrc = strip(read("functions/_lib/db.js"));
-const lib = new Function(dbSrc + `\nreturn { insertOrder, createProduct, createBlank, setBlankLink, analyzePricing, getPricingSettings, setPricingSettings, getCatalogIssues, getNewPricingAlerts, pricingBelowTargetForBlanks };`)();
+const lib = new Function(dbSrc + `\nreturn { insertOrder, createProduct, createBlank, setBlankLink, analyzePricing, getPricingSettings, setPricingSettings, getCatalogIssues, getNewPricingAlerts, pricingBelowTargetForBlanks, avgRunMinutesByProduct_ };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + strip(read("functions/_lib/fileUpload.js")) + "\n" + strip(read("functions/_lib/vendorImages.js")) + "\n" +
   "const requireAdmin = async () => null; const adminActor = () => 'owner@test'; const adminUser = () => (globalThis.__role ? { role: globalThis.__role } : null);\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
@@ -129,6 +129,59 @@ const wait = async (cond, n = 300) => { for (let i = 0; i < n && !cond(); i++) a
   run(3, 1, "2026-10-02T12:00:00Z", 2, 0);                                        // piece 3: untimed — left out
   a = (await lib.analyzePricing(d1, { orgId: "acme", productId: "tee" })).products[0];
   ok("the average adds up every hooping of a piece and leaves untimed pieces out: (15 + 21) / 2 = 18 min", a.avgRunMinutes === 18 && a.avgRunPieces === 2);
+
+  // Worked out in SQL (review #98), over the last 12 months — or all history for a product with fewer than 5 timed
+  // pieces in that time. The JS it replaced, as the reference: every done run of the shop, summed per piece.
+  const jsAverage = (rows) => {
+    const pieces = new Map();
+    for (const r of rows) {
+      const key = r.productId + "\u0001" + r.itemId + "\u0001" + (r.pieceNo != null ? r.pieceNo : "r" + r.id);
+      const ms = new Date(r.finishedAt) - new Date(r.startedAt);
+      const cur = pieces.get(key) || { productId: r.productId, ms: 0, bad: false };
+      if (!Number(r.timed) || !Number.isFinite(ms) || ms <= 0) cur.bad = true; else cur.ms += ms;
+      pieces.set(key, cur);
+    }
+    const out = {};
+    for (const p of pieces.values()) { if (p.bad) continue; const o = out[p.productId] = out[p.productId] || { totalMs: 0, pieces: 0 }; o.totalMs += p.ms; o.pieces++; }
+    return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, { minutes: Math.round(v.totalMs / v.pieces / 6000) / 10, pieces: v.pieces }]));
+  };
+  const runRows = () => d1.q(`SELECT oi.productId, pr.id, pr.itemId, pr.pieceNo, pr.startedAt, pr.finishedAt, pr.timed FROM production_runs pr JOIN order_items oi ON oi.id = pr.itemId
+    WHERE pr.status = 'done' AND oi.orgId = 'acme' AND oi.productId IS NOT NULL AND oi.productId <> ''`);
+  const daysAgo = (d, h = 10) => new Date(Date.now() - d * 86400000 + h * 3600000).toISOString().replace(/T.*/, "") + "T" + String(h).padStart(2, "0") + ":00:00.000Z";
+  const newLine = async (orderId, productId, qty) => {
+    await lib.insertOrder(d1, { orderId, orgId: "acme", customerName: "C", contact: "c@example.test", placedAt: daysAgo(400) }, [{ productId, name: productId, type: "shirt", size: "M", qty, unitPrice: 20 }]);
+    return d1.q("SELECT id FROM order_items WHERE orderId = ?", orderId)[0].id;
+  };
+  const runOn = (orderId, item, piece, step, start, mins, timed = 1) => d1._raw.run(`INSERT INTO production_runs (orgId, orderId, itemId, startedAt, finishedAt, status, createdAt, pieceNo, stepNo, timed) VALUES ('acme',?,?,?,?,'done','t',?,?,?)`,
+    [orderId, item, start, new Date(new Date(start).getTime() + mins * 60000).toISOString(), piece, step, timed]);
+  // A product with many recent pieces of varied hoopings, untimed ones and legacy rows with no piece number.
+  let seedN = 7; const rnd = () => (seedN = (seedN * 48271) % 2147483647) / 2147483647;
+  const mixItem = await newLine("MIX", "mix", 40);
+  for (let piece = 1; piece <= 40; piece++) {
+    const steps = 1 + Math.floor(rnd() * 3), day = 5 + Math.floor(rnd() * 300);
+    for (let s = 1; s <= steps; s++) runOn("MIX", mixItem, piece, s, daysAgo(day, 8 + s), 3 + rnd() * 25, rnd() < 0.08 ? 0 : 1);
+  }
+  for (let k = 0; k < 4; k++) runOn("MIX", mixItem, null, null, daysAgo(20 + k), 7 + k);
+  const sqlAvg = await lib.avgRunMinutesByProduct_(d1, "acme");
+  const ref = jsAverage(runRows());
+  ok("in SQL: the same averages and piece counts as the JS it replaced (all within the last 12 months)", ["tee", "mix"].every(p => sqlAvg[p] && ref[p] &&
+    sqlAvg[p].pieces === ref[p].pieces && Math.abs(sqlAvg[p].minutes - ref[p].minutes) <= 0.1) && ref.mix.pieces >= 30);
+  // A product made often: runs older than 12 months are left out.
+  const oftenItem = await newLine("OFTEN", "often", 12);
+  for (let piece = 1; piece <= 6; piece++) runOn("OFTEN", oftenItem, piece, 1, daysAgo(30 + piece), 10);   // recent: 10 min each
+  for (let piece = 7; piece <= 12; piece++) runOn("OFTEN", oftenItem, piece, 1, daysAgo(400 + piece), 40); // over a year ago: 40 min
+  // A product made rarely: fewer than 5 timed pieces in 12 months, so its whole history counts.
+  const rareItem = await newLine("RARE", "rare", 6);
+  runOn("RARE", rareItem, 1, 1, daysAgo(10), 12); runOn("RARE", rareItem, 2, 1, daysAgo(12), 14);
+  runOn("RARE", rareItem, 3, 1, daysAgo(13), 99, 0);                                                      // untimed: never counted
+  for (let piece = 4; piece <= 6; piece++) runOn("RARE", rareItem, piece, 1, daysAgo(500 + piece), 20);
+  const byWindow = await lib.avgRunMinutesByProduct_(d1, "acme");
+  ok("a product with 5+ timed pieces in the last 12 months: only those (6 at 10 min), not the older 40-minute ones", byWindow.often.minutes === 10 && byWindow.often.pieces === 6);
+  ok("…with fewer: its whole history ((12 + 14 + 3 × 20) / 5 = 17.2 min), untimed pieces still left out", byWindow.rare.minutes === 17.2 && byWindow.rare.pieces === 5);
+  const one = await lib.avgRunMinutesByProduct_(d1, "acme", { productId: "often" });
+  ok("analysing one product reads only its runs", JSON.stringify(Object.keys(one)) === '["often"]' && one.often.minutes === 10);
+  ok("the pricing analysis shows the same", (await lib.analyzePricing(d1, { orgId: "acme", productId: "tee" })).products[0].avgRunMinutes === 18);
+  ok("migration 0104 adds the finished-runs index the 12-month read uses", d1.q("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_runs_done_finished'").length === 1);
 
   console.log("\n=== Alerts: catalog health, blank costs, the roll-up ===");
   const issues = await lib.getCatalogIssues(d1, "acme");

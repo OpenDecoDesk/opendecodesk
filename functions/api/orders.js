@@ -112,7 +112,7 @@ import {
   RECURRING_FREQUENCIES, recurringDueDates, recurringIndexAfter, listRecurringExpenses, getRecurringExpense, saveRecurringExpense, stopRecurringExpense,
   deleteRecurringExpense, recordDueRecurringExpenses, getRecurringExpensesRecorded,
   getRefundedCents, getDepositPayments, linkPaymentsToCashout, cashoutNetCents_,
-  receiveBlanks, writeOffBlanks, setBlankCount, getBlankMovements, markBlankPricesChecked, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection,
+  receiveBlanks, writeOffBlanks, setBlankCount, getBlankMovements, markBlankPricesChecked, setBlankArchived, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection,
   getSiteSetting, setSiteDomain,
   getPublishedOrg, setOrgReady, getShopWizard, saveShopWizard, deleteShopWizard, listShopWizards, setProductLinksFromBlank, publishShop, getPublishState, getDraftCatalogShop, signPreviewToken,
   planDiscardShopChanges, discardShopChanges, applyProductPrices,
@@ -142,7 +142,7 @@ import { verifyQuote, canonicalItems } from "../_lib/quoteToken.js";
 import { selectBox } from "../_lib/boxSize.js";
 import { verifyTurnstile } from "../_lib/turnstile.js";
 // Payments, refunds and money integrity (kept apart from the long list above).
-import { expireCheckoutSession, createCheckoutSession, CHECKOUT_LINK_SECONDS, listCacheVersions_, readCachedList_, refreshCachedLists_ } from "../_lib/db.js";
+import { expireCheckoutSession, createCheckoutSession, CHECKOUT_LINK_SECONDS, listCacheVersions_, readCachedList_, refreshCachedLists_, peekCachedList_, blankListDelta_ } from "../_lib/db.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9\-]{1,64}$/;
 // Whether an order counts as paid, for a money action's reply: the Payments window redraws the row from it (Mark as
@@ -165,6 +165,9 @@ const BULK_ORDERS_MAX = 100;
 // Lines one bulk cancel takes (review #9): each runs several queries (the line, the cancel, the stock it gave back,
 // the paid state) plus its order's email, so the admin page sends a bigger selection in groups of whole orders.
 const BULK_CANCEL_LINES_MAX = 20;
+// Lines one blank shipment (one tracking number) may cover. The queries take any number (json_each); this only
+// keeps one request's work bounded.
+const BLANK_SHIPMENT_MAX_ITEMS_ = 5000;
 // "Quote pending" is a note for the shop, not a carrier: wherever a shipping method is printed for
 // a customer (the shipped email, a shipping payment link) it reads as no method.
 const shownMethod_ = (m) => (m === SHIPPING_QUOTE_PENDING ? "" : String(m || ""));
@@ -240,7 +243,7 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "saveGlobalSettingsAll",   // Global settings → Save: every section above in one request, all or nothing
   "getBoxPresets", "setBoxPresets",
   "getInventory", "createInventoryItem", "updateInventoryItem", "deleteInventoryItem",
-  "getBlanks", "createBlank", "updateBlank", "deleteBlank", "mergeBlanks", "markBlankPricesChecked", "getBlankVendorPriceHistory", "recomputeBlankAverageCosts", "confirmProductPrices",
+  "getBlanks", "createBlank", "updateBlank", "deleteBlank", "mergeBlanks", "markBlankPricesChecked", "setBlankArchived", "getBlankVendorPriceHistory", "recomputeBlankAverageCosts", "confirmProductPrices",
   "previewVendorBlanks", "applyVendorBlanks", "copyVendorImage", "getPricingSettings", "updatePricingSettings", "getRushSettings", "updateRushSettings", "analyzePricing", "previewProductHoopings", "removeBlankImages", "findOrphanImages", "deleteOrphanImages", "suggestColorGroups",
   "vendorDirectorySearch", "vendorDirectoryEndpoints", "listVendorConnections", "saveVendorConnection", "deleteVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks", "fetchVendorProducts",
   "previewSupplierOrder", "placeSupplierOrder", "listSupplierOrders", "checkSupplierOrderShipments", "cancelSupplierOrder", "listVendorApiLog", "getVendorApiLogEntry",
@@ -407,7 +410,7 @@ const NO_MONTH_ACTIONS = new Set([
   "saveNeedleSize", "saveNeedleType", "deleteThread", "deleteSpoolSize", "deleteThreadInventory", "deleteNeedleSize", "deleteNeedleType",
   "listAbortReasons", "saveAbortReason", "deleteAbortReason",
   // Inventory set-up (stock received, counted or written off is dated, and in periodGuard)
-  "createInventoryItem", "updateInventoryItem", "createBlank", "updateBlank", "addBlankSizes", "readInvoiceWithAi", "markBlankPricesChecked", "setBlankLink",
+  "createInventoryItem", "updateInventoryItem", "createBlank", "updateBlank", "addBlankSizes", "readInvoiceWithAi", "markBlankPricesChecked", "setBlankArchived", "setBlankLink",
   "saveBlankLinks", "deleteBlankLink", "applyBlankCatchUp", "importBlanks", "applyVendorBlanks", "copyVendorImage", "removeBlankImages", "deleteInventoryItem",
   "deleteBlank", "mergeBlanks", "recomputeBlankAverageCosts", "recordRestockOrder", "cancelRestockOrder", "saveVendor", "deleteVendor", "previewSupplierOrder",
   "placeSupplierOrder", "cancelSupplierOrder", "saveTransfer", "applyTransferCatchUp", "deleteTransfer",
@@ -595,12 +598,14 @@ export async function onRequestPost(context) {
   if (asked && (asked.at || asked.placedAt || action === "setOrderDates") && typeof resolveTimeZone === "function") await resolveTimeZone(env).catch(() => {});
   if (!listCacheOn_()) action = null;
   const before = action && writesLists_(action) ? await listCacheVersions_(env.DB).catch(() => null) : null;
-  const res = await handleOrdersPost_(context);
+  const res = await handleOrdersPost_(context, before);
   if (before && res && res.ok && typeof context.waitUntil === "function") context.waitUntil(refreshCachedLists_(env.DB, before).catch((e) => console.error("list cache refresh failed:", e)));
   return res;
 }
 
-async function handleOrdersPost_(context) {
+// `listBefore`: the list versions taken before a change (onRequestPost), so a change's answer can send only the blanks
+// that moved (withList_).
+async function handleOrdersPost_(context, listBefore = null) {
   const { request, env } = context;
   // Every audit row records WHO (adminActor: the signed-in user, and the Access email when there is one)
   // and from WHERE (client IP).
@@ -651,6 +656,10 @@ async function handleOrdersPost_(context) {
   // Products now below a target or a blank's MAP: all of it for a manager; a worker hears only of MAP (a vendor's
   // public price), never of costs or targets.
   const belowFor_ = (list) => seesPricing_() ? list : list.filter(p => p.belowMap).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.mapProblems || [], belowMap: true }));
+  // The same after a blank cost change. The change itself is saved by then, so a failed check only loses the
+  // notice, but it is logged so a broken query doesn't go unseen.
+  const belowForBlanks_ = async (blankIds) => belowFor_(await pricingBelowTargetForBlanks(env.DB, blankIds)
+    .catch((e) => { console.error("Pricing check after a blank cost change failed:", e); return []; }));
   // The order lists for a role without costs.view: each line's cost of goods and each payment's processor fee
   // (and their total) are left out. Prices, payments and postage stay: they are what the order screens work with.
   const orderCostsFor_ = (orders) => seesPricing_() ? orders : orders.map(o => {
@@ -686,7 +695,7 @@ async function handleOrdersPost_(context) {
   // machines or orgs. data is shared between requests: shape it into new objects, never change it.
   const cachedList_ = async (name) => {
     if (typeof readCachedList_ === "function") return readCachedList_(env.DB, name, undefined, { waitUntil: context.waitUntil?.bind(context) });
-    const build = { blanks: () => getAllBlanks(env.DB), threads: () => listThreads(env.DB), hoops: () => listHoops(env.DB),
+    const build = { blanks: () => getAllBlanks(env.DB, { includeArchived: true }), threads: () => listThreads(env.DB), hoops: () => listHoops(env.DB),
       locations: () => listLocations(env.DB), machines: () => listMachines(env.DB), orgs: () => getAllOrgs(env.DB) }[name];
     return { version: null, data: await build() };
   };
@@ -699,8 +708,23 @@ async function handleOrdersPost_(context) {
   };
   // A change's answer that carries the list again: the cached copy (built fresh, the change having moved its
   // version) and cacheVersions: { <name>: n }, so the page can keep it as its own copy.
+  // Blanks (review #82): the catalog only grows, so when the page says it holds the copy this change started from
+  // (body.listHeld.blanks equals the version before the change) and that copy is still kept here, only the blanks
+  // that differ go back: { blanks: [those], changedBlankIds, cacheVersions: { blanks: { from, to } } }. The page
+  // patches its copy (admin.js listCacheTake_). Anything else gets the whole list, as before.
   const withList_ = async (payload, name, key, shape = (d) => d) => {
+    const from = name === "blanks" && listBefore && listBefore.versions ? listBefore.versions.blanks : null;
+    const held = body.listHeld && typeof body.listHeld === "object" ? Number(body.listHeld[name]) : NaN;
+    const old = Number.isFinite(from) && held === from && typeof peekCachedList_ === "function"
+      ? await peekCachedList_(name, listBefore).catch(() => null) : null;
     const { version, data } = await cachedList_(name);
+    if (old && version !== null) {
+      const { changed, ids } = blankListDelta_(old, data);
+      payload[key] = shape(changed);
+      payload.changedBlankIds = ids;
+      payload.cacheVersions = { [name]: { from, to: version } };
+      return jsonResponse(payload);
+    }
     payload[key] = shape(data);
     if (version !== null) payload.cacheVersions = { [name]: version };
     return jsonResponse(payload);
@@ -1059,15 +1083,20 @@ async function handleOrdersPost_(context) {
   if (body.action === "getAuditLog") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
-    const entries = await getAuditLog(env.DB, {
+    // `before` ({createdAt, id} of the last entry shown) asks for the next, older page; `more` says there is one.
+    const before = body.before && typeof body.before === "object" && body.before.createdAt
+      ? { createdAt: String(body.before.createdAt).slice(0, 40), id: Number(body.before.id) } : null;
+    const got = await getAuditLog(env.DB, {
       orgId:    body.orgId    ? String(body.orgId).trim()    : undefined,
       orderId:  body.orderId  ? String(body.orderId).trim()  : undefined,
       action:   body.filter   ? String(body.filter).trim()   : undefined,
       dateFrom: body.dateFrom ? String(body.dateFrom).trim() : undefined,
       dateTo:   body.dateTo   ? String(body.dateTo).trim()   : undefined,
       limit:    body.limit    ? Number(body.limit)           : 20,
+      before, paged: true,
     });
-    return jsonResponse({ status: "ok", entries: auditCostsFor_(entries) });
+    const page = Array.isArray(got) ? { entries: got, more: false } : got;
+    return jsonResponse({ status: "ok", entries: auditCostsFor_(page.entries), more: !!page.more });
   }
 
   // ---- getDashboard — admin Home: orders by step and the money, kept for an hour (db.js getDashboard) ----
@@ -2872,6 +2901,7 @@ async function handleOrdersPost_(context) {
     { const vbad = await checkVendors_(); if (vbad) return vbad; }
     const itemIds = Array.isArray(body.itemIds) ? body.itemIds.map(Number).filter(Boolean) : [];
     if (!itemIds.length) return jsonResponse({ status: "error", message: "Pick at least one line item" }, 400);
+    if (itemIds.length > BLANK_SHIPMENT_MAX_ITEMS_) return jsonResponse({ status: "error", message: `At most ${BLANK_SHIPMENT_MAX_ITEMS_} lines in one shipment.` }, 400);
     try {
       const id = await addBlankShipment(env.DB, { carrier: body.carrier, trackingNumber: body.trackingNumber, vendor: body.vendor, shippedAt: body.shippedAt, itemIds });
       audit({ orgId: body.org || null, orderId: body.orderId || null, action: "blank.shipment_added",
@@ -2885,6 +2915,7 @@ async function handleOrdersPost_(context) {
     if (!body.id) return jsonResponse({ status: "error", message: "id required" }, 400);
     const itemIds = Array.isArray(body.itemIds) ? body.itemIds.map(Number).filter(Boolean) : [];
     if (!itemIds.length) return jsonResponse({ status: "error", message: "Pick at least one line item" }, 400);
+    if (itemIds.length > BLANK_SHIPMENT_MAX_ITEMS_) return jsonResponse({ status: "error", message: `At most ${BLANK_SHIPMENT_MAX_ITEMS_} lines in one shipment.` }, 400);
     try {
       await updateBlankShipment(env.DB, Number(body.id), { carrier: body.carrier, trackingNumber: body.trackingNumber, shippedAt: body.shippedAt, itemIds });
       audit({ orgId: body.org || null, orderId: body.orderId || null, action: "blank.shipment_updated",
@@ -4636,7 +4667,7 @@ async function handleOrdersPost_(context) {
       // Products priced on the old vendor prices — the form offers to open them.
       const repricing = priceChanges.length ? (await getProductPriceChanges(env.DB).catch(() => [])).filter(p => p.changes.some(c => c.blankId === id)) : [];
       // A new vendor price or MAP (migrations/0070): the products using this blank now below a target or its MAP.
-      const belowTarget = belowFor_(await pricingBelowTargetForBlanks(env.DB, [id]).catch(() => []));
+      const belowTarget = await belowForBlanks_([id]);
       return jsonResponse({ status: "ok", priceChanges: priceChanges.length, repricing: repricing.map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name })), belowTarget });
     }
 
@@ -4647,6 +4678,16 @@ async function handleOrdersPost_(context) {
       if (!at) return jsonResponse({ status: "error", message: "Blank not found" }, 404);
       audit({ orgId: null, orderId: null, action: "inventory.vendor_prices_checked", detail: { blankId: id } });
       return jsonResponse({ status: "ok", pricesCheckedAt: at });
+    }
+
+    // Archive / Unarchive (migrations/0104): a retired blank leaves the Blanks screen, product linking and vendor
+    // matching; its stock, history and reports stay.
+    if (body.action === "setBlankArchived") {
+      const id = Number(body.id);
+      const at = id ? await setBlankArchived(env.DB, id, !!body.archived) : null;
+      if (at === null) return jsonResponse({ status: "error", message: "Blank not found" }, 404);
+      audit({ orgId: null, orderId: null, action: body.archived ? "inventory.blank_archived" : "inventory.blank_unarchived", detail: { blankId: id } });
+      return withList_({ status: "ok", archivedAt: at }, "blanks", "blanks", blankCostsFor_);
     }
 
     // ---- Vendor blanks (2026-10): complete blanks + per-color prices from a vendor product file ----
@@ -4673,7 +4714,7 @@ async function handleOrdersPost_(context) {
       for (const r of results) audit({ orgId: null, orderId: null, action: r.created ? "inventory.blank_created_from_vendor" : "inventory.blank_updated_from_vendor",
         detail: { ...r, source: note } });
       // Prices / new blanks just changed: the products using them that are now below a pricing target.
-      const belowTarget = belowFor_(await pricingBelowTargetForBlanks(env.DB, results.map(r => r.blankId)).catch(() => []));
+      const belowTarget = await belowForBlanks_(results.map(r => r.blankId));
       return withList_({ status: "ok", results, belowTarget }, "blanks", "blanks", blankCostsFor_);
     }
 
@@ -6017,7 +6058,7 @@ async function handleOrdersPost_(context) {
       const { keys, parts } = await commitBlankOrder_(plan, { date, accountId, paidPersonally, fallbackName: "Blank order", source: { blankOrder: true } });
       audit({ orgId: null, orderId: null, action: "inventory.order_received", detail: { date, accountId, paidPersonally, keys, parts, total: plan.totalCents / 100 } });
       // The received blanks' average cost moved: products using them that are now below a pricing target.
-      const belowTarget = belowFor_(await pricingBelowTargetForBlanks(env.DB, plan.groups.map(g => g.blankId)).catch(() => []));
+      const belowTarget = await belowForBlanks_(plan.groups.map(g => g.blankId));
       return withList_({ status: "ok", parts, total: plan.totalCents / 100, belowTarget }, "blanks", "blanks", blankCostsFor_);
     }
     if (body.action === "receiveBlanks") {
@@ -6329,7 +6370,7 @@ async function handleOrdersPost_(context) {
       const targetId = Number(body.targetId);
       const sourceIds = Array.isArray(body.sourceIds) ? body.sourceIds.map(Number).filter(Boolean) : [];
       if (!targetId || !sourceIds.length) return jsonResponse({ status: "error", message: "Pick a target blank and at least one to merge in" }, 400);
-      const before = await getAllBlanks(env.DB);
+      const before = await getAllBlanks(env.DB, { includeArchived: true });
       const names = before.filter(b => sourceIds.includes(b.id)).map(b => b.name || b.brand);
       const result = await mergeBlanks(env.DB, { targetId, sourceIds });
       audit({ orgId: null, orderId: null, action: "inventory.blanks_merged", detail: { targetId, sourceIds, mergedNames: names } });

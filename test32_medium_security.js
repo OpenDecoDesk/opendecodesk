@@ -234,8 +234,8 @@ const SAME = { Origin: ADMIN, "CF-Connecting-IP": "203.0.113.7" };
       sendOrderReceivedEmail: async () => false, sendOrderNotificationEmail: async () => false, setOrderEmailTimestamp: async () => {},
       // The REAL address check from db.js (whitelist + state-vs-ZIP), not a mock.
       cleanShippingAddress: new Function(strip(read("functions/_lib/db.js")) + "\nreturn cleanShippingAddress;")(),
-      // …and the REAL quantity rule.
-      ...new Function(strip(read("functions/_lib/db.js")) + "\nreturn { lineQty, QTY_MESSAGE };")(),
+      // …and the REAL quantity rule (and the quantity-break counter the order path calls).
+      ...new Function(strip(read("functions/_lib/db.js")) + "\nreturn { lineQty, QTY_MESSAGE, orderBreakQty_ };")(),
     });
     const sub = await O.onRequestPost({ env: { DB: {} }, waitUntil: () => {},
       request: makeReq("https://league101.example.com/api/orders", { body: { orderId: "ORD-9", orgId: "league-101",

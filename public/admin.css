@@ -632,6 +632,49 @@
   .cust-pick:hover, .cust-pick:focus-visible{border-color:var(--accent,#333); background:var(--accent-soft,#f5f5f0);}
   .cust-pick span{font-size:12px; color:#666; overflow-wrap:anywhere;}
   .cust-merge-text{font-size:14px; line-height:1.5; white-space:pre-line; margin-bottom:12px; overflow-wrap:anywhere;}
+  /* ---- Quotes (public/admin-quotes.js): the list, one quote's editor and its windows. It reuses the Customers
+     page's pieces (.cust-field, .cust-table, .cust-tag…); these are the parts of its own. ---- */
+  .cust-field select{font:inherit; font-size:14px; font-weight:400; padding:7px 9px; border:1px solid #ccc; border-radius:4px; background:#fff; color:var(--ink,#1a1a1a); width:100%; box-sizing:border-box;}
+  .cust-field select:disabled{background:#f3f4f6; color:#555;}
+  .qt-filter{flex:0 1 180px;}
+  /* The Quotes heading on a customer's page, with its New quote button beside it. */
+  .cust-h-row{display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px 16px; margin:20px 0 10px;}
+  .cust-h-row .cust-h{margin:0;}
+  .qt-st-draft{background:#eceff1; color:#455a64;}
+  .qt-st-sent{background:#e3effd; color:#1d4f91;}
+  .qt-st-changes{background:#fff4e0; color:#8a4b00;}
+  .qt-st-accepted, .qt-st-converted{background:#e3f2e6; color:#1b5e20;}
+  .qt-st-cancelled{background:#f1f1f1; color:#777;}
+  .qt-page .cust-name .cust-tag{font-size:12px;}
+  .qt-callout{border:1px solid var(--card-line,#ddd); border-left:4px solid #1d4f91; border-radius:6px; background:#fff; padding:10px 14px; margin:0 0 14px; font-size:13px; line-height:1.5;}
+  .qt-callout-changes{border-left-color:#c77700; background:#fffaf0;}
+  .qt-quote-text{white-space:pre-line; overflow-wrap:anywhere; margin:6px 0; padding:6px 10px; border-left:2px solid #ddd; color:var(--ink,#1a1a1a);}
+  .qt-form{max-width:none;}
+  .qt-form .cust-grid, .qt-form > .cust-field{max-width:760px;}
+  .qt-lines .qt-qty{width:84px; font:inherit; font-size:13px; padding:4px 6px; border:1px solid #ccc; border-radius:4px; text-align:right; box-sizing:border-box;}
+  .qt-line-sub{font-size:12px; color:var(--ink-soft,#666); margin-top:2px;}
+  .qt-line-acts{white-space:nowrap; text-align:right;}
+  .qt-line-acts .admin-btn + .admin-btn{margin-left:4px;}
+  .qt-add{display:flex; flex-wrap:wrap; gap:8px;}
+  .qt-totals{display:flex; flex-direction:column; align-items:flex-end;}
+  .qt-sum{border-collapse:collapse; font-size:14px; min-width:260px;}
+  .qt-sum th{text-align:left; font-weight:400; color:var(--ink-soft,#666); padding:4px 16px 4px 0;}
+  .qt-sum td{text-align:right; font-variant-numeric:tabular-nums; padding:4px 0;}
+  .qt-sum .qt-sum-total th, .qt-sum .qt-sum-total td{font-weight:700; font-size:16px; color:var(--ink,#1a1a1a); border-top:1px solid var(--card-line,#ddd);}
+  .qt-picked{display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:13px; padding:8px 10px; border:1px solid #bae6fd; border-radius:5px; background:#f0f9ff; overflow-wrap:anywhere;}
+  /* A .cust-field is display:flex, which would otherwise win over the hidden attribute. */
+  .qt-picked[hidden], .qt-page [hidden], .cust-form [hidden]{display:none;}
+  .qt-preview{font-size:13px; color:var(--ink-soft,#555); line-height:1.5; min-height:18px;}
+  .qt-muted{font-weight:400; color:var(--ink-soft,#888);}
+  .qt-sr{position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap;}
+  @media(max-width:760px){
+    .cust-field select{font-size:16px;}
+    .qt-filter{flex:1 1 140px;}
+    .qt-totals{align-items:stretch;}
+    .qt-sum{min-width:0; width:100%;}
+    .qt-lines .qt-qty{font-size:16px; width:100px;}
+    .qt-add .admin-btn{flex:1 1 auto; min-height:44px;}
+  }
   @media(max-width:760px){
     .cust-grid, .cust-grid-3{grid-template-columns:1fr;}
     .cust-field input, .cust-field textarea{font-size:16px;}

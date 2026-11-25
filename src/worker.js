@@ -28,6 +28,7 @@ import { cleanUpUnsavedUploads } from "../functions/_lib/unsavedUploads.js";
 import * as dailyDigest from "../functions/api/daily-digest.js";
 import * as design from "../functions/api/design.js";
 import * as download from "../functions/api/download.js";
+import * as estimate from "../functions/api/estimate.js";
 import * as imageProxy from "../functions/api/image-proxy.js";
 import * as invoice from "../functions/api/invoice.js";
 import * as orders from "../functions/api/orders.js";
@@ -65,6 +66,7 @@ export const ROUTES = {
   "daily-digest": dailyDigest,
   "design": design,
   "download": download,
+  "estimate": estimate,
   "image-proxy": imageProxy,
   "invoice": invoice,
   "orders": orders,

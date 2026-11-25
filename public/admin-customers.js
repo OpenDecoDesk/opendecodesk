@@ -1,6 +1,6 @@
 // The Customers page (admin.js loads this file on demand, the first time #customers is opened:
 // ensureCustomersPage_). A customer is a record orders link to (migrations/0108): the list with a search, and one
-// customer's details, tax exemption, totals and orders, with archive and merge.
+// customer's details, tax exemption, totals, orders and quotes, with archive and merge.
 //
 // A classic script like admin.js, so it uses admin.js's own helpers as they are (adminApi_, adminSetHash,
 // adminPageHead_, inventoryModal_, askConfirm_, adminCan_, adminMoney_, adminDate_, openOrderFromDashboard_) and
@@ -22,6 +22,12 @@
   function custLabel(c) { return (c && (c.name || c.company || c.email)) || "Customer " + (c && c.id != null ? c.id : ""); }
   function plural(n, one, many) { return n + " " + (n === 1 ? one : (many || one + "s")); }
   const looksLikeEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+  // Quotes (public/admin-quotes.js, migrations/0109) on a customer's page: shown only where admin.js can open the
+  // Quotes page, the feature is on and the role may see quotes.
+  const QUOTES_FN = "quotes.estimates";
+  const QUOTES_SHOWN_MAX = 50;
+  const QUOTE_STATUS = { draft: "Draft", sent: "Sent", changes: "Changes asked", accepted: "Accepted", converted: "Converted", cancelled: "Cancelled" };
+  const quotesOn_ = () => typeof ensureQuotesPage_ === "function" && adminFeatureOn_("quotes") && adminCan_(QUOTES_FN, "read");
   // A screen that finished loading after the admin moved on must not draw over the page they went to.
   const stillOn = (hash, root) => _currentAdminHash === hash && (!root || root.isConnected);
 
@@ -151,7 +157,10 @@
   // ---- One customer: #customers/<id> -------------------------------------------------------------------------
   function backLink() { return `<a class="backlink" href="#customers">‹ Customers</a>`; }
 
-  async function renderOne(app, id) {
+  // known: { quotes } — what the page already showed of the customer's quotes (null: none shown), when it is drawn again
+  // after a change to the customer itself (a save, archive), which leaves its quotes as they were — so only the
+  // customer is asked for again.
+  async function renderOne(app, id, known) {
     let hash = "customers/" + id;
     adminSetHash(hash);
     document.title = adminTitle_("Customer");
@@ -166,6 +175,14 @@
       return;
     }
     if (!stillOn(hash) || !d || !d.customer) return;
+    // The customer's quotes (public/admin-quotes.js), asked for before anything is drawn so the page is drawn once. A
+    // server or role without quotes simply leaves the section out.
+    let quotes = known && quotesOn_() ? known.quotes : null;
+    if (!known && quotesOn_()) {
+      try { quotes = (await adminApi_({ action: "listEstimates", customerId: Number(d.customer.id), limit: QUOTES_SHOWN_MAX, offset: 0 })).estimates || []; }
+      catch (e) { quotes = null; }
+      if (!stillOn(hash)) return;
+    }
     const c = d.customer, orders = d.orders || [], totals = d.totals || {};
     // A customer that was merged away answers as the one it was merged into: the address follows.
     if (Number(c.id) !== id) { hash = "customers/" + c.id; adminSetHash(hash); }
@@ -252,10 +269,24 @@
           ${orders.length >= ORDERS_SHOWN_MAX ? `<div class="cust-note">The ${ORDERS_SHOWN_MAX} most recent orders are listed. The totals above count every order.</div>` : ""}
           ${orders.some(o => o.voided || o.isTest) ? `<div class="cust-note">Voided and test orders are listed but not counted in the totals.</div>` : ""}`
           : `<div class="cust-note">No orders yet.</div>`}
+        ${quotes == null ? "" : `<div class="cust-h-row"><h3 class="cust-h">Quotes</h3>
+          ${c.archived ? "" : `<button type="button" class="admin-btn admin-btn-secondary" id="custNewQuote" data-need="${QUOTES_FN}:edit">New quote for this customer</button>`}</div>
+        ${quotes.length ? `<div class="admin-table-wrap"><table class="stack-mobile cust-table cust-quotes">
+          <thead><tr><th>Quote</th><th>Title</th><th>Shop</th><th>Status</th><th class="cust-num">Total</th><th>Updated</th></tr></thead>
+          <tbody>${quotes.map(q => `<tr class="${q.status === "cancelled" ? "cust-row-archived" : ""}">
+            <td class="stack-title"><a class="cust-link" href="#quotes/${encodeURIComponent(q.id)}">${escapeHtml(q.number || "Quote " + q.id)}</a></td>
+            <td>${escapeHtml(q.title || "")}</td>
+            <td>${escapeHtml(shopName(q.orgId))}</td>
+            <td><span class="cust-tag qt-st-${escapeHtml(QUOTE_STATUS[q.status] ? q.status : "draft")}">${escapeHtml(QUOTE_STATUS[q.status] || "Draft")}</span>${q.orderId ? " " + escapeHtml("Order " + q.orderId) : ""}</td>
+            <td class="cust-num">${adminMoneyOr_(q.total)}</td>
+            <td>${escapeHtml(q.updatedAt ? adminDate_(q.updatedAt) : "")}</td>
+          </tr>`).join("")}</tbody></table></div>
+          ${quotes.length >= QUOTES_SHOWN_MAX ? `<div class="cust-note">The ${QUOTES_SHOWN_MAX} most recent quotes are listed; the Quotes page has them all.</div>` : ""}`
+          : `<div class="cust-note">No quotes yet.</div>`}`}
       </div>`;
 
     const root = document.getElementById("custPage");
-    const reload = () => { if (stillOn(hash)) renderOne(app, Number(c.id)); };
+    const reload = () => { if (stillOn(hash)) renderOne(app, Number(c.id), { quotes }); };
     const val = (fid) => root.querySelector("#" + fid).value.trim();
 
     root.querySelector("#custForm").addEventListener("submit", async (e) => {
@@ -295,6 +326,13 @@
       if (!btn) return;
       if (btn.id === "custNewSale") {
         if (typeof adminNewSaleForCustomer_ === "function") adminNewSaleForCustomer_(c);
+        return;
+      }
+      if (btn.id === "custNewQuote") {
+        // The Quotes page's own New quote window, with this customer picked; it opens the quote once it is made.
+        try { await ensureQuotesPage_(); }
+        catch (ex) { showToast(ex.message + ". Check your connection and try again.", true); return; }
+        if (stillOn(hash) && typeof renderQuotes === "function" && renderQuotes.newForCustomer) renderQuotes.newForCustomer(c);
         return;
       }
       if (btn.id === "custArchive") {

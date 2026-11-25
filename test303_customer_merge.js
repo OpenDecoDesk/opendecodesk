@@ -177,7 +177,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   ok("…and nothing of it is kept: the order hasn't moved and the duplicate isn't retired", snapshot() === wasBefore && same(ordersOf(from), [oBatch]) && row(from).mergedIntoId === null);
   d1._raw.run("DROP TRIGGER t277_refuse");
   r = await lib.mergeCustomers(countedDb, { fromId: from, intoId: into });
-  ok("a merge is one batch of four statements and no write outside it", r.moved === 1 && calls.batches === 1 && calls.inBatch === 4 && calls.writes === 0);
+  ok("a merge is one batch of five statements (the quotes move too, migrations/0109) and no write outside it", r.moved === 1 && calls.batches === 1 && calls.inBatch === 5 && calls.writes === 0);
 
   console.log("\n=== db.js mergeCustomers: what it refuses, with nothing changed ===");
   const a = cust({ name: "Refusal A", email: "ra@example.com" }), b = cust({ name: "Refusal B" });

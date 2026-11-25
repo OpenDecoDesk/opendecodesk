@@ -49,7 +49,8 @@ Because each order remembers its own mode, a reporting period that contains both
 A line of an order is taxed when **all** of these are true:
 
 1. **The product is taxable.** Each product has a "taxable" setting (on by default). Turn it off for
-   work that isn't taxable where you are. A custom line on a local sale chooses for itself.
+   work that isn't taxable where you are. A custom line on a local sale or a quote chooses for
+   itself, and so does a fee on a quote (setup, digitizing, art).
 2. **Neither the shop nor the customer is tax-exempt** (below).
 3. **The order is not shipped to another state.** An order with no shipping address — pickup, or
    one of a shop's own delivery options — counts as in your home state. If no home state is set,
@@ -115,6 +116,23 @@ Things to know:
   while a shop's expiry date is only a reminder and the shop stays exempt until you untick it.
 - The date an order is checked against is the day it was placed in the business's time zone
   (Global settings → Region).
+
+## Quotes
+
+A quote ([shops-and-domains.md](shops-and-domains.md#quotes)) shows its tax by the same rules as a
+local sale for that customer: its product lines are taxable when the product is, its custom lines
+and fees when you ticked them, and nothing is taxed when the shop or the customer is exempt. A
+quote has no shipping address, so it counts as in your home state.
+
+- **Until it is sent**, its tax follows the current settings.
+- **Sending it keeps** the rate and whether prices include tax, as they were that moment (a rate of
+  nothing when the shop or the customer was exempt). Changing the settings afterwards doesn't
+  change a quote already sent; sending a revised one takes them again.
+- **The order it becomes** is made like a local sale with the customer picked, on the day it is
+  accepted or converted, and taxed as that sale would be: by the settings and the exemptions of
+  that day, and by the delivery the customer chooses on the invoice. When nothing has changed in
+  between, that is the tax the quote showed.
+- Quotes aren't sales: they are not in the reports. The order is, from the month it was made.
 
 ## The reports
 

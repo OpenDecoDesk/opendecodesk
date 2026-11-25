@@ -110,4 +110,5 @@ export const MIGRATIONS = [
   "0106_orphan_scan_transfer_item_index.sql",
   "0107_receive_request_keys.sql",
   "0108_customers.sql",
+  "0109_estimates.sql",
 ];

@@ -158,6 +158,20 @@ const fig = (s) => s && [s.orders, s.pieces, s.sales, s.raised, s.paidOut, s.owe
   console.log("=== The Fundraising report: the per-order rows ===");
   ok("every counted order is a row, the first and last instants of the range included", same(R.orders.map(o => o.orderId).sort(), ["B1", "C1", "C2", "C9", "E1"]));
   ok("a shop's orders are in sale-date order", same(R.orders.filter(o => o.orgId === "club").map(o => o.orderId), ["C1", "C9", "C2"]));
+  ok("the rows are in sale-date order across shops, not shop by shop (Club 3/1, Band 3/5, League 3/7, Club 3/12, Club 3/31)",
+    same(R.orders.map(o => o.orderId), ["C1", "B1", "E1", "C9", "C2"]));
+  { // Two shops only, their sales taking turns.
+    const two = await makeDb();
+    await lib.setOrgFundraiser(two, "club", { mode: "percent", percent: 10, label: "Example Boosters" });
+    await lib.setOrgFundraiser(two, "band", { mode: "perPiece", amount: 1, label: "Example Band Parents" });
+    addOrder(two, { id: "T-B2", org: "band", placedAt: "2027-03-01T10:00:00.000Z", shippedAt: "2027-03-04T10:00:00.000Z" }, [{ qty: 1, total: 1000, raise: 100 }]);
+    addOrder(two, { id: "T-C1", org: "club", placedAt: "2027-03-01T10:00:00.000Z", shippedAt: "2027-03-02T10:00:00.000Z" }, [{ qty: 1, total: 1000, raise: 100 }]);
+    addOrder(two, { id: "T-C3", org: "club", placedAt: "2027-03-01T10:00:00.000Z", shippedAt: "2027-03-06T10:00:00.000Z" }, [{ qty: 1, total: 1000, raise: 100 }]);
+    addOrder(two, { id: "T-B4", org: "band", placedAt: "2027-03-01T10:00:00.000Z", shippedAt: "2027-03-08T10:00:00.000Z" }, [{ qty: 1, total: 1000, raise: 100 }]);
+    const tr = await lib.getFundraisingReport(two, { dateFrom: "2027-03-01", dateTo: "2027-03-31" });
+    ok("two shops whose sales take turns: Example Club, Example Band, Example Club, Example Band, by sale date",
+      same(tr.orders.map(o => o.orderId), ["T-C1", "T-B2", "T-C3", "T-B4"]));
+  }
   const c2 = R.orders.find(o => o.orderId === "C2");
   ok("each order row has orderId, orgId, placedAt, customerName, pieces, sales and raised",
     same(Object.keys(c2).sort(), ["customerName", "orderId", "orgId", "pieces", "placedAt", "raised", "sales"]));
@@ -234,6 +248,13 @@ const fig = (s) => s && [s.orders, s.pieces, s.sales, s.raised, s.paidOut, s.owe
   const halfR = await lib.getFundraisingReport(half, { dateFrom: "2027-03-01", dateTo: "2027-03-31" }).catch(e => ({ thrown: e.message }));
   ok("without expenses.fundraiserOrgId the report is empty, not an error", Array.isArray(halfR.shops) && halfR.shops.length === 0 && !halfR.thrown);
   ok("without expenses.fundraiserOrgId the payouts list is empty", same(await lib.listFundraiserPayouts(half, {}), []));
+  await lib.setOrgFundraiser(half, "club", { mode: "percent", percent: 10, label: "Example Boosters" });
+  const halfAcct = await lib.saveAccount(half, 0, { name: "Example Checking", type: "checking", openingBalance: 0, openingDate: "2027-01-01", active: true });
+  const halfN = half.q("SELECT count(*) AS n FROM expenses")[0].n;
+  const halfPay = await lib.recordFundraiserPayout(half, { orgId: "club", amount: 5, date: "2027-03-01", accountId: halfAcct, today: "2027-06-15" }).catch(e => ({ thrown: e.message }));
+  ok("without expenses.fundraiserOrgId a payout is refused as not ready ({ error: the update message, notReady: true }), not thrown",
+    same(halfPay, { error: NOT_READY, notReady: true }));
+  ok("…and no expense is written on that database", half.q("SELECT count(*) AS n FROM expenses")[0].n === halfN);
 
   // =====================================================================================================
   console.log("=== Recording a payout: what it refuses ===");

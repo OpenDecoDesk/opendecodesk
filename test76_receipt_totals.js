@@ -15,7 +15,7 @@ global.fetch = async (url, init) => {
   if (captureMail(url, init, sent)) return MAIL_OK;
   throw new Error("unexpected fetch " + url);
 };
-const E = new Function("const recordSystemIssue = async () => {};\n" + strip(read("functions/_lib/email.js")) +
+const E = new Function("const recordSystemIssue = async () => {};\n" + require("./testlib/fetch-timeout").source() + strip(read("functions/_lib/email.js")) +
   "\nreturn { sendOrderReceivedEmail, sendPaymentConfirmedEmail, sendDailyDigestEmail };")();
 const env = { ...MAIL_ENV };
 const plain = (html) => html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ");

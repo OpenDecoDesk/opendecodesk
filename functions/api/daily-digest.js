@@ -41,13 +41,16 @@ export async function onRequestPost({ request, env }) {
 // The roll-up, minus authentication, with a record of the run left behind (see setDigestRun) — also
 // when it found nothing or failed, so Communications can say "last checked 6:00 AM — nothing new".
 // `trigger`: "scheduled" (the Worker's cron) or "manual" (the POST above). Returns the JSON Response.
-export async function runDailyDigest(env, trigger = "manual") {
+// `onSent`: called once the email is out, before the run saves its progress (src/worker.js marks the
+// scheduled try done there, so a failure after the send can't make a retry send it twice).
+export async function runDailyDigest(env, trigger = "manual", { onSent } = {}) {
   const record = async (fields) => {
     try { await setDigestRun(env.DB, { at: new Date().toISOString(), trigger, ...fields }); }
     catch (e) { console.error("Could not record the roll-up run:", e); }
   };
   let res;
-  try { res = await runDailyDigestInner_(env, trigger); }
+  const sentHook = async () => { if (onSent) { try { await onSent(); } catch (e) { console.error("onSent failed:", e); } } };
+  try { res = await runDailyDigestInner_(env, trigger, sentHook); }
   catch (e) { await record({ ok: false, sent: false, message: String((e && e.message) || e).slice(0, 300) }); throw e; }
   const body = await res.clone().json().catch(() => ({}));
   await record({ ok: res.ok, sent: !!body.sent, heartbeat: body.heartbeat || "", orders: Number(body.orders) || 0, notices: Number(body.notices) || 0,
@@ -56,7 +59,7 @@ export async function runDailyDigest(env, trigger = "manual") {
   return res;
 }
 
-async function runDailyDigestInner_(env, trigger) {
+async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
 
   // Check tracking for shipped orders first: delivered ones are marked delivered
   // and queued as "delivered" notices, so they land in THIS email. In-transit
@@ -171,12 +174,14 @@ async function runDailyDigestInner_(env, trigger) {
     if (trigger === "scheduled") {
       const ok = await sendDigestHeartbeatEmail(env, { lastSentAt: state ? state.sentAt || "" : "", inTransit, awaitingPickup, awaitingBlanks, maintenanceDue, rushToSet, recurringRecorded });
       heartbeat = ok ? "sent" : "failed";
+      if (ok) await onSent();
     }
     return jsonResponse({ status: "ok", sent: false, heartbeat, orders: 0, notices: 0, delivered: deliveries.delivered.length, inTransit: 0 });
   }
   const orgNames = Object.fromEntries((await getAllOrgs(env.DB)).map(o => [o.orgId, o.name]));
   const sent = await sendDailyDigestEmail(env, { orders, notices, orgNames, security, inTransit, pickedUp, awaitingPickup, issues, awaitingBlanks, priceReminder, belowTarget, maintenanceDue, rushToSet, recurringRecorded });
   if (!sent) return jsonResponse({ status: "error", message: "Email could not be sent — will retry next run" }, 502);
+  await onSent();
   if (priceReminder) await setBlankPriceReminderSent(env.DB).catch((e) => console.error("setBlankPriceReminderSent failed:", e));
   await alerts.commit().catch((e) => console.error("pricing alerts commit failed:", e));
   await setDigestState(env.DB, { ...cursor, sentAt: new Date().toISOString() });

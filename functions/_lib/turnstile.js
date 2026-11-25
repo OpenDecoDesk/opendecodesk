@@ -17,6 +17,21 @@ export function turnstileEnabled(env){
   return !!env.TURNSTILE_SECRET_KEY;
 }
 
+// Kept identical to http.js's fetchWithTimeout (this file imports nothing: the tests load it on its own; test19
+// checks the copies match). A siteverify that never answers would otherwise hold the order submission.
+function fetchWithTimeout(url, init, ms){
+  const limit = Number(ms) > 0 ? Number(ms) : (Number(fetchWithTimeout.defaultMs) || 10000);
+  if(typeof AbortSignal === "undefined" || typeof AbortSignal.timeout !== "function") return fetch(url, init);
+  const signal = AbortSignal.timeout(limit);
+  return new Promise((resolve, reject) => {
+    // Rejected here as well as by fetch itself, so a fetch that ignores its signal can't hang the caller.
+    const onAbort = () => reject(Object.assign(new Error("No answer within " + (limit >= 1000 ? Math.round(limit / 1000) + " seconds." : limit + " ms.")), { name: "TimeoutError" }));
+    signal.addEventListener("abort", onAbort, { once: true });
+    fetch(url, { ...(init || {}), signal }).then(resolve, (e) => (signal.aborted ? onAbort() : reject(e)))
+      .finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 // Returns {ok:true} or {ok:false, message}.
 export async function verifyTurnstile(env, token, request){
   if(!turnstileEnabled(env)) return { ok: true };
@@ -29,7 +44,7 @@ export async function verifyTurnstile(env, token, request){
   const ip = request.headers.get("CF-Connecting-IP");
   if(ip) form.append("remoteip", ip);
   try{
-    const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form });
+    const res = await fetchWithTimeout("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form });
     const data = await res.json();
     if(data && data.success === true) return { ok: true };
     console.error("Turnstile rejected:", data && data["error-codes"]);

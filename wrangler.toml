@@ -40,10 +40,11 @@ not_found_handling = "single-page-application"
 
 # The daily roll-up. Cron is UTC-only, so the Worker is woken every hour and
 # functions/_lib/schedule.js lets through the one tick that is DIGEST_HOUR (default 6) in the
-# install's time zone (Global settings → Region, else the TIMEZONE variable, else UTC). The other
-# 23 ticks a day do one small database read and stop. If you never change the time zone you can
-# list just the UTC hour(s) that match instead, e.g. crons = ["0 4 * * *", "0 5 * * *"] for
-# 6 AM in a UTC+1/+2 zone.
+# install's time zone (Global settings → Region, else the TIMEZONE variable, else UTC), and the
+# ticks after it retry a roll-up or housekeeping that failed (up to 3 tries a day). The other ticks
+# do a few small database reads and stop. If you never change the time zone you can list just the
+# UTC hour(s) that match instead, e.g. crons = ["0 4 * * *", "0 5 * * *"] for 6 AM in a UTC+1/+2
+# zone — but then a failed roll-up isn't retried until the next day.
 [triggers]
 crons = ["0 * * * *"]
 

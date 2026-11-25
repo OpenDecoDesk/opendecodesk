@@ -223,4 +223,93 @@ function makeCachesMock(){
     console.log("The outage gets the fallback, and the next request the rebuilt catalog:", fb.subdomainMap.x === "org-x-1" && next.subdomainMap.x === "org-x-3");
     _resetCatalogCacheState();
   }
+
+  // A fresh build is stored twice in the Cache API (its versioned key and its last-known-good copy). Both are
+  // stored at once; with the request's waitUntil the answer doesn't wait for them (code review #102).
+  console.log("\n=== Storing a fresh build: both copies at once, and after the answer with waitUntil ===");
+  {
+    const store = makeCachesMock(); _resetCatalogCacheState();
+    const realPut = global.caches.default.put;
+    let inFlight = 0, most = 0, release = null, gate = new Promise(r => { release = r; }), failPut = false;
+    global.caches.default.put = async (key, response) => {
+      inFlight++; most = Math.max(most, inFlight);
+      await gate; inFlight--;
+      if (failPut) throw new Error("cache full");
+      return realPut(key, response);
+    };
+    const DB = await makePlatformDb();
+    global.getPublicCatalogMeta = async () => ({ subdomainMap: { x: "org-x" } });
+    global.getPublicCatalogShop = async (db, id) => ({ orgId: id, products: [] });
+    // Without waitUntil the call waits for both copies — stored side by side, not one after the other.
+    let done = false;
+    const p = getCatalogData({ DB }).then(d => { done = true; return d; });
+    for (let i = 0; i < 20 && most < 2; i++) await new Promise(r => setTimeout(r, 5));
+    console.log("without waitUntil: both copies are stored at once:", most === 2 && !done);
+    release(); await p;
+    console.log("…and the answer comes once they are:", done && store.size === 2);
+    // With waitUntil: the answer is back while the copies are still being stored.
+    _resetCatalogCacheState(); store.clear(); most = 0;
+    gate = new Promise(r => { release = r; });
+    await bumpCatalogVersion(DB); invalidateCatalogVersionCache();
+    const waits = [];
+    const meta = await getCatalogData({ DB }, { waitUntil: (pr) => waits.push(pr) });
+    console.log("with waitUntil: the answer doesn't wait for the Cache API:", meta.subdomainMap.x === "org-x" && store.size === 0 && waits.length === 1 && most === 2);
+    release(); await Promise.all(waits);
+    console.log("…both copies are stored after it, through waitUntil:", store.size === 2);
+    const shop = await getCatalogShop({ DB }, "acme", { waitUntil: (pr) => waits.push(pr) });
+    console.log("a shop's entry the same way:", shop && shop.orgId === "acme" && waits.length === 2);
+    await Promise.all(waits);
+    console.log("…stored after the answer:", store.size === 4);
+    // A copy that can't be stored: with waitUntil the answer is still the fresh build, and nothing rejects.
+    _resetCatalogCacheState(); store.clear(); failPut = true;
+    await bumpCatalogVersion(DB); invalidateCatalogVersionCache();
+    const w2 = [];
+    const again = await getCatalogData({ DB }, { waitUntil: (pr) => w2.push(pr) });
+    let rejected = false; await Promise.all(w2).catch(() => { rejected = true; });
+    console.log("a copy that can't be stored doesn't fail the answer (waitUntil gets a promise that never rejects):", again.subdomainMap.x === "org-x" && !rejected);
+    global.caches.default.put = realPut; failPut = false;
+    _resetCatalogCacheState();
+  }
+
+  // The admin's versioned lists (db.js readCachedList_): a rebuilt list is stored after the answer with waitUntil.
+  console.log("\n=== The admin's lists (readCachedList_): stored after the answer with waitUntil ===");
+  {
+    const { createD1 } = require("./testlib/d1-shim.js");
+    const strip = (s) => s.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1");
+    const lib = new Function(strip(fs.readFileSync(__dirname + "/functions/_lib/db.js", "utf8")) + "\nreturn { readCachedList_, _resetListCacheMemory };")();
+    const d1 = await createD1();
+    d1._raw.exec(fs.readFileSync(__dirname + "/testlib/schema-pre-0006.sql", "utf8"));
+    for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(fs.readFileSync(__dirname + "/migrations/" + f, "utf8"));
+    const store = makeCachesMock();
+    const realPut = global.caches.default.put;
+    let release, gate = new Promise(r => { release = r; });
+    global.caches.default.put = async (k, r) => { await gate; return realPut(k, r); };
+    const waits = [];
+    const got = await lib.readCachedList_(d1, "threads", undefined, { waitUntil: (pr) => waits.push(pr) });
+    console.log("the list comes back before it is stored:", got.version !== null && Array.isArray(got.data) && store.size === 0 && waits.length === 1);
+    release(); await Promise.all(waits);
+    console.log("…and is stored through waitUntil:", store.size === 1);
+    lib._resetListCacheMemory(); store.clear();
+    gate = new Promise(r => { release = r; });
+    let done = false;
+    const p = lib.readCachedList_(d1, "threads").then(() => { done = true; });
+    await new Promise(r => setTimeout(r, 20));
+    console.log("without waitUntil it waits for the store, as before:", !done);
+    release(); await p;
+    console.log("…then answers:", done && store.size === 1);
+    global.caches.default.put = realPut;
+  }
+
+  console.log("\n=== The API handlers pass their waitUntil ===");
+  {
+    const src = (f) => fs.readFileSync(__dirname + "/functions/api/" + f, "utf8");
+    const calls = (f, re) => (src(f).match(re) || []).length;
+    const meta = /getCatalogData\(env, \{ waitUntil(: context\.waitUntil\?\.bind\(context\))? \}\)/g;
+    const counts = { "catalog.js": 1, "checkout.js": 1, "shipping.js": 2, "orders.js": 1, "customer-design.js": 1, "admin-users.js": 1, "admin-password.js": 1, "admin-2fa.js": 1, "shippo-label.js": 1 };
+    const missing = Object.entries(counts).filter(([f, n]) => calls(f, meta) !== n || calls(f, /await getCatalogData\(env\)/g) !== 0).map(([f]) => f);
+    console.log("every request handler's catalog read passes it:", missing.length === 0);
+    if (missing.length) console.log("  not passed in:", missing.join(" "));
+    console.log("…and the storefront's shop read and the admin's lists too:", /getCatalogShop\(env, orgId, \{ waitUntil: context\.waitUntil\?\.bind\(context\) \}\)/.test(src("catalog.js")) &&
+      /readCachedList_\(env\.DB, name, undefined, \{ waitUntil: context\.waitUntil\?\.bind\(context\) \}\)/.test(src("orders.js")));
+  }
 })();

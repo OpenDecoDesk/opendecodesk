@@ -44,7 +44,7 @@ const checkout = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n"
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const getCatalogData = async () => ({ subdomainMap: { acme: 'acme' }, orgs: {} });\n" +
   dbSrc + "\n" + strip(read("functions/api/checkout.js")) + "\nreturn onRequestPost;")();
-const E = new Function("const recordSystemIssue = async () => {};\n" + strip(read("functions/_lib/email.js")) +
+const E = new Function("const recordSystemIssue = async () => {};\n" + require("./testlib/fetch-timeout").source() + strip(read("functions/_lib/email.js")) +
   "\nreturn { sendOrderReceivedEmail, sendPaymentConfirmedEmail };")();
 const plain = (html) => html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ");
 

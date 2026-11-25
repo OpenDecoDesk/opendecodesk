@@ -37,7 +37,7 @@ export async function onRequestPost(context){
   const { request, env } = context;
 
   let catalogData;
-  try{ catalogData = await getCatalogData(env); }
+  try{ catalogData = await getCatalogData(env, { waitUntil: context.waitUntil?.bind(context) }); }
   catch(e){ return jsonResponse({status:"error", message:"Catalog unavailable"}, 503); }
   const host = classifyHost(new URL(request.url).hostname, catalogData.subdomainMap, env);
 

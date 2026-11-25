@@ -39,8 +39,10 @@ import * as uploadVerify from "../functions/api/upload-verify.js";
 import * as upload from "../functions/api/upload.js";
 import * as verify from "../functions/api/verify.js";
 import { recordSystemIssue, resolveTimeZone, getDigestRun, ensureSigningSecret } from "../functions/_lib/db.js";
-import { isDigestHour, isHousekeepingHour, localHour, digestHour } from "../functions/_lib/schedule.js";
+import { getSettingRaw, setSettingRaw } from "../functions/_lib/db.js";
+import { localHour, localDay, digestHour, housekeepingHour, scheduledJobDue, scheduledAttempt } from "../functions/_lib/schedule.js";
 import { pendingMigrations } from "../functions/_lib/migrationCheck.js";
+import { jsonResponse } from "../functions/_lib/http.js";
 import { isDesktopEdition, desktopSuppliersOn, desktopEmailOn } from "../functions/_lib/hostConfig.js";
 import { ensureDesktopReady } from "../functions/_lib/desktop.js";
 import { fillMissingCardFees } from "../functions/_lib/stripeFees.js";
@@ -120,15 +122,31 @@ export async function handleRequest(request, env, ctx) {
   const handler = handlerFor(mod, request.method);
   if (!handler) return text("Method not allowed", 405);
   env = await withSigningSecret(env);
-  return handler({
-    request,
-    env,
-    params: {},
-    data: {},
-    waitUntil: (p) => ctx.waitUntil(p),
-    passThroughOnException: () => ctx.passThroughOnException(),
-    next: (req) => (env.ASSETS ? env.ASSETS.fetch(req || request) : text("Not found", 404)),
-  });
+  try {
+    return await handler({
+      request,
+      env,
+      params: {},
+      data: {},
+      waitUntil: (p) => ctx.waitUntil(p),
+      passThroughOnException: () => ctx.passThroughOnException(),
+      next: (req) => (env.ASSETS ? env.ASSETS.fetch(req || request) : text("Not found", 404)),
+    });
+  } catch (e) {
+    // A handler that throws (a bug, a database that refused a statement no one caught) would otherwise give
+    // the runtime's bare 500 page, which the admin's and the shop's pages can't read, and leave the error only
+    // in the Worker's log. The caller gets a plain JSON error (never the stack), and the error goes into the
+    // next roll-up's system problems (recorded after the answer, so a database that is down can't hold it up).
+    const route = match[1];
+    console.error("/api/" + route + " failed:", e);
+    const message = String((e && e.message) || e || "unknown error");
+    const record = recordSystemIssue(env && env.DB, "api_error", route + ": " + message);
+    if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(record);
+    else await record;
+    const res = jsonResponse({ status: "error", message: "Something went wrong — it has been logged." }, 500);
+    res.headers.set("Cache-Control", "no-store");
+    return res;
+  }
 }
 
 // The desktop program's roll-up is due when it is the roll-up's hour or later, in the business's time
@@ -177,9 +195,22 @@ async function runHousekeeping_(env) {
   return out;
 }
 
-// The scheduled roll-up. The cron wakes the Worker every hour (UTC); only the tick that lands on the
+// The scheduled jobs' records of the day ({day, attempts, ok} — functions/_lib/schedule.js), in global_settings.
+// Not the roll-up's own last-run record (dailyDigestRun): a roll-up sent by hand overwrites that one.
+const DIGEST_SCHEDULE_KEY = "dailyDigestScheduled";
+const HOUSEKEEPING_SCHEDULE_KEY = "housekeepingScheduled";
+async function scheduledEntry_(env, key) {
+  try { const v = await getSettingRaw(env.DB, key); return v ? JSON.parse(v) : null; }
+  catch (e) { return null; }
+}
+async function saveScheduledEntry_(env, key, entry) {
+  try { await setSettingRaw(env.DB, key, JSON.stringify(entry)); }
+  catch (e) { console.error("Could not save the scheduled run's record", key, e); }
+}
+
+// The scheduled roll-up. The cron wakes the Worker every hour (UTC); the tick that lands on the
 // configured local hour runs it, so it goes out once a day at the same local time all year (and the
-// tick an hour before runs the housekeeping above). The
+// tick an hour before runs the housekeeping above); a failed run is tried again on the next ticks. The
 // time zone is the install's one zone: Global settings → Region, else TIMEZONE, else UTC.
 export async function handleScheduled(event, env) {
   env = await withSigningSecret(env);
@@ -223,24 +254,45 @@ export async function handleScheduled(event, env) {
   }
   const when = new Date(event && event.scheduledTime ? event.scheduledTime : Date.now());
   const timeZone = await resolveTimeZone(env);
-  // An hour before the roll-up: the housekeeping, on its own tick, so its requests (up to 20 to Stripe, the
-  // clean-ups' storage and database calls) never come out of the roll-up's per-run allowance.
-  if (isHousekeepingHour(env, when, timeZone)) return { ran: true, housekeeping: await runHousekeeping_(env) };
-  if (!isDigestHour(env, when, timeZone)) return { ran: false, reason: "not the digest hour" };
+  // Each job runs at its hour or, if that try failed or its tick never came, at a later tick the same day, up
+  // to 3 tries (functions/_lib/schedule.js scheduledJobDue). The record is the scheduled runs' own: a roll-up
+  // sent by hand (Communications) neither counts as a try nor stops one. Never both jobs on one tick: the
+  // roll-up first; a housekeeping still due goes on the next tick.
+  const hour = localHour(when, timeZone), day = localDay(when, timeZone);
+  const rollUpEntry = await scheduledEntry_(env, DIGEST_SCHEDULE_KEY);
+  if (!scheduledJobDue(rollUpEntry, { hour, jobHour: digestHour(env), day })) {
+    // An hour before the roll-up: the housekeeping, on its own tick, so its requests (up to 20 to Stripe, the
+    // clean-ups' storage and database calls) never come out of the roll-up's per-run allowance.
+    const hkEntry = await scheduledEntry_(env, HOUSEKEEPING_SCHEDULE_KEY);
+    if (!scheduledJobDue(hkEntry, { hour, jobHour: housekeepingHour(env), day })) return { ran: false, reason: "not the digest hour" };
+    const attempt = scheduledAttempt(hkEntry, day);
+    await saveScheduledEntry_(env, HOUSEKEEPING_SCHEDULE_KEY, attempt);
+    const housekeeping = await runHousekeeping_(env);
+    const failed = Object.values(housekeeping).some(r => r && (r.error || (Array.isArray(r.errors) && r.errors.length)));
+    await saveScheduledEntry_(env, HOUSEKEEPING_SCHEDULE_KEY, { ...attempt, ok: !failed });
+    return { ran: true, housekeeping };
+  }
+  const attempt = scheduledAttempt(rollUpEntry, day);
+  await saveScheduledEntry_(env, DIGEST_SCHEDULE_KEY, attempt);
+  // Done as soon as the email is out (runDailyDigest's onSent), before the roll-up saves its progress: if
+  // saving that fails, a retry would send the same email again.
+  const markDone = () => saveScheduledEntry_(env, DIGEST_SCHEDULE_KEY, { ...attempt, ok: true });
   // Database updates this code needs that the database hasn't had (code deployed without its migrations, or one
-  // that failed partway — functions/_lib/migrationCheck.js): reported in this roll-up, every day until applied.
-  try {
+  // that failed partway — functions/_lib/migrationCheck.js): reported in this roll-up, every day until applied
+  // (once a day: a retry's roll-up still has the first try's report to send).
+  if (attempt.attempts === 1) try {
     const pending = await pendingMigrations(env.DB);
     if (pending && pending.length) await recordSystemIssue(env.DB, "migrations_pending", pending.length + " not applied, starting with " + pending[0]);
   } catch (e) { console.error("Checking for database updates failed (continuing with the roll-up):", e); }
   try {
-    const res = await dailyDigest.runDailyDigest(env, "scheduled");
+    const res = await dailyDigest.runDailyDigest(env, "scheduled", { onSent: markDone });
     const body = await res.clone().json().catch(() => ({}));
     if (!res.ok) {
       console.error("Daily roll-up did not complete:", res.status, JSON.stringify(body).slice(0, 300));
       await recordSystemIssue(env.DB, "digest_failed", (body && body.message) || ("HTTP " + res.status));
       return { ran: true, ok: false, body };
     }
+    await markDone();
     return { ran: true, ok: true, body };
   } catch (e) {
     console.error("Daily roll-up crashed:", e);

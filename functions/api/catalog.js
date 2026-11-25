@@ -178,7 +178,7 @@ export async function onRequestGet(context){
 
   let catalogData;
   try{
-    catalogData = await getCatalogData(env);
+    catalogData = await getCatalogData(env, { waitUntil: context.waitUntil?.bind(context) });
   }catch(err){
     return jsonResponse({status:"error", message:"Catalog temporarily unavailable"}, 503);
   }
@@ -251,7 +251,7 @@ export async function onRequestGet(context){
   // Only this shop's catalog is read (catalogCache.js caches each shop apart), never the other shops'.
   let org = null;
   if(orgId){
-    try{ org = await getCatalogShop(env, orgId); }
+    try{ org = await getCatalogShop(env, orgId, { waitUntil: context.waitUntil?.bind(context) }); }
     catch(err){ return jsonResponse({status:"error", message:"Catalog temporarily unavailable"}, 503); }
   }
   // The admin's draft preview (migrations/0076): ?preview=<token signed for THIS shop> serves the shop's live,

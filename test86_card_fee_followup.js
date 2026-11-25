@@ -61,5 +61,5 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
   console.log("it only retries when the first read gave 0:", /inserted && feeCents === 0/.test(hook));
   // (The daily housekeeping, an hour before the roll-up on its own tick — test84 runs it; the desktop program has no Stripe.)
   const hk = w.slice(w.indexOf("async function runHousekeeping_("), w.indexOf("export async function handleScheduled("));
-  console.log("the scheduled housekeeping fills missing fees, an hour before the roll-up:", /fillMissingCardFees\(env\)/.test(hk) && /isHousekeepingHour\(env, when, timeZone\)\) return \{ ran: true, housekeeping: await runHousekeeping_\(env\) \}/.test(w));
+  console.log("the scheduled housekeeping fills missing fees, an hour before the roll-up:", /fillMissingCardFees\(env\)/.test(hk) && /jobHour: housekeepingHour\(env\)/.test(w) && /const housekeeping = await runHousekeeping_\(env\);/.test(w));
 })().catch((e) => { console.log("test86 crashed:", false); console.error(e); process.exit(1); });

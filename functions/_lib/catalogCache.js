@@ -156,24 +156,27 @@ async function fetchShopFromD1_(env, orgId){
 }
 
 // The meta entry: the shop addresses and the settings, no shop's products (see the top of this file).
-export async function getCatalogData(env){
+// `waitUntil` (optional, the request's context.waitUntil): a fresh build is stored in the Cache API after the
+// answer instead of before it.
+export async function getCatalogData(env, { waitUntil } = {}){
   const { version, ns } = await getCacheState_(env);
-  return layered_(versionedCacheKey(ns, version, "meta"), staleFallbackKey(ns, "meta"), _meta, () => fetchMetaFromD1_(env));
+  return layered_(versionedCacheKey(ns, version, "meta"), staleFallbackKey(ns, "meta"), _meta, () => fetchMetaFromD1_(env), waitUntil);
 }
 
 // One shop's entry, as published: the same object the whole-install build gives for it. null = no such shop.
-export async function getCatalogShop(env, orgId){
+export async function getCatalogShop(env, orgId, { waitUntil } = {}){
   if(orgId == null || orgId === "") return null;
   const id = String(orgId);
   const { version, ns } = await getCacheState_(env);
-  return layered_(versionedCacheKey(ns, version, shopPart_(id)), staleFallbackKey(ns, shopPart_(id)), _shops, () => fetchShopFromD1_(env, id));
+  return layered_(versionedCacheKey(ns, version, shopPart_(id)), staleFallbackKey(ns, shopPart_(id)), _shops, () => fetchShopFromD1_(env, id), waitUntil);
 }
 
 // One entry through the layers: this isolate's memory, then the Cache API, then a build from D1 —
 // stored in the Cache API under its versioned key and as its last-known-good copy, and kept in
 // memory. If the build fails, the last-known-good copy is served (or the error thrown when
-// there is none).
-async function layered_(key, staleKey, mem, build){
+// there is none). The two copies are stored at once; with `waitUntil` the request doesn't wait for
+// them (a copy that fails to store only costs another isolate a rebuild).
+async function layered_(key, staleKey, mem, build, waitUntil){
   const hit = mem.get(key);
   if(hit) return hit.data;
 
@@ -191,8 +194,9 @@ async function layered_(key, staleKey, mem, build){
     const response = new Response(JSON.stringify(data), {
       headers: { "Content-Type": "application/json", "Cache-Control": "max-age=" + CACHE_TTL_SECONDS, [BUILT_AT_HEADER]: String(builtAt) }
     });
-    await cache.put(key, response.clone());
-    await cache.put(staleKey, response.clone());
+    const puts = [cache.put(key, response.clone()), cache.put(staleKey, response.clone())];
+    if(typeof waitUntil === "function") waitUntil(Promise.all(puts).catch(() => {}));
+    else await Promise.all(puts);
     remember_(mem, key, data, builtAt);
     return data;
   }catch(err){

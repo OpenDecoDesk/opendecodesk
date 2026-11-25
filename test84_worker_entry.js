@@ -98,12 +98,13 @@ const path = require("path");
     const issue = DB.q("SELECT group_concat(kind) AS value FROM system_issues");
     console.log("an on-hour tick runs the roll-up:", res.ran === true);
     console.log("a roll-up that fails is recorded for the owner (digest_failed):", res.ok === false && issue.length === 1 && /digest_failed/.test(issue[0].value));
-    const utc = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T10:00:00Z") }, { DB });
-    const utc6 = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T06:00:00Z") }, { DB });
+    // (A fresh database for each tick below: a failed roll-up is retried on the ticks after it — test265.)
+    const fresh = async (tokyo) => { const d = await makePlatformDb(); if (tokyo) d.q("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('locale', '{\"timeZone\":\"Asia/Tokyo\",\"country\":\"US\"}')"); return d; };
+    const utc = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T10:00:00Z") }, { DB: await fresh() });
+    const utc6 = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T06:00:00Z") }, { DB: await fresh() });
     console.log("with no time zone anywhere, 06:00 UTC is the tick:", utc.ran === false && utc6.ran === true);
-    DB.q("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('locale', '{\"timeZone\":\"Asia/Tokyo\",\"country\":\"US\"}')");
-    const tky = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-14T21:00:00Z") }, { DB, TIMEZONE: "America/New_York" });
-    const notNy = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T10:00:00Z") }, { DB, TIMEZONE: "America/New_York" });
+    const tky = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-14T21:00:00Z") }, { DB: await fresh(true), TIMEZONE: "America/New_York" });
+    const notNy = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T10:00:00Z") }, { DB: await fresh(true), TIMEZONE: "America/New_York" });
     console.log("a time zone saved in Region beats TIMEZONE:", tky.ran === true && notNy.ran === false);
   }
 

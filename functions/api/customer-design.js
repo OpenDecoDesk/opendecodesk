@@ -48,13 +48,13 @@ const PRODUCT_RE = /^[a-z0-9-]{1,40}$/;
 const fail = (message, status = 400) => jsonResponse({ status: "error", message }, status);
 const randomHex32 = () => crypto.randomUUID().replace(/-/g, "").slice(0, 32);
 
-export async function onRequestPost({ request, env }) {
+export async function onRequestPost({ request, env, waitUntil }) {
   if (!env.DB) return fail("Uploads aren't available right now.", 503);
   const url = new URL(request.url);
 
   // 1. A shop's own address only.
   let catalog;
-  try { catalog = await getCatalogData(env); } catch (e) { return fail("Uploads aren't available right now — please try again shortly.", 503); }
+  try { catalog = await getCatalogData(env, { waitUntil }); } catch (e) { return fail("Uploads aren't available right now — please try again shortly.", 503); }
   // (The bare domain serves no shop — catalog.js — so it's refused here too.)
   const host = classifyHost(url.hostname, catalog.subdomainMap, env);
   if (host.kind !== "locked" || !host.orgId) return fail("Not available here.", 403);

@@ -10,7 +10,7 @@ const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'
 const issues = [];
 const STUBS = "const addOwnerNotice = async () => {}; const recordSystemIssue = async (db, kind, d) => issues.push(kind);\n" +
   "const getBusinessProfile = async () => ({ name: 'Acme Tees', ownerEmail: 'owner@acme.test' }); const resolveTimeZone = () => 'UTC';\n";
-const E = new Function("issues", STUBS + strip(read("functions/_lib/email.js")) + "\nreturn { sendTestEmail, sendOrderReceivedEmail };")(issues);
+const E = new Function("issues", STUBS + require("./testlib/fetch-timeout").source() + strip(read("functions/_lib/email.js")) + "\nreturn { sendTestEmail, sendOrderReceivedEmail };")(issues);
 
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };

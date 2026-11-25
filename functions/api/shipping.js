@@ -26,7 +26,7 @@
  */
 
 import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
-import { jsonResponse } from "../_lib/http.js";
+import { jsonResponse, fetchWithTimeout } from "../_lib/http.js";
 import { selectBox } from "../_lib/boxSize.js";
 import { getBoxPresets, getProductsByOrg, getShipFromAddress, lineQty, QTY_MESSAGE, getCategoryPackMap, getOrderInvoice, invoiceExpired } from "../_lib/db.js";
 import { classifyHost } from "../_lib/hostConfig.js";
@@ -53,7 +53,7 @@ export async function onRequestPost(context){
   // catalog data, which is edge-cached — no extra database read.
   let storefrontOff = false;
   try{
-    const cd = await getCatalogData(env);
+    const cd = await getCatalogData(env, { waitUntil: context.waitUntil?.bind(context) });
     // Global settings → Features → Shipping switched off: no carrier rates at all.
     if(((cd && cd.features) || {}).shipping === false){
       return jsonResponse({status:"error", feature:"shipping", message:"Carrier shipping isn't available for this shop — please choose another delivery option."}, 403);
@@ -111,7 +111,7 @@ export async function onRequestPost(context){
   // client-supplied weightOz of 0.1 would otherwise be enough to get a cheaper rate.
   let orgId = null;
   try{
-    const catalogData = await getCatalogData(env);
+    const catalogData = await getCatalogData(env, { waitUntil: context.waitUntil?.bind(context) });
     const host = classifyHost(new URL(request.url).hostname, catalogData.subdomainMap, env);
     if(host.kind === "locked") orgId = host.orgId;
     // The shop comes from the address the request was sent to. Only a developer's own machine
@@ -185,7 +185,7 @@ export async function onRequestPost(context){
 
   let shipment;
   try{
-    const res = await fetch("https://api.goshippo.com/shipments/", {
+    const res = await fetchWithTimeout("https://api.goshippo.com/shipments/", {
       method: "POST",
       headers: {
         "Authorization": "ShippoToken " + env.SHIPPO_API_KEY,

@@ -120,7 +120,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const [s1, s2] = await Promise.all([lib.ensureSigningSecret(d2), lib.ensureSigningSecret(d2)]);
   ok("two first requests at once end up with the same secret", s1 === s2 && d2.q("SELECT value FROM global_settings WHERE key = 'signingSecret'")[0].value === s1);
   const workerSrc = read("src/worker.js");
-  ok("every request and the scheduled roll-up get it", /env = await withSigningSecret\(env\);\n  return handler\(/.test(workerSrc) && /handleScheduled\(event, env\) \{\n  env = await withSigningSecret\(env\);/.test(workerSrc));
+  ok("every request and the scheduled roll-up get it", /env = await withSigningSecret\(env\);\n  (try \{\n    )?return (await )?handler\(/.test(workerSrc) && /handleScheduled\(event, env\) \{\n  env = await withSigningSecret\(env\);/.test(workerSrc));
 
   console.log("\n=== A forgotten password ===");
   ok("the sign-in box says what to do: ask an admin, or (the only admin) give the site a new setup password in Cloudflare and sign in with it",

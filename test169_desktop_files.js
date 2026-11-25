@@ -84,6 +84,52 @@ const ok = (d, c) => console.log(d + ":", !!c);
   ok("every stored file is copied, with its type, name and original upload time", n === 2 && r1 && r1.httpMetadata.contentType === "application/pdf" &&
     r1.customMetadata.name === "Invoice 42.pdf" && r1.uploaded === "2026-10-02T10:00:00.000Z" && copyStore.get("images", "uploads/shop/old.png").body.length === 7);
 
+  console.log("\n=== Listing reads only the prefix's folder, and reuses its keys page to page ===");
+  {
+    const s2 = new FileStore(path.join(root, "files2"));
+    const B = wrap({ STORE: { fetch: (url, init) => s2.handle(new Request(url, init)) }, BUCKET: "images" });
+    for (let i = 0; i < 6; i++) await B.put(`uploads/shop/q${i}.png`, png);
+    for (let i = 0; i < 3; i++) await B.put(`uploads/other/r${i}.png`, png);
+    await B.put("top.png", png);
+    const reads = [];
+    const realReaddir = fs.readdirSync;
+    fs.readdirSync = function (d, ...rest) { reads.push(path.relative(path.join(root, "files2", "images"), String(d))); return realReaddir.call(fs, d, ...rest); };
+    let realNow = Date.now;
+    try {
+      let p = await B.list({ prefix: "uploads/shop/q", limit: 4 });
+      ok("a prefix's listing starts at the deepest folder it names (uploads/shop), not the bucket's top", p.objects.length === 4 && reads.length === 1 && reads[0] === path.join("uploads", "shop"));
+      reads.length = 0;
+      p = await B.list({ prefix: "uploads/shop/q", limit: 4, cursor: p.cursor });
+      ok("…the next page reuses the sorted keys: no folder is read again", reads.length === 0 && p.objects.map(o => o.key).join() === "uploads/shop/q4.png,uploads/shop/q5.png" && !p.truncated);
+      p = await B.list({ prefix: "uploads/shop/", cursor: "uploads/shop/q25" });
+      ok("a cursor that isn't one of the keys still starts at the next key after it", p.objects[0].key === "uploads/shop/q3.png" && p.objects.length === 3);
+      await B.put("uploads/shop/q6.png", png);
+      reads.length = 0;
+      p = await B.list({ prefix: "uploads/shop/q" });
+      ok("a put in the bucket is listed at once (the kept keys are dropped)", reads.length === 1 && p.objects.length === 7);
+      await B.delete("uploads/shop/q6.png");
+      ok("…and so is a delete", (await B.list({ prefix: "uploads/shop/q" })).objects.length === 6);
+      fs.copyFileSync(path.join(root, "files2", "images", "uploads", "shop", "q0.png"), path.join(root, "files2", "images", "uploads", "shop", "q7.png"));
+      ok("a file copied in by hand isn't seen while the keys are fresh", (await B.list({ prefix: "uploads/shop/q" })).objects.length === 6);
+      const later = realNow() + 31 * 1000; Date.now = () => later;
+      ok("…and is after 30 seconds", (await B.list({ prefix: "uploads/shop/q" })).objects.length === 7);
+      fs.unlinkSync(path.join(root, "files2", "images", "uploads", "shop", "q7.png"));
+      ok("a file removed by hand from a kept listing is skipped, not an error", (await B.list({ prefix: "uploads/shop/q" })).objects.length === 6);
+      Date.now = realNow;
+      reads.length = 0;
+      const all = await B.list();
+      ok("no prefix: the whole bucket, in key order", all.objects.map(o => o.key).join() === [...all.objects.map(o => o.key)].sort().join() && all.objects.length === 10 && reads[0] === "");
+      ok("a prefix with a folder that can't be a key matches nothing", (await B.list({ prefix: "uploads/../" })).objects.length === 0 && (await B.list({ prefix: "uploads//q" })).objects.length === 0);
+      ok("a prefix that names a folder exactly lists its files", (await B.list({ prefix: "uploads/other/" })).objects.map(o => o.key).join() === "uploads/other/r0.png,uploads/other/r1.png,uploads/other/r2.png");
+    } finally { fs.readdirSync = realReaddir; Date.now = realNow; }
+    let p = await B.list({ prefix: "uploads/shop/", startAfter: "uploads/shop/q3.png" });
+    ok("startAfter (R2's option) lists the keys after it, through the bucket as the Worker has it", p.objects.map(o => o.key).join() === "uploads/shop/q4.png,uploads/shop/q5.png");
+    p = await B.list({ prefix: "uploads/shop/", startAfter: "uploads/shop/q1.png", limit: 2 });
+    const p2 = await B.list({ prefix: "uploads/shop/", startAfter: "uploads/shop/q1.png", limit: 2, cursor: p.cursor });
+    ok("…and pages on from there with the cursor", p.objects.map(o => o.key).join() === "uploads/shop/q2.png,uploads/shop/q3.png" && p2.objects.map(o => o.key).join() === "uploads/shop/q4.png,uploads/shop/q5.png");
+    ok("FileStore.list reads startAfter too", s2.list("images", { prefix: "uploads/", startAfter: "uploads/shop/q4.png" }).objects.map(o => o.key).join() === "uploads/shop/q5.png");
+  }
+
   console.log("\n=== Wired into the program ===");
   const serverSrc = fs.readFileSync(path.join(__dirname, "desktop/server.js"), "utf8");
   ok("the program gives the Worker these buckets, not Miniflare's R2", /wrappedBindings: \{ IMAGES: bucket\("images"\), RECEIPTS: bucket\("receipts"\), DESIGNS: bucket\("designs"\) \}/.test(serverSrc) &&

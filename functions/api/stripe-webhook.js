@@ -105,7 +105,7 @@
  * events older than 5 minutes to prevent replay attacks.
  */
 
-import { jsonResponse } from "../_lib/http.js";
+import { jsonResponse, fetchWithTimeout } from "../_lib/http.js";
 import {
   setOrderRefunded, setOrderDisputeStatus, addShippingPayment, addOrderPayment, isShippingPayment, recordStripePayout,
   getOrderCheckoutState, hasProcessedStripeEvent, recordStripeEvent, recordSystemIssue,
@@ -162,7 +162,7 @@ async function verifyStripeSignature(rawBody, sigHeader, secret){
 }
 
 async function stripeGet(env, path){
-  const res = await fetch("https://api.stripe.com/v1/" + path, {
+  const res = await fetchWithTimeout("https://api.stripe.com/v1/" + path, {
     headers: { "Authorization": "Bearer " + env.STRIPE_SECRET_KEY }
   });
   return res.json();
@@ -221,7 +221,7 @@ async function resolveOrderRef(obj, env){
     : (obj.payment_intent && obj.payment_intent.id));
   if(!piId || !env.STRIPE_SECRET_KEY) return { orderId: null, orgId: null };
   try{
-    const res = await fetch("https://api.stripe.com/v1/payment_intents/" + encodeURIComponent(piId), {
+    const res = await fetchWithTimeout("https://api.stripe.com/v1/payment_intents/" + encodeURIComponent(piId), {
       headers: { "Authorization": "Bearer " + env.STRIPE_SECRET_KEY }
     });
     const pi = await res.json();
@@ -230,7 +230,7 @@ async function resolveOrderRef(obj, env){
     if(piMeta.orderId && piMeta.orgId) return { orderId: piMeta.orderId, orgId: piMeta.orgId };
     // Last resort: the Checkout Session that created this PaymentIntent
     // (for a session that didn't stamp its PaymentIntent).
-    const sres = await fetch("https://api.stripe.com/v1/checkout/sessions?limit=1&payment_intent=" + encodeURIComponent(piId), {
+    const sres = await fetchWithTimeout("https://api.stripe.com/v1/checkout/sessions?limit=1&payment_intent=" + encodeURIComponent(piId), {
       headers: { "Authorization": "Bearer " + env.STRIPE_SECRET_KEY }
     });
     const sessions = await sres.json();

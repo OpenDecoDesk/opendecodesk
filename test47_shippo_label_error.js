@@ -181,7 +181,7 @@ async function migratedDb(){
   const label = new Function(
     "fetch", "console",
     "const classifyHost = () => ({ kind: 'admin', orgId: null }); const getCatalogData = async () => ({ subdomainMap: {} }); const requireAdmin = async () => null;\n" +
-    httpSrc + "\n" + dbSrc + "\n" + boxSizeSrc + "\n" + shippoSrc + "\nreturn onRequestPost;"
+    httpSrc + "\n" + dbSrc + "\n" + boxSizeSrc + "\n" + shippoSrc + "\nonRequestPost.fetchWithTimeout = fetchWithTimeout; return onRequestPost;"
   )(
     (url, opts) => fetchImpl.f(url, opts),
     { error: (...a) => errors.push(a) },
@@ -281,6 +281,28 @@ async function migratedDb(){
   fetchImpl.f = async () => { throw new Error("network down"); };
   res = await reprint();
   console.log("Shippo unreachable -> a clear 502, nothing changed:", res.status === 502 && d1.q("SELECT labelUrl FROM shipping_labels")[0].labelUrl === "");
+  // Shippo takes the request and never answers (code review #103): given up on after the time limit (lowered here),
+  // with the same clear 502 — for the reprint lookup and for rate quotes.
+  {
+    const keepAlive = setInterval(() => {}, 1000);   // (Node doesn't wait on AbortSignal.timeout's timer)
+    label.fetchWithTimeout.defaultMs = 30;
+    fetchImpl.f = () => new Promise(() => {});
+    let t0 = Date.now();
+    res = await reprint();
+    body = await res.json();
+    console.log("Shippo never answers a reprint lookup -> the same clear 502 after the time limit:", res.status === 502 && /Could not reach Shippo/.test(body.message) && Date.now() - t0 < 2000);
+    t0 = Date.now();
+    res = await ratesCall();
+    body = await res.json();
+    console.log("…and a rate quote that never comes back -> its clear 502 too:", res.status === 502 && /Shippo/.test(body.message) && Date.now() - t0 < 2000);
+    delete label.fetchWithTimeout.defaultMs;
+    clearInterval(keepAlive);
+    const src = read("functions/api/shippo-label.js");
+    const buy = src.slice(src.indexOf("let txn;"), src.indexOf("txn = await res.json();"));
+    console.log("buying the label itself has no time limit (cut off after Shippo bought it, the label would go unrecorded):",
+      /await fetch\("https:\/\/api\.goshippo\.com\/transactions\/", \{\n\s+method: "POST"/.test(buy) && /never recorded/.test(buy) &&
+      (src.match(/fetchWithTimeout\("https:\/\/api\.goshippo\.com/g) || []).length === 3);
+  }
   d1._raw.exec("UPDATE shipping_labels SET voidedAt='2026-09-26T00:00:00Z'");
   res = await reprint();
   console.log("a voided label isn't offered:", res.status === 404);

@@ -11,11 +11,15 @@ function source() {
   const fnStart = db.indexOf("export async function createCheckoutSession", start);
   const end = db.indexOf("\n}\n", fnStart);
   if (start < 0 || fnStart < 0 || end < 0) throw new Error("createCheckoutSession not found in db.js");
-  return db.slice(start, end + 2).replace(/export (const|async function)/g, "$1");
+  // …and db.js's fetchWithTimeout, which its Stripe call goes through (it calls the test's fetch too).
+  const tStart = db.indexOf("function fetchWithTimeout(");
+  const tEnd = db.indexOf("\n}\n", tStart);
+  if (tStart < 0 || tEnd < 0) throw new Error("fetchWithTimeout not found in db.js");
+  return db.slice(tStart, tEnd + 2) + "\n" + db.slice(start, end + 2).replace(/export (const|async function)/g, "$1");
 }
 
 function install() {
-  const made = new Function(source() + "\nreturn { CHECKOUT_LINK_SECONDS, createCheckoutSession };")();
+  const made = new Function(source() + "\nreturn { CHECKOUT_LINK_SECONDS, createCheckoutSession, fetchWithTimeout };")();
   global.CHECKOUT_LINK_SECONDS = made.CHECKOUT_LINK_SECONDS;
   global.createCheckoutSession = made.createCheckoutSession;
   return made;

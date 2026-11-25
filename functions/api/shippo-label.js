@@ -37,7 +37,7 @@
 import { classifyHost }  from "../_lib/hostConfig.js";
 import { getCatalogData } from "../_lib/catalogCache.js";
 import { requireAdmin }  from "../_lib/adminAuth.js";
-import { jsonResponse, featureOffResponse }  from "../_lib/http.js";
+import { jsonResponse, featureOffResponse, fetchWithTimeout }  from "../_lib/http.js";
 import { getOrderForShipping, recordShippingLabel, getShipFromAddress, getOrderLabel, setShippingLabelUrl, getCategoryPackMap, claimLabelPurchase, releaseLabelPurchase } from "../_lib/db.js";
 import { selectBox } from "../_lib/boxSize.js";
 
@@ -76,7 +76,7 @@ export async function onRequestPost(context){
   catch(e){ return jsonResponse({status:"error", message:"Invalid JSON."}, 400); }
 
   let catalogData;
-  try{ catalogData = await getCatalogData(env); }
+  try{ catalogData = await getCatalogData(env, { waitUntil: context.waitUntil?.bind(context) }); }
   catch(e){ return jsonResponse({status:"error", message:"Catalog temporarily unavailable."}, 503); }
 
   const host = classifyHost(new URL(request.url).hostname, catalogData.subdomainMap, env);
@@ -101,7 +101,7 @@ export async function onRequestPost(context){
     if(!url){
       // The transaction id comes from OUR record of the order, never from the browser.
       try{
-        const res = await fetch("https://api.goshippo.com/transactions/" + encodeURIComponent(label.shippoTransactionId), {
+        const res = await fetchWithTimeout("https://api.goshippo.com/transactions/" + encodeURIComponent(label.shippoTransactionId), {
           headers: { "Authorization": "ShippoToken " + env.SHIPPO_API_KEY }
         });
         const t = await res.json();
@@ -190,7 +190,7 @@ export async function onRequestPost(context){
   if(action === "rates"){
     let shipment;
     try{
-      const res = await fetch("https://api.goshippo.com/shipments/", {
+      const res = await fetchWithTimeout("https://api.goshippo.com/shipments/", {
         method: "POST",
         headers: {
           "Authorization": "ShippoToken " + env.SHIPPO_API_KEY,
@@ -299,6 +299,8 @@ export async function onRequestPost(context){
 
     let txn;
     try{
+      // Buying the label: plain fetch, no time limit. Cut off after Shippo had bought it, the label would be paid
+      // for and never recorded here (claimLabelPurchase above keeps a second click from buying another).
       const res = await fetch("https://api.goshippo.com/transactions/", {
         method: "POST",
         headers: {
@@ -362,7 +364,7 @@ export async function onRequestPost(context){
       if(txn.rate && typeof txn.rate === "object"){
         rate = txn.rate;
       }else if(txn.rate){
-        const rr = await fetch("https://api.goshippo.com/rates/" + encodeURIComponent(txn.rate), {
+        const rr = await fetchWithTimeout("https://api.goshippo.com/rates/" + encodeURIComponent(txn.rate), {
           headers: { "Authorization": "ShippoToken " + env.SHIPPO_API_KEY }
         });
         rate = await rr.json();

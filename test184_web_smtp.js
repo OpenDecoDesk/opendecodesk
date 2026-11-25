@@ -89,7 +89,7 @@ const MSG = { to: "pat@cust.test", fromName: "Acme Tees", replyTo: "owner@acme.t
   const E = new Function("issues", "const addOwnerNotice = async () => {}; const recordSystemIssue = async (db, kind) => issues.push(kind);\n" +
     "const getBusinessProfile = async () => ({ name: 'Acme Tees', ownerEmail: 'owner@acme.test', receiptsEmail: 'receipts@acme.test' }); const resolveTimeZone = () => 'UTC';\n" +
     "const getEmailMailbox = async () => global.__mailbox;\n" +
-    strip(read("functions/_lib/vendorCredentials.js")) + "\n" + strip(read("functions/_lib/smtp.js")) + "\n" + strip(read("functions/_lib/email.js")) +
+    strip(read("functions/_lib/vendorCredentials.js")) + "\n" + strip(read("functions/_lib/smtp.js")) + "\n" + require("./testlib/fetch-timeout").source() + strip(read("functions/_lib/email.js")) +
     "\nreturn { send_, sendTestEmail, encryptVendorCredentials };")(issues);
   const KEY = "a-long-random-master-key-for-tests";
   global.__mailbox.password = await E.encryptVendorCredentials({ VENDOR_CREDENTIALS_KEY: KEY }, { id: "smtp", password: "app-pass" });

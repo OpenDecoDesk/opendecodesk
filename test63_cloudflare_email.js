@@ -13,7 +13,9 @@ const strip = (src) => src
 global.__issues = [];
 // The Business profile the transport reads (name, the owner's inbox, the receipts inbox).
 global.__biz = { name: "Example Stitch Co", ownerEmail: "owner@stitch.example", receiptsEmail: "receipts@stitch.example" };
-const send_ = new Function("const getBusinessProfile = async () => global.__biz; const addOwnerNotice = async () => {}; const recordSystemIssue = async (db, kind, sample) => { global.__issues.push({ kind, sample }); };\n" + strip(read("functions/_lib/email.js")) + "\nreturn send_;")();
+// (http.js for fetchWithTimeout, which every provider call goes through.)
+const lib63 = new Function("const getBusinessProfile = async () => global.__biz; const addOwnerNotice = async () => {}; const recordSystemIssue = async (db, kind, sample) => { global.__issues.push({ kind, sample }); };\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/email.js")) + "\nreturn { send_, fetchWithTimeout };")();
+const send_ = lib63.send_;
 
 const OWNER = "owner@stitch.example";
 const RECEIPTS = "receipts@stitch.example";
@@ -114,6 +116,37 @@ const isCf = (c) => c.url.startsWith("https://api.cloudflare.com/");
   resendReply = () => { throw new Error("network down"); };
   console.log("a network error is a failure too:", (await send_(rs, msg)) === false && calls.length === 1);
   global.fetch = realFetch;
+
+  console.log("\n=== a provider that never answers: given up on after the time limit (code review #103) ===");
+  {
+    const realFetch2 = global.fetch;
+    const keepAlive = setInterval(() => {}, 1000);   // (Node doesn't wait on AbortSignal.timeout's timer)
+    let asked = 0;
+    // Takes the request and never answers (and ignores the abort signal, the worst case).
+    global.fetch = (url) => { asked++; return new Promise(() => {}); };
+    lib63.fetchWithTimeout.defaultMs = 30;
+    global.__issues = [];
+    let t0 = Date.now();
+    const r1 = await send_(cf, msg);
+    console.log("Cloudflare: the send gives up and is reported as not sent, recorded for the owner:", r1 === false && asked === 1 && Date.now() - t0 < 2000 &&
+      global.__issues.length === 1 && global.__issues[0].kind === "email_failed");
+    t0 = Date.now();
+    const r2 = await send_({ ...cf, RESEND_API_KEY: "re_key" }, msg);
+    console.log("Resend: the same:", r2 === false && asked === 2 && Date.now() - t0 < 2000 && global.__issues.length === 2);
+    // A fetch that honours the signal (as the real one does) is aborted rather than left running.
+    let aborted = false;
+    global.fetch = (url, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => { aborted = true; reject(init.signal.reason); }));
+    const r3 = await send_(cf, msg);
+    console.log("the request itself is aborted (its signal fires):", r3 === false && aborted);
+    let err = null;
+    try { await lib63.fetchWithTimeout("https://example.test/", {}, 20); } catch (e) { err = e; }
+    console.log("the error says what happened, in words a page can show:", !!err && err.name === "TimeoutError" && err.message === "No answer within 20 ms.");
+    global.fetch = async (url, init) => ({ ok: true, status: 200, json: async () => ({ success: true, errors: [], result: { permanent_bounces: [] } }), _signal: init && init.signal });
+    console.log("an answer in time is passed straight through, with a signal attached:", (await send_(cf, msg)) === true);
+    delete lib63.fetchWithTimeout.defaultMs;
+    global.fetch = realFetch2;
+    clearInterval(keepAlive);
+  }
 
   console.log("\n=== guards ===");
   calls = [];

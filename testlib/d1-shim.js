@@ -5,12 +5,17 @@
 //
 // Mirrors the D1 surface db.js uses: prepare(sql).bind(...).first()/all()/run(),
 // batch([...]) (one transaction), exec(sql) for migration files. Like D1,
-// foreign keys are enforced, binding `undefined` is an error, and meta.changes
+// foreign keys are enforced, binding `undefined` or more than 100 parameters is an error, and meta.changes
 // counts the rows triggers change too.
 
 const initSqlJs = require("sql.js");
 
+// D1 refuses a statement with more than 100 bound parameters; SQLite here would take thousands. Failing the
+// same way makes every test catch an unchunked `IN (?,?,…)` list that would only break in production.
+const D1_MAX_BOUND_PARAMS = 100;
+
 function checkParams(params, sql){
+  if(params.length > D1_MAX_BOUND_PARAMS) throw new Error("D1_ERROR: too many SQL variables (" + params.length + " bound, D1 allows " + D1_MAX_BOUND_PARAMS + ") in: " + sql.slice(0, 80));
   params.forEach((p, i) => {
     if(p === undefined) throw new Error("D1_TYPE_ERROR: Type 'undefined' not supported for value at index " + i + " in: " + sql.slice(0, 80));
   });

@@ -212,6 +212,8 @@ const ADMIN_ACTIONS_ = {
   blankWriteOff(){ blankWriteOff(this.dataset.blankId); },
   blankMerge(){ blankMerge(this.dataset.blankId); },
   blankClone(){ blankClone(this.dataset.blankId); },
+  blankArchive(){ blankArchive(this.dataset.blankId); },
+  blankUnarchive(){ blankUnarchive(this.dataset.blankId); },
   blankDelete(){ blankDelete(this.dataset.blankId, this.dataset.blankName); },
   threadInventory_(){ threadInventory_(this.dataset.tid); },
   threadEdit_(){ threadEdit_(this.dataset.tid); },
@@ -432,6 +434,12 @@ function listCacheClear_(){ try{ _listCache = new Map(); }catch(e){ /* called be
 // The request to send for a list: the same, plus the version of the copy held (if any).
 function listCacheAsk_(body){
   const k = listCacheKey_(body), held = k ? _listCache.get(k) : null;
+  if(!k){
+    // A change: say which blanks copy is held, so an answer that carries the blanks can send only those that
+    // differ from it (orders.js withList_; patched in listCacheTake_).
+    const blanks = body && _listCache.get("getBlanks");
+    return blanks ? { ...body, listHeld: { blanks: blanks.version } } : body;
+  }
   if(!held) return body;
   const asked = { ...body, cacheVersion: held.version };
   _listCacheAsked.set(asked, held);
@@ -453,9 +461,33 @@ function listCacheTake_(asked, d){
     for(const [name, v] of Object.entries(d.cacheVersions)){
       const action = LIST_CACHE_FROM_CHANGE_[name];
       if(action && typeof v === "number" && Array.isArray(d[name])) _listCache.set(action, { version: v, data: listCacheCopy_(d[name]) });
+      else if(action && v && typeof v === "object") listCachePatch_(d, name, action, v);
     }
   }
   return d;
+}
+// A change's answer with only the blanks that differ (review #82): { blanks: [those], changedBlankIds,
+// cacheVersions: { blanks: { from, to } } }. Applied only to the copy at exactly `from` — the answer then carries
+// the whole patched list under `blanks`, as callers expect. On any doubt the copy is dropped and the answer is
+// marked for adminApiOnce_ to ask for the whole list again.
+function listCachePatch_(d, name, action, v){
+  const held = _listCache.get(action), ids = Array.isArray(d.changedBlankIds) ? d.changedBlankIds.map(Number) : null;
+  if(!held || held.version !== v.from || typeof v.to !== "number" || !ids || !Array.isArray(d[name])){
+    _listCache.delete(action);
+    d[name] = undefined;
+    d.listRefetch_ = name;
+    return;
+  }
+  const gone = new Set(ids), byId = new Map(d[name].map(b => [Number(b.id), b]));
+  const out = [];
+  for(const b of held.data){ const id = Number(b.id); if(byId.has(id)){ out.push(byId.get(id)); byId.delete(id); } else if(!gone.has(id)) out.push(b); }
+  out.push(...byId.values());
+  // The server's order (db.js getAllBlanks): type, brand, name, color.
+  const key = (b) => [b.productType, b.brand, b.name, b.color].map(x => x == null ? "" : String(x));
+  out.sort((a, b) => { const x = key(a), y = key(b); for(let i = 0; i < x.length; i++){ if(x[i] !== y[i]) return x[i] < y[i] ? -1 : 1; } return 0; });
+  _listCache.set(action, { version: v.to, data: out });
+  d[name] = listCacheCopy_(out);
+  delete d.changedBlankIds;
 }
 
 // The one call to /api/orders for the admin's screens. Signs in first when needed. When the session has ended it
@@ -494,6 +526,11 @@ async function adminApiOnce_(body){
       throw new Error(SESSION_ENDED_);
     }
     if(!r.ok || d.status === "error") throw new Error((d && d.message) || "Request failed");
+    // Only some blanks came back and the copy here couldn't take them: the whole list, read again.
+    if(d.listRefetch_ === "blanks"){
+      delete d.listRefetch_;
+      try{ d.blanks = (await adminApi_({ action: "getBlanks" })).blanks; }catch(e){ delete d.blanks; }
+    }
     return d;
   }
 }
@@ -3487,7 +3524,7 @@ function showVendorConnect_(existing, labels, onDone){
 
 // Test a connection with one style: what comes back (colors, sizes, prices, images) next to what's on file.
 function showVendorTest_(conn, onDone){
-  const mine = (window._blanksAll || []).filter(b => b.sku && (b.vendorConnectionId === conn.id || sameVendorName_(b.vendor, conn.name)));
+  const mine = (window._blanksAll || []).filter(b => b.sku && !b.archivedAt && (b.vendorConnectionId === conn.id || sameVendorName_(b.vendor, conn.name)));
   const { ov, close } = inventoryModal_("Test " + escapeHtml(conn.name), `<div style="font-size:13px;">
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">Style # <input id="vtStyle" list="vtList" placeholder="e.g. K540" style="padding:5px 7px;border:1px solid #ccc;border-radius:4px;width:160px;">
         <datalist id="vtList">${mine.map(b => `<option value="${escapeHtml(b.sku)}">${escapeHtml(b.name)}</option>`).join("")}</datalist>
@@ -3515,7 +3552,8 @@ function showVendorTest_(conn, onDone){
 
 // Which of your blanks this vendor supplies (their SKU = its style #). Pre-ticks the ones whose vendor matches.
 function showVendorLinkBlanks_(conn, onDone){
-  const all = window._blanksAll || [];
+  // Archived blanks (migrations/0104) are left out, unless already linked to this vendor.
+  const all = (window._blanksAll || []).filter(b => !b.archivedAt || b.vendorConnectionId === conn.id);
   const ticked = (b) => b.vendorConnectionId === conn.id || (b.vendorConnectionId == null && sameVendorName_(b.vendor, conn.name));
   const { ov, close } = inventoryModal_("Blanks from " + escapeHtml(conn.name), `<div style="font-size:13px;color:#555;margin-bottom:8px;">Tick the blanks this vendor supplies. Their SKU is used as the vendor's style #.</div>
     <div style="max-height:50vh;overflow:auto;border:1px solid #eee;border-radius:6px;">${all.map(b => `<label style="display:flex;gap:8px;align-items:center;padding:4px 8px;font-size:13px;border-bottom:1px solid #f3f3f3;"><input type="checkbox" class="vlb" value="${b.id}"${ticked(b) ? " checked" : ""}> <b>${escapeHtml(b.sku || "(no SKU)")}</b> ${escapeHtml(b.name)} <span style="color:#888;">${escapeHtml(b.vendor || "")}</span></label>`).join("") || `<div style="padding:8px;color:#888;">No blanks yet.</div>`}</div>
@@ -3527,7 +3565,7 @@ function showVendorLinkBlanks_(conn, onDone){
       close(); showToast(`${r.linked} blank${r.linked === 1 ? "" : "s"} linked to ${conn.name}.`); if (onDone) onDone();
     } catch (e) { showToast(e.message); }
   };
-  if (!all.length) hoopApi_({ action: "getBlanks" }).then(r => { window._blanksAll = r.blanks || []; close(); showVendorLinkBlanks_(conn, onDone); }, () => {});
+  if (!(window._blanksAll || []).length) hoopApi_({ action: "getBlanks" }).then(r => { window._blanksAll = r.blanks || []; if (!window._blanksAll.length) return; close(); showVendorLinkBlanks_(conn, onDone); }, () => {});
 }
 
 // Live data for blanks or typed styles, a few styles per request, into the review window.
@@ -3553,7 +3591,7 @@ async function fetchFromVendors_(jobs, opts){
 async function refreshBlanksFromVendors_(blankIds, onDone){
   let conns = window._vendorConnections;
   if (!conns) { try { conns = (await hoopApi_({ action: "listVendorConnections" })).connections || []; } catch (e) { showToast(e.message); return; } }
-  const blanks = (window._blanksAll || []).filter(b => b.vendorConnectionId && b.sku && (!blankIds || blankIds.includes(b.id)));
+  const blanks = (window._blanksAll || []).filter(b => b.vendorConnectionId && b.sku && (blankIds ? blankIds.includes(b.id) : !b.archivedAt));   // "all": not the archived (migrations/0104)
   if (!blanks.length) { showToast(conns.length ? "No blanks are linked to a connected vendor yet — Settings → Vendor integrations → Link blanks." : "No vendor is connected yet — Settings → Vendor integrations."); return; }
   const { ov, close } = inventoryModal_("Refreshing from vendors", `<div id="rfStatus" style="font-size:13px;color:#555;">Starting…</div>`, 520);
   const res = await fetchFromVendors_(blanks.map(b => ({ connectionId: b.vendorConnectionId, style: b.sku, brand: b.brand })), { onProgress: (t) => { const el = ov.querySelector("#rfStatus"); if (el) el.textContent = t; } });
@@ -9087,7 +9125,7 @@ function wizBlanksScreen_(){
       const saved = new Set(st.products.filter(p => p.saved).map(p => Number(p.blankId)));
       const draw = () => {
         const words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
-        const shown = (_wiz.data.blanks || []).filter(b => !b.forTesting).filter(b => { const t = [b.name, b.brand, b.sku, b.vendor, b.productType].join(" ").toLowerCase(); return words.every(w => t.includes(w)); });
+        const shown = (_wiz.data.blanks || []).filter(b => !b.forTesting && !b.archivedAt).filter(b => { const t = [b.name, b.brand, b.sku, b.vendor, b.productType].join(" ").toLowerCase(); return words.every(w => t.includes(w)); });
         list.innerHTML = shown.length ? shown.map(b => {
           const img = ((b.colors || []).find(c => (c.images || []).length) || {}).images; const src = img && img[0] ? img[0].url : "";
           return `<label class="wiz-blank${queued.has(b.id) ? " on" : ""}"><input type="checkbox" value="${b.id}"${queued.has(b.id) ? " checked" : ""}${saved.has(b.id) ? " disabled" : ""}>
@@ -14103,7 +14141,8 @@ async function loadBlankLinksSection(orgId, product) {
     // The blanks offered: this product's type — plus any blank already linked to it, whatever its type, so changing a
     // blank's type (e.g. long-sleeve polo → shirt) never hides it from a product that uses it.
     const linkedIds = new Set(links.filter(l => l.orgId === orgId && l.productId === product.productId).map(l => Number(l.blankId)));
-    const blanks = allBlanks.filter(b => !b.productType || b.productType === product.type || linkedIds.has(Number(b.id)));
+    // Archived blanks (migrations/0104) are offered only where already linked.
+    const blanks = allBlanks.filter(b => linkedIds.has(Number(b.id)) || (!b.archivedAt && (!b.productType || b.productType === product.type)));
 
     // A product's color+size links to a blank's color+size (migrations/0037). A configurable product
     // maps each garment color; a classic product uses one default color (''). The colors can change
@@ -14580,6 +14619,11 @@ const AUDIT_ACTION_LABELS = {
 
 function auditDetailSummary(action, detail) {
   if (!detail) return "";
+  // Too long to keep in full (db.js auditDetailJson_, over 8 KB): say so, with the start of what it held.
+  if (detail.truncated === true && typeof detail.preview === "string") {
+    const kb = Number(detail.bytes) > 0 ? ` (${Math.round(Number(detail.bytes) / 1024)} KB)` : "";
+    return `<span title="${escapeHtml(detail.preview.slice(0, 2000))}"><em>Too long to keep in full${kb}.</em> ${escapeHtml(detail.preview.slice(0, 120))}${detail.preview.length > 120 ? "…" : ""}</span>`;
+  }
   try {
     // Catalog edits record only what changed: "flatPrice: 20 → 22; visible: true → false".
     const changeList = (c) => Object.entries(c || {}).slice(0, 8).map(([f, v]) => {
@@ -19801,39 +19845,84 @@ async function renderAuditLog(app) {
     </div>
   `;
 
-  async function loadAudit() {
+  // The rows shown so far and the filters they were asked with: Load more asks for the page after the last one
+  // (orders.js getAuditLog: before = its {createdAt, id}) and adds it below (review #108).
+  let auditShown = [], auditParams = null;
+  const auditRowHtml_ = (e, i) => {
+    const dateStr = adminDate_(e.createdAt);
+    const timeStr = adminTime_(e.createdAt, {hour:"2-digit",minute:"2-digit"});
+    const label = AUDIT_ACTION_LABELS[e.action] || e.action;
+    const summary = auditDetailSummary(e.action, e.detail);
+    const rowBg = i % 2 === 0 ? "" : "background:var(--surface-alt,#f9f9f9);";
+    return `<tr style="${rowBg}">
+      <td style="padding:7px 10px;white-space:nowrap;border-bottom:1px solid #eee;color:var(--ink-soft,#666);">${dateStr}<br><span style="font-size:11px;">${timeStr}</span>${e.actor ? `<br><span style="font-size:11px;" title="${escapeHtml(e.ip ? "IP " + e.ip : "")}">by ${escapeHtml(e.actor)}</span>` : ""}</td>
+      <td class="audit-shop" style="padding:7px 10px;border-bottom:1px solid #eee;">${e.orgId ? `<span title="${escapeHtml(e.orgId)}">${escapeHtml(orgNameOf_(e.orgId))}</span>` : '<span style="color:#aaa;">—</span>'}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px;">${e.orderId ? `<a href="#" data-order="${escapeHtml(e.orderId)}" data-admin-action="auditFilterOrder_" style="color:var(--accent);">${escapeHtml(e.orderId)}</a>` : '<span style="color:#aaa;">—</span>'}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #eee;white-space:nowrap;">
+        <span style="display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600;background:${auditActionColor(e.action)};color:#fff;">${escapeHtml(label)}</span>
+      </td>
+      <td style="padding:7px 10px;border-bottom:1px solid #eee;color:var(--ink-soft,#666);">${summary}</td>
+    </tr>`;
+  };
+  // Under the table: how many are shown and, when older entries match too, a way to them.
+  const auditFooter_ = (more) => {
+    const n = auditShown.length, el = document.getElementById("auditFooter");
+    if (!el) return;
+    el.innerHTML = more
+      ? `Showing the newest ${n} — narrow the dates or <button type="button" class="admin-btn" id="auditMore" style="padding:2px 10px;font-size:12px;margin-left:4px;">Load more</button>`
+      : `${n} entr${n === 1 ? "y" : "ies"}`;
+    const btn = document.getElementById("auditMore");
+    if (btn) btn.onclick = () => { btn.disabled = true; btn.textContent = "Loading…"; loadAudit(true); };
+  };
+
+  async function loadAudit(more = false) {
     const resultsEl = document.getElementById("auditResults");
     if (!resultsEl) return;
-    resultsEl.innerHTML = `<div style="color:#888;font-size:14px;padding:20px 0;">Loading…</div>`;
+    if (!more) resultsEl.innerHTML = `<div style="color:#888;font-size:14px;padding:20px 0;">Loading…</div>`;
 
     if (!adminKey) adminKey = (await adminLogin()) || "";
     if (!adminKey) return;
 
-    const params = {
-      action: "getAuditLog", key: adminKey,
-      orgId:    document.getElementById("afOrg")?.value    || undefined,
-      orderId:  document.getElementById("afOrder")?.value  || undefined,
-      filter:   document.getElementById("afAction")?.value || undefined,
-      // The boxes are local days; the log is stored in UTC — so each is sent as that local day's first / last moment.
-      dateFrom: localDayStartIso_(document.getElementById("afFrom")?.value) || undefined,
-      dateTo:   localDayEndIso_(document.getElementById("afTo")?.value)     || undefined,
-      limit:    Number(document.getElementById("afLimit")?.value) || 20,
-    };
-    // Strip undefined keys
-    Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+    if (!more || !auditParams) {
+      auditParams = {
+        action: "getAuditLog",
+        orgId:    document.getElementById("afOrg")?.value    || undefined,
+        orderId:  document.getElementById("afOrder")?.value  || undefined,
+        filter:   document.getElementById("afAction")?.value || undefined,
+        // The boxes are local days; the log is stored in UTC — so each is sent as that local day's first / last moment.
+        dateFrom: localDayStartIso_(document.getElementById("afFrom")?.value) || undefined,
+        dateTo:   localDayEndIso_(document.getElementById("afTo")?.value)     || undefined,
+        limit:    Number(document.getElementById("afLimit")?.value) || 20,
+      };
+      // Strip undefined keys
+      Object.keys(auditParams).forEach(k => auditParams[k] === undefined && delete auditParams[k]);
+      auditShown = [];
+    }
+    const last = auditShown[auditShown.length - 1];
+    const params = { ...auditParams, key: adminKey, ...(more && last ? { before: { createdAt: last.createdAt, id: last.id } } : {}) };
 
     try {
       const r = await fetch("/api/orders", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(params) });
       const d = await r.json();
       if (!r.ok || d.status === "error") {
-        resultsEl.innerHTML = `<div style="color:#b03a2e;font-size:14px;padding:20px 0;">${escapeHtml((d && d.message) || "Error loading audit log.")}</div>`;
+        const msg = escapeHtml((d && d.message) || "Error loading audit log.");
+        if (more) { const f = document.getElementById("auditFooter"); if (f) f.innerHTML = `<span style="color:#b03a2e;">${msg}</span>`; }
+        else resultsEl.innerHTML = `<div style="color:#b03a2e;font-size:14px;padding:20px 0;">${msg}</div>`;
         return;
       }
       const entries = d.entries || [];
+      if (more) {
+        const body = resultsEl.querySelector("tbody");
+        if (body) body.insertAdjacentHTML("beforeend", entries.map((e, i) => auditRowHtml_(e, auditShown.length + i)).join(""));
+        auditShown = auditShown.concat(entries);
+        auditFooter_(!!d.more && entries.length > 0);
+        return;
+      }
       if (!entries.length) {
         resultsEl.innerHTML = `<div style="color:#888;font-size:14px;padding:20px 0;">No entries found for these filters.</div>`;
         return;
       }
+      auditShown = entries.slice();
       resultsEl.innerHTML = `
         <table style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead>
@@ -19846,28 +19935,15 @@ async function renderAuditLog(app) {
             </tr>
           </thead>
           <tbody>
-            ${entries.map((e, i) => {
-              const dateStr = adminDate_(e.createdAt);
-              const timeStr = adminTime_(e.createdAt, {hour:"2-digit",minute:"2-digit"});
-              const label = AUDIT_ACTION_LABELS[e.action] || e.action;
-              const summary = auditDetailSummary(e.action, e.detail);
-              const rowBg = i % 2 === 0 ? "" : "background:var(--surface-alt,#f9f9f9);";
-              return `<tr style="${rowBg}">
-                <td style="padding:7px 10px;white-space:nowrap;border-bottom:1px solid #eee;color:var(--ink-soft,#666);">${dateStr}<br><span style="font-size:11px;">${timeStr}</span>${e.actor ? `<br><span style="font-size:11px;" title="${escapeHtml(e.ip ? "IP " + e.ip : "")}">by ${escapeHtml(e.actor)}</span>` : ""}</td>
-                <td style="padding:7px 10px;border-bottom:1px solid #eee;">${e.orgId ? escapeHtml(e.orgId) : '<span style="color:#aaa;">—</span>'}</td>
-                <td style="padding:7px 10px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px;">${e.orderId ? `<a href="#" data-order="${escapeHtml(e.orderId)}" data-admin-action="auditFilterOrder_" style="color:var(--accent);">${escapeHtml(e.orderId)}</a>` : '<span style="color:#aaa;">—</span>'}</td>
-                <td style="padding:7px 10px;border-bottom:1px solid #eee;white-space:nowrap;">
-                  <span style="display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600;background:${auditActionColor(e.action)};color:#fff;">${escapeHtml(label)}</span>
-                </td>
-                <td style="padding:7px 10px;border-bottom:1px solid #eee;color:var(--ink-soft,#666);">${summary}</td>
-              </tr>`;
-            }).join("")}
+            ${entries.map(auditRowHtml_).join("")}
           </tbody>
         </table>
-        <div style="font-size:12px;color:#aaa;margin-top:8px;">${entries.length} entr${entries.length===1?"y":"ies"}</div>
+        <div id="auditFooter" style="font-size:12px;color:#888;margin:8px 10px;"></div>
       `;
+      auditFooter_(!!d.more);
     } catch (err) {
-      resultsEl.innerHTML = `<div style="color:#b03a2e;font-size:14px;padding:20px 0;">Network error.</div>`;
+      if (more) { const f = document.getElementById("auditFooter"); if (f) f.innerHTML = `<span style="color:#b03a2e;">Network error.</span>`; }
+      else resultsEl.innerHTML = `<div style="color:#b03a2e;font-size:14px;padding:20px 0;">Network error.</div>`;
     }
   }
 
@@ -19949,6 +20025,7 @@ async function renderAdminBlanks(app) {
         <select id="blankGroup" aria-label="Which blanks" style="font-size:13px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;">
           <option value="">All blanks</option><option value="sale">For sale</option><option value="testing">For testing / shop use</option>
           <option value="onsale">On a product for sale</option><option value="unlinked">Not linked to any product</option><option value="low">Below reorder point</option></select>
+        <label style="font-size:13px;display:inline-flex;gap:4px;align-items:center;" title="Archived blanks are retired: off this list, product linking and vendor matching. Their stock and history stay."><input type="checkbox" id="blankShowArchived"${blanksView_().archived ? " checked" : ""}> Show archived</label>
         <button type="button" class="admin-btn" id="blankAddBtn" data-need="inventory.blanks:edit">+ New blank</button>
         <button type="button" class="admin-btn" id="blankOrderBtn" data-need="inventory.blanks:edit" title="Record a whole vendor order: several blanks, shipping, R&amp;D and personal items">Receive order</button>
         ${adminMenuHtml_("Import", [
@@ -19975,6 +20052,7 @@ async function renderAdminBlanks(app) {
   document.getElementById("blankGroup").value = blanksView_().group;
   document.getElementById("blankSearch").addEventListener("input", () => drawBlanks_(app));
   document.getElementById("blankGroup").addEventListener("change", () => drawBlanks_(app));
+  document.getElementById("blankShowArchived").addEventListener("change", () => drawBlanks_(app));
   const refresh = () => refreshBlanks_(app);
   document.getElementById("blankAddBtn").onclick = () => showBlankModal(null, refresh);
   document.getElementById("blankOrderBtn").onclick = () => showReceiveOrderModal(refresh);
@@ -20241,17 +20319,25 @@ function drawBlanks_(app) {
   const view = blanksView_();
   view.q = (document.getElementById("blankSearch") || {}).value || "";
   view.group = (document.getElementById("blankGroup") || {}).value || "";
+  view.archived = !!(document.getElementById("blankShowArchived") || {}).checked;
   const q = view.q.toLowerCase().trim();
   // For sale vs for testing / shop use (migrations/0060) — the blank type's flag.
   const grp = view.group;
   // …and on a product for sale (a visible product uses it) / not linked to any product.
   const uses = (b) => (window._blankProducts || {})[b.id] || [];
-  const inGroup = all.filter(b => !grp ? true : grp === "testing" ? b.forTesting : grp === "sale" ? !b.forTesting
+  // Archived blanks (migrations/0104) only with Show archived.
+  const inGroup = all.filter(b => view.archived || !b.archivedAt).filter(b => !grp ? true : grp === "testing" ? b.forTesting : grp === "sale" ? !b.forTesting
     : grp === "onsale" ? uses(b).some(p => p.visible) : grp === "unlinked" ? !uses(b).length
     : grp === "low" ? Object.keys(window._blanksLow || {}).some(k => k.split("|")[0] === String(b.id)) : true);
   const shown = !q ? inGroup : inGroup.filter(b => [b.name, b.vendor, b.brand, b.sku, b.color, b.productType, b.needleType,
       ...(b.colors || []).map(c => c.color), ...(b.sizes || []).map(z => z.size), ...uses(b).map(p => p.name)]
     .some(v => String(v || "").toLowerCase().includes(q)));
+  const hidden = view.archived ? 0 : all.filter(b => b.archivedAt).length;
+  if (!shown.length && hidden && !q && !grp) {
+    window._blanksCache = all;
+    panel.innerHTML = `<div class="admin-empty">Every blank is archived. Tick Show archived to see the ${hidden}.</div>`;
+    return;
+  }
   renderBlanksTable(panel, app, shown, q || grp);
 }
 
@@ -20331,7 +20417,7 @@ function renderBlanksTable(panel, app, blanks, query) {
       if (b.forTesting) { testingValue += totalValue; testingStock += totalStock; }
       html += `
         <tr data-blank-row="${b.id}" style="border-bottom:1px solid var(--card-line);">
-          <td style="padding:8px 10px;font-weight:600;vertical-align:top;">${escapeHtml(b.name || "—")}${b.forTesting ? ` <span class="blank-testing-badge" title="For testing / shop use — still inventory (it could be sold), reported as its own group" style="font-size:10px;font-weight:700;letter-spacing:.04em;padding:1px 5px;border-radius:3px;background:#ede9fe;color:#5b21b6;vertical-align:middle;">TESTING</span>` : ""}${b.needleType ? `<div style="font-weight:400;font-size:11px;color:var(--ink-soft);margin-top:2px;">Needle: ${escapeHtml(b.needleType)}</div>` : ""}${blankUsesHtml_(b)}${costs && (window._blanksPriceCheck || []).includes(b.id) ? `<div class="blank-price-check" title="Used by products on sale — check the vendor's prices (Edit → enter any change, or Prices are current)" style="font-weight:400;font-size:11px;color:#b45309;margin-top:2px;">💲 ${escapeHtml(blankPricesCheckedLabel_(b))}</div>` : ""}</td>
+          <td style="padding:8px 10px;font-weight:600;vertical-align:top;">${escapeHtml(b.name || "—")}${b.forTesting ? ` <span class="blank-testing-badge" title="For testing / shop use — still inventory (it could be sold), reported as its own group" style="font-size:10px;font-weight:700;letter-spacing:.04em;padding:1px 5px;border-radius:3px;background:#ede9fe;color:#5b21b6;vertical-align:middle;">TESTING</span>` : ""}${b.archivedAt ? ` <span class="blank-archived-badge" title="Archived ${escapeHtml(String(b.archivedAt).slice(0, 10))}: off product linking and vendor matching; its stock and history stay" style="font-size:10px;font-weight:700;letter-spacing:.04em;padding:1px 5px;border-radius:3px;background:#e5e7eb;color:#374151;vertical-align:middle;">ARCHIVED</span>` : ""}${b.needleType ? `<div style="font-weight:400;font-size:11px;color:var(--ink-soft);margin-top:2px;">Needle: ${escapeHtml(b.needleType)}</div>` : ""}${blankUsesHtml_(b)}${costs && (window._blanksPriceCheck || []).includes(b.id) ? `<div class="blank-price-check" title="Used by products on sale — check the vendor's prices (Edit → enter any change, or Prices are current)" style="font-weight:400;font-size:11px;color:#b45309;margin-top:2px;">💲 ${escapeHtml(blankPricesCheckedLabel_(b))}</div>` : ""}</td>
           <td style="padding:8px 10px;color:var(--ink-soft);vertical-align:top;">${escapeHtml(b.vendor)}</td>
           <td style="padding:8px 10px;font-family:monospace;font-size:12px;vertical-align:top;">${escapeHtml(b.brand)}${b.sku ? " / " + escapeHtml(b.sku) : ""}</td>
           <td style="padding:8px 10px;vertical-align:top;">${colorBlocks}<div style="font-size:11px;color:var(--ink-soft);margin-top:3px;">${totalStock} units${totalHeld ? ` · ${totalHeld} set aside` : ""}${costs ? ` · $${totalValue.toFixed(2)} value` : ""}</div></td>
@@ -20342,6 +20428,9 @@ function renderBlanksTable(panel, app, blanks, query) {
               adminMenuItem_(`data-blank-id="${b.id}" data-need="inventory.blanks:full" data-admin-action="blankWriteOff" title="Damaged, lost, or used for testing/samples/shop scrap"`, "Write off&hellip;"),
               adminMenuItem_(`data-blank-id="${b.id}" data-need="inventory.blanks:full" data-admin-action="blankMerge" title="Fold other blanks (old per-color rows) into this one"`, "Merge&hellip;"),
               adminMenuItem_(`data-blank-id="${b.id}" data-admin-action="blankClone" title="Start a new blank from this one: its colors, sizes, prices and photos, with no stock"`, "Clone"),
+              b.archivedAt
+                ? adminMenuItem_(`data-blank-id="${b.id}" data-admin-action="blankUnarchive" title="Back on the Blanks list, product linking and vendor matching"`, "Unarchive")
+                : adminMenuItem_(`data-blank-id="${b.id}" data-admin-action="blankArchive" title="Retire it: off the Blanks list, product linking and vendor matching. Its stock, history and reports stay"`, "Archive"),
               '<div class="admin-menu-sep" role="separator"></div>',
               adminMenuItem_(`data-blank-id="${b.id}" data-blank-name="${escapeHtml(b.name || [b.brand, b.color].filter(Boolean).join(" "))}" data-need="inventory.blanks:full" data-admin-action="blankDelete"`, "Delete&hellip;", true),
             ].join(""), { dots: true, ariaLabel: "More for " + (b.name || "this blank"), btnStyle: "padding:3px 10px;font-size:12px;margin-left:4px;" })}</span>
@@ -20392,6 +20481,17 @@ function renderBlanksTable(panel, app, blanks, query) {
     const target = (window._blanksCache || []).find(x => x.id === Number(idStr));
     if (target) showMergeBlanksModal_(target, () => refreshBlanks_(app));
   };
+  // Archive / Unarchive (migrations/0104): the answer carries the blanks list (patched in listCacheTake_).
+  const setArchived = async (idStr, archived) => {
+    try {
+      const r = await hoopApi_({ action: "setBlankArchived", id: Number(idStr), archived });
+      if (Array.isArray(r.blanks)) window._blanksAll = r.blanks;
+      showToast(archived ? "Blank archived. Show archived lists it again." : "Blank back in use.");
+      await keepView_(async () => drawBlanks_(app));
+    } catch (e) { showToast(e.message, true); }
+  };
+  window.blankArchive = (idStr) => setArchived(idStr, true);
+  window.blankUnarchive = (idStr) => setArchived(idStr, false);
   window.blankDelete = async function(idStr, name) {
     if (!await askConfirm_("Delete blank \"" + name + "\"? This will remove all linked product-blank associations. This cannot be undone.")) return;
     try {

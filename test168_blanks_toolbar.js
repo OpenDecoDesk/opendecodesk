@@ -1,5 +1,5 @@
 // Blanks screen: a short toolbar — + New blank and Receive order, then the Import, Connected vendor and
-// More menus — and on each blank's row Edit, History and a "⋯" menu (Write off, Merge, Clone, Delete).
+// More menus — and on each blank's row Edit, History and a "⋯" menu (Write off, Merge, Clone, Archive, Delete).
 // Connected vendor only appears once a vendor is connected with a login; the desktop version doesn't ask
 // while its supplier connections are off. jsdom with the real index.html + admin.js; fetch mocked per action.
 const fs = require("fs");
@@ -84,8 +84,8 @@ const visibleLabels = (root) => [...root.children].filter(el => el.style.display
   const rowButtons = [...row.querySelectorAll("td:last-child > button")].map(b => b.textContent.trim());
   ok("a row shows Edit and History", JSON.stringify(rowButtons) === JSON.stringify(["Edit", "History"]));
   const rowMenu = row.querySelector(".admin-menu");
-  ok("…and a ⋯ menu with Write off, Merge, Clone and (set apart, in red) Delete", rowMenu && rowMenu.querySelector(":scope > button").textContent.trim() === "⋯" &&
-    JSON.stringify([...rowMenu.querySelectorAll(".admin-menu-item")].map(b => b.textContent.trim())) === JSON.stringify(["Write off…", "Merge…", "Clone", "Delete…"]) &&
+  ok("…and a ⋯ menu with Write off, Merge, Clone, Archive and (set apart, in red) Delete", rowMenu && rowMenu.querySelector(":scope > button").textContent.trim() === "⋯" &&
+    JSON.stringify([...rowMenu.querySelectorAll(".admin-menu-item")].map(b => b.textContent.trim())) === JSON.stringify(["Write off…", "Merge…", "Clone", "Archive", "Delete…"]) &&
     rowMenu.querySelector(".admin-menu-sep") && rowMenu.querySelector(".admin-menu-item:last-child").classList.contains("danger"));
   ok("…the ⋯ button is named for screen readers", rowMenu.querySelector(":scope > button").getAttribute("aria-label") === "More for Gildan 5000");
   let wrote = null;

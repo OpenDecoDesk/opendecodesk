@@ -2422,26 +2422,39 @@ export async function setShopRate(db, input, { today = new Date() } = {}) {
 }
 
 // Average minutes to make one piece of each product, from its timed, finished runs (every hooping of a piece
-// added up). {productId: {minutes, pieces}} for one shop. Untimed hoopings ("Mark done (no timing)") and pieces
-// with any untimed hooping are left out, so a piece is never counted as quicker than it was.
-async function avgRunMinutesByProduct_(db, orgId) {
-  const { results } = await db.prepare(
-    `SELECT oi.productId, pr.id, pr.itemId, pr.pieceNo, pr.startedAt, pr.finishedAt, pr.timed
-     FROM production_runs pr JOIN order_items oi ON oi.id = pr.itemId
-     WHERE pr.status = 'done' AND oi.orgId = ? AND oi.productId IS NOT NULL AND oi.productId <> ''`).bind(orgId).all().catch(() => ({ results: [] }));
-  const pieces = new Map();
-  for (const r of results || []) {
-    const key = r.productId + "\u0001" + r.itemId + "\u0001" + (r.pieceNo != null ? r.pieceNo : "r" + r.id);
-    const ms = new Date(r.finishedAt) - new Date(r.startedAt);
-    const cur = pieces.get(key) || { productId: r.productId, ms: 0, bad: false };
-    if (!Number(r.timed) || !Number.isFinite(ms) || ms <= 0) cur.bad = true; else cur.ms += ms;
-    pieces.set(key, cur);
-  }
+// added up). {productId: {minutes, pieces}} for one shop (or only `productId`). Untimed hoopings ("Mark done (no
+// timing)") and pieces with any untimed hooping are left out, so a piece is never counted as quicker than it was.
+// Worked out in SQL (review #98: the run history only grows): the pieces finished in the last 12 months, and all
+// of a product's history when it has fewer than AVG_RUN_MIN_PIECES_ timed pieces in that time.
+const AVG_RUN_MIN_PIECES_ = 5;
+async function avgRunMinutesByProduct_(db, orgId, { productId = null, now = Date.now() } = {}) {
+  const since = new Date(now - 365 * 86400000).toISOString();
+  // One row per piece (its hoopings summed), then per product. A piece counts only when every hooping was timed
+  // and took a positive time; `recent` keeps the pieces whose last hooping finished `since` or later (the item
+  // filter lets the finished-runs index find them without reading older history).
+  const sql = (recent, skip) => `WITH piece AS (
+      SELECT oi.productId AS productId,
+             SUM((julianday(pr.finishedAt) - julianday(pr.startedAt)) * 86400000.0) AS ms,
+             MAX(COALESCE(pr.timed, 0) = 0 OR COALESCE(julianday(pr.finishedAt) - julianday(pr.startedAt), 0) <= 0) AS bad,
+             MAX(pr.finishedAt) AS lastAt
+      FROM production_runs pr JOIN order_items oi ON oi.id = pr.itemId
+      WHERE pr.status = 'done' AND oi.orgId = ? AND oi.productId IS NOT NULL AND oi.productId <> ''
+        ${productId != null ? "AND oi.productId = ?" : ""}
+        ${recent ? "AND pr.itemId IN (SELECT itemId FROM production_runs WHERE status = 'done' AND finishedAt >= ?)" : ""}
+        ${skip ? "AND oi.productId NOT IN (SELECT value FROM json_each(?))" : ""}
+      GROUP BY oi.productId, pr.itemId, COALESCE(pr.pieceNo, 'r' || pr.id))
+    SELECT productId, SUM(ms) AS totalMs, COUNT(*) AS pieces FROM piece WHERE bad = 0${recent ? " AND lastAt >= ?" : ""} GROUP BY productId`;
+  const base = productId != null ? [orgId, String(productId)] : [orgId];
   const out = {};
-  for (const p of pieces.values()) {
-    if (p.bad) continue;
-    const o = out[p.productId] = out[p.productId] || { totalMs: 0, pieces: 0 };
-    o.totalMs += p.ms; o.pieces++;
+  const take = (rows) => { for (const r of rows || []) if (Number(r.pieces) > 0) out[r.productId] = { totalMs: Number(r.totalMs) || 0, pieces: Number(r.pieces) }; };
+  try {
+    take((await db.prepare(sql(true, false)).bind(...base, since, since).all()).results);
+    // Too few recent pieces (or none) for an average to mean much: the product's whole history instead.
+    const enough = Object.keys(out).filter(k => out[k].pieces >= AVG_RUN_MIN_PIECES_);
+    take((await db.prepare(sql(false, true)).bind(...base, JSON.stringify(enough)).all()).results);
+  } catch (e) {
+    console.error("Average run times failed:", e);
+    return {};
   }
   return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, { minutes: Math.round(v.totalMs / v.pieces / 6000) / 10, pieces: v.pieces }]));
 }
@@ -2489,7 +2502,7 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
   const brandRules = await getBrandRules(db).catch(() => null);
   const tierCache = {}, runCache = {};
   const tiersOf = async (org) => tierCache[org] || (tierCache[org] = await getTierPrices(db, org));
-  const runsOf = async (org) => runCache[org] || (runCache[org] = await avgRunMinutesByProduct_(db, org));
+  const runsOf = async (org) => runCache[org] || (runCache[org] = await avgRunMinutesByProduct_(db, org, { productId: orgId ? productId : null }));   // one product: only its runs
   const transferCents = (id) => { const t = transferById.get(Number(id)); return t ? Math.max(0, Number(t.purchasePriceCents) || 0) : 0; };
   const cardOf = (c) => c > 0 ? Math.round(c * settings.cardPctBps / 10000) + settings.cardFixedCents : 0;
   const out = [];
@@ -2621,7 +2634,8 @@ export async function getNewPricingAlerts(db) {
 export async function pricingBelowTargetForBlanks(db, blankIds) {
   const ids = [...new Set((blankIds || []).map(Number).filter(Boolean))];
   if (!ids.length) return [];
-  const { results } = await db.prepare(`SELECT DISTINCT orgId, productId FROM product_blank_links WHERE blankId IN (${ids.map(() => "?").join(",")})`).bind(...ids).all();
+  // A vendor file can change thousands of blanks at once: one JSON array, not one parameter per id.
+  const { results } = await db.prepare("SELECT DISTINCT orgId, productId FROM product_blank_links WHERE blankId IN (SELECT value FROM json_each(?))").bind(JSON.stringify(ids)).all();
   const want = new Set(results.map(r => r.orgId + "|" + r.productId));
   const out = [];
   for (const org of [...new Set(results.map(r => r.orgId))]) {
@@ -3036,7 +3050,7 @@ export async function getCatalogCacheState(db) {
 // FIRST and the rows after, so a copy is never older than its number (at worst newer, which the next change
 // corrects). Copies are shared between requests: callers must not change what they are given.
 export const LIST_CACHE_BUILDERS = {
-  blanks: (db) => getAllBlanks(db),
+  blanks: (db) => getAllBlanks(db, { includeArchived: true }),
   threads: (db) => listThreads(db),
   hoops: (db) => listHoops(db),
   locations: (db) => listLocations(db),
@@ -3098,6 +3112,34 @@ export async function refreshCachedLists_(db, before) {
   const moved = Object.keys(LIST_CACHE_BUILDERS).filter(n => Number.isFinite(after.versions[n]) && after.versions[n] !== before.versions[n]);
   for (const n of moved) await readCachedList_(db, n, after);
   return moved;
+}
+
+// The copy of one list at exactly `state`'s version, from memory or the Cache API, or null when neither has it.
+// Never built: by the time a change's answer asks, the rows have moved on and would be stored under the old number.
+export async function peekCachedList_(name, state) {
+  if (!state || !state.versions || !Number.isFinite(state.versions[name])) return null;
+  const version = state.versions[name];
+  const mem = _listMem.get(state.ns + "/" + name);
+  if (mem && mem.version === version) return mem.data;
+  const cache = typeof caches !== "undefined" && caches && caches.default ? caches.default : null;
+  if (!cache) return null;
+  try { const hit = await cache.match(listCacheKey_(state.ns, name, version)); return hit ? await hit.json() : null; }
+  catch (e) { return null; }
+}
+
+// What differs between two copies of the blanks list (review #82): the blanks that are new or changed, and the ids
+// of those plus the ones removed. Compared blank by blank as JSON, so whatever moved — this request's change or
+// another one made meanwhile — is in it.
+export function blankListDelta_(oldList, newList) {
+  const was = new Map((oldList || []).map(b => [Number(b.id), JSON.stringify(b)]));
+  const changed = [], ids = [], now = new Set();
+  for (const b of newList || []) {
+    const id = Number(b.id);
+    now.add(id);
+    if (was.get(id) !== JSON.stringify(b)) { changed.push(b); ids.push(id); }
+  }
+  for (const id of was.keys()) if (!now.has(id)) ids.push(id);
+  return { changed, ids };
 }
 
 // Test hook: forget this isolate's copies (a new isolate).
@@ -3997,6 +4039,9 @@ function parseBlank_(row, sizeRows, colorRows, needleTypeNames) {
     features:    tryParse_(row.featuresJson, []) || [],
     source:      tryParse_(row.sourceJson, {}) || {},
     vendorConnectionId: row.vendorConnectionId == null ? null : Number(row.vendorConnectionId),   // migrations/0065
+    // migrations/0104 — retired: off the Blanks screen, product linking and vendor matching unless asked for. Its
+    // stock, history and reports are unchanged. "" = in use.
+    archivedAt:  row.archivedAt  || "",
     createdAt:   row.createdAt   || "",
     updatedAt:   row.updatedAt   || "",
     colors,
@@ -4044,10 +4089,19 @@ export async function removeBlankColorImages(db, blankId, removals) {
   return { removed, colors };
 }
 
-export async function getAllBlanks(db) {
-  const { results: blankRows } = await db.prepare(
-    "SELECT * FROM blanks ORDER BY productType, brand, name, color"
-  ).all();
+// Archived blanks (migrations/0104) are left out unless includeArchived. The admin's cached list (LIST_CACHE_BUILDERS)
+// takes them all, flagged with archivedAt, because orders, stock and history still look blanks up by id there; the
+// screens leave the archived ones out of their pickers.
+export async function getAllBlanks(db, { includeArchived = false } = {}) {
+  let blankRows;
+  try {
+    ({ results: blankRows } = await db.prepare(
+      `SELECT * FROM blanks${includeArchived ? "" : " WHERE archivedAt IS NULL"} ORDER BY productType, brand, name, color`
+    ).all());
+  } catch (e) {
+    if (!/no such column/i.test(String(e && e.message))) throw e;   // before migrations/0104: nothing is archived
+    ({ results: blankRows } = await db.prepare("SELECT * FROM blanks ORDER BY productType, brand, name, color").all());
+  }
   if (!blankRows.length) return [];
   const [{ results: sizeRows }, { results: colorRows }, needleTypes] = await Promise.all([
     db.prepare("SELECT * FROM blank_sizes ORDER BY blankId, color, size").all(),
@@ -4697,13 +4751,15 @@ export async function linkBlanksToVendorConnection(db, id, blankIds) {
 // ---- Orders placed with a supplier (migrations/0072) ----------------------------------------------------
 // The blanks and sizes an order to a supplier is for: {blank: {…}, sizes: Map("color|size" → row)} per blankId.
 export async function getBlanksForSupplierOrder(db, blankIds) {
-  const ids = [...new Set((blankIds || []).map(Number).filter(Boolean))].slice(0, 200);
+  // 100 = SUPPLIER_ORDER_MAX_LINES (supplierOrders.js, which imports this file): one order never has more
+  // blanks than lines. The ids go in as one JSON array, so the count is never held to D1's 100 parameters.
+  const ids = [...new Set((blankIds || []).map(Number).filter(Boolean))].slice(0, 100);
   const out = new Map();
   if (!ids.length) return out;
-  const ph = ids.map(() => "?").join(",");
+  const idsJson = JSON.stringify(ids);
   const [{ results: blanks }, { results: sizes }] = await Promise.all([
-    db.prepare(`SELECT * FROM blanks WHERE id IN (${ph})`).bind(...ids).all(),
-    db.prepare(`SELECT * FROM blank_sizes WHERE blankId IN (${ph})`).bind(...ids).all(),
+    db.prepare("SELECT * FROM blanks WHERE id IN (SELECT value FROM json_each(?))").bind(idsJson).all(),
+    db.prepare("SELECT * FROM blank_sizes WHERE blankId IN (SELECT value FROM json_each(?))").bind(idsJson).all(),
   ]);
   for (const b of blanks) out.set(Number(b.id), { blank: b, sizes: new Map() });
   for (const z of sizes) { const e = out.get(Number(z.blankId)); if (e) e.sizes.set((z.color || "") + "\u0001" + (z.size || ""), z); }
@@ -4764,7 +4820,7 @@ export async function listSupplierOrders(db, { limit = 30 } = {}) {
   const orders = results.map(parseSupplierOrder_);
   if (!orders.length) return orders;
   const { results: ships } = await db.prepare(`SELECT id, carrier, trackingNumber, shippedAt, status, deliveredAt, supplierPoNumber FROM blank_shipments
-    WHERE supplierPoNumber IN (${orders.map(() => "?").join(",")})`).bind(...orders.map(o => o.poNumber)).all().catch(() => ({ results: [] }));
+    WHERE supplierPoNumber IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(orders.map(o => o.poNumber))).all().catch(() => ({ results: [] }));
   for (const o of orders) o.shipments = ships.filter(s => s.supplierPoNumber === o.poNumber)
     .map(s => ({ id: Number(s.id), carrier: s.carrier || "", trackingNumber: s.trackingNumber || "", shippedAt: s.shippedAt || "", status: s.status || "", deliveredAt: s.deliveredAt || "" }));
   return orders;
@@ -4949,6 +5005,17 @@ async function setBlankNeedleType_(db, id, fields) {
   if (!fields || fields.needleTypeId === undefined) return;
   const v = fields.needleTypeId == null || fields.needleTypeId === "" ? null : (Number(fields.needleTypeId) || null);
   await db.prepare("UPDATE blanks SET needleTypeId=? WHERE id=?").bind(v, Number(id)).run();
+}
+
+// Archives (retires) a blank, or brings it back (migrations/0104). Nothing else about it changes: its stock, links,
+// movements and reports stay as they are. Returns the new archivedAt ("" = in use), or null when there's no such blank.
+export async function setBlankArchived(db, id, archived) {
+  const at = archived ? new Date().toISOString() : null;
+  const r = await db.prepare(archived ? "UPDATE blanks SET archivedAt = COALESCE(archivedAt, ?) WHERE id = ?" : "UPDATE blanks SET archivedAt = ? WHERE id = ?")
+    .bind(at, Number(id)).run();
+  if (!r.meta || !r.meta.changes) return null;
+  const row = await db.prepare("SELECT archivedAt FROM blanks WHERE id = ?").bind(Number(id)).first();
+  return row ? (row.archivedAt || "") : null;
 }
 
 export async function deleteBlank(db, id) {
@@ -6286,22 +6353,23 @@ export async function addBlankShipment(db, { carrier, trackingNumber, vendor, sh
   const shippedIso = shippedAt && /^\d{4}-\d{2}-\d{2}/.test(String(shippedAt)) ? String(shippedAt).slice(0, 10) : now.slice(0, 10);
   // Resolve the real, active lines FIRST (ignore bogus/cancelled ids). Refuse if none resolve, so a
   // shipment row is never created without at least one covered line (which would orphan it — no
-  // order view shows it, but the daily Shippo poller still processes it).
-  const placeholders = ids.map(() => "?").join(",");
+  // order view shows it, but the daily Shippo poller still processes it). The ids go in as one JSON
+  // array (json_each), not one placeholder each: a shipment can cover more lines than D1's 100 bound
+  // parameters.
   const { results: rows } = await db.prepare(
-    `SELECT id, orderId FROM order_items WHERE id IN (${placeholders}) AND cancelDate IS NULL`).bind(...ids).all();
+    "SELECT id, orderId FROM order_items WHERE id IN (SELECT value FROM json_each(?)) AND cancelDate IS NULL").bind(JSON.stringify(ids)).all();
   if (!rows.length) throw pricingError_("None of the selected items are valid order lines.");
   const res = await db.prepare(
     `INSERT INTO blank_shipments (carrier, trackingNumber, vendor, shippedAt, createdAt, updatedAt)
      VALUES (?, ?, ?, ?, ?, ?)`
   ).bind(String(carrier || "").slice(0, 40), String(trackingNumber || "").slice(0, 100), String(vendor || "").slice(0, 100), shippedIso, now, now).run();
   const shipmentId = Number(res.meta.last_row_id);
-  const stmts = [];
-  for (const r of rows) {
-    stmts.push(db.prepare("INSERT OR IGNORE INTO blank_shipment_items (shipmentId, itemId) VALUES (?, ?)").bind(shipmentId, Number(r.id)));
-    stmts.push(db.prepare("UPDATE order_items SET blankShippedAt = COALESCE(blankShippedAt, ?) WHERE id = ?").bind(shippedIso, Number(r.id)));
-  }
-  await db.batch(stmts);   // rows.length >= 1, so this is never empty
+  // Two set-based statements cover every resolved line, however many there are.
+  const lineIds = JSON.stringify(rows.map(r => Number(r.id)));
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO blank_shipment_items (shipmentId, itemId) SELECT ?, value FROM json_each(?)").bind(shipmentId, lineIds),
+    db.prepare("UPDATE order_items SET blankShippedAt = COALESCE(blankShippedAt, ?) WHERE id IN (SELECT value FROM json_each(?))").bind(shippedIso, lineIds),
+  ]);
   for (const orderId of [...new Set(rows.map(r => r.orderId))]) await recomputeOrderBlankStatus_(db, orderId);
   return shipmentId;
 }
@@ -6333,9 +6401,8 @@ export async function updateBlankShipment(db, id, { carrier, trackingNumber, shi
   if (!before) throw pricingError_("That shipment no longer exists.");
   // Resolve the real active lines BEFORE touching anything, and refuse if none resolve — otherwise
   // the item-set replacement below would leave the shipment covering zero lines (an orphan).
-  const placeholders = ids.map(() => "?").join(",");
   const { results: rows } = await db.prepare(
-    `SELECT id, orderId FROM order_items WHERE id IN (${placeholders}) AND cancelDate IS NULL`).bind(...ids).all();
+    "SELECT id, orderId FROM order_items WHERE id IN (SELECT value FROM json_each(?)) AND cancelDate IS NULL").bind(JSON.stringify(ids)).all();
   if (!rows.length) throw pricingError_("None of the selected items are valid order lines.");
   const now = new Date().toISOString();
   const newTrack = String(trackingNumber || "").slice(0, 100);
@@ -6348,19 +6415,18 @@ export async function updateBlankShipment(db, id, { carrier, trackingNumber, shi
   // Replace the covered-items set.
   const prev = (await db.prepare("SELECT itemId, (SELECT orderId FROM order_items WHERE id=blank_shipment_items.itemId) AS orderId FROM blank_shipment_items WHERE shipmentId=?").bind(sid).all()).results || [];
   await db.prepare("DELETE FROM blank_shipment_items WHERE shipmentId=?").bind(sid).run();
-  const stmts = [];
   const shipDate = shippedIso || now.slice(0, 10);
-  for (const r of rows) {
-    stmts.push(db.prepare("INSERT OR IGNORE INTO blank_shipment_items (shipmentId, itemId) VALUES (?, ?)").bind(sid, Number(r.id)));
-    stmts.push(db.prepare("UPDATE order_items SET blankShippedAt = COALESCE(blankShippedAt, ?) WHERE id = ?").bind(shipDate, Number(r.id)));
-  }
-  if (stmts.length) await db.batch(stmts);
-  // A line dropped from this shipment and covered by no other loses its shipped stamp.
-  for (const p of prev) {
-    if (rows.some(r => Number(r.id) === Number(p.itemId))) continue;
-    const still = await db.prepare("SELECT 1 FROM blank_shipment_items WHERE itemId=? LIMIT 1").bind(Number(p.itemId)).first();
-    if (!still) await db.prepare("UPDATE order_items SET blankShippedAt=NULL WHERE id=?").bind(Number(p.itemId)).run();
-  }
+  const lineIds = JSON.stringify(rows.map(r => Number(r.id)));
+  const keep = new Set(rows.map(r => Number(r.id)));
+  const dropped = JSON.stringify(prev.map(p => Number(p.itemId)).filter(i => !keep.has(i)));
+  // Set-based, so any number of lines takes three statements.
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO blank_shipment_items (shipmentId, itemId) SELECT ?, value FROM json_each(?)").bind(sid, lineIds),
+    db.prepare("UPDATE order_items SET blankShippedAt = COALESCE(blankShippedAt, ?) WHERE id IN (SELECT value FROM json_each(?))").bind(shipDate, lineIds),
+    // A line dropped from this shipment and covered by no other loses its shipped stamp.
+    db.prepare(`UPDATE order_items SET blankShippedAt=NULL WHERE id IN (SELECT value FROM json_each(?))
+                AND NOT EXISTS (SELECT 1 FROM blank_shipment_items si WHERE si.itemId = order_items.id)`).bind(dropped),
+  ]);
   const orderIds = [...new Set([...rows.map(r => r.orderId), ...prev.map(p => p.orderId)].filter(Boolean))];
   for (const orderId of orderIds) await recomputeOrderBlankStatus_(db, orderId);
 }
@@ -12312,9 +12378,10 @@ export async function recordDueRecurringExpenses(db, today, { ids = null, max = 
     stmts.push(db.prepare("UPDATE recurring_expenses SET nextIndex = ? WHERE id = ? AND nextIndex = ?")
       .bind(Number(r.nextIndex) + dates.length, Number(r.id), Number(r.nextIndex)));
     await db.batch(stmts);
-    // What this run wrote (an ignored date keeps its older createdAt).
+    // What this run wrote (an ignored date keeps its older createdAt). The dates go in as one JSON array: a
+    // backdated weekly rule can be due on far more than D1's 100 bound parameters.
     const { results: made } = await db.prepare(`SELECT id, expenseDate FROM expenses WHERE recurringId = ? AND createdAt = ?
-      AND expenseDate IN (${dates.map(() => "?").join(",")}) ORDER BY expenseDate`).bind(Number(r.id), now, ...dates).all();
+      AND expenseDate IN (SELECT value FROM json_each(?)) ORDER BY expenseDate`).bind(Number(r.id), now, JSON.stringify(dates)).all();
     for (const row of made) out.recorded.push({ id: Number(row.id), ruleId: Number(r.id), date: row.expenseDate, amount: fromCents(r.amountCents), description: r.description });
   }
   return out;
@@ -13002,7 +13069,8 @@ export async function receiptAccountBlockers(db, rec, target) {
   const out = [];
   const matched = async (src, ids) => {
     if (!ids.length) return 0;
-    return Number((await db.prepare(`SELECT count(*) n FROM statement_matches WHERE src = ? AND srcId IN (${ids.map(() => "?").join(",")})`).bind(src, ...ids).first()).n || 0);
+    // One JSON array, not a parameter per id: a receipt can have more rows than D1's 100 bound parameters.
+    return Number((await db.prepare("SELECT count(*) n FROM statement_matches WHERE src = ? AND srcId IN (SELECT value FROM json_each(?))").bind(src, JSON.stringify(ids)).first()).n || 0);
   };
   const n = await matched(rec.kind === "transfers" ? "transfer_sheet" : "blanks", rec.stock.map(s => s.id))
     + await matched("expense", rec.expense ? [rec.expense.id] : []) + await matched("owner", rec.draw ? [rec.draw.id] : []);
@@ -13054,7 +13122,9 @@ export async function getTransferSheet(db, seedId) {
   const rec = await getReceiptRecords(db, "transfers", seedId);
   if (!rec || !rec.stock.length) return null;
   const ids = rec.stock.map(s => s.id);
-  const moves = (await db.prepare(`SELECT * FROM transfer_movements WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id`).bind(...ids).all()).results;
+  // Id lists go in as one JSON array (json_each) here and in editTransferSheet: a big sheet can have more
+  // movements than D1's 100 bound parameters.
+  const moves = (await db.prepare("SELECT * FROM transfer_movements WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id").bind(JSON.stringify(ids)).all()).results;
   const exp = rec.expense ? await db.prepare("SELECT * FROM expenses WHERE id = ?").bind(rec.expense.id).first() : null;
   const draw = rec.draw ? await db.prepare("SELECT * FROM owner_transactions WHERE id = ?").bind(rec.draw.id).first() : null;
   // Back to the form's rows: a row's second movement (if any) is the very next one, same item and %, one cent dearer.
@@ -13085,7 +13155,7 @@ export async function getTransferSheet(db, seedId) {
     pePct = totalCents ? r4(peCents * 100 / totalCents) : 0;
   }
   const label = transferSheetLabel(rec.vendor, rec.vendorRef);
-  const matchedN = async (src, list) => list.length ? Number((await db.prepare(`SELECT count(*) n FROM statement_matches WHERE src = ? AND srcId IN (${list.map(() => "?").join(",")})`).bind(src, ...list).first()).n || 0) : 0;
+  const matchedN = async (src, list) => list.length ? Number((await db.prepare("SELECT count(*) n FROM statement_matches WHERE src = ? AND srcId IN (SELECT value FROM json_each(?))").bind(src, JSON.stringify(list)).first()).n || 0) : 0;
   const matched = (await matchedN("transfer_sheet", ids) + await matchedN("expense", exp ? [Number(exp.id)] : []) + await matchedN("owner", draw ? [Number(draw.id)] : [])) > 0;
   const month = rec.date.slice(0, 7);
   let reconciled = false;
@@ -13128,7 +13198,8 @@ export async function editTransferSheet(db, seedId, x, { preview = false, newRec
   if (moneyChanged && sheet.reconciled) throw sheetError_(`${sheet.date.slice(0, 7)} is reconciled for the account this sheet was paid from, so its amounts, date and paid-from can't change — reopen that month on Reconcile first.`);
   if (moneyChanged && acct && await isReconciled(db, acct, String(x.date).slice(0, 7))) throw sheetError_(`${String(x.date).slice(0, 7)} is reconciled for the account you chose — reopen that month on Reconcile first.`);
   const oldIds = sheet.movementIds;
-  const lines = (await db.prepare(`SELECT DISTINCT lineId FROM statement_matches WHERE src = 'transfer_sheet' AND srcId IN (${oldIds.map(() => "?").join(",")})`).bind(...oldIds).all()).results.map(r => Number(r.lineId));
+  const oldIdsJson = JSON.stringify(oldIds);
+  const lines = (await db.prepare("SELECT DISTINCT lineId FROM statement_matches WHERE src = 'transfer_sheet' AND srcId IN (SELECT value FROM json_each(?))").bind(oldIdsJson).all()).results.map(r => Number(r.lineId));
   if (lines.length > 1) throw sheetError_("This sheet is matched to more than one bank-statement line. Unmatch it on Reconcile first, edit it, then match it again.");
 
   // Replay every transfer on the sheet before or after the edit, with the old purchases swapped for the new.
@@ -13178,7 +13249,7 @@ export async function editTransferSheet(db, seedId, x, { preview = false, newRec
   const receiptKey = x.receiptKey != null && x.receiptKey !== "" ? String(x.receiptKey) : sheet.receiptKey;
   const receiptName = x.receiptKey != null && x.receiptKey !== "" ? String(x.receiptName || "") : sheet.receiptName;
   const label = transferSheetLabel(x.vendor, x.vendorRef);
-  const stmts = [db.prepare(`UPDATE transfer_movements SET voidedAt = ?, voidReason = 'Sheet edited' WHERE id IN (${oldIds.map(() => "?").join(",")}) AND voidedAt IS NULL`).bind(now, ...oldIds)];
+  const stmts = [db.prepare("UPDATE transfer_movements SET voidedAt = ?, voidReason = 'Sheet edited' WHERE id IN (SELECT value FROM json_each(?)) AND voidedAt IS NULL").bind(now, oldIdsJson)];
   for (const s of specs) {
     stmts.push(transferMovementStmt_(db, { transferId: s.transferId, transferName: (transfers.find(t => t.transferId === s.transferId) || {}).name || "", qtyDelta: s.qty, unitCostCents: s.unit,
       kind: "purchase", vendor: x.vendor, vendorRef: x.vendorRef, note: sheet.note || "Received", pctOfSheet: s.pct, occurredAt: x.date,
@@ -13212,7 +13283,7 @@ export async function editTransferSheet(db, seedId, x, { preview = false, newRec
   } else if (sheet.personal) stmts.push(db.prepare("UPDATE owner_transactions SET deletedAt = ? WHERE id = ? AND deletedAt IS NULL").bind(now, sheet.personal.ownerEntryId));
   // The bank-statement match follows the sheet to its new movements (only reached when its money is unchanged).
   if (lines.length === 1) {
-    stmts.push(db.prepare(`DELETE FROM statement_matches WHERE src = 'transfer_sheet' AND srcId IN (${oldIds.map(() => "?").join(",")})`).bind(...oldIds));
+    stmts.push(db.prepare("DELETE FROM statement_matches WHERE src = 'transfer_sheet' AND srcId IN (SELECT value FROM json_each(?))").bind(oldIdsJson));
     stmts.push(db.prepare("INSERT INTO statement_matches (lineId, src, srcId, matchedAt, auto) SELECT ?, 'transfer_sheet', id, ?, 0 FROM transfer_movements WHERE receiptGroup = ? AND kind = 'purchase' AND voidedAt IS NULL")
       .bind(lines[0], now, group));
   }
@@ -14820,12 +14891,38 @@ export async function getSalesTaxRefunds(db, dateFrom, dateTo) {
     .map(m => ({ month: m.month, refunds: m.count, refunded: fromCents(m.refundCents), taxRefunded: fromCents(m.taxCents) }));
 }
 
+// An audit entry's detail as stored: at most AUDIT_DETAIL_MAX_ bytes (review #100: the log keeps everything, so no
+// one entry may be huge). A bigger {from, to} keeps only the fields that changed (onlyChanged: true); anything still
+// too big becomes {truncated: true, bytes, preview: the start of its JSON}. The Audit log screen says so.
+export const AUDIT_DETAIL_MAX_ = 8192;
+const utf8Bytes_ = (s) => new TextEncoder().encode(s).length;
+export function auditDetailJson_(detail) {
+  if (detail == null) return null;
+  const json = JSON.stringify(detail);
+  if (json === undefined) return null;
+  if (json.length <= AUDIT_DETAIL_MAX_ / 4 || utf8Bytes_(json) <= AUDIT_DETAIL_MAX_) return json;
+  const isObj = (x) => x && typeof x === "object" && !Array.isArray(x);
+  if (isObj(detail) && isObj(detail.from) && isObj(detail.to)) {
+    const from = {}, to = {};
+    for (const k of new Set([...Object.keys(detail.from), ...Object.keys(detail.to)])) {
+      if (JSON.stringify(detail.from[k]) !== JSON.stringify(detail.to[k])) { from[k] = detail.from[k]; to[k] = detail.to[k]; }
+    }
+    const slim = JSON.stringify({ ...detail, from, to, onlyChanged: true });
+    if (utf8Bytes_(slim) <= AUDIT_DETAIL_MAX_) return slim;
+  }
+  // The preview is cut until the whole entry fits (escaping can make it longer than the text it holds).
+  const bytes = utf8Bytes_(json);
+  let n = AUDIT_DETAIL_MAX_ - 200, out;
+  do { out = JSON.stringify({ truncated: true, bytes, preview: json.slice(0, n) }); n = Math.floor(n * 0.8); } while (utf8Bytes_(out) > AUDIT_DETAIL_MAX_ && n > 0);
+  return out;
+}
+
 export async function insertAuditLog(db, { orgId, orderId, action, detail, actor, ip, actorUserId, targetUserId }) {
   const createdAt = new Date().toISOString();
   // Only a real order ID is kept: many actions pass the request's orderId through unchecked, and the Audit log
   // screen links each one. Anything else (a typo, a crafted string) is dropped rather than stored.
   orderId = orderId != null && /^[A-Za-z0-9\-]{1,64}$/.test(String(orderId)) ? String(orderId) : null;
-  const detailJson = detail != null ? JSON.stringify(detail) : null;
+  const detailJson = auditDetailJson_(detail);
   // Security entries also say which user did it and to which (migrations/0053).
   if (actorUserId != null || targetUserId != null) {
     await db.prepare(
@@ -14844,7 +14941,7 @@ export async function insertAuditLog(db, { orgId, orderId, action, detail, actor
     await db.prepare(
       "INSERT INTO audit_log (createdAt, orgId, orderId, action, detail) VALUES (?, ?, ?, ?, ?)"
     ).bind(createdAt, orgId || null, orderId || null, action,
-      JSON.stringify({ ...(detail || {}), _actor: actor || null, _ip: ip || null })).run();
+      auditDetailJson_({ ...(detail || {}), _actor: actor || null, _ip: ip || null })).run();
   }
 }
 
@@ -14853,26 +14950,43 @@ export async function insertAuditLog(db, { orgId, orderId, action, detail, actor
 export function auditLogStatement(db, { orgId, orderId, action, detail, actor, ip }) {
   orderId = orderId != null && /^[A-Za-z0-9\-]{1,64}$/.test(String(orderId)) ? String(orderId) : null;
   return db.prepare("INSERT INTO audit_log (createdAt, orgId, orderId, action, detail, actor, ip) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(new Date().toISOString(), orgId || null, orderId, action, detail != null ? JSON.stringify(detail) : null, actor || null, ip || null);
+    .bind(new Date().toISOString(), orgId || null, orderId, action, auditDetailJson_(detail), actor || null, ip || null);
 }
 
-export async function getAuditLog(db, { orgId, orderId, action, dateFrom, dateTo, limit = 20 } = {}) {
+// The newest entries matching the filters, newest first, at most `limit` (≤ 200) — the entries array, or with `paged`
+// { entries, more } (review #108): `more` says older entries match too, and `before` ({createdAt, id} of the last
+// entry shown) asks for the page after it. Ties on createdAt are ordered by id, so no entry is shown twice or skipped.
+export async function getAuditLog(db, { orgId, orderId, action, dateFrom, dateTo, limit = 20, before = null, paged = false } = {}) {
   const conditions = [];
   const params = [];
+  const none = () => paged ? { entries: [], more: false } : [];
   if (orgId)    { conditions.push("orgId = ?");       params.push(orgId); }
   if (orderId)  { conditions.push("orderId = ?");     params.push(orderId); }
-  if (action)   { conditions.push("action LIKE ?");   params.push("%" + action + "%"); }
+  if (action) {
+    // The typed text, matched to the action names it appears in (review #100): the log is then read by name, on
+    // the (action, createdAt) index (migrations/0104), instead of a "contains" match no index can serve.
+    const want = String(action).toLowerCase();
+    const { results: names } = await db.prepare("SELECT DISTINCT action FROM audit_log").all();
+    const matched = names.map(r => String(r.action || "")).filter(a => a.toLowerCase().includes(want));
+    if (!matched.length) return none();
+    conditions.push("action IN (SELECT value FROM json_each(?))"); params.push(JSON.stringify(matched));
+  }
   if (dateFrom) { conditions.push("createdAt >= ?");  params.push(dateFrom); }
   // A plain day (YYYY-MM-DD) runs to the end of that UTC day; a full time (the admin sends its local day's last
   // moment) is used as it is.
   if (dateTo)   { conditions.push("createdAt <= ?");  params.push(/T/.test(dateTo) ? dateTo : dateTo + "T23:59:59.999Z"); }
+  if (before && typeof before === "object" && before.createdAt && Number.isFinite(Number(before.id))) {
+    conditions.push("(createdAt < ? OR (createdAt = ? AND id < ?))");
+    params.push(String(before.createdAt), String(before.createdAt), Number(before.id));
+  }
   const where = conditions.length ? "WHERE " + conditions.join(" AND ") : "";
   const cap = Math.min(Math.max(1, Number(limit) || 20), 200);
-  params.push(cap);
+  params.push(cap + 1);   // one more than shown: whether there are more
   const { results } = await db.prepare(
-    `SELECT id, createdAt, orgId, orderId, action, detail, actor, ip, actorUserId, targetUserId FROM audit_log ${where} ORDER BY createdAt DESC LIMIT ?`
+    `SELECT id, createdAt, orgId, orderId, action, detail, actor, ip, actorUserId, targetUserId FROM audit_log ${where} ORDER BY createdAt DESC, id DESC LIMIT ?`
   ).bind(...params).all();
-  return results.map(r => ({ ...r, detail: r.detail ? JSON.parse(r.detail) : null }));
+  const entries = results.slice(0, cap).map(r => ({ ...r, detail: r.detail ? tryParse_(r.detail, { truncated: true, preview: String(r.detail).slice(0, 200) }) : null }));
+  return paged ? { entries, more: results.length > cap } : entries;
 }
 
 function tryParse_(str, fallback) {

@@ -28,7 +28,8 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customerId);
 
 -- Backfill: a customer for each email that real (non-test) orders were placed with. An email here is what
 -- db.js normalizeCustomerEmail_ accepts: one @ with something before it, a dot with something either side after it,
--- no white space, at most 200 characters. Its name is the one on that email's newest order, and it has been a
+-- no white space, at most 200 characters. Only printable ASCII is taken: SQLite's trim() knows four white-space
+-- characters and JavaScript's knows many (a pasted no-break space), so anything else is left for the app to link later. Its name is the one on that email's newest order, and it has been a
 -- customer since its oldest. Nothing is inserted on a database with no orders.
 INSERT INTO customers (name, email, createdAt, updatedAt)
 SELECT substr(trim(customerName), 1, 200), email, firstAt, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -41,6 +42,7 @@ FROM (
     AND length(email) - length(replace(email, '@', '')) = 1
     AND instr(email, ' ') = 0 AND instr(email, char(9)) = 0 AND instr(email, char(10)) = 0 AND instr(email, char(13)) = 0
     AND length(email) <= 200
+    AND NOT (email GLOB '*[^!-~]*')
 )
 WHERE newest = 1;
 

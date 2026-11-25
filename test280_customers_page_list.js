@@ -430,6 +430,17 @@ const section = (t) => console.log("=== " + t + " ===");
   escape();
   await wait(() => !dlg());
   ok("…or closes it when the answer is Discard, saving nothing", !dlg() && asks.length === 2 && saves().length === 0);
+  open();
+  fill("custNewName", "Half typed");
+  confirmAnswer = false;
+  field("custNewCancel").click();
+  await wait(() => asks.length === 3);
+  await settled();
+  ok("Cancel asks too once something is typed, and keeps the window when the answer is to keep editing", asks.length === 3 && /^Discard changes\?/.test(asks[2]) && !!dlg() && field("custNewName").value === "Half typed");
+  confirmAnswer = true;
+  field("custNewCancel").click();
+  await wait(() => !dlg());
+  ok("…and closes it when the answer is Discard, saving nothing", !dlg() && asks.length === 4 && saves().length === 0);
 
   reset();
   open();
@@ -524,6 +535,20 @@ const section = (t) => console.log("=== " + t + " ===");
   submit();
   await wait(onePage("Robin Sample"));
   ok("…and creates a customer", rowsInDb("SELECT count(*) AS n FROM customers WHERE name = 'Robin Sample'")[0].n === 1 && onePage("Robin Sample")());
+
+  section("An exemption that has expired");
+  // An exemption is changed with the full level (the page's role here is Back office).
+  const asAdmin = async (body) => { const was = globalThis.__role; globalThis.__role = "admin"; try { return await call(body); } finally { globalThis.__role = was; } };
+  ok("(the expiry is moved into the past)", (await asAdmin({ action: "saveCustomer", id: blakeId, taxExemptExpires: "2020-01-01" })).status === 200);
+  await leave(); reset();
+  $("#custQ") && ($("#custQ").value = "");
+  w.location.hash = "#customers";
+  await wait(() => !!$("#custBody") && /Blake Stone/.test($("#custBody").textContent));
+  {
+    const tags = rowOf("Blake Stone") ? [...rowOf("Blake Stone").querySelectorAll(".cust-tag")] : [];
+    ok("a customer whose exemption has expired is tagged Exemption expired, not Exempt", tags.map(t => t.textContent).join("|") === "Exemption expired" && tags[0].classList.contains("cust-tag-warn") && !rowOf("Blake Stone").querySelector(".cust-tag-exempt"));
+  }
+  ok("(and taken away again)", (await asAdmin({ action: "saveCustomer", id: blakeId, taxExemptExpires: "" })).status === 200);
 
   section("A role without Customers");
   const none = Object.assign({}, effectivePermissions(DEFAULT_ROLES.production), { "customers.records": "none" });

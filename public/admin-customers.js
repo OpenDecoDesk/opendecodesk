@@ -59,7 +59,7 @@
       body.innerHTML = `<div class="admin-table-wrap"><table class="stack-mobile cust-table">
         <thead><tr><th>Name</th><th>Company</th><th>Email</th><th>Phone</th><th class="cust-num">Orders</th><th>Last order</th></tr></thead>
         <tbody>${customers.map(c => `<tr class="cust-row${c.archived ? " cust-row-archived" : ""}" data-cust-id="${escapeHtml(c.id)}">
-          <td class="stack-title"><a class="cust-link" href="#customers/${encodeURIComponent(c.id)}">${escapeHtml(custLabel(c))}</a>${c.taxExempt ? ` <span class="cust-tag cust-tag-exempt">Exempt</span>` : ""}${c.archived ? ` <span class="cust-tag">Archived</span>` : ""}</td>
+          <td class="stack-title"><a class="cust-link" href="#customers/${encodeURIComponent(c.id)}">${escapeHtml(custLabel(c))}</a>${c.taxExempt ? (c.taxExemptExpires && c.taxExemptExpires < localToday_() ? ` <span class="cust-tag cust-tag-warn">Exemption expired</span>` : ` <span class="cust-tag cust-tag-exempt">Exempt</span>`) : ""}${c.archived ? ` <span class="cust-tag">Archived</span>` : ""}</td>
           <td>${escapeHtml(c.company || "")}</td>
           <td>${escapeHtml(c.email || "")}</td>
           <td>${escapeHtml(c.phone || "")}</td>
@@ -130,7 +130,8 @@
       </form>`, 480, { guard: true });
     const val = (id) => ov.querySelector("#" + id).value.trim();
     const err = ov.querySelector("#custNewErr"), save = ov.querySelector("#custNewSave");
-    ov.querySelector("#custNewCancel").onclick = close;
+    // Cancel asks before throwing away what was typed, as ✕ and Escape do.
+    ov.querySelector("#custNewCancel").onclick = () => ov.querySelector("[data-modal-close]").click();
     ov.querySelector("#custNewForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       const name = val("custNewName"), company = val("custNewCompany"), email = val("custNewEmail");

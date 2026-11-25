@@ -185,8 +185,8 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   console.log("\n=== Card checkout charges the tax ===");
   const pay = async (orderId) => {
     stripeCalls.length = 0;
-    const res = await checkout({ env: { DB: d1, STRIPE_SECRET_KEY: "sk_test_x" },
-      request: { url: "https://acme.example.com/api/checkout", json: async () => ({ orderId, orgId: "acme", checkoutToken: await orderTokenFor({ STRIPE_SECRET_KEY: "sk_test_x" }, orderId) }), headers: { get: () => null } } });
+    const res = await checkout({ env: { DB: d1, STRIPE_SECRET_KEY: "sk_test_x", ...QUOTE_ENV },
+      request: { url: "https://acme.example.com/api/checkout", json: async () => ({ orderId, orgId: "acme", checkoutToken: await orderTokenFor(QUOTE_ENV, orderId) }), headers: { get: () => null } } });
     return { status: res.status, sent: stripeCalls[0] };
   };
   let c = await pay("DISC");

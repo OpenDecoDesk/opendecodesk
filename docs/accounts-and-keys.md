@@ -524,9 +524,9 @@ Without GitHub you can still back up by hand: create the bucket (step 3), then r
 | `CLOUDFLARE_ACCOUNT_ID` | Same value as `CF_ACCOUNT_ID` | letters and digits | No | GitHub secret |
 | `D1_BACKUP_ENABLED` | You type it | `true` | — | GitHub variable |
 
-The installer makes three values itself and you never fetch them: the admin passphrase (shown to
+The installer makes four values itself and you never fetch them: the admin passphrase (shown to
 you once, at the end; the first sign-in with it creates the first admin, who chooses their own
-password), the signing secret and the roll-up key. What each value does is in
+password), the signing secret, the password pepper and the roll-up key. What each value does is in
 [configuration.md](configuration.md).
 
 Its first questions are your own answers, not values to fetch: your domain, the subdomain for

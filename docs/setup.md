@@ -199,6 +199,7 @@ npx wrangler deploy
 npx wrangler secret put PROXY_ADMIN_PASSPHRASE   # a long passphrase you'll type to sign in
 npx wrangler secret put SIGNING_SECRET           # a long random string, e.g. from: openssl rand -hex 32
 npx wrangler secret put CRON_SECRET              # optional; another long random string
+npx wrangler secret put PASSWORD_PEPPER          # recommended; another long random string, set once and never changed
 ```
 
 Add the secrets and settings for any optional service from

@@ -18,7 +18,7 @@ function legacyLabels_(env, label) {
 
 const ORDER_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 function orderTokenSecret_(env){
-  return (env && (env.SIGNING_SECRET || env.QUOTE_SIGNING_SECRET || env.STRIPE_SECRET_KEY)) || "";
+  return (env && (env.SIGNING_SECRET || env.QUOTE_SIGNING_SECRET)) || "";
 }
 async function orderTokenMac_(secret, data, label = "odd-order-pay-v1:"){
   const enc = new TextEncoder();

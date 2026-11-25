@@ -12,7 +12,8 @@
  * Signing key: SIGNING_SECRET — the site's one signing secret, shared with the
  * signed download links (each use is domain-separated by its own label, so one
  * signature can't be confused with another). An install that hasn't set it yet
- * falls back to the older QUOTE_SIGNING_SECRET, then STRIPE_SECRET_KEY.
+ * falls back to the older QUOTE_SIGNING_SECRET (never the Stripe key: one secret
+ * must not double as another's).
  * Rotating it just invalidates quotes that are < 2h old.
  */
 
@@ -20,7 +21,7 @@ const LABEL = "odd-shipping-quote-v1:";
 export const QUOTE_TTL_SECONDS = 2 * 60 * 60;
 
 function signingSecret(env){
-  return env.SIGNING_SECRET || env.QUOTE_SIGNING_SECRET || env.STRIPE_SECRET_KEY || "";
+  return env.SIGNING_SECRET || env.QUOTE_SIGNING_SECRET || "";
 }
 
 function b64urlEncode(str){

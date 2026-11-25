@@ -39,7 +39,7 @@ import { rateLimitCheck, rateLimitHit, rateLimitResponse } from "../_lib/rateLim
 // and switching two-step off, so it can't be guessed at speed.
 const CODE_BUCKET = "admin_2fa_code";
 const CODE_LIMIT = 5;
-import { verifyTOTP }           from "../_lib/totp.js";
+import { verifyTOTP, sealTotp, openTotp, totpIsSealed } from "../_lib/totp.js";
 
 function generateBase32Secret(){
   const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -113,11 +113,17 @@ export async function onRequestPost(context){
       if(await spendRecoveryCode(env, user, code)){ user = await getUserById(env.DB, user.id); return null; }
       return wrongCode("That recovery code is not right, or was already used.");
     }
-    const result = await verifyTOTP(user.totpSecret, code);
+    // The secret is kept sealed (totp.js sealTotp). One that won't open is refused, never taken as "no two-step".
+    let secret;
+    try{ secret = await openTotp(env, user.totpSecret); }
+    catch(e){ if(e && e.code === "totp_unreadable") return jsonResponse({status:"error", code:"totp_unreadable", message: e.message}, 409); throw e; }
+    const result = await verifyTOTP(secret, code);
     if(!result.valid) return wrongCode("Invalid code — check your device and try again.");
     if(!(await claimUserTotpCounter(env.DB, user.id, result.counter))){
       return jsonResponse({status:"error", message:"That code was already used — wait for the next one from your authenticator app."}, 400);
     }
+    // A secret stored before sealing is sealed now that a code has matched it.
+    if(!totpIsSealed(user.totpSecret)) await updateUser(env.DB, user.id, { totpSecret: await sealTotp(env, secret) });
     return null;
   };
   // Turning two-step on or off ends this user's OTHER sessions (this one stays signed in).
@@ -152,7 +158,8 @@ export async function onRequestPost(context){
     if(auditErr) return auditErr;
     let recoveryCodes = null, pending = null;
     try{
-      await updateUser(env.DB, user.id, { totpSecret: proposedSecret, totpLastCounter: null });
+      // Stored sealed (totp.js sealTotp): a copy of the database alone can't make codes.
+      await updateUser(env.DB, user.id, { totpSecret: await sealTotp(env, proposedSecret), totpLastCounter: null });
       // Record counter so the setup code can't be immediately replayed.
       if(result.counter !== null) await claimUserTotpCounter(env.DB, user.id, result.counter);
       if(!recoveryCodesLeft(user)) recoveryCodes = await makeRecoveryCodes();

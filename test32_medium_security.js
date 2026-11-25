@@ -278,8 +278,8 @@ const SAME = { Origin: ADMIN, "CF-Connecting-IP": "203.0.113.7" };
     global.fetch = async (url, opts) => { stripeParams = new URLSearchParams(opts.body); return { json: async () => ({ url: "https://checkout.stripe.com/x" }) }; };
     const C = load("functions/api/checkout.js", ["onRequestPost"]);
     const { orderTokenFor } = require("./testlib/order-token");
-    const call = async (host, body) => C.onRequestPost({ env: { DB: {}, STRIPE_SECRET_KEY: "sk_test" },
-      request: makeReq("https://" + host + "/api/checkout", { body: Object.assign({ checkoutToken: await orderTokenFor({ STRIPE_SECRET_KEY: "sk_test" }, body.orderId) }, body) }) });
+    const call = async (host, body) => C.onRequestPost({ env: { DB: {}, STRIPE_SECRET_KEY: "sk_test", SIGNING_SECRET: "test-signing-secret" },
+      request: makeReq("https://" + host + "/api/checkout", { body: Object.assign({ checkoutToken: await orderTokenFor({ STRIPE_SECRET_KEY: "sk_test", SIGNING_SECRET: "test-signing-secret" }, body.orderId) }, body) }) });
 
     state.paid = true; stripeParams = null;
     let r = await call("league101.example.com", { orderId: "ORD-1", orgId: "league-101" });

@@ -52,7 +52,7 @@ import {
   signInBudgetBlocked, countSignInFailure, noteSignInAddress,
 } from "../_lib/adminAuth.js";
 import { accessEnabled, verifyAccess } from "../_lib/access.js";
-import { verifyTOTP }         from "../_lib/totp.js";
+import { verifyTOTP, sealTotp, openTotp, totpIsSealed } from "../_lib/totp.js";
 import { disableWorkersDev }  from "../_lib/cloudflareSetup.js";
 import {
   recordFailedAdminLogin, insertAuditLog, getUserByEmail, getUserById, insertFirstAdmin, insertUser, getBootstrapState,
@@ -148,14 +148,22 @@ export async function onRequestPost(context){
         if(!(await spendRecoveryCode(env, user, code))) return refuse("code", "That recovery code is not right, or was already used.");
         usedRecoveryCode = true;
       }else{
-        const result = await verifyTOTP(user.totpSecret, code);
+        // The secret is kept sealed (totp.js sealTotp). One that won't open (the passphrase was replaced) is
+        // refused with what to do — never taken as "no two-step".
+        const secret = await openTotp(env, user.totpSecret);
+        const result = await verifyTOTP(secret, code);
         if(!result.valid) return refuse("code", "Invalid authentication code. Check the time on your device and try again.");
         // Prevent replay: a counter is accepted once, and only if it is newer than the last one.
         if(!(await claimUserTotpCounter(env.DB, user.id, result.counter))){
           return jsonResponse({status:"error", message:"Code already used — wait for the next code from your authenticator app."}, 401);
         }
+        // A secret stored before sealing is sealed now that a code has matched it.
+        if(!totpIsSealed(user.totpSecret)) await updateUser(env.DB, user.id, { totpSecret: await sealTotp(env, secret) });
       }
-    }catch(e){ return unavailable("could not check the code", e); }
+    }catch(e){
+      if(e && e.code === "totp_unreadable") return jsonResponse({status:"error", code:"totp_unreadable", message: e.message}, 409);
+      return unavailable("could not check the code", e);
+    }
   }
 
   // A check, not a sign-in: the password (and code) must belong to the user signed in with this cookie. The

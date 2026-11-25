@@ -58,8 +58,9 @@ async function makeAuth({ d1, passphrase = "abcd-efgh-jkmn-pqrs-tuvw-xyz2", real
   const password = load("functions/api/admin-password.js", "onRequestPost");
   const users = load("functions/api/admin-users.js", "onRequestPost");
   const twoFactor = load("functions/api/admin-2fa.js", "onRequestPost");
-  // Internals a test needs to stage an older install (a password record as the old code stored it).
-  const lib = load("", "{ passwordRecordFor_, requireAdmin, adminUser, adminActor, setUserRoleAndStatus, getAuditLog }");
+  // Internals a test needs to stage an older install (a password record as the old code stored it), and to read
+  // a sealed two-step secret back (openTotp).
+  const lib = load("", "{ passwordRecordFor_, requireAdmin, adminUser, adminActor, setUserRoleAndStatus, getAuditLog, openTotp, sealTotp, passwordIterations }");
   // The real limiter's own functions, when realLimits (to test it directly).
   const limits = realLimits ? load("", "{ rateLimited, rateLimitCheck, rateLimitHit, rateLimitCheckGlobal, rateLimitHitGlobal, ipv6Prefix64 }") : null;
   // The orders endpoint — the 207 back-office actions — behind the real gate. Everything it does

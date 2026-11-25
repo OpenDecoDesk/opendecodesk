@@ -191,8 +191,8 @@ function makeGsMock(calls){ return async (url, opts) => {
     return { json: async () => ({status:"ok"}) };
   };
   const co1 = await checkoutHandler({
-    request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
-    env: { DB: {}, STRIPE_SECRET_KEY:"sk_test_fake" }
+    request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
+    env: { DB: {}, SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake" }
   });
   const d1 = JSON.parse(await co1.text());
   console.log("Returns ok:", d1.status === "ok");
@@ -215,8 +215,8 @@ function makeGsMock(calls){ return async (url, opts) => {
   {
     const callCheckout = async () => {
       const r = await checkoutHandler({
-        request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101"}), url:"https://example.com/api/checkout" },
-        env: { DB: {}, STRIPE_SECRET_KEY:"sk_test_fake" } });
+        request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101"}), url:"https://example.com/api/checkout" },
+        env: { DB: {}, SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake" } });
       return { status: r.status, body: JSON.parse(await r.text()) };
     };
     let created = 0, expired = 0;
@@ -262,15 +262,15 @@ function makeGsMock(calls){ return async (url, opts) => {
   // carry a phone number instead of an email — either would make Stripe
   // reject the session with "Invalid email address" if it were passed on.
   await checkoutHandler({
-    request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "TEST-1"), orderId:"TEST-1",orgId:"league-101",customerName:"Admin Test Transaction",contact:""}), url:"https://example.com/api/checkout" },
-    env: { DB: {}, STRIPE_SECRET_KEY:"sk_test_fake" }
+    request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}, "TEST-1"), orderId:"TEST-1",orgId:"league-101",customerName:"Admin Test Transaction",contact:""}), url:"https://example.com/api/checkout" },
+    env: { DB: {}, SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake" }
   });
   const paramsBlank = new URLSearchParams(capturedBlankContactReq.opts.body);
   console.log("customer_email key is omitted entirely for a blank contact, not sent as an empty string:", !paramsBlank.has("customer_email"));
 
   await checkoutHandler({
-    request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T2"), orderId:"ORD-T2",orgId:"league-101",customerName:"Bea",contact:"614-555-0100"}), url:"https://example.com/api/checkout" },
-    env: { DB: {}, STRIPE_SECRET_KEY:"sk_test_fake" }
+    request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T2"), orderId:"ORD-T2",orgId:"league-101",customerName:"Bea",contact:"614-555-0100"}), url:"https://example.com/api/checkout" },
+    env: { DB: {}, SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake" }
   });
   const paramsPhone = new URLSearchParams(capturedBlankContactReq.opts.body);
   console.log("customer_email key is also omitted for a phone-number-only contact:", !paramsPhone.has("customer_email"));
@@ -280,16 +280,16 @@ function makeGsMock(calls){ return async (url, opts) => {
   global.getOrderTotal = async () => 45;
   global.fetch = async (url, opts) => { capturedStripeReq = { url, opts }; return { json: async () => ({ url: "https://checkout.stripe.com/x" }) }; };
   await checkoutHandler({
-    request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",customerName:"Mallory",contact:"mallory@evil.example"}), url:"https://example.com/api/checkout" },
-    env: { STRIPE_SECRET_KEY: "sk_test_fake", DB: {} }
+    request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",customerName:"Mallory",contact:"mallory@evil.example"}), url:"https://example.com/api/checkout" },
+    env: { SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY: "sk_test_fake", DB: {} }
   });
   const spoofed = new URLSearchParams(capturedStripeReq.opts.body);
   console.log("a spoofed body email is ignored — Stripe gets the order's own email:", spoofed.get("customer_email") === "a@example.com");
   console.log("a spoofed body name is ignored in metadata:", spoofed.get("metadata[customerName]") === "Aaron");
   global.__checkoutVoided = true;
   const vRes = await checkoutHandler({
-    request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101"}), url:"https://example.com/api/checkout" },
-    env: { STRIPE_SECRET_KEY: "sk_test_fake", DB: {} }
+    request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101"}), url:"https://example.com/api/checkout" },
+    env: { SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY: "sk_test_fake", DB: {} }
   });
   console.log("a voided order is refused (409):", vRes.status === 409);
   global.__checkoutVoided = false;
@@ -305,8 +305,8 @@ function makeGsMock(calls){ return async (url, opts) => {
     return { json: async () => ({status:"ok"}) };
   };
   await checkoutHandler({
-    request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",total:0.50,customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
-    env: { DB: {}, STRIPE_SECRET_KEY:"sk_test_fake" }
+    request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",total:0.50,customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
+    env: { DB: {}, SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake" }
   });
   const paramsTampered = new URLSearchParams(capturedStripeReq2.opts.body);
   console.log("Charges the REAL $45.00, not the tampered $0.50 the request body claimed:", paramsTampered.get("line_items[0][price_data][unit_amount]") === "4500");
@@ -316,7 +316,7 @@ function makeGsMock(calls){ return async (url, opts) => {
   console.log("Error returned:", JSON.parse(await co2.text()).status === "error");
 
   console.log("\n=== checkout.js: missing DB binding returns a clean error ===");
-  const co2b = await checkoutHandler({ request:{json:async()=>({}),url:"https://example.com/api/checkout"}, env:{STRIPE_SECRET_KEY:"sk_test_fake"} });
+  const co2b = await checkoutHandler({ request:{json:async()=>({}),url:"https://example.com/api/checkout"}, env:{SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"} });
   console.log("Error returned:", JSON.parse(await co2b.text()).status === "error");
 
   console.log("\n=== checkout.js: order not found in D1 -> refuses to create a session, never calls Stripe ===");
@@ -327,8 +327,8 @@ function makeGsMock(calls){ return async (url, opts) => {
     return { json: async () => ({status:"ok"}) };
   };
   const co2c = await checkoutHandler({
-    request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-NOPE"), orderId:"ORD-NOPE",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
-    env: { DB: {}, STRIPE_SECRET_KEY:"sk_test_fake" }
+    request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-NOPE"), orderId:"ORD-NOPE",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
+    env: { DB: {}, SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake" }
   });
   console.log("Refuses cleanly:", JSON.parse(await co2c.text()).status === "error");
   console.log("Never even calls Stripe:", !calledStripeForMissingOrder);
@@ -342,8 +342,8 @@ function makeGsMock(calls){ return async (url, opts) => {
     return { json: async () => ({status:"ok"}) };
   };
   const co2d = await checkoutHandler({
-    request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_live_bad"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
-    env: { DB: {}, STRIPE_SECRET_KEY:"sk_live_bad" }
+    request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_live_bad"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
+    env: { DB: {}, SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_live_bad" }
   });
   const errData = JSON.parse(await co2d.text());
   console.log("Returns an error:", errData.status === "error");
@@ -358,8 +358,8 @@ function makeGsMock(calls){ return async (url, opts) => {
     return { json: async () => ({status:"ok"}) };
   };
   const co2e = await checkoutHandler({
-    request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_live_bad"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
-    env: { DB: {}, STRIPE_SECRET_KEY:"sk_live_bad" }
+    request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_live_bad"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
+    env: { DB: {}, SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_live_bad" }
   });
   const errData2 = JSON.parse(await co2e.text());
   console.log("Returns an error:", errData2.status === "error");
@@ -451,8 +451,8 @@ function makeGsMock(calls){ return async (url, opts) => {
     return { json: async () => ({status:"ok"}) };
   };
   await checkoutHandler({
-    request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-PI1"), orderId:"ORD-PI1",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
-    env: { DB: {}, STRIPE_SECRET_KEY:"sk_test_fake" }
+    request: { json:async()=>({checkoutToken: await orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-PI1"), orderId:"ORD-PI1",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
+    env: { DB: {}, SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake" }
   });
   const piParams = new URLSearchParams(capturedPiReq.opts.body);
   console.log("payment_intent_data[metadata][orderId] set:", piParams.get("payment_intent_data[metadata][orderId]") === "ORD-PI1");
@@ -582,7 +582,7 @@ function makeGsMock(calls){ return async (url, opts) => {
   };
   const whBare = await webhookHandler({
     request:{text:async()=>bareRefundBody, headers:{get:(h)=>h==="stripe-signature"?brHeader:null}},
-    env:{DB:{}, STRIPE_WEBHOOK_SECRET:"whsec_test", STRIPE_SECRET_KEY:"sk_test_fake"}
+    env:{DB:{}, STRIPE_WEBHOOK_SECRET:"whsec_test", SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}
   });
   console.log("PaymentIntent fetched to resolve metadata:", piFetched);
   console.log("setOrderRefunded called on D1 with recovered orderId:", brD1Written && brD1OrderId === "ORD-R1");
@@ -597,7 +597,7 @@ function makeGsMock(calls){ return async (url, opts) => {
   global.fetch = async () => ({ json: async () => ({status:"ok"}) });
   const whOrphan = await webhookHandler({
     request:{text:async()=>orphanBody, headers:{get:(h)=>h==="stripe-signature"?orHeader:null}},
-    env:{DB:{}, STRIPE_WEBHOOK_SECRET:"whsec_test", STRIPE_SECRET_KEY:"sk_test_fake"}
+    env:{DB:{}, STRIPE_WEBHOOK_SECRET:"whsec_test", SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}
   });
   console.log("Still 200 (retrying can't fix it):", whOrphan.status === 200);
   console.log("setOrderRefunded never called (no orderId to write):", !orphanD1Written);
@@ -645,7 +645,7 @@ function makeGsMock(calls){ return async (url, opts) => {
     const b = JSON.stringify({ id: eventId, type: "charge.dispute.created", data: { object: { id: "dp_1", object: "dispute", metadata: {}, payment_intent: "pi_D1", reason: "product_not_received", status: "needs_response", amount: 2300 } } });
     const { header } = makeStripeSignature("whsec_test", b);
     return webhookHandler({ request: { text: async () => b, headers: { get: (h) => h === "stripe-signature" ? header : null } },
-      env: { DB: {}, STRIPE_WEBHOOK_SECRET: "whsec_test", STRIPE_SECRET_KEY: "sk_test_x" } });
+      env: { DB: {}, STRIPE_WEBHOOK_SECRET: "whsec_test", SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY: "sk_test_x" } });
   };
   let flagged = null;
   global.setOrderDisputeStatus = async (db, orderId, status) => { flagged = orderId + ":" + status; };

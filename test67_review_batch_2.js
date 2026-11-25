@@ -80,9 +80,10 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
       const src = read(f);
       const body = src.slice(src.indexOf("function linkSecret(env)"), src.indexOf("}", src.indexOf("function linkSecret(env)")) + 1);
       const linkSecret = new Function(body + "\nreturn linkSecret;")();
-      console.log(f + ": LINK_SIGNING_SECRET first, never PROXY_ADMIN_PASSPHRASE:",
+      // Nor the Stripe key (review #83): one secret mustn't double as another.
+      console.log(f + ": LINK_SIGNING_SECRET first, never PROXY_ADMIN_PASSPHRASE or STRIPE_SECRET_KEY:",
         linkSecret({ LINK_SIGNING_SECRET: "L", QUOTE_SIGNING_SECRET: "Q", STRIPE_SECRET_KEY: "S" }) === "L" &&
-        linkSecret({ STRIPE_SECRET_KEY: "S", PROXY_ADMIN_PASSPHRASE: "P" }) === "S" &&
+        linkSecret({ STRIPE_SECRET_KEY: "S", PROXY_ADMIN_PASSPHRASE: "P" }) === "" &&
         linkSecret({ PROXY_ADMIN_PASSPHRASE: "P" }) === "");
       console.log(f + ": the single SIGNING_SECRET wins over the older per-purpose secrets:",
         linkSecret({ SIGNING_SECRET: "ONE", LINK_SIGNING_SECRET: "L", QUOTE_SIGNING_SECRET: "Q", STRIPE_SECRET_KEY: "S" }) === "ONE");

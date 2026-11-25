@@ -52,10 +52,20 @@ export function setupStatus(env, settings) {
 
   addDatabase();
 
-  const signing = set(env.SIGNING_SECRET), signingFallback = set(env.LINK_SIGNING_SECRET) || set(env.QUOTE_SIGNING_SECRET) || set(env.STRIPE_SECRET_KEY);
+  // The Stripe key is no longer a fallback (one secret mustn't double as another): an install that had only that runs
+  // `npm run setup`, which makes SIGNING_SECRET. Links it sent before then stop working.
+  const signing = set(env.SIGNING_SECRET), signingFallback = set(env.LINK_SIGNING_SECRET) || set(env.QUOTE_SIGNING_SECRET);
   add("signingSecret", "Signing secret", "required", signing || signingFallback,
     "Signs carrier shipping quotes and the short-lived links that open receipts and design files. Without one, those are refused.",
-    signing ? "" : signingFallback ? "SIGNING_SECRET is not set; an older fallback secret is being used instead. Set SIGNING_SECRET." : "SIGNING_SECRET is not set.");
+    signing ? "" : signingFallback ? "SIGNING_SECRET is not set; an older fallback secret is being used instead. Set SIGNING_SECRET."
+      : "SIGNING_SECRET is not set. Run `npm run setup` (it makes one and saves it as a secret on the Worker); links sent before then stop working.");
+  // One the site made itself and keeps in the database (src/worker.js withSigningSecret, which says so in
+  // SIGNING_SECRET_FROM_DB): it works, but anyone with a copy of the database could sign links with it.
+  if (signing && env.SIGNING_SECRET_FROM_DB === true) {
+    add("signingSecretStored", "Signing secret kept in the database", "recommended", false,
+      "Links work, but anyone with a copy of the database (a backup, an export) could sign them too.",
+      "Connect your domain under Your domain, above: that saves it as a secret on the Worker and removes the database copy. On a site installed from the command line, run `npm run setup`.");
+  }
 
   const resend = set(env.RESEND_API_KEY), cfBinding = !!(env.EMAIL && typeof env.EMAIL.send === "function");
   const cfToken = set(env.CF_EMAIL_API_TOKEN), cfAccount = set(env.CF_ACCOUNT_ID);

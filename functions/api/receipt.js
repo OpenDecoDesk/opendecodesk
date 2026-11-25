@@ -115,10 +115,10 @@ export async function onRequestGet({ request, env }) {
 function linkSecret(env) {
   // SIGNING_SECRET — the one random secret every signature on the site is made with (each use adds
   // its own label, so a quote signature can't pass as a download link). The older per-purpose secrets
-  // and the Stripe key are only a fallback for an install that hasn't set it yet. Never the admin
-  // passphrase: it's typed by a person (low entropy) and shouldn't double as an HMAC key.
+  // are only a fallback for an install that hasn't set it yet. Never the Stripe key (a payment
+  // credential shouldn't double as a signing key) and never the admin passphrase (typed by a person).
   // The links only live 60 s, so rotating any of these just expires them.
-  return env.SIGNING_SECRET || env.LINK_SIGNING_SECRET || env.QUOTE_SIGNING_SECRET || env.STRIPE_SECRET_KEY || "";
+  return env.SIGNING_SECRET || env.LINK_SIGNING_SECRET || env.QUOTE_SIGNING_SECRET || "";
 }
 async function hmacHex(secret, data) {
   const enc = new TextEncoder();

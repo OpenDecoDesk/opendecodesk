@@ -6,7 +6,7 @@ const { createD1 } = require("./testlib/d1-shim.js");
 const { adminAs, asRole, effectivePermissions, DEFAULT_ROLES } = require("./testlib/roles");
 const { JSDOM, ResourceLoader, VirtualConsole } = require("jsdom");
 
-// The Customers page (public/admin-customers.js, migrations/0105): its LIST screen and how the admin gets to it.
+// The Customers page (public/admin-customers.js, migrations/0108): its LIST screen and how the admin gets to it.
 // The real admin.js draws it in jsdom, with the real orders.js / db.js on sql.js behind its requests:
 //   - the address: #customers and #/customers, an id that isn't a customer's number, the script loaded once (and
 //     tried again after it couldn't load), renderCustomers the one name the file adds
@@ -563,4 +563,4 @@ const section = (t) => console.log("=== " + t + " ===");
   const { passed, failed } = counts();
   console.log(`\n${failed ? "FAIL" : "PASS"} — ${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
-})().catch((e) => { console.error(e); console.log("test280 crashed: false"); process.exit(1); });
+})().catch((e) => { console.error(e); console.log("test306 crashed: false"); process.exit(1); });

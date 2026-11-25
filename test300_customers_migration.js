@@ -2,11 +2,11 @@ const fs = require("fs");
 const { ok } = require("./testlib/check");
 const { createD1 } = require("./testlib/d1-shim.js");
 
-// Customer records, the database side (migrations/0105_customers.sql and its mirror in schema.sql, 2026-11):
+// Customer records, the database side (migrations/0108_customers.sql and its mirror in schema.sql, 2026-11):
 //   - the customers table, its defaults and what it refuses
 //   - one live customer per email (a merged-away duplicate keeps its email; an archived customer is still live)
 //   - orders.customerId and its index
-//   - the backfill, run on a database as it was just before 0105 with orders already in it: one customer per
+//   - the backfill, run on a database as it was just before 0108 with orders already in it: one customer per
 //     email that real orders were placed with, named after the newest order, a customer since the oldest;
 //     every order with that email linked, test orders too; anything that isn't an email left alone
 //   - an empty database, and a new one built from schema.sql, end up with the same shape
@@ -16,15 +16,15 @@ const { createD1 } = require("./testlib/d1-shim.js");
 
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1");
-const MIGRATION = "0105_customers.sql";
+const MIGRATION = "0108_customers.sql";
 const migrationFiles = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f)).sort();
 const { normalizeCustomerEmail_ } = new Function(strip(read("functions/_lib/db.js")) + "\nreturn { normalizeCustomerEmail_ };")();
 
-// A database as it was just before migrations/0105: the frozen pre-0006 schema plus every migration up to 0104.
-async function databaseBefore0105() {
+// A database as it was just before migrations/0108: the frozen pre-0006 schema plus every migration up to 0107.
+async function databaseBefore0108() {
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
-  for (const f of migrationFiles.filter(f => f >= "0006" && f < "0105")) d1.execFile(read("migrations/" + f));
+  for (const f of migrationFiles.filter(f => f >= "0006" && f < "0108")) d1.execFile(read("migrations/" + f));
   return d1;
 }
 const refused = (d1, sql, ...params) => { try { d1.q(sql, ...params); return ""; } catch (e) { return String(e && e.message || e); } };
@@ -147,15 +147,15 @@ function checkRules(d1, built) {
   // ---------------------------------------------------------------- the list of migrations
   say("The migration is part of the code");
   const MIGRATIONS = new Function(strip(read("functions/_lib/migrationList.js")) + "\nreturn MIGRATIONS;")();
-  ok("migrations/0105_customers.sql exists", migrationFiles.includes(MIGRATION));
+  ok("migrations/0108_customers.sql exists", migrationFiles.includes(MIGRATION));
   ok("functions/_lib/migrationList.js lists it, once", MIGRATIONS.filter(m => m === MIGRATION).length === 1);
-  ok("right after 0104, in the same place as the file sits in migrations/",
-    /^0104_/.test(MIGRATIONS[MIGRATIONS.indexOf(MIGRATION) - 1] || "") && MIGRATIONS.indexOf(MIGRATION) === migrationFiles.indexOf(MIGRATION));
-  ok("no other migration has the number 0105", migrationFiles.filter(f => /^0105_/.test(f)).length === 1 && MIGRATIONS.filter(m => /^0105_/.test(m)).length === 1);
+  ok("right after 0107, in the same place as the file sits in migrations/",
+    /^0107_/.test(MIGRATIONS[MIGRATIONS.indexOf(MIGRATION) - 1] || "") && MIGRATIONS.indexOf(MIGRATION) === migrationFiles.indexOf(MIGRATION));
+  ok("no other migration has the number 0108", migrationFiles.filter(f => /^0108_/.test(f)).length === 1 && MIGRATIONS.filter(m => /^0108_/.test(m)).length === 1);
 
   // ---------------------------------------------------------------- before
   say("A database that hasn't had the migration yet");
-  const d1 = await databaseBefore0105();
+  const d1 = await databaseBefore0108();
   ok("has no customers table", !hasTable(d1, "customers"));
   ok("and its orders have no customer column", !columns(d1, "orders").some(c => c.name === "customerId"));
   d1.q("INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt) VALUES ('acme', 'acme', 'Example Club', 't', 't')");
@@ -249,13 +249,13 @@ function checkRules(d1, built) {
 
   // ---------------------------------------------------------------- an empty database
   say("Applying the migration to a database with no orders");
-  const empty = await databaseBefore0105();
+  const empty = await databaseBefore0108();
   let emptyError = "";
   try { empty.execFile(read("migrations/" + MIGRATION)); } catch (e) { emptyError = String(e && e.message || e); }
   ok("it applies without an error", emptyError === "");
   ok("the customers table is there, with nobody in it", hasTable(empty, "customers") && empty.q("SELECT COUNT(*) AS n FROM customers")[0].n === 0);
   ok("and orders have their customer column", columns(empty, "orders").some(c => c.name === "customerId"));
-  const noEmails = await databaseBefore0105();
+  const noEmails = await databaseBefore0108();
   noEmails.q("INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt) VALUES ('acme', 'acme', 'Example Club', 't', 't')");
   noEmails.q("INSERT INTO orders (orderId, orgId, customerName, contact, placedAt) VALUES ('P-1', 'acme', 'Phone Person', '555-0100', '2026-01-01T00:00:00.000Z')");
   noEmails.q("INSERT INTO orders (orderId, orgId, customerName, contact, placedAt, isTest) VALUES ('P-2', 'acme', 'Test Only', 'tester@example.com', '2026-01-01T00:00:00.000Z', 1)");

@@ -1,9 +1,9 @@
-// Customer records (migrations/0105): edge cases found while testing them, each fixed.
+// Customer records (migrations/0108): edge cases found while testing them, each fixed.
 //   * The backfill takes only plain-ASCII emails, so it never makes a customer the app's own email check can't
 //     find again (SQLite's trim() knows four white-space characters, JavaScript's knows many).
 //   * saveCustomer refuses an expiry date that isn't a real calendar day (Date.parse rolls 2027-02-31 into March).
 //   * listCustomers trims a search again after cutting it to 200 characters.
-//   * On a database without migrations/0105, adding an exempt customer answers 503 BEFORE the exemption's audit row
+//   * On a database without migrations/0108, adding an exempt customer answers 503 BEFORE the exemption's audit row
 //     is written, so the log never claims a change that didn't happen.
 //   * A local sale that isn't shipped keeps the phone typed on it for the customer it makes.
 // Real SQL (sql.js), the real db.js and orders.js. Invented customers only.
@@ -80,7 +80,7 @@ const rows = (d1, sql) => { const st = d1._raw.prepare(sql); const out = []; whi
     ok("…and a later sale with another phone doesn't change the customer's", r2.status === 200 && rows(d1, "SELECT phone FROM customers WHERE email = 'robin@example.com'")[0].phone === "555-0104");
   }
 
-  // ---- A database without migrations/0105: no audit row for an exemption that wasn't saved --------------------
+  // ---- A database without migrations/0108: no audit row for an exemption that wasn't saved --------------------
   {
     const old = await newDb({ before: CUSTOMERS });
     const res = await api({ env: { DB: old }, waitUntil: () => {},
@@ -89,4 +89,4 @@ const rows = (d1, sql) => { const st = d1._raw.prepare(sql); const out = []; whi
     ok("adding an exempt customer before the migration answers 503 with a plain sentence", res.status === 503 && typeof body.message === "string" && body.message.length > 10);
     ok("…and writes no exemption row to the audit log", rows(old, "SELECT count(*) AS n FROM audit_log WHERE action LIKE 'customer.%'")[0].n === 0);
   }
-})().catch((e) => { console.error(e); console.log("test284 crashed: false"); process.exit(1); });
+})().catch((e) => { console.error(e); console.log("test310 crashed: false"); process.exit(1); });

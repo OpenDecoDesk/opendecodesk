@@ -1,4 +1,4 @@
-// Customers (migrations/0105): what each role may do with customer records (customers.records in
+// Customers (migrations/0108): what each role may do with customer records (customers.records in
 // functions/_lib/permissions.js; the checks in functions/api/orders.js; the page in public/admin-customers.js and
 // the menu, the order's Link / Unlink and the Local sale Customer box in public/admin.js).
 //   - Manager (Full): everything, the tax exemption and Merge included.
@@ -336,7 +336,7 @@ for (const [role, label] of [["production", "Production"], ["viewer", "Read only
     const shop = await makeShop(api, { prefix: "crr", products: [{ name: "Sample Tee", price: 20 }] });
     const tag = slug("rd");
     const name = "Robin Reader " + tag, archivedName = "Archie Archived " + tag;
-    const id = await makeCustomer(api, { name, company: "Example Club", email: anEmail(), phone: "555-0105", notes: "Likes navy.",
+    const id = await makeCustomer(api, { name, company: "Example Club", email: anEmail(), phone: "555-0108", notes: "Likes navy.",
       taxExempt: true, taxExemptCertificate: "EX-OWNER-3", taxExemptExpires: FAR });
     const other = await makeCustomer(api, { name: uniq("Sam Second") });
     const archivedId = await makeCustomer(api, { name: archivedName });
@@ -360,7 +360,7 @@ for (const [role, label] of [["production", "Production"], ["viewer", "Read only
     await expect(p.locator("tr[data-cust-id]")).toHaveCount(1);
     await expect(row.locator(".cust-tag-exempt")).toHaveText("Exempt");
     await expect(row).toContainText("Example Club");
-    await expect(row).toContainText("555-0105");
+    await expect(row).toContainText("555-0108");
     await expect(row.locator("td.cust-num")).toHaveText("1");
     await p.locator("#custShowArchived").check();
     await expect(p.locator(`tr[data-cust-id="${archivedId}"]`)).toContainText("Archived");

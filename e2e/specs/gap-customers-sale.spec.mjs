@@ -1,4 +1,4 @@
-// Orders and customer records together (migrations/0105), in a real browser:
+// Orders and customer records together (migrations/0108), in a real browser:
 //   - the Local sale window's Customer search: what it lists and says, picking with the mouse and with Enter, the
 //     name, email and phone it fills, Clear, an edited email forgetting the pick, and the customerId it sends;
 //   - which customer an order lands on: the one picked, the one with the typed email, a new one for a new email,
@@ -412,7 +412,7 @@ test("Local sale: a typed email joins the customer who has it, whatever its lett
   await form.locator("summary", { hasText: "Customer info" }).click();
   const walkIn = "Wren Walkin " + tag;
   await form.locator("#lsName").fill(walkIn);
-  await form.locator("#lsPhone").fill("555-0105");
+  await form.locator("#lsPhone").fill("555-0108");
   const third = await recordSale(page, form);
   expect((await orderOf(api, shop, third.orderId)).customerId).toBeNull();
   expect(await customersWith(api, walkIn)).toEqual([]);

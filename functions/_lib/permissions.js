@@ -109,7 +109,7 @@ const BY_FN = {
   "orders.invoices": { read: ["getInvoiceDocument", "getOrderPdf"], edit: ["sendInvoice", "resendEmail"] },
   "orders.downloads": { read: ["getOrderDownloads"], edit: ["resendDownloads", "resetDownloads"], full: ["revokeDownloads"] },
   "orders.import": { edit: ["importOrders"] },
-  // Customer records (migrations/0105). A tax exemption is Full's: saveCustomer asks for Full itself when its save
+  // Customer records (migrations/0108). A tax exemption is Full's: saveCustomer asks for Full itself when its save
   // changes one. Merging moves a customer's orders and retires the record: Full.
   "customers.records": {
     read: ["listCustomers", "getCustomer"],

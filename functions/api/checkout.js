@@ -78,7 +78,7 @@ export async function onRequestPost(context){
   // Enforce subdomain/org consistency — same guard as orders.js
   let catalogData;
   try{
-    catalogData = await getCatalogData(env);
+    catalogData = await getCatalogData(env, { waitUntil: context.waitUntil?.bind(context) });
   }catch(err){
     return jsonResponse({status:"error", message:"Server misconfigured — catalog data unavailable."}, 500);
   }

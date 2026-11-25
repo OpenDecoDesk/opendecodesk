@@ -38,8 +38,25 @@ function partToKey_(p) {
   return decodeURIComponent(s);
 }
 
+// How long a listing's sorted keys are reused (list below) when nothing was put or deleted through the
+// store: files copied in by hand, or by a restore, show up within this.
+const LIST_CACHE_MS = 30 * 1000;
+const LIST_CACHE_MAX = 50;
+// The first index in sorted `keys` whose key comes after `after`.
+function firstAfter_(keys, after) {
+  let lo = 0, hi = keys.length;
+  while (lo < hi) { const mid = (lo + hi) >>> 1; if (keys[mid] <= after) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+
 class FileStore {
-  constructor(root) { this.root = root; }
+  constructor(root) {
+    this.root = root;
+    // list(): each bucket's change count (put / delete), and the sorted keys of recent listings.
+    this.generation_ = Object.fromEntries(BUCKETS.map(b => [b, 0]));
+    this.listCache_ = new Map();
+  }
+  changed_(bucket) { this.generation_[bucket] = (this.generation_[bucket] || 0) + 1; }
 
   dir_(bucket) {
     if (!BUCKETS.includes(bucket)) throw Object.assign(new Error("No such bucket"), { status: 404 });
@@ -63,8 +80,10 @@ class FileStore {
     const body = Buffer.from(bytes);
     const meta = { key: String(key), size: body.length, uploaded: uploaded || new Date().toISOString(),
       httpMetadata: clean_(httpMetadata), customMetadata: clean_(customMetadata) };
-    this.writeAtomic_(p.file, body);
-    this.writeAtomic_(p.meta, JSON.stringify(meta));
+    try {
+      this.writeAtomic_(p.file, body);
+      this.writeAtomic_(p.meta, JSON.stringify(meta));
+    } finally { this.changed_(bucket); }
     return meta;
   }
   head(bucket, key) {
@@ -85,30 +104,51 @@ class FileStore {
   delete(bucket, key) {
     const p = this.paths_(bucket, key);
     for (const f of [p.file, p.meta]) { try { fs.unlinkSync(f); } catch (e) { /* already gone */ } }
+    this.changed_(bucket);
   }
-  // Keys in order, after `cursor` (the last key of the previous page), at most `limit` (1–1000) of them.
-  list(bucket, { prefix = "", cursor = "", limit = 1000 } = {}) {
-    const dir = this.dir_(bucket), keys = [];
-    const walk = (d, parts) => {
-      let entries;
-      try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
-      for (const e of entries) {
-        if (e.name.includes(".tmp-")) continue;
-        if (e.isDirectory()) walk(path.join(d, e.name), [...parts, e.name]);
-        else if (e.isFile()) keys.push([...parts, e.name].map(partToKey_).join("/"));
-      }
-    };
-    walk(dir, []);
-    keys.sort();
+  // The sorted keys starting with `prefix`. The walk starts at the deepest folder the prefix names in full
+  // ("uploads/shop/ab" → uploads/shop), not the bucket's top, and its result is kept for the next pages
+  // until something is put or deleted in the bucket, or for LIST_CACHE_MS.
+  keysWithPrefix_(bucket, prefix) {
+    const dir = this.dir_(bucket);
+    const cacheKey = bucket + "\0" + prefix, gen = this.generation_[bucket];
+    const hit = this.listCache_.get(cacheKey);
+    if (hit && hit.gen === gen && Date.now() - hit.at < LIST_CACHE_MS) return hit.keys;
+    const dirParts = prefix.split("/").slice(0, -1);
+    const enc = dirParts.length ? keyParts(dirParts.join("/")) : [];
+    const keys = [];
+    if (enc) {   // (a prefix with an empty, "." or ".." folder matches no key)
+      const walk = (d, parts) => {
+        let entries;
+        try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+        for (const e of entries) {
+          if (e.name.includes(".tmp-")) continue;
+          if (e.isDirectory()) walk(path.join(d, e.name), [...parts, e.name]);
+          else if (e.isFile()) { const k = [...parts, e.name].map(partToKey_).join("/"); if (k.startsWith(prefix)) keys.push(k); }
+        }
+      };
+      walk(path.join(dir, ...enc), enc);
+      keys.sort();
+    }
+    if (this.listCache_.size >= LIST_CACHE_MAX) this.listCache_.clear();
+    this.listCache_.set(cacheKey, { gen, at: Date.now(), keys });
+    return keys;
+  }
+  // Keys in order, after `cursor` (the last key of the previous page) or `startAfter` (R2's own option, read
+  // the same way), at most `limit` (1–1000) of them.
+  list(bucket, { prefix = "", cursor = "", startAfter = "", limit = 1000 } = {}) {
+    const keys = this.keysWithPrefix_(bucket, String(prefix || ""));
+    const after = [String(cursor || ""), String(startAfter || "")].sort().pop();
     const n = Math.max(1, Math.min(1000, Number(limit) || 1000));
-    const page = keys.filter(k => k.startsWith(String(prefix || "")) && (!cursor || k > cursor)).slice(0, n + 1);
-    const truncated = page.length > n, objects = page.slice(0, n).map(k => this.head(bucket, k));
-    return { objects, truncated, cursor: truncated ? objects[objects.length - 1].key : undefined };
+    const from = after ? firstAfter_(keys, after) : 0;
+    const page = keys.slice(from, from + n + 1);
+    const truncated = page.length > n, objects = page.slice(0, n).map(k => this.head(bucket, k)).filter(Boolean);
+    return { objects, truncated, cursor: truncated ? page[n - 1] : undefined };
   }
 
   // The requests desktop/r2-files-binding.mjs sends (a Miniflare service binding answered here in
   // Node): METHOD http://files/<bucket>?key=…  — PUT (body = the bytes, X-Meta = JSON of
-  // httpMetadata / customMetadata), GET, HEAD, DELETE, and GET …/<bucket>?list=1&prefix&cursor&limit.
+  // httpMetadata / customMetadata), GET, HEAD, DELETE, and GET …/<bucket>?list=1&prefix&cursor&startAfter&limit.
   async handle(request) {
     const url = new URL(request.url);
     const bucket = url.pathname.replace(/^\/+/, "");
@@ -116,7 +156,7 @@ class FileStore {
     const metaHeader = (m) => ({ "X-Meta": encodeURIComponent(JSON.stringify(m)) });
     try {
       if (request.method === "GET" && url.searchParams.get("list")) {
-        const r = this.list(bucket, { prefix: url.searchParams.get("prefix") || "", cursor: url.searchParams.get("cursor") || "", limit: url.searchParams.get("limit") });
+        const r = this.list(bucket, { prefix: url.searchParams.get("prefix") || "", cursor: url.searchParams.get("cursor") || "", startAfter: url.searchParams.get("startAfter") || "", limit: url.searchParams.get("limit") });
         return Response.json(r);
       }
       if (request.method === "PUT") {

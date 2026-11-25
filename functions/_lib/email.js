@@ -2,6 +2,7 @@ import { addOwnerNotice, recordSystemIssue, getBusinessProfile, resolveTimeZone,
 import { pdfDocument, pdfWrap, pdfTextWidth, pdfBase64 } from "./pdf.js";
 import { smtpSend } from "./smtp.js";
 import { decryptVendorCredentials } from "./vendorCredentials.js";
+import { fetchWithTimeout } from "./http.js";
 
 /**
  * Transactional email, sent through Cloudflare Email Service. Sends from EMAIL_FROM (default
@@ -156,7 +157,7 @@ async function sendViaResend_(env, { to, subject, html, text, attachments }, id,
   const from = String(env.EMAIL_FROM || ("orders@" + siteRoot_(env))).trim();
   const bcc = id.bcc && id.bcc.toLowerCase() !== String(to).trim().toLowerCase() ? [id.bcc] : [];
   try {
-    const res = await fetch("https://api.resend.com/emails", {
+    const res = await fetchWithTimeout("https://api.resend.com/emails", {
       method: "POST",
       headers: { "Authorization": `Bearer ${String(env.RESEND_API_KEY).trim()}`, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -211,7 +212,7 @@ async function sendViaCloudflare_(env, { to, subject, html, text, attachments },
       if (report) report.providerMessage = "No email provider is set up (no RESEND_API_KEY, no EMAIL binding, no CF_EMAIL_API_TOKEN + CF_ACCOUNT_ID).";
       return false;
     }
-    const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/email/sending/send`, {
+    const res = await fetchWithTimeout(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/email/sending/send`, {
       method: "POST",
       headers: { "Authorization": `Bearer ${env.CF_EMAIL_API_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({

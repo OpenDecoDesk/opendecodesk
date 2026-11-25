@@ -15,8 +15,12 @@
  * own tick so its requests never come out of the roll-up's per-run allowance, and so a clean-up that
  * fails is recorded in time for that morning's roll-up.
  *
- * Two edge cases of "once a day", both on the day the clocks change and only when DIGEST_HOUR is
- * the hour that is skipped or repeated (1–2 AM in most zones): that day gets no roll-up, or two.
+ * Retries (scheduledJobDue): each job keeps a record of the day in global_settings — {day, attempts, ok}
+ * under dailyDigestScheduled and housekeepingScheduled (src/worker.js). A run that fails, or a tick that
+ * never came, is tried again at the next hourly tick of the same local day, up to 3 tries a day. That
+ * also covers the day the clocks change when DIGEST_HOUR is the hour that is skipped (it runs the hour
+ * after) or repeated (the second one finds the day done). An install whose cron lists only specific UTC
+ * hours (wrangler.toml) gets no retries: there is no later tick that day to retry on.
  */
 
 export const DEFAULT_TIMEZONE = "UTC";
@@ -40,6 +44,37 @@ export function isDigestHour(env, date, timeZone) {
 }
 
 // The hour before the roll-up's (wrapping past midnight): the daily housekeeping tick.
+export function housekeepingHour(env) {
+  return (digestHour(env) + 23) % 24;
+}
 export function isHousekeepingHour(env, date, timeZone) {
-  return localHour(date, timeZone || (env && env.TIMEZONE)) === (digestHour(env) + 23) % 24;
+  return localHour(date, timeZone || (env && env.TIMEZONE)) === housekeepingHour(env);
+}
+
+// The business's calendar day (YYYY-MM-DD) at `date`, in the time zone (UTC when it isn't one).
+export function localDay(date, timeZone) {
+  const fmt = (tz) => new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+  try { return fmt(timeZone || DEFAULT_TIMEZONE).format(date); }
+  catch { return fmt(DEFAULT_TIMEZONE).format(date); }
+}
+
+export const SCHEDULED_MAX_ATTEMPTS = 3;
+
+// Whether this tick should run a daily job: its local hour or later, and today not yet done — no try yet
+// today (its own tick never came, or it's the first tick of the day at or past the hour), or tries that
+// failed, fewer than SCHEDULED_MAX_ATTEMPTS. `entry` is the job's saved record ({day, attempts, ok}), null
+// when there is none at all — a database that has never had one (the first day after this update, or a
+// record that can't be read): then only the job's own hour runs it, as before retries, so an update deployed
+// in the afternoon doesn't send a second roll-up that day.
+export function scheduledJobDue(entry, { hour, jobHour, day }) {
+  if (hour < jobHour) return false;
+  if (!entry || typeof entry !== "object") return hour === jobHour;
+  if (entry.day !== day) return true;
+  return entry.ok !== true && (Number(entry.attempts) || 0) < SCHEDULED_MAX_ATTEMPTS;
+}
+
+// The record to save before a try (so a run the runtime cuts off still counts as one), and after it.
+export function scheduledAttempt(entry, day) {
+  const before = entry && typeof entry === "object" && entry.day === day ? Number(entry.attempts) || 0 : 0;
+  return { day, attempts: before + 1, ok: false };
 }

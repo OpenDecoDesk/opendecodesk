@@ -366,6 +366,31 @@ function makeGsMock(calls){ return async (url, opts) => {
   console.log("Does NOT leak the raw session object/internal field to the client:", !errData2.message.includes("internal_debug_field"));
   console.log("Uses a bounded, generic fallback message instead:", errData2.message.includes("Unknown Stripe error"));
 
+  console.log("\n=== Stripe takes the request and never answers: given up on after the time limit (code review #103) ===");
+  {
+    const keepAlive = setInterval(() => {}, 1000);   // (Node doesn't wait on AbortSignal.timeout's timer)
+    const made = require("./testlib/checkout-session").install();   // its fetchWithTimeout, to lower the limit
+    made.fetchWithTimeout.defaultMs = 30;
+    fetchWithTimeout.defaultMs = 30;   // http.js's, which stripe-webhook.js uses
+    let asked = 0;
+    global.fetch = (url) => { asked++; return new Promise(() => {}); };
+    let t0 = Date.now();
+    const hung = await checkoutHandler({
+      request: { json:async()=>({checkoutToken: await orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-T1"), orderId:"ORD-T1",orgId:"league-101",customerName:"Aaron",contact:"a@example.com"}), url:"https://example.com/api/checkout" },
+      env: { DB: {}, STRIPE_SECRET_KEY:"sk_test_fake" }
+    });
+    const hungData = JSON.parse(await hung.text());
+    console.log("Pay by card: the customer gets the usual 'couldn't reach Stripe' answer after the limit, not a page that never loads:",
+      asked === 1 && hungData.status === "error" && /Couldn't reach Stripe/.test(hungData.message) && Date.now() - t0 < 2000);
+    const read19 = (f) => fs.readFileSync(__dirname + "/" + f, "utf8");
+    const copy = (src) => { const i = src.indexOf("function fetchWithTimeout("); return src.slice(i, src.indexOf("\n}\n", i) + 2); };
+    const httpCopy = copy(read19("functions/_lib/http.js"));
+    console.log("db.js's and turnstile.js's copies of fetchWithTimeout are identical to http.js's:", httpCopy.length > 200 &&
+      copy(read19("functions/_lib/db.js")) === httpCopy && copy(read19("functions/_lib/turnstile.js")) === httpCopy);
+    console.log("…and every Stripe call goes through one:", !/await fetch\("https:\/\/api\.stripe\.com/.test(read19("functions/_lib/db.js") + read19("functions/api/stripe-webhook.js") + read19("functions/api/orders.js") + read19("functions/_lib/stripeFees.js")));
+    global.__webhookHung = { asked: 0, keepAlive, t0: Date.now() };
+  }
+
   // ========================
   // WEBHOOK — PAYMENT
   // ========================
@@ -631,6 +656,12 @@ function makeGsMock(calls){ return async (url, opts) => {
   global.fetch = async (url) => { if (String(url).includes("api.stripe.com")) throw new Error("timeout"); return { json: async () => ({}) }; };
   dr = await sendDispute("evt_dp_down");
   console.log("Stripe unreachable for the lookup → 500, so Stripe sends the event again (not 200 and lost):", dr.status === 500 && flagged === null);
+  global.fetch = (url) => (String(url).includes("api.stripe.com") ? new Promise(() => {}) : Promise.resolve({ json: async () => ({}) }));
+  let t1 = Date.now();
+  dr = await sendDispute("evt_dp_hung");
+  console.log("…and when Stripe never answers the lookup: 500 after the time limit, so Stripe sends it again:", dr.status === 500 && flagged === null && Date.now() - t1 < 2000);
+  delete fetchWithTimeout.defaultMs;
+  clearInterval(global.__webhookHung.keepAlive);
   global.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: { type: "rate_limit_error" } }) });
   dr = await sendDispute("evt_dp_429");
   console.log("…the same when Stripe answers the lookup with an error:", dr.status === 500 && flagged === null);

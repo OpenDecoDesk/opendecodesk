@@ -72,6 +72,26 @@ export function jsonResponse(obj, status){
   });
 }
 
+// ---- Outbound requests with a time limit --------------------------------------------------------
+// A service that takes the connection and never answers (Stripe, Shippo, the email provider, Turnstile)
+// would otherwise hold the request — and the customer or admin waiting on it — until the runtime gives up.
+// After `ms` (default fetchWithTimeout.defaultMs, 10 seconds; the tests lower it) the fetch is aborted and the
+// promise rejects with a TimeoutError whose message reads "No answer within 10 seconds.", which each caller's
+// catch turns into its usual "couldn't reach …" answer. The limit covers the answer arriving, not the reading
+// of its body. Without AbortSignal.timeout (an old runtime) the fetch goes without a limit, as before.
+export function fetchWithTimeout(url, init, ms){
+  const limit = Number(ms) > 0 ? Number(ms) : (Number(fetchWithTimeout.defaultMs) || 10000);
+  if(typeof AbortSignal === "undefined" || typeof AbortSignal.timeout !== "function") return fetch(url, init);
+  const signal = AbortSignal.timeout(limit);
+  return new Promise((resolve, reject) => {
+    // Rejected here as well as by fetch itself, so a fetch that ignores its signal can't hang the caller.
+    const onAbort = () => reject(Object.assign(new Error("No answer within " + (limit >= 1000 ? Math.round(limit / 1000) + " seconds." : limit + " ms.")), { name: "TimeoutError" }));
+    signal.addEventListener("abort", onAbort, { once: true });
+    fetch(url, { ...(init || {}), signal }).then(resolve, (e) => (signal.aborted ? onAbort() : reject(e)))
+      .finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 // ---- Features (Global settings → Features; db.js FEATURES) --------------------------------------
 // The answer every handler gives for something that belongs to a switched-off feature.
 export function featureOffResponse(key, label){

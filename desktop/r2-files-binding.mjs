@@ -75,7 +75,8 @@ class FilesBucket {
     }
   }
   async list(options = {}) {
-    const params = { list: "1", prefix: options.prefix || "", cursor: options.cursor || "", limit: String(options.limit || 1000) };
+    // startAfter (R2: list the keys after this one) is read like the cursor (FileStore#list).
+    const params = { list: "1", prefix: options.prefix || "", cursor: options.cursor || "", startAfter: options.startAfter || "", limit: String(options.limit || 1000) };
     const res = await this.store.fetch(this.url_(params), { method: "GET" });
     if (!res.ok) await this.fail_(res, "list");
     const r = await res.json();

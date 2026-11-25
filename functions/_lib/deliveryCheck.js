@@ -28,6 +28,7 @@ import { getShippedAwaitingDelivery, getLabeledAwaitingShipment, markOrderShippe
   addOwnerNotice, insertAuditLog, getOrderById,
   listActiveBlankShipments, recordBlankTrackingEvents, setBlankShipmentStatus, resolveTimeZone, getFeatures } from "./db.js";
 import { sendShippedEmail } from "./email.js";
+import { fetchWithTimeout } from "./http.js";
 
 // Shippo's carrier token for a label's carrier / the order's shipping method
 // ("USPS Ground Advantage", "UPS Ground Saver"…). "usps" first: it contains "ups".
@@ -65,7 +66,7 @@ const STATUS_LABEL = {
 // One Shippo tracking lookup → { status, statusDate, statusDetail, firstScanDate } or null on error.
 // firstScanDate = the earliest history event showing the carrier has the package (not PRE_TRANSIT).
 async function lookupTracking_(env, carrier, tracking) {
-  const res = await fetch("https://api.goshippo.com/tracks/" + encodeURIComponent(carrier) + "/" + encodeURIComponent(tracking), {
+  const res = await fetchWithTimeout("https://api.goshippo.com/tracks/" + encodeURIComponent(carrier) + "/" + encodeURIComponent(tracking), {
     headers: { "Authorization": "ShippoToken " + env.SHIPPO_API_KEY },
   });
   const t = await res.json();

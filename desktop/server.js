@@ -23,6 +23,23 @@ const { displayVersion } = require("./version.js");
 const IMAGES_HOST = "images.desktop.invalid";
 const IMAGES_BASE = "https://" + IMAGES_HOST;
 
+// Where the Worker's own fetch() may connect: the public internet only. Miniflare's default also allows
+// this computer and its private network (for local development), so a link the Worker is asked to fetch —
+// a vendor image (vendorImages.js), a supplier's web-service address — could reach the owner's router or
+// another machine at home or at work. This is the same network service Miniflare uses by default (workerd
+// resolves the name and checks every address it connects to, so a name that resolves to a private address
+// is refused too), minus the private ranges; the deny list adds blocks that aren't the public internet but
+// may not count as "private". Public requests go exactly as before. Service bindings (MAILER) and the
+// buckets aren't outbound requests and aren't affected. Windows needs the system's root certificates
+// listed, as Miniflare does for its default.
+const WORKER_OUTBOUND = {
+  network: {
+    allow: ["public"],
+    deny: ["0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4", "fc00::/7", "fe80::/10", "ff00::/8"],
+    tlsOptions: { trustBrowserCas: true, trustedCertificates: process.platform === "win32" ? Array.from(require("tls").rootCertificates) : [] },
+  },
+};
+
 // The repository files the program carries: the Worker, the pages, the database files.
 function appRoot() {
   return path.join(__dirname, "..");
@@ -203,6 +220,7 @@ async function startServer({ dataDir, port, protect, unprotect, log = () => {}, 
       bindings: { EDITION: "desktop", DESKTOP_VERSION: displayVersion(require("./package.json").version), R2_PUBLIC_BASE: IMAGES_BASE, ...withoutMailbox_(secrets), ...(cfg.supplierConnections ? { DESKTOP_SUPPLIERS: "on" } : {}),
         ...(mailer ? { DESKTOP_EMAIL: "on", EMAIL_FROM: mailer.settings.from } : {}) },
       ...(mailer ? { serviceBindings: { MAILER: (request) => mailer.handle(request) } } : {}),
+      outboundService: WORKER_OUTBOUND,
     }, {
       name: "files",
       modules: true,
@@ -396,7 +414,7 @@ function restoreState(dataDir, from) {
   return { aside };
 }
 
-module.exports = { startServer, adminHasUsablePassword, copyState, restoreState, pruneUpdateCopies, resetSignIn, setShippoKey, setSupplierConnections, setSmtp, setEmailOn, savedSmtpPassword, recordBackup, stamp, statePaths, IMAGES_HOST, IMAGES_BASE, desktopCsp };
+module.exports = { startServer, adminHasUsablePassword, copyState, restoreState, pruneUpdateCopies, resetSignIn, setShippoKey, setSupplierConnections, setSmtp, setEmailOn, savedSmtpPassword, recordBackup, stamp, statePaths, IMAGES_HOST, IMAGES_BASE, WORKER_OUTBOUND, desktopCsp };
 
 if (require.main === module) {
   const dataDir = path.resolve(process.argv[2] || path.join(process.cwd(), "desktop-data"));

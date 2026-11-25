@@ -48,7 +48,7 @@ import { pendingMigrations, pendingMigrationsNote } from "../_lib/migrationCheck
 import { connectCloudflare, cloudflareTokenLink, workersDevParts } from "../_lib/cloudflareSetup.js";
 import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { readInvoiceWithAi } from "../_lib/invoiceAi.js";
-import { jsonResponse, featureOffResponse, signOrderToken } from "../_lib/http.js";
+import { jsonResponse, featureOffResponse, signOrderToken, fetchWithTimeout } from "../_lib/http.js";
 import {
   getAllOrgs, getOrgById, createOrg, updateOrg, cleanDeliveryOptions, setOrgDeliveryOptions, defaultDeliveryOptions, cleanShippingAddress, stagePrereqError, stageTimeError, shopTime_, ORDER_DATE_FIELDS, orderDatesError, setOrderDates, whyNotCompletable_, getSystemIssues,
   getProductsByOrg, getProductsByIds, priceLookups, productShipWeightOz, createProduct, updateProduct, setProductVisible,
@@ -685,7 +685,7 @@ async function handleOrdersPost_(context) {
   // Versioned list cache (db.js readCachedList_): { version, data } for blanks, threads, hoops, locations,
   // machines or orgs. data is shared between requests: shape it into new objects, never change it.
   const cachedList_ = async (name) => {
-    if (typeof readCachedList_ === "function") return readCachedList_(env.DB, name);
+    if (typeof readCachedList_ === "function") return readCachedList_(env.DB, name, undefined, { waitUntil: context.waitUntil?.bind(context) });
     const build = { blanks: () => getAllBlanks(env.DB), threads: () => listThreads(env.DB), hoops: () => listHoops(env.DB),
       locations: () => listLocations(env.DB), machines: () => listMachines(env.DB), orgs: () => getAllOrgs(env.DB) }[name];
     return { version: null, data: await build() };
@@ -946,7 +946,7 @@ async function handleOrdersPost_(context) {
   catch { return jsonResponse({ status: "error", message: "Invalid JSON" }, 400); }
 
   let catalogData;
-  try { catalogData = await getCatalogData(env); }
+  try { catalogData = await getCatalogData(env, { waitUntil: context.waitUntil?.bind(context) }); }
   catch { return jsonResponse({ status: "error", message: "Catalog temporarily unavailable" }, 503); }
 
   const host = classifyHost(new URL(request.url).hostname, catalogData.subdomainMap, env);
@@ -2289,7 +2289,7 @@ async function handleOrdersPost_(context) {
     const budgetLeft = () => calls < STRIPE_SYNC_CALLS;
     const stripeGet = async (path) => {
       calls++;
-      const r = await fetch("https://api.stripe.com/v1/" + path, { headers: { Authorization: "Bearer " + env.STRIPE_SECRET_KEY } });
+      const r = await fetchWithTimeout("https://api.stripe.com/v1/" + path, { headers: { Authorization: "Bearer " + env.STRIPE_SECRET_KEY } });
       return r.json();
     };
     // Dates: a Stripe-linked payment is dated when Stripe charged the card (entries imported or recorded late
@@ -2313,7 +2313,9 @@ async function handleOrdersPost_(context) {
     const sessionsByOrder = byId_();
     let startingAfter = "";
     for (let page = 0; page < 10 && missing.some(p => !p.externalRef) && calls < STRIPE_SYNC_CALLS - 5; page++) {
-      const list = await stripeGet("checkout/sessions?limit=100" + (startingAfter ? "&starting_after=" + startingAfter : ""));
+      let list;
+      try { list = await stripeGet("checkout/sessions?limit=100" + (startingAfter ? "&starting_after=" + startingAfter : "")); }
+      catch (e) { console.error("backfillStripeFees: listing Stripe sessions failed:", e); return jsonResponse({ status: "error", message: "Couldn't reach Stripe — try again in a moment." }, 502); }
       for (const cs of (list.data || [])) {
         const oid = cs.metadata && cs.metadata.orderId;
         const pi = typeof cs.payment_intent === "string" ? cs.payment_intent : (cs.payment_intent && cs.payment_intent.id);
@@ -2766,12 +2768,18 @@ async function handleOrdersPost_(context) {
       "payment_intent_data[metadata][orgId]": org,
       success_url: successUrl, cancel_url: cancelUrl,
     });
-    const stripeRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
-      method: "POST",
-      headers: { Authorization: "Bearer " + env.STRIPE_SECRET_KEY, "Content-Type": "application/x-www-form-urlencoded" },
-      body: params.toString(),
-    });
-    const session = await stripeRes.json();
+    let session;
+    try {
+      const stripeRes = await fetchWithTimeout("https://api.stripe.com/v1/checkout/sessions", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + env.STRIPE_SECRET_KEY, "Content-Type": "application/x-www-form-urlencoded" },
+        body: params.toString(),
+      });
+      session = await stripeRes.json();
+    } catch (e) {
+      console.error("Test checkout: Stripe session creation failed:", e);
+      return jsonResponse({ status: "error", message: "Couldn't reach Stripe — try again in a moment." }, 502);
+    }
     if (!session.url) {
       return jsonResponse({ status: "error", message: "Could not create Stripe session: " + ((session.error && session.error.message) || "unknown") }, 500);
     }

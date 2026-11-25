@@ -9,12 +9,13 @@
  */
 
 import { getRecentCardPaymentsMissingFee, setCardFeeByRef } from "./db.js";
+import { fetchWithTimeout } from "./http.js";
 
 // Fee in cents, or null when Stripe can't give it yet (no key, an error, or no balance transaction).
 export async function readStripeFeeCents(env, paymentIntentId) {
   if (!env.STRIPE_SECRET_KEY || !String(paymentIntentId || "").startsWith("pi_")) return null;
   try {
-    const res = await fetch("https://api.stripe.com/v1/payment_intents/" + encodeURIComponent(paymentIntentId) +
+    const res = await fetchWithTimeout("https://api.stripe.com/v1/payment_intents/" + encodeURIComponent(paymentIntentId) +
       "?expand[]=latest_charge.balance_transaction", { headers: { Authorization: "Bearer " + env.STRIPE_SECRET_KEY } });
     const pi = await res.json();
     const bt = pi && pi.latest_charge && pi.latest_charge.balance_transaction;

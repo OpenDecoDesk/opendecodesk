@@ -3059,8 +3059,9 @@ export async function listCacheVersions_(db) {
 
 // { version, data } for one list, from memory, the Cache API or D1 (and then kept in both). `state` is
 // listCacheVersions_'s answer when the caller already has it. version is null when the database has no
-// version table: the list then comes straight from D1, as before.
-export async function readCachedList_(db, name, state) {
+// version table: the list then comes straight from D1, as before. `waitUntil` (optional, the request's
+// context.waitUntil): a rebuilt list is stored in the Cache API after the answer instead of before it.
+export async function readCachedList_(db, name, state, { waitUntil } = {}) {
   const build = LIST_CACHE_BUILDERS[name];
   if (!build) throw new Error("No such cached list: " + name);
   const st = state === undefined ? await listCacheVersions_(db) : state;
@@ -3080,7 +3081,9 @@ export async function readCachedList_(db, name, state) {
   _listMem.set(memKey, { version, data });
   if (cache) {
     try {
-      await cache.put(key, new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json", "Cache-Control": "max-age=86400" } }));
+      const put = cache.put(key, new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json", "Cache-Control": "max-age=86400" } }));
+      if (typeof waitUntil === "function") waitUntil(Promise.resolve(put).catch(() => {}));
+      else await put;
     } catch (e) { /* kept in memory; another isolate rebuilds */ }
   }
   return { version, data };
@@ -11127,8 +11130,22 @@ export async function saveCheckoutSession(db, orderId, sessionId, amountCents, e
        createdAt = excluded.createdAt, expiresAt = excluded.expiresAt`
   ).bind(orderId, String(sessionId), Math.max(0, Math.round(Number(amountCents) || 0)), new Date().toISOString(), String(expiresAt || "")).run();
 }
+// Kept identical to http.js's fetchWithTimeout (db.js imports nothing: the tests load it on its own; test19 checks
+// the copies match). Stripe calls that never answer would otherwise hold the card checkout.
+function fetchWithTimeout(url, init, ms){
+  const limit = Number(ms) > 0 ? Number(ms) : (Number(fetchWithTimeout.defaultMs) || 10000);
+  if(typeof AbortSignal === "undefined" || typeof AbortSignal.timeout !== "function") return fetch(url, init);
+  const signal = AbortSignal.timeout(limit);
+  return new Promise((resolve, reject) => {
+    // Rejected here as well as by fetch itself, so a fetch that ignores its signal can't hang the caller.
+    const onAbort = () => reject(Object.assign(new Error("No answer within " + (limit >= 1000 ? Math.round(limit / 1000) + " seconds." : limit + " ms.")), { name: "TimeoutError" }));
+    signal.addEventListener("abort", onAbort, { once: true });
+    fetch(url, { ...(init || {}), signal }).then(resolve, (e) => (signal.aborted ? onAbort() : reject(e)))
+      .finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
 async function stripeCheckoutCall_(env, path, post) {
-  const res = await fetch("https://api.stripe.com/v1/checkout/sessions/" + path, post
+  const res = await fetchWithTimeout("https://api.stripe.com/v1/checkout/sessions/" + path, post
     ? { method: "POST", headers: { Authorization: "Bearer " + env.STRIPE_SECRET_KEY, "Content-Type": "application/x-www-form-urlencoded" }, body: "" }
     : { headers: { Authorization: "Bearer " + env.STRIPE_SECRET_KEY } });
   return res.json();
@@ -11214,7 +11231,7 @@ export async function createCheckoutSession(env, p) {
   if (p.customerEmail && String(p.customerEmail).includes("@")) params["customer_email"] = String(p.customerEmail);
   let session;
   try {
-    const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+    const res = await fetchWithTimeout("https://api.stripe.com/v1/checkout/sessions", {
       method: "POST",
       headers: { "Authorization": "Bearer " + env.STRIPE_SECRET_KEY, "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams(params).toString(),
@@ -13460,10 +13477,11 @@ export const SYSTEM_ISSUE_LABELS = {
   email_failed: "Emails that couldn't be sent at all",
   webhook_failed: "Stripe webhook updates that failed (Stripe retries these)",
   payment_needs_review: "Card payments that need a look — more than the order owed, or on a voided order (refund in Stripe if needed)",
-  digest_failed: "Daily roll-ups that did not complete (the scheduled run will try again tomorrow)",
+  digest_failed: "Daily roll-ups that did not complete (the scheduled run tries again the next hour, up to 3 times a day)",
   recurring_expense_skipped: "Recurring expenses that couldn't be recorded (fix the rule on Expenses — it's recorded once fixed)",
   cleanup_failed: "Daily clean-ups that did not complete (old log entries stay until one does)",
   migrations_pending: "Database updates this version needs that haven't been applied (until they are, some pages can show $0 or empty lists; see Global settings → Setup status)",
+  api_error: "Requests that failed with an unexpected error (the page showed \"Something went wrong\")",
 };
 export async function recordSystemIssue(db, kind, sample) {
   if (!db || typeof db.prepare !== "function") return;

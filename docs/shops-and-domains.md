@@ -596,6 +596,41 @@ changed once the order is paid, shipped or in a closed month, or when the invoic
 delivery fixed. Sending again keeps the same link and renews it for 60 days; the customer's choice is
 in the morning roll-up.
 
+## Customers
+
+**Customers**, next to Orders, keeps one record per customer: name, company, email, phone, address
+and notes, with the customer's orders across every shop, how many there are, what they've spent
+and what they still owe. (The amounts are shown to the roles that see order totals.) Each order
+number opens that order.
+
+- **Where they come from.** Every order with an email address is linked to the customer with that
+  email, and a customer is made the first time an email is seen. Capitals and spaces around it
+  don't matter. An order whose contact is a phone number, or empty, has no customer. Orders you
+  already had were linked the same way when this was added. A test order joins a customer that
+  exists but never makes one.
+- **The list** searches name, company, email and phone as you type. Archived customers are hidden
+  until you tick **Show archived**.
+- **+ New customer** needs a name or a company. Two customers can't have the same email.
+- **On a local sale**, type in the **Customer** box and pick one: the name and contact are filled
+  in and the sale is linked to that customer. Change the email afterwards, or press **Clear**, and
+  it is linked by its email like any other order. **New sale for this customer**, on the
+  customer's page, opens the form with them picked.
+- **On an order**, the customer's name opens their page. **Link to a customer…** puts an order
+  that has none (or the wrong one, after **Unlink customer**) on a customer you search for. Linking
+  or unlinking changes only whose history the order is in; the order's own name, contact and tax
+  stay as they were. A voided order keeps the customer it had.
+- **Archive** hides a customer from the list and keeps everything. An archived customer's later
+  orders are still linked to it. **Restore** brings it back.
+- **Merge into another customer…** is for duplicates — the same person under two emails. Every
+  order moves to the customer you choose, after a confirmation that says how many. Blanks on that
+  customer (email, phone, company, address, notes) are filled from the one merged away, and
+  nothing already there is overwritten. The merged record is archived, and a later order with its
+  email goes to the customer you kept. A merge can't be undone. A tax exemption is not carried
+  over ([sales-tax.md](sales-tax.md#tax-exempt-customers)).
+
+There is no customer sign-in: the records are for the back office, and nothing about them is sent
+to the storefront.
+
 ## Rush orders
 
 A customer can ask for an order to be rushed. What it costs is a rule, set in Global settings → **Rush

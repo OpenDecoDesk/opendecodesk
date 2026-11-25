@@ -202,6 +202,29 @@ INSERT OR IGNORE INTO accounts (id, name, type, createdAt, updatedAt) VALUES
   (5, 'Stripe balance',    'stripe',      strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 
+-- Customer records (migrations/0105). An order belongs to one through orders.customerId (NULL when its contact is a
+-- phone number or nothing). email is trimmed and lower case, '' when there is none; addressJson is '' or the same JSON
+-- as orders.shippingAddress. Never deleted: archivedAt hides one, mergedIntoId says which customer a duplicate was
+-- folded into. A customer's tax exemption makes its orders exempt, like a shop's (db.js insertOrder).
+CREATE TABLE IF NOT EXISTS customers (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  name                 TEXT NOT NULL DEFAULT '',
+  company              TEXT NOT NULL DEFAULT '',
+  email                TEXT NOT NULL DEFAULT '',
+  phone                TEXT NOT NULL DEFAULT '',
+  addressJson          TEXT NOT NULL DEFAULT '',
+  notes                TEXT NOT NULL DEFAULT '',
+  taxExempt            INTEGER NOT NULL DEFAULT 0 CHECK (taxExempt IN (0, 1)),
+  taxExemptCertificate TEXT NOT NULL DEFAULT '',
+  taxExemptExpires     TEXT,
+  createdAt            TEXT NOT NULL,
+  updatedAt            TEXT NOT NULL,
+  archivedAt           TEXT,
+  mergedIntoId         INTEGER REFERENCES customers(id)
+);
+-- One customer per email, leaving out the ones merged away.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_email ON customers(email) WHERE email <> '' AND mergedIntoId IS NULL;
+
 CREATE TABLE IF NOT EXISTS orders (
   orderId             TEXT PRIMARY KEY,
   orgId               TEXT NOT NULL REFERENCES orgs(orgId),
@@ -275,7 +298,8 @@ CREATE TABLE IF NOT EXISTS orders (
   downloadsEmailedAt  TEXT,                       -- migrations/0086: when the "Your downloads" email went out
   source              TEXT NOT NULL DEFAULT '',   -- migrations/0087: '' = made here; 'etsy' / 'shopify' / 'csv' = imported
   externalOrderId     TEXT,                       -- migrations/0087: the store's own order number
-  payOnDelivery       INTEGER NOT NULL DEFAULT 0 CHECK (payOnDelivery IN (0, 1))   -- migrations/0105: steps go on before it's paid
+  payOnDelivery       INTEGER NOT NULL DEFAULT 0 CHECK (payOnDelivery IN (0, 1)),  -- migrations/0105: steps go on before it's paid
+  customerId          INTEGER REFERENCES customers(id)   -- migrations/0105: the customer it belongs to; NULL = none
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -1678,6 +1702,7 @@ CREATE INDEX IF NOT EXISTS idx_download_log_grant ON download_log(grantId, at);
 
 -- Orders imported from another store (migrations/0087): the same store order is only imported once per shop.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_external ON orders(orgId, source, externalOrderId) WHERE externalOrderId IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customerId);   -- migrations/0105
 
 -- Versioned list cache (migrations/0102): one version per admin reference list, raised by the triggers below on
 -- every change to a table behind it. '_ns' is a random number per database (Cache API keys).

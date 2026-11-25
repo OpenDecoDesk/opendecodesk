@@ -7370,9 +7370,13 @@ function orderEstimatePill_(o){
 function orderFundraiserText_(o, orgId){
   const raised = Number(o && o.fundraiserRaised) || 0;
   if (!(raised > 0)) return "";
-  const org = (window._adminOrgRegistry || []).find(x => x.orgId === (orgId || (o && o.orgId)));
+  const id = orgId || (o && o.orgId);
+  const org = (window._adminOrgRegistry || []).find(x => x.orgId === id);
   const f = fundraiserView_(org && org.fundraiser);
-  return "Raises " + adminMoney_(raised) + " for " + (f && f.label ? f.label : "the shop's fundraiser");
+  // The full shop registry is filled only by the catalog pages; the session's shop list (listOrgs) has the label too.
+  const listed = (adminOrgs || []).find(x => x.orgId === id);
+  const label = (f && f.label) || (listed && listed.fundraiserLabel) || "";
+  return "Raises " + adminMoney_(raised) + " for " + (label || "the shop's fundraiser");
 }
 function orderFundraiserPill_(o, orgId){
   const t = orderFundraiserText_(o, orgId);

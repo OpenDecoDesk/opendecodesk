@@ -619,7 +619,12 @@ export async function getPublishedOrg(db, orgId, lk) {
   try {
     const snap = await publishedSnap_(db, orgId, lk);
     const row = snap ? snap.org : await db.prepare("SELECT * FROM orgs WHERE orgId=?").bind(orgId).first();   // never published: live
-    return row ? parseOrg_(row) : null;
+    if (!row) return null;
+    const org = parseOrg_(row);
+    // The fundraiser is live, not published: the snapshot's copy may be out of date, so it isn't handed on
+    // (insertOrder reads the live one itself).
+    if (snap) delete org.fundraiser;
+    return org;
   } catch (e) { return null; }
 }
 export async function publishedProductRow_(db, orgId, productId, lk) {
@@ -924,7 +929,8 @@ export async function setOrgDeliveryOptions(db, orgId, options) {
 // does the storefront's "… supports …" line (catalogShopFromRows_).
 const FUNDRAISER_MAX_LABEL_ = 80;
 const FUNDRAISER_NOT_READY_ = "Fundraising needs the latest database update. Apply the migrations, then try again.";
-const noFundraiserYet_ = (e) => /no such column: (\w+\.)?(fundraiserJson|fundraiserCents|fundraiserOrgId)\b/i.test(String(e && e.message));
+// A read says "no such column"; an INSERT that names a missing column says "has no column named".
+const noFundraiserYet_ = (e) => /(no such column: (\w+\.)?|has no column named )(fundraiserJson|fundraiserCents|fundraiserOrgId)\b/i.test(String(e && e.message));
 // The stored JSON → { mode: "percent", percent, label, showOnShop } or { mode: "perPiece", amount, label, showOnShop };
 // null for none — or for anything that isn't a whole, valid setup, so a damaged value never raises money by mistake.
 export function parseFundraiser_(json) {
@@ -982,7 +988,7 @@ export async function setOrgFundraiser(db, orgId, fundraiser) {
   if (n.error) return { error: n.error };
   let row;
   try { row = await db.prepare("SELECT orgId, fundraiserJson FROM orgs WHERE orgId=?").bind(String(orgId == null ? "" : orgId)).first(); }
-  catch (e) { if (noFundraiserYet_(e)) return { error: FUNDRAISER_NOT_READY_ }; throw e; }
+  catch (e) { if (noFundraiserYet_(e)) return { error: FUNDRAISER_NOT_READY_, notReady: true }; throw e; }
   if (!row) return { error: "That shop wasn't found." };
   const stored = fundraiserStored_(n.fundraiser);
   // updatedAt is left alone: a changed updatedAt alone counts as an unpublished change (getPublishState), and this
@@ -15766,7 +15772,7 @@ export async function getFundraisingReport(db, { dateFrom, dateTo, orgId = null,
   const payBy = new Map(payoutRows.map(r => [r.orgId, { inRange: Number(r.inRange) || 0, toDate: Number(r.toDate) || 0 }]));
   const byOrg = new Map();
   for (const r of orderRows) (byOrg.get(r.orgId) || byOrg.set(r.orgId, []).get(r.orgId)).push(r);
-  const shops = [], orders = [];
+  const shops = [], orders = [], listed = new Set();
   const t = { orders: 0, pieces: 0, sales: 0, raised: 0, paidOut: 0, owed: 0 };
   for (const org of orgRows) {
     const f = parseFundraiser_(org.fundraiserJson), rows = byOrg.get(org.orgId) || [], pay = payBy.get(org.orgId) || { inRange: 0, toDate: 0 };
@@ -15778,9 +15784,11 @@ export async function getFundraisingReport(db, { dateFrom, dateTo, orgId = null,
     for (const k of Object.keys(t)) t[k] += s[k];
     shops.push({ orgId: org.orgId, name: org.name || org.orgId, label: f ? f.label : "", mode: f ? f.mode : null,
       orders: s.orders, pieces: s.pieces, sales: fromCents(s.sales), raised: fromCents(s.raised), paidOut: fromCents(s.paidOut), owed: fromCents(s.owed) });
-    for (const r of rows) orders.push({ orderId: r.orderId, orgId: r.orgId, placedAt: r.placedAt || "", customerName: r.customerName || "",
-      pieces: Number(r.pieces) || 0, sales: fromCents(r.salesCents), raised: fromCents(r.raisedCents) });
+    listed.add(org.orgId);
   }
+  // Per order across every listed shop, in the query's sale-date order (not shop by shop).
+  for (const r of orderRows) if (listed.has(r.orgId)) orders.push({ orderId: r.orderId, orgId: r.orgId, placedAt: r.placedAt || "",
+    customerName: r.customerName || "", pieces: Number(r.pieces) || 0, sales: fromCents(r.salesCents), raised: fromCents(r.raisedCents) });
   shops.sort((a, b) => String(a.name).localeCompare(String(b.name)) || String(a.orgId).localeCompare(String(b.orgId)));
   return { shops, orders, totals: { orders: t.orders, pieces: t.pieces, sales: fromCents(t.sales), raised: fromCents(t.raised),
     paidOut: fromCents(t.paidOut), owed: fromCents(t.owed) }, dateFrom, dateTo, owedAsOf: dateTo };
@@ -15807,10 +15815,10 @@ export async function recordFundraiserPayout(db, { orgId, amount, date, accountI
   if (text.length > 200) return { error: "The note can be at most 200 characters." };
   let org;
   try { org = await db.prepare("SELECT orgId, name, fundraiserJson FROM orgs WHERE orgId = ?").bind(String(orgId == null ? "" : orgId)).first(); }
-  catch (e) { if (noFundraiserYet_(e)) return { error: FUNDRAISER_NOT_READY_ }; throw e; }
+  catch (e) { if (noFundraiserYet_(e)) return { error: FUNDRAISER_NOT_READY_, notReady: true }; throw e; }
   if (!org) return { error: "That shop wasn't found." };
   const cat = await fundraiserPayoutCategory_(db);
-  if (!cat) return { error: FUNDRAISER_NOT_READY_ };
+  if (!cat) return { error: FUNDRAISER_NOT_READY_, notReady: true };
   const acct = accountId ? await getAccount(db, accountId) : null;
   if (!acct || !acct.active) return { error: "Choose the account it was paid from." };
   // Who got it: the group the shop's fundraiser supports, else (a fundraiser since ended) the shop.
@@ -15820,7 +15828,7 @@ export async function recordFundraiserPayout(db, { orgId, amount, date, accountI
     const id = await saveExpense(db, 0, { date, description, categoryId: Number(cat.id), amount: fromCents(toCents(a)), vendor: String(to).slice(0, 120),
       businessUsePct: 100, vendorChargedTax: true, accountId: acct.id, paidPersonally: false, fundraiserOrgId: org.orgId });
     return { id };
-  } catch (e) { if (noFundraiserYet_(e)) return { error: FUNDRAISER_NOT_READY_ }; throw e; }
+  } catch (e) { if (noFundraiserYet_(e)) return { error: FUNDRAISER_NOT_READY_, notReady: true }; throw e; }
 }
 // The payouts recorded to shops' fundraisers (live ones), newest first, each as listExpenses gives an expense plus the
 // shop's orgId and name and the account's name. { orgId, dateFrom, dateTo } all optional (YYYY-MM-DD). [] before 0110.

@@ -377,7 +377,7 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     addShop("league-101", "league"); addShop("club-7", "club");
     const lines = [], from = st.calls.length;
     const up = async (opts = {}) => { lines.length = 0; let error = null, result = null;
-      try { result = await S.upgrade({ print: (l) => lines.push(String(l)), run: S.createRunner({ dryRun: !!opts.dryRun, exec: st.exec, print: (l) => lines.push(String(l)) }), files: S.realFiles, configPath: opts.config || p, noBackup: !!opts.noBackup }); } catch (e) { error = e; }
+      try { result = await S.upgrade({ print: (l) => lines.push(String(l)), run: S.createRunner({ dryRun: !!opts.dryRun, exec: st.exec, print: (l) => lines.push(String(l)) }), files: S.realFiles, configPath: opts.config || p, noBackup: !!opts.noBackup, ci: !!opts.ci }); } catch (e) { error = e; }
       return { error, result, text: lines.join("\n") }; };
     let u = await up({ dryRun: true });
     ok("a dry run shows the three steps and changes nothing", !u.error && /would run: npx wrangler d1 migrations apply/.test(u.text) && /SELECT subdomain FROM orgs/.test(u.text) && /would run: npx wrangler deploy/.test(u.text) &&
@@ -438,6 +438,14 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     u = await up({ noBackup: true });
     ok("--no-backup applies them without asking for a bookmark, and says there is no restore point", !u.error && !callsFrom(at).some(c => /time-travel/.test(c)) && /No restore point \(--no-backup\)/.test(u.text) &&
       u.result.applied.join() === "9991_example_more.sql" && u.result.bookmark === "");
+    // Cloudflare's build (the Deploy button's automatic deploys): its token may not read Time Travel, and nobody is there
+    // to add --no-backup, so a missing bookmark is a warning there and the migrations still go ahead.
+    st.extra["9991_zz_example_ci.sql"] = "CREATE TABLE example_ci (id INTEGER PRIMARY KEY);";
+    at = st.calls.length;
+    u = await up({ ci: true });
+    ok("in Cloudflare's build, no bookmark is a warning: the migrations are applied and no restore command is printed", !u.error && callsFrom(at).some(c => /time-travel info/.test(c)) &&
+      /Could not save a restore point .*going ahead, as this is Cloudflare's build/.test(u.text) && !/time-travel restore/.test(u.text) &&
+      u.result.applied.join() === "9991_zz_example_ci.sql" && u.result.bookmark === "" && st.db.q("SELECT count(*) n FROM sqlite_master WHERE name='example_ci'")[0].n === 1);
     st.failOn = null;
     // The deploy fails after the migrations ran: the message says what was changed, and how to undo it.
     st.extra["9992_example_last.sql"] = "CREATE TABLE example_last (id INTEGER PRIMARY KEY);";

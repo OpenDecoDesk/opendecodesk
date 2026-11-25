@@ -708,7 +708,10 @@ export async function setup({ io, run, files, configPath = "wrangler.toml", flag
 // has made an empty database.
 // Before migrations change an EXISTING database, a restore point: D1 Time Travel's bookmark for the
 // database as it is now, printed with the command that puts it back. Without one (wrangler can't get
-// it) nothing is applied, unless noBackup (--no-backup) says to go ahead without.
+// it) nothing is applied, unless noBackup (--no-backup) says to go ahead without. In Cloudflare's
+// build (ci: the Deploy button's automatic deploys) a missing restore point is a warning instead: the
+// build's token may not be allowed to read Time Travel, and stopping there would leave the new code
+// undeployed on every push, with nobody at a terminal to add --no-backup.
 //   databaseName  for the restore command (wrangler.toml's database_name)
 // Returns { isNew, applied, bookmark, restore }: the migrations this run applied (null: there were
 // some, but wrangler's list couldn't be read), the bookmark from before them and its restore command.
@@ -723,7 +726,7 @@ export function parseBookmark(stdout) {
   const b = String((j && j.bookmark) || (/bookmark is '([^']+)'/.exec(String(stdout || "")) || [])[1] || "").trim();
   return /^[A-Za-z0-9-]{8,200}$/.test(b) ? b : "";   // it goes into a command we print: nothing a shell would read
 }
-export function prepareTables({ run, files, configPath, say, fail, databaseName = "", noBackup = false }){
+export function prepareTables({ run, files, configPath, say, fail, databaseName = "", noBackup = false, ci = false }){
   const dry = !!run.dryRun;
   let r;
   const query = (sql, what) => {
@@ -764,7 +767,7 @@ export function prepareTables({ run, files, configPath, say, fail, databaseName 
   let applied = [], bookmark = "", restore = "";
   if (!isNew) {
     const l = run(commands.migrationsList(configPath));
-    if (!l.skipped && !l.ok && !noBackup) fail("Could not list the migrations still to run, so none was applied.", l,
+    if (!l.skipped && !l.ok && !noBackup && !ci) fail("Could not list the migrations still to run, so none was applied.", l,
       "Fix the problem and run it again, or run it with --no-backup to apply them without a restore point.");
     applied = l.ok && !l.skipped ? parseMigrationsList(l.stdout) : null;
     if (applied && applied.length) say(`   Migrations to apply: ${applied.join(", ")}`);
@@ -774,11 +777,14 @@ export function prepareTables({ run, files, configPath, say, fail, databaseName 
       else {
         const t = run(commands.timeTravelInfo(configPath));
         bookmark = t.ok ? parseBookmark(t.stdout) : "";
-        if (!bookmark) fail("Could not save a restore point (D1 Time Travel) before the migrations, so none was applied.", t,
+        if (!bookmark && ci) say("   ⚠ Could not save a restore point (D1 Time Travel) before the migrations; going ahead, as this is Cloudflare's build. Time Travel's own history can still restore to a time before this deploy.");
+        else if (!bookmark) fail("Could not save a restore point (D1 Time Travel) before the migrations, so none was applied.", t,
           "Fix the problem and run it again, or run it with --no-backup to apply them without a restore point.");
-        restore = `npx wrangler d1 time-travel restore ${databaseName || "DB --config " + configPath} --bookmark=${bookmark}`;
-        say(`   Restore point before the migrations: bookmark ${bookmark}`);
-        say(`   To put the database back as it is now (this also undoes anything written after it): ${restore}`);
+        if (bookmark) {
+          restore = `npx wrangler d1 time-travel restore ${databaseName || "DB --config " + configPath} --bookmark=${bookmark}`;
+          say(`   Restore point before the migrations: bookmark ${bookmark}`);
+          say(`   To put the database back as it is now (this also undoes anything written after it): ${restore}`);
+        }
       }
     }
   }
@@ -889,7 +895,7 @@ export async function upgrade({ print, run, files, configPath = "wrangler.toml",
     print("   Check only — the migrations still to run (none is applied):");
     const m = run(commands.migrationsList(configPath), { stream: true });
     if (!m.skipped && !m.ok) stop("Could not list the database's migrations.", m);
-  } else tables = prepareTables({ run, files, configPath, say: print, fail: stop, databaseName: cfg.databaseName, noBackup });
+  } else tables = prepareTables({ run, files, configPath, say: print, fail: stop, databaseName: cfg.databaseName, noBackup, ci });
 
   print(""); print("── 2. Hostnames");
   // Where the domain comes from: wrangler.toml (installed from the command line) or the database

@@ -169,6 +169,8 @@ Manage catalog → the shop → **Edit**:
   the Shipping feature), and any number of your own options with a flat fee.
 - **Payment methods** — a shop can turn off methods that are on site-wide; it can't turn on one
   that is off site-wide.
+- **Payment on delivery** — follows Global settings: a shop can turn it off, or limit it to the
+  Local sale window on Orders, but can't turn it on when it's off site-wide.
 - **Order deadline** — a date, a message for afterwards, and whether orders are still accepted
   after it.
 - **Sales tax** — tax exemption (see [sales-tax.md](sales-tax.md)).

@@ -1205,6 +1205,19 @@ async function hasFromStockColumn_(db) {
 async function fromStockLine_(db) {
   return (await hasFromStockColumn_(db)) ? (alias) => `COALESCE(${alias}.fromStock, 0) = 1` : () => "0";
 }
+// orders.payOnDelivery (migrations/0105) — only a "yes" is remembered, like the checks above.
+const _hasPayOnDeliveryColumn = new WeakSet();
+async function hasPayOnDeliveryColumn_(db) {
+  if (_hasPayOnDeliveryColumn.has(db)) return true;
+  try { await db.prepare("SELECT payOnDelivery FROM orders LIMIT 0").all(); _hasPayOnDeliveryColumn.add(db); return true; }
+  catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; return false; }
+}
+// SQL for "the work on this order (alias, default o) may go ahead": paid, paid for everything but a rush fee
+// (migrations/0082), or set to pay on delivery (migrations/0105) — the queues' version of workCleared().
+async function workClearedSql_(db) {
+  const pod = await hasPayOnDeliveryColumn_(db);
+  return (a = "o") => `(${a}.paid = 1 OR ${a}.paidForWork = 1${pod ? ` OR ${a}.payOnDelivery = 1` : ""})`;
+}
 // SQL for "this line (alias) is a digital product" (products.digital, migrations/0086): sold as files, so there's
 // nothing to make, pack or ship for it — the order's stages and the production backlog leave it out. A constant "no"
 // on a database from before the migration; only a "yes" is remembered, like the checks above.
@@ -2891,6 +2904,30 @@ export async function getGlobalSettings(db) {
   return {
     enabledPayments: row ? tryParse_(row.value, { card: true, venmo: true, zelle: true, check: true }) : { card: true, venmo: true, zelle: true, check: true }
   };
+}
+
+// ---- Payment on delivery (migrations/0105) ----------------------------------------------------------------------
+// Whether a shop may set its orders to pay on delivery, the same allow-list rule as the payment methods: Global
+// settings allows it for every shop (enabledPayments.onDelivery — unlike the methods, off until ticked) and a shop can
+// only turn it off for itself (its enabledPayments.onDelivery false), never on when it is off globally. Either one
+// can limit it to the Local sale window on Orders (onDeliveryLocalOnly); the shop can't lift the global limit.
+// → { allowed, localSaleOnly }.
+export function payOnDeliveryRule(globalPayments, orgPayments) {
+  const g = globalPayments && typeof globalPayments === "object" ? globalPayments : {};
+  const o = orgPayments && typeof orgPayments === "object" ? orgPayments : {};
+  const allowed = g.onDelivery === true && o.onDelivery !== false;
+  return { allowed, localSaleOnly: allowed && (g.onDeliveryLocalOnly === true || o.onDeliveryLocalOnly === true) };
+}
+export async function getPayOnDeliveryRule(db, orgId) {
+  const [g, org] = await Promise.all([getGlobalSettings(db), orgId ? getOrgById(db, orgId) : null]);
+  return payOnDeliveryRule(g.enabledPayments, org && org.enabledPayments);
+}
+// Whether the work on order `o` may go ahead (the stage rules, Home's step): paid, paid for everything but a rush fee,
+// or set to pay on delivery — its steps go on and it's paid when it's delivered.
+export const workCleared = (o) => !!(o && (o.paid || o.paidForWork || o.payOnDelivery));
+// Sets or clears an order's pay on delivery. Checked by the caller (setPayOnDelivery / createLocalSale in orders.js).
+export async function setOrderPayOnDelivery(db, orderId, on) {
+  await db.prepare("UPDATE orders SET payOnDelivery = ? WHERE orderId = ?").bind(on ? 1 : 0, orderId).run();
 }
 
 // The payment-method boxes (enabledPayments): stored as sent.
@@ -5939,7 +5976,7 @@ async function stageSql_(db) {
 
 export async function getProductionQueue(db) {
   const stage = await stageSql_(db);
-  const nb = await noBlankLine_(db), fs = await fromStockLine_(db), dg = await digitalLine_(db);
+  const nb = await noBlankLine_(db), fs = await fromStockLine_(db), dg = await digitalLine_(db), cleared = await workClearedSql_(db);
   const { results } = await db.prepare(`
     SELECT oi.id AS itemId, oi.orderId, oi.orgId, o.customerName, o.placedAt, o.dueDate, oi.qty,
            COALESCE(oi.manufacturedQty,0) AS manufacturedQty, oi.productId,
@@ -5965,7 +6002,7 @@ export async function getProductionQueue(db) {
       SELECT id FROM design_versions WHERE designId = d.id ORDER BY uploadedAt DESC, id DESC LIMIT 1
     )
     WHERE oi.cancelDate IS NULL
-      AND (o.paid = 1 OR o.paidForWork = 1) AND o.isTest = 0 AND o.voidedAt IS NULL
+      AND ${cleared()} AND o.isTest = 0 AND o.voidedAt IS NULL
       AND (COALESCE(oi.blankReceivedAt, o.blankReceivedAt) IS NOT NULL OR ${nb("oi")})   -- no blank to wait for (0057)
       AND o.manufacturedAt IS NULL
       AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL   -- shipped / delivered / completed: nothing left to make
@@ -6556,7 +6593,7 @@ async function blankShipmentsByOrder_(db, scope) {
 export async function getPaidUnrunOrders(db) {
   const dg = await digitalLine_(db);   // a line sold as files (migrations/0086) is nothing to run
   const orders = await loadOrders_(db,
-    `(o.paid = 1 OR o.paidForWork = 1) AND o.isTest = 0 AND o.voidedAt IS NULL AND o.manufacturedAt IS NULL AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL
+    `${(await workClearedSql_(db))()} AND o.isTest = 0 AND o.voidedAt IS NULL AND o.manufacturedAt IS NULL AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL
      AND EXISTS (SELECT 1 FROM order_items ai WHERE ai.orderId = o.orderId AND ai.cancelDate IS NULL AND NOT ${dg("ai")})`,
     [], "(o.dueDate IS NULL) ASC, o.dueDate ASC, placedAt ASC");
   const orgNames = {};
@@ -8770,7 +8807,7 @@ function resolveReorderQr_(productReorderQr, orgDefault) {
 //     stays listed HERE until its transfers are marked applied (transfersAppliedAt), even after the
 //     embroidery is done, until the order ships. `embroideryDone` says where the other half is.
 export async function getTransferQueue(db) {
-  const nb = await noBlankLine_(db), fs = await fromStockLine_(db);
+  const nb = await noBlankLine_(db), fs = await fromStockLine_(db), cleared = await workClearedSql_(db);
   const { results } = await db.prepare(
     `SELECT i.id AS itemId, i.orderId, i.orgId, i.name AS itemName, i.size AS itemSize, i.qty, i.configJson,
             COALESCE(i.manufacturedQty,0) AS manufacturedQty, i.transfersAppliedAt, o.manufacturedAt AS orderMadeAt,
@@ -8785,7 +8822,7 @@ export async function getTransferQueue(db) {
      LEFT JOIN product_blank_links l ON l.orgId = i.orgId AND l.productId = i.productId AND l.productSize = i.size
             AND l.productColor = (CASE WHEN i.configJson LIKE '{%' THEN COALESCE(json_extract(i.configJson,'$.garmentColor'),'') ELSE '' END)
      LEFT JOIN blanks b ON b.id = l.blankId
-     WHERE i.cancelDate IS NULL AND (o.paid = 1 OR o.paidForWork = 1) AND o.isTest = 0 AND o.voidedAt IS NULL AND i.configJson <> '' AND NOT ${fs("i")}
+     WHERE i.cancelDate IS NULL AND ${cleared()} AND o.isTest = 0 AND o.voidedAt IS NULL AND i.configJson <> '' AND NOT ${fs("i")}
        -- An order that has shipped, been delivered or been completed has nothing left to press, even if it
        -- was never marked made (production had a delivered + completed order listed with 30 pieces).
        AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL
@@ -9011,12 +9048,12 @@ export async function deleteBlankLink(db, orgId, productId, a, b) {
 // same rule as the per-shop breakdown on Orders), and counted so the screen can say how many.
 // Lines with no blank link are returned separately rather than silently dropped. Read-only.
 export async function getBlanksToOrder(db, { includeUnpaid = false } = {}) {
-  const nb = await noBlankLine_(db);
+  const nb = await noBlankLine_(db), cleared = await workClearedSql_(db);   // pay on delivery (0105) counts as paid here
   const [{ results: lines }, { results: links }, { results: blanks }, { results: sizes }] = await Promise.all([
     db.prepare(
       `SELECT oi.id, oi.orderId, oi.orgId, oi.productId, oi.name, oi.size, oi.qty, COALESCE(oi.manufacturedQty, 0) AS made, oi.configJson,
               COALESCE(oi.blankOrderedAt, o.blankOrderedAt) AS orderedAt, COALESCE(oi.blankReceivedAt, o.blankReceivedAt) AS receivedAt,
-              (o.paid = 1 OR o.paidForWork = 1) AS paid, o.customerName
+              ${cleared()} AS paid, o.customerName
        FROM order_items oi JOIN orders o ON o.orderId = oi.orderId
        WHERE oi.cancelDate IS NULL AND o.voidedAt IS NULL AND o.isTest = 0 AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL AND o.manufacturedAt IS NULL
          AND NOT ${nb("oi")}   -- made with no blank (migrations/0057): nothing to buy
@@ -10278,16 +10315,16 @@ export async function getOpenOrders(db, opts = {}) {
 // columns and counts of its lines — no lines, payments or labels loaded — for Home's counts and to pick the
 // orders of one step. [{orderId, orgId, placedAt, stage}].
 export async function getOpenOrderStages(db) {
-  const nb = await noBlankLine_(db), dg = await digitalLine_(db);
+  const nb = await noBlankLine_(db), dg = await digitalLine_(db), pod = await hasPayOnDeliveryColumn_(db);
   const { results } = await db.prepare(
-    `SELECT o.orderId, o.orgId, o.placedAt, o.paid, o.paidForWork, o.blankOrderedAt, o.blankReceivedAt, o.manufacturedAt,
+    `SELECT o.orderId, o.orgId, o.placedAt, o.paid, o.paidForWork, ${pod ? "o.payOnDelivery" : "0 AS payOnDelivery"}, o.blankOrderedAt, o.blankReceivedAt, o.manufacturedAt,
             o.qaPackedAt, o.shippedAt, o.deliveredAt,
             (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND NOT ${nb("i")}) AS blankLines,
             (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND NOT ${dg("i")}) AS madeLines
        FROM orders o WHERE ${OPEN_ORDERS_SQL_} ORDER BY o.placedAt ASC`).all();
   // The same fields parseOrder_ gives homeOrderStage (every open order has an active line).
   return results.map(r => ({ orderId: r.orderId, orgId: r.orgId, placedAt: r.placedAt, stage: homeOrderStage({
-    paid: !!r.paid, paidForWork: !!r.paid || !!r.paidForWork, digitalOnly: !Number(r.madeLines), needsBlanks: Number(r.blankLines) > 0,
+    paid: !!r.paid, paidForWork: !!r.paid || !!r.paidForWork, payOnDelivery: !!r.payOnDelivery, digitalOnly: !Number(r.madeLines), needsBlanks: Number(r.blankLines) > 0,
     blankOrderedAt: r.blankOrderedAt, blankReceivedAt: r.blankReceivedAt, manufacturedAt: r.manufacturedAt,
     qaPackedAt: r.qaPackedAt, shippedAt: r.shippedAt, deliveredAt: r.deliveredAt }) }));
 }
@@ -10735,12 +10772,14 @@ export function stagePrereqError(o, stage) {
   }
   // Nothing on the order uses a blank (every product is "No blank needed", migrations/0057).
   if (["blankOrdered", "blankShipped", "blankReceived"].includes(stage) && o.needsBlanks === false) return "nothing on this order uses a blank";
+  // Paid (or paid for everything but a rush fee), or set to pay on delivery (migrations/0105): the work goes ahead.
+  const cleared = workCleared(o);
   const need = {
-    blankOrdered:       [o.paidForWork, "the order isn't paid yet"],
+    blankOrdered:       [cleared, "the order isn't paid yet"],
     blankShipped:       [o.blankOrderedAt, "the blank hasn't been ordered yet"],
     blankReceived:      [o.blankOrderedAt, "the blank hasn't been ordered yet"],
-    digitizingComplete: [o.paidForWork, "the order isn't paid yet"],
-    designApproved:     [o.needsDigitizing === false ? o.paidForWork : o.digitizingCompleteAt, o.needsDigitizing === false ? "the order isn't paid yet" : "digitizing isn't complete yet"],
+    digitizingComplete: [cleared, "the order isn't paid yet"],
+    designApproved:     [o.needsDigitizing === false ? cleared : o.digitizingCompleteAt, o.needsDigitizing === false ? "the order isn't paid yet" : "digitizing isn't complete yet"],
     manufactured:       manufacturedPrereq_(o),
     qaPacked:           [o.manufacturedAt, "it isn't manufactured yet"],
     shipped:            [o.qaPackedAt, "it isn't QA'd and packed yet"],
@@ -13873,6 +13912,7 @@ function parseOrder_(row, items, payments, labels) {
     rushFeeTax: fromCents(amounts.rushTaxCents),
     rushPayBy: row.rushPayBy || "",   // full payment due by, to keep the rush date (migrations/0083)
     paidForWork: !!row.paid || !!row.paidForWork,   // `paid` covers the work too
+    payOnDelivery: !!row.payOnDelivery,             // migrations/0105: the steps go on before it's paid
     discountAmount,
     discountNote: row.discountNote || "",
     discountTax: fromCents(Number(row.discountTaxCents) || 0),   // the tax inside the discount (inclusive prices)
@@ -14493,7 +14533,7 @@ export async function getRevenueData(db, dateFrom, dateTo, { basis } = {}) {
 // or delivered and only waiting to be closed out. `o` is an order as getOpenOrders returns it.
 export const HOME_STAGES = ["new", "paid", "blanks", "run", "qa", "ship"];
 export function homeOrderStage(o){
-  if (!o.paid && !o.paidForWork) return "new";
+  if (!workCleared(o)) return "new";   // pay on delivery (migrations/0105) goes on like a paid one
   if (o.digitalOnly) return "ship";   // downloads only: nothing to make; paid → deliver the files and complete it
   const blanks = o.needsBlanks !== false;
   if (blanks && !o.blankOrderedAt) return "paid";

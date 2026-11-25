@@ -52,7 +52,7 @@ import { jsonResponse, featureOffResponse, signOrderToken, fetchWithTimeout } fr
 import {
   getAllOrgs, getOrgById, createOrg, updateOrg, cleanDeliveryOptions, setOrgDeliveryOptions, defaultDeliveryOptions, cleanShippingAddress, stagePrereqError, stageTimeError, shopTime_, ORDER_DATE_FIELDS, orderDatesError, setOrderDates, whyNotCompletable_, getSystemIssues,
   getProductsByOrg, getProductsByIds, priceLookups, productShipWeightOz, createProduct, updateProduct, setProductVisible,
-  getGlobalSettings, setGlobalSettings, getMachineSettings, setMachineSettings,
+  getGlobalSettings, setGlobalSettings, getMachineSettings, setMachineSettings, getPayOnDeliveryRule, setOrderPayOnDelivery,
   getShipFromAddress, setShipFromAddress, shipFromMissing, getBusinessProfile, setBusinessProfile, getLocaleSettings, setLocaleSettings, FEATURES, getFeatures, setFeatures, resolveTimeZone, setOrdersCompleted, getShippedAwaitingDelivery,
   getBoxPresets, setBoxPresets,
   addShippingPaidAmount, setShippingPaidAmount,
@@ -147,7 +147,7 @@ import { expireCheckoutSession, createCheckoutSession, CHECKOUT_LINK_SECONDS, li
 const ORDER_ID_RE = /^[A-Za-z0-9\-]{1,64}$/;
 // Whether an order counts as paid, for a money action's reply: the Payments window redraws the row from it (Mark as
 // paid, the steps), so a payment that settles the order shows it at once, not after a reload.
-const paidState_ = (o) => o ? { paid: !!o.paid, paidForWork: !!o.paidForWork, paidAt: o.paidAt || null } : {};
+const paidState_ = (o) => o ? { paid: !!o.paid, paidForWork: !!o.paidForWork, paidAt: o.paidAt || null, payOnDelivery: !!o.payOnDelivery } : {};
 
 // The most orders one shop's list returns (getOrders), and the All shops page in all (getOrdersAllShops): the newest that many.
 const ORDERS_LIST_MAX = 2000;
@@ -394,6 +394,7 @@ const NO_MONTH_ACTIONS = new Set([
   "sendDesignVerification", "deleteOrderItemFile", "useBlanksFromStock", "addBlankShipment", "updateBlankShipment", "checkBlankShipments",
   "deleteBlankShipment", "setOrderCompleted", "checkDeliveries", "recordTracking", "bulkRecordTracking", "createShippingPaymentLink", "sendInvoice",
   "resendEmail", "resendDownloads", "resetDownloads", "revokeDownloads", "importOrders",
+  "setPayOnDelivery",   // pay on delivery (migrations/0105): no money moves, only whether the steps wait for it
   // Run Order and transfer sheets
   "startRun", "completeRun", "abortRun", "markManufacturedOnMachine", "setTransferReceived", "setTransfersApplied",
   // Catalog and shops
@@ -1005,9 +1006,14 @@ async function handleOrdersPost_(context, listBefore = null) {
     const org = body.org;
     if (!org) return jsonResponse({ status: "error", message: "Unknown org" }, 404);
     // Optional date window (the Orders page's filter) — see getOrdersByOrg.
-    const orders = await getOrdersByOrg(env.DB, org, { from: body.dateFrom, to: body.dateTo }, { limit: ORDERS_LIST_MAX + 1 });
+    const [orders, podRule] = await Promise.all([
+      getOrdersByOrg(env.DB, org, { from: body.dateFrom, to: body.dateTo }, { limit: ORDERS_LIST_MAX + 1 }),
+      // A harness that loads this file without db.js's rule gets "not allowed", as a failed read does.
+      (async () => getPayOnDeliveryRule(env.DB, org))().catch(() => ({ allowed: false, localSaleOnly: false }))]);
     const more = orders.length > ORDERS_LIST_MAX;
-    return jsonResponse({ status: "ok", orders: orderCostsFor_(more ? orders.slice(0, ORDERS_LIST_MAX) : orders), more, max: ORDERS_LIST_MAX });
+    // payOnDelivery: whether this shop's orders may be set to pay on delivery ({ allowed, localSaleOnly }), so the page
+    // offers it only where the server would take it (setPayOnDelivery, createLocalSale).
+    return jsonResponse({ status: "ok", orders: orderCostsFor_(more ? orders.slice(0, ORDERS_LIST_MAX) : orders), more, max: ORDERS_LIST_MAX, payOnDelivery: podRule });
   }
 
   // ---- getOrdersByIds — some of one shop's orders, after an action on them ----
@@ -2448,6 +2454,36 @@ async function handleOrdersPost_(context, listBefore = null) {
       payments: updated ? updated.payments : [], ...paidState_(updated) });
   }
 
+  // ---- setPayOnDelivery — the order is paid when it's delivered (migrations/0105) ----------------
+  // `on` true: its steps (blanks, digitizing, approval, the run, QA, delivery) go on before it's paid; it's completed
+  // once paid in full, as always. Needs "Set orders to pay on delivery" (permissions.js orders.payOnDelivery) and, to
+  // turn it on, a shop that allows it (db.js payOnDeliveryRule) — not when the shop limits it to the Local sale
+  // window, where it's chosen as the sale is recorded. Turning it off is always allowed.
+  if (body.action === "setPayOnDelivery") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const orderId = String(body.orderId || "").trim();
+    if (!orderId || !ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
+    const on = body.on === true;
+    const before = await getOrderById(env.DB, orderId);
+    if (!before || (body.org && String(body.org) !== before.orgId)) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    if (on) {
+      if (before.voidedAt) return jsonResponse({ status: "error", message: "This order is voided." }, 409);
+      if (before.completedAt) return jsonResponse({ status: "error", message: "This order is already completed." }, 409);
+      if (before.paid) return jsonResponse({ status: "error", message: "This order is already paid in full." }, 409);
+      const rule = await getPayOnDeliveryRule(env.DB, before.orgId);
+      if (!rule.allowed) return jsonResponse({ status: "error", message: "Payment on delivery isn't allowed for this shop (Global settings and Shop settings → Payment methods)." }, 409);
+      if (rule.localSaleOnly) return jsonResponse({ status: "error", message: "This shop allows payment on delivery only for local sales — choose it in the Local sale window as the sale is recorded." }, 409);
+    }
+    if (!!before.payOnDelivery !== on) {
+      const auditErr = await auditStrict({ orgId: before.orgId, orderId, action: "order.pay_on_delivery_set", detail: { from: !!before.payOnDelivery, to: on } });
+      if (auditErr) return auditErr;
+      await setOrderPayOnDelivery(env.DB, orderId, on);
+    }
+    const updated = await getOrderById(env.DB, orderId);
+    return jsonResponse({ status: "ok", orderId, ...paidState_(updated) });
+  }
+
   // ---- setDiscount — apply or clear a discount on an order -------------------
   if (body.action === "setDiscount") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
@@ -2598,10 +2634,17 @@ async function handleOrdersPost_(context, listBefore = null) {
     // Paid records a payment and Delivered sets a step: what Mark as paid and the step menu need on their own.
     if (body.paid && !can_("orders.payments", "edit")) return forbidden_("Your role can't record payments. Ask an admin.");
     if (body.delivered) { const no = stageDenied_("delivered"); if (no) return no; }
+    // Pay on delivery (migrations/0105): its own permission, and only where the shop allows it (Local sale counts
+    // even when it's limited to local sales).
+    if (body.payOnDelivery && !can_("orders.payOnDelivery", "edit")) return forbidden_("Your role can't set orders to pay on delivery. Ask an admin.");
+    if (body.payOnDelivery && body.paid) return jsonResponse({ status: "error", message: "Choose Paid or Pay on delivery, not both." }, 400);
     { const locked = await periodGuard(body); if (locked) return locked; }
 
     const org = body.org;
     if (!org) return jsonResponse({ status: "error", message: "Missing org" }, 400);
+    if (body.payOnDelivery && !(await getPayOnDeliveryRule(env.DB, org)).allowed) {
+      return jsonResponse({ status: "error", message: "Payment on delivery isn't allowed for this shop (Global settings and Shop settings → Payment methods)." }, 409);
+    }
     if (!Array.isArray(body.items) || body.items.length === 0 || body.items.length > 20) {
       return jsonResponse({ status: "error", message: "Invalid items" }, 400);
     }
@@ -2717,10 +2760,11 @@ async function handleOrdersPost_(context, listBefore = null) {
 
     if (body.paid)      await settleOrderBalance(env.DB, orderId,
                           "Local sale" + (order.paymentMethod ? " (" + order.paymentMethod + ")" : ""), placedAt, saleKey);
+    if (body.payOnDelivery) await setOrderPayOnDelivery(env.DB, orderId, true);
     if (body.delivered) await setFulfillmentStage(env.DB, orderId, "delivered", { at: placedAt });
 
     audit({ orgId: org, orderId, action: "order.created_local_sale",
-      detail: { customerName: order.customerName, total: subtotal, paid: !!body.paid, items: pricedItems.length } });
+      detail: { customerName: order.customerName, total: subtotal, paid: !!body.paid, payOnDelivery: !!body.payOnDelivery, items: pricedItems.length } });
     return jsonResponse({ status: "ok", orderId });
   }
 

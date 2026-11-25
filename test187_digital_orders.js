@@ -38,8 +38,8 @@ const adminSrc = read("public/admin.js");
 const cut = (start, end) => { const i = adminSrc.indexOf(start); if (i < 0) throw new Error("not found: " + start); return adminSrc.slice(i, adminSrc.indexOf(end, i) + end.length); };
 const ui = new Function(
   "const escapeHtml = (s) => String(s == null ? '' : s).replace(/[&<>\"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' })[c]);\n" +
-  "const featureOn_ = () => true, adminCan_ = () => true, adminDesktopNoEmail_ = () => false, invoiceCell_ = () => '';\n" +
-  cut("const FULFILLMENT_STAGES = [", "\n];\n") + cut("const FULFILLMENT_LATE_ = ", ";\n") + cut("const FULFILLMENT_FIELD = ", ";\n") +
+  "const featureOn_ = () => true, adminCan_ = () => true, adminDesktopNoEmail_ = () => false, invoiceCell_ = () => '', window = {};\n" +
+  cut("function workCleared_(o){", "\n") + cut("function podRule_(orgId){", "\n") + cut("const FULFILLMENT_STAGES = [", "\n];\n") + cut("const FULFILLMENT_LATE_ = ", ";\n") + cut("const FULFILLMENT_FIELD = ", ";\n") +
   cut("function canCompleteOrder(o){", "\n}\n") + cut("function adminActionCell(org, o){", "\n}\n") +
   cut("const DASH_STATUSES_ = [", "\n];\n") + cut("function dashOrderStatus_(o){", "\n}\n") +
   "return { adminActionCell, canCompleteOrder, dashOrderStatus_ };")();

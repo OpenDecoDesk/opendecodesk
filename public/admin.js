@@ -53,6 +53,7 @@ const ADMIN_ACTIONS_ = {
   resendDownloadsNow_(){ resendDownloadsNow_(this.dataset.org,this.dataset.order); },
   showRushFeeModal_(){ showRushFeeModal_(this.dataset.org,this.dataset.order); },
   markOrderPaid(){ markOrderPaid(this.dataset.org, this.dataset.order); },
+  setPayOnDelivery_(){ setPayOnDelivery_(this.dataset.org, this.dataset.order, this.dataset.on === "1"); },
   resendEmail(){ resendEmail(this.dataset.org, this.dataset.order); },
   editOrder(){ editOrder(this.dataset.org,this.dataset.order); },
   pickFulfillmentStage_(){ if (this.value) { setFulfillmentStage(this.dataset.org, this.dataset.order, this.value); this.value = ""; } },
@@ -1459,6 +1460,7 @@ async function fetchOrders(orgId, retried){
     const rows = Array.isArray(data) ? data : (data.orders || []);
     rows.sort((a,b)=> new Date(b.placedAt) - new Date(a.placedAt));
     (window._ordersMore = window._ordersMore || {})[orgId] = data && data.more ? rows.length : 0;
+    (window._ordersPod = window._ordersPod || {})[orgId] = (data && data.payOnDelivery) || { allowed: false, localSaleOnly: false };
     return rows;
   }catch(e){
     console.error("Admin orders fetch threw an exception:", e);
@@ -1584,7 +1586,7 @@ function renderPickerOrgButtons(panel){
 // Admin home dashboard: every open order across every shop (not completed, not voided, not a
 // test, not fully cancelled), oldest first, each with where it is in fulfillment.
 const DASH_STATUSES_ = [
-  ["unpaid", "Awaiting payment"], ["notStarted", "Paid — not started"], ["digitalPaid", "Paid — downloads only, ready to complete"], ["blankOrderedAt", "Blank ordered"],
+  ["unpaid", "Awaiting payment"], ["notStarted", "Paid or pay on delivery — not started"], ["digitalPaid", "Paid — downloads only, ready to complete"], ["blankOrderedAt", "Blank ordered"],
   ["digitizingCompleteAt", "Digitizing done"], ["blankReceivedAt", "Blank received"], ["designApprovedAt", "Design approved"],
   ["manufacturedAt", "Manufactured"], ["qaPackedAt", "QA & packed"], ["shippedAt", "Shipped"], ["deliveredAt", "Delivered"],
 ];
@@ -1593,7 +1595,7 @@ function dashOrderStatus_(o){
   // Downloads only (migrations/0086): no stages — once it's paid, it's ready to complete.
   if (o.digitalOnly) return o.paid ? "digitalPaid" : "unpaid";
   for (let i = DASH_STATUSES_.length - 1; i >= 3; i--) if (o[DASH_STATUSES_[i][0]]) return DASH_STATUSES_[i][0];
-  return o.paid ? "notStarted" : "unpaid";
+  return workCleared_(o) ? "notStarted" : "unpaid";   // pay on delivery (migrations/0105) goes on like a paid one
 }
 window._dashFilter = window._dashFilter || "";
 
@@ -4542,22 +4544,30 @@ async function setLineItemRefund(orgId, sheetRow, defaultAmount, paymentMethod){
   }
 }
 
+// Whether an order's work may go ahead (db.js workCleared): paid, paid for everything but a rush fee (migrations/0082),
+// or set to pay on delivery (migrations/0105) — its steps go on and it's paid when it's delivered.
+function workCleared_(o){ return !!(o && (o.paid === true || o.paidForWork === true || o.payOnDelivery === true)); }
+// This shop's pay-on-delivery rule ({ allowed, localSaleOnly }), as its last getOrders said (db.js payOnDeliveryRule).
+// The Paid cell: "Paid", "Unpaid", or — set to pay on delivery and not paid yet — "Unpaid · on delivery".
+function paidLabel_(o){ return o.paid ? "Paid" : o.payOnDelivery ? "Unpaid · on delivery" : "Unpaid"; }
+function podRule_(orgId){ return ((window._ordersPod || {})[orgId]) || { allowed: false, localSaleOnly: false }; }
+
 // Fulfillment stages in strict progression order.
 const FULFILLMENT_STAGES = [
   // The blank steps aren't offered when nothing on the order uses a blank (o.needsBlanks false: every
   // product is "No blank needed", migrations/0052) — and Mark manufactured then doesn't wait for one.
-  { stage: "blankOrdered",       label: "Mark blank ordered",        prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => o.paid === true || o.paidForWork === true, prereq2: o => o.needsBlanks !== false },
+  { stage: "blankOrdered",       label: "Mark blank ordered",        prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => workCleared_(o), prereq2: o => o.needsBlanks !== false },
   // Blanks already on the shelf: marked ordered + received from "In stock" in one go (the server checks
   // the stock covers every waiting line, and says what's short when it doesn't).
-  { stage: "blanksFromStock",    label: "Use blanks from stock",     prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => o.paid === true || o.paidForWork === true, prereq2: o => o.needsBlanks !== false && !o.blankOrderedAt },
+  { stage: "blanksFromStock",    label: "Use blanks from stock",     prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => workCleared_(o), prereq2: o => o.needsBlanks !== false && !o.blankOrderedAt },
   { stage: "blankShipped",       label: "Mark blank shipped…",       prereqField: "blankOrderedAt",       prereqCheck: v => !!v, prereq2: o => o.needsBlanks !== false },
   { stage: "blankReceived",      label: "Mark blank received",       prereqField: "blankOrderedAt",       prereqCheck: v => !!v, prereq2: o => o.needsBlanks !== false },
   // Digitizing is skipped when every product on the order already has a design (o.needsDigitizing);
   // design approval is only asked for when a line has free-form personalization text
   // (o.needsDesignApproval). Both flags come from the server (stagePrereqError applies the same rules).
-  { stage: "digitizingComplete", label: "Mark digitizing complete",  prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => o.paid === true || o.paidForWork === true, prereq2: o => o.needsDigitizing !== false },
-  { stage: "designApproved",     label: "Mark design approved",      prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => o.paid === true || o.paidForWork === true, prereq2: o => o.needsDesignApproval !== false && (o.needsDigitizing === false || !!o.digitizingCompleteAt) },
-  { stage: "manufactured",       label: "Mark manufactured",         prereqField: "blankReceivedAt",      prereqCheck: v => !!v, prereqMet: o => o.needsBlanks === false ? (o.paid === true || o.paidForWork === true) : !!o.blankReceivedAt, prereq2: o => o.needsDesignApproval !== false ? !!o.designApprovedAt : (o.needsDigitizing === false || !!o.digitizingCompleteAt) },
+  { stage: "digitizingComplete", label: "Mark digitizing complete",  prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => workCleared_(o), prereq2: o => o.needsDigitizing !== false },
+  { stage: "designApproved",     label: "Mark design approved",      prereqField: "paid",                 prereqCheck: v => v === true, prereqMet: o => workCleared_(o), prereq2: o => o.needsDesignApproval !== false && (o.needsDigitizing === false || !!o.digitizingCompleteAt) },
+  { stage: "manufactured",       label: "Mark manufactured",         prereqField: "blankReceivedAt",      prereqCheck: v => !!v, prereqMet: o => o.needsBlanks === false ? workCleared_(o) : !!o.blankReceivedAt, prereq2: o => o.needsDesignApproval !== false ? !!o.designApprovedAt : (o.needsDigitizing === false || !!o.digitizingCompleteAt) },
   { stage: "qaPacked",           label: "Mark QA and packed",        prereqField: "manufacturedAt",       prereqCheck: v => !!v },
   { stage: "shipped",            label: "Mark shipped",              prereqField: "qaPackedAt",           prereqCheck: v => !!v },
   { stage: "delivered",          label: "Mark delivered",            prereqField: "qaPackedAt",           prereqCheck: v => !!v },
@@ -4592,9 +4602,20 @@ function adminActionCell(org, o){
   // Downloads only: nothing to make or ship, so no rush, no shipping and no stages — paid, then completed.
   const rushBtn = o.digitalOnly || !can("orders.payments", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:full" data-admin-action="showRushFeeModal_" title="Rush this order, or change its rush fee" style="margin-top:4px;">${o.rushRequested ? "Rush…" : "+ Rush…"}</button>`;
 
-  // Paid for everything but a rush fee (migrations/0082) counts as paid for the work: the stages go on.
-  if(!o.paid && !o.paidForWork){
-    return (can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid">Mark as paid</button>` : `<span class="muted-cell" style="font-size:12px;">Not paid</span>`) +
+  // Pay on delivery (migrations/0105): offered on an unpaid order where the shop allows it — not when the shop limits it
+  // to local sales (chosen in the Local sale window) — to a role with "Set orders to pay on delivery"; taken off again
+  // from the same role. The steps go on before it's paid.
+  const pod = podRule_(org.orgId);
+  const podOnBtn = !o.paid && !o.payOnDelivery && !o.digitalOnly && !o.completedAt && pod.allowed && !pod.localSaleOnly && can("orders.payOnDelivery", "edit")
+    ? `<button class="admin-btn" ${dataAttrs} data-on="1" data-need="orders.payOnDelivery:edit" data-admin-action="setPayOnDelivery_" title="The customer pays when it's delivered: blanks, the run and delivery go ahead before it's paid" style="margin-top:4px;">Pay on delivery</button>` : "";
+  const podOffBtn = o.payOnDelivery && !o.paid && !o.completedAt && can("orders.payOnDelivery", "edit")
+    ? `<button class="admin-btn" ${dataAttrs} data-on="0" data-need="orders.payOnDelivery:edit" data-admin-action="setPayOnDelivery_" title="Back to the usual rule: the steps wait for payment" style="margin-top:4px;">Not pay on delivery</button>` : "";
+  const podTag = o.payOnDelivery && !o.paid ? `<div class="mono" style="font-size:11px;color:#b45309;margin-bottom:4px;" title="The steps go on before it's paid; it's completed once paid in full">Pay on delivery</div>` : "";
+
+  // Paid for everything but a rush fee (migrations/0082) counts as paid for the work: the stages go on — and so does
+  // an order set to pay on delivery (migrations/0105).
+  if(!workCleared_(o)){
+    return (can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid">Mark as paid</button>` : `<span class="muted-cell" style="font-size:12px;">Not paid</span>`) + podOnBtn +
       (adminDesktopNoEmail_() || !can("orders.invoices", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.invoices:edit" data-admin-action="resendEmail" style="margin-top:4px;">${resendLabel}</button>`) +
       (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") +
       (can("orders.details", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" data-admin-action="editOrder" style="margin-top:4px;">Edit items</button>` : "") +
@@ -4627,9 +4648,9 @@ function adminActionCell(org, o){
     : canCompleteOrder(o) && can("orders.stepsLate", "edit")
       ? `<button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" data-admin-action="completeOrdersAsk_" title="${o.digitalOnly ? "Paid in full, and its downloads have gone out" : "Delivered and paid in full"} — close it out" style="margin-top:4px;background:#166534;color:#fff;border-color:#166534;">Mark completed</button>`
       : "";
-  // The rush fee still owed (the rest is paid): Mark as paid settles it.
-  const payRushBtn = !o.paid && Number(o.balanceDue) > 0 && can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid" title="Record the rest of the balance — the rush fee — as paid" style="margin-top:4px;">Mark as paid</button>` : "";
-  return stageEl + completeBtn + payRushBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + rushBtn + dlBtn + paymentsBtn + deleteBtn;
+  // The rush fee still owed (the rest is paid), or a pay-on-delivery order's balance: Mark as paid settles it.
+  const payRushBtn = !o.paid && Number(o.balanceDue) > 0 && can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid" title="${o.payOnDelivery && !o.paidForWork ? "Record the balance as paid" : "Record the rest of the balance — the rush fee — as paid"}" style="margin-top:4px;">Mark as paid</button>` : "";
+  return podTag + stageEl + completeBtn + payRushBtn + podOffBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + rushBtn + dlBtn + paymentsBtn + deleteBtn;
 }
 
 // The order row's Resend downloads (digital products, migrations/0086): a new download link, emailed with the files
@@ -4640,6 +4661,19 @@ async function resendDownloadsNow_(orgId, orderId){
     const r = await hoopApi_({ action: "resendDownloads", orderId, org: orgId });
     showToast("Downloads emailed" + (r.sent && r.sent.attached ? " with the files." : r.sent && r.sent.tooBig ? " (the files are too large to attach, so just the link)." : "."));
   } catch (e) { showToast("Couldn't resend the downloads: " + (e.message || "unknown error"), true); }
+}
+
+// The order row's Pay on delivery / Not pay on delivery (migrations/0105): set, the order's steps go on before it's paid.
+async function setPayOnDelivery_(orgId, orderId, on){
+  const msg = on
+    ? "Set order " + orderId + " to pay on delivery?\n\nIts steps — blanks, the run, packing and delivery — go ahead before it's paid. It's completed once it's paid in full."
+    : "Take pay on delivery off order " + orderId + "?\n\nSteps not done yet wait for payment again.";
+  if (!(await askConfirm_(msg, { confirmLabel: on ? "Pay on delivery" : "Take it off" }))) return;
+  try {
+    await hoopApi_({ action: "setPayOnDelivery", orderId, org: orgId, on });
+    showToast(on ? "Order " + orderId + " is pay on delivery." : "Order " + orderId + " waits for payment again.");
+    refreshOrderRows_(orgId, [orderId]);
+  } catch (e) { showToast("Couldn't change pay on delivery: " + (e.message || "unknown error"), true); }
 }
 
 // "⚡ RUSH · needed by 11/20 · fee to follow" on an order's row and card (migrations/0082).
@@ -5094,7 +5128,7 @@ function trackingCell(org, o){
   // Already has a label: never offer "Ship" again (that would buy a second one).
   if(lbl) return labelBtn.trim();
   if(shippingOn && o.shippingAddress && o.shippingAddress.line1 && !o.items.every(it => it.cancelDate)){
-    if(!o.paid){
+    if(!o.paid && !o.payOnDelivery){   // pay on delivery (migrations/0105) ships before it's paid
       return `<span style="color:var(--ink-soft);font-size:12px;">Awaiting payment</span>`;
     }
     return `<button class="admin-btn admin-btn-sm" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.shipping:edit" data-admin-action="shipOrder">Ship</button>`;
@@ -5847,7 +5881,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         <td>${refundCol}</td>
         ${idx === 0 ? `
           <td rowspan="${o.items.length}">${escapeHtml(o.paymentMethod || "—")}</td>
-          <td rowspan="${o.items.length}" data-paid-td>${o.paid ? "Paid" : "Unpaid"}</td>
+          <td rowspan="${o.items.length}" data-paid-td>${paidLabel_(o)}</td>
           <td rowspan="${o.items.length}" data-discount-td style="text-align:right;white-space:nowrap;">${o.discountAmount > 0 ? `<span style="color:#166534;">−$${Number(o.discountAmount).toFixed(2)}</span>${o.discountNote ? `<br><span style="font-size:11px;color:var(--ink-soft);">${escapeHtml(o.discountNote)}</span>` : ""}` : "—"}</td>
           <td rowspan="${o.items.length}" data-balance-td style="text-align:right;white-space:nowrap;font-weight:600;color:${o.balanceDue > 0.005 ? "#b03a2e" : "var(--ink-soft)"};">${o.balanceDue > 0.005 ? `$${Number(o.balanceDue).toFixed(2)}` : o.amountReceived > 0 ? "Settled" : "—"}</td>
           <td rowspan="${o.items.length}">${emailBadge(o.receivedEmailAt)}</td>
@@ -5953,7 +5987,7 @@ function orderCardHtml_(o, org, verif, showShop){
         ${showShop ? `<div class="oc-dim">${escapeHtml(org.name || org.orgId)}</div>` : ""}
       </div>
       <div class="oc-amt"><div class="oc-total">${money(total)}</div>
-        <div class="oc-dim"><span style="color:${o.paid ? "#166534" : "#b03a2e"};font-weight:600;">${o.paid ? "Paid" : "Unpaid"}</span> · ${escapeHtml(o.paymentMethod || "—")}</div></div>
+        <div class="oc-dim"><span style="color:${o.paid ? "#166534" : o.payOnDelivery ? "#b45309" : "#b03a2e"};font-weight:600;">${paidLabel_(o)}</span> · ${escapeHtml(o.paymentMethod || "—")}</div></div>
     </div>
     <div class="oc-status">${status}</div>
     <ul class="oc-items">${items}</ul>
@@ -6221,7 +6255,7 @@ function renderOrderBreakdown(orders, blankLinks, blanks){
   // Unpaid orders are excluded — don't order blanks until payment is confirmed.
   const products = {};
   orders.forEach(o => {
-    if(!o.paid && !o.paidForWork) return; // skip unpaid entirely (an unpaid rush fee doesn't count — migrations/0082)
+    if(!workCleared_(o)) return; // skip unpaid entirely (an unpaid rush fee doesn't count — migrations/0082; pay on delivery counts as paid — 0105)
     o.items.forEach(it => {
       if(it.cancelDate) return; // exclude canceled line items
       if(it.noBlank) return;    // made with no blank (migrations/0052) — nothing to order for it
@@ -6893,7 +6927,7 @@ function showBalanceMismatchPrompt(paymentAmount, remainder, doSave, errEl) {
 }
 
 // The order's paid state from a money action's reply (orders.js paidState_), when it has one.
-function paidOf_(d){ return d && typeof d.paid === "boolean" ? { paid: d.paid, paidForWork: !!d.paidForWork, paidAt: d.paidAt || null } : {}; }
+function paidOf_(d){ return d && typeof d.paid === "boolean" ? { paid: d.paid, paidForWork: !!d.paidForWork, paidAt: d.paidAt || null, ...(typeof d.payOnDelivery === "boolean" ? { payOnDelivery: d.payOnDelivery } : {}) } : {}; }
 function updateOrderCache(orgId, orderId, updated) {
   if (!window._ordersCache) window._ordersCache = {};
   if (!window._ordersCache[orgId]) return;
@@ -6916,7 +6950,7 @@ function updateOrderTableRow(orgId, orderId, updated) {
       : "—";
   });
   // The Paid / Unpaid cell, from the server's paid flag (a payment that settles the order shows it at once).
-  if (typeof updated.paid === "boolean") document.querySelectorAll(`tr[data-order="${CSS.escape(orderId)}"] td[data-paid-td]`).forEach(td => { td.textContent = updated.paid ? "Paid" : "Unpaid"; });
+  if (typeof updated.paid === "boolean") document.querySelectorAll(`tr[data-order="${CSS.escape(orderId)}"] td[data-paid-td]`).forEach(td => { td.textContent = paidLabel_(updated); });
   // Update balance cell
   document.querySelectorAll(`tr[data-order="${CSS.escape(orderId)}"] td[data-balance-td]`).forEach(td => {
     const b = updated.balanceDue;
@@ -7198,7 +7232,9 @@ async function createLocalSaleOnce_(orgId){
     return;
   }
 
-  const result = await showLocalSaleModal(products, blanks);
+  // Pay on delivery (migrations/0105): offered where the shop allows it (limited to local sales or not) to a role that may set it.
+  const pod = podRule_(orgId);
+  const result = await showLocalSaleModal(products, blanks, { payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit") });
   if(!result) return;
   const { sendInvoice: wantsInvoice, ...sale } = result;
   // This sale's key: the server makes one order (and books one payment) per key, so the retry below, or a
@@ -7235,7 +7271,7 @@ async function createLocalSaleOnce_(orgId){
   }
 }
 
-function showLocalSaleModal(products, blanks){
+function showLocalSaleModal(products, blanks, opts = {}){
   return new Promise((resolve) => {
     const IS = (s) => `width:100%;padding:8px 10px;border:1px solid var(--border,#ccc);border-radius:5px;font-size:14px;box-sizing:border-box;background:var(--surface,#fff);color:var(--ink,#111);margin-bottom:10px;`;
     const LS = (t, opt, forId) => `<label${forId ? ` for="${forId}"` : ""} style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">${t}${opt ? ` <span style="font-weight:400;color:var(--ink-soft,#888)">(optional)</span>` : ""}</label>`;
@@ -7399,6 +7435,9 @@ function showLocalSaleModal(products, blanks){
           <label data-need="orders.stepsLate:edit" style="font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;">
             <input type="checkbox" id="lsDelivered" style="width:auto;margin:0;"> Delivered
           </label>
+          ${opts.payOnDelivery ? `<label data-need="orders.payOnDelivery:edit" style="font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;" title="The customer pays when it's delivered: blanks, the run and delivery go ahead before it's paid">
+            <input type="checkbox" id="lsPod" style="width:auto;margin:0;"> Pay on delivery
+          </label>` : ""}
         </div>
         <div style="margin:-4px 0 14px;${adminDesktop_() ? "display:none;" : ""}">
           <label style="font-size:14px;display:flex;align-items:flex-start;gap:8px;cursor:pointer;">
@@ -7638,6 +7677,12 @@ function showLocalSaleModal(products, blanks){
         overlay.querySelector("#lsEmail").focus();
         return;
       }
+      const podBox = overlay.querySelector("#lsPod");
+      if(podBox && podBox.checked && overlay.querySelector("#lsPaid").checked){
+        errEl.textContent = "Tick Paid or Pay on delivery, not both.";
+        errEl.style.display = "";
+        return;
+      }
       if(wantsInvoice && overlay.querySelector("#lsPaid").checked){
         errEl.textContent = "Untick Paid to send an invoice — an invoice is for what's still owed.";
         errEl.style.display = "";
@@ -7693,6 +7738,7 @@ function showLocalSaleModal(products, blanks){
         ...(shipping ? { shippingCost: shipping.cost, shippingMethod: shipping.method } : {}),
         paid:      overlay.querySelector("#lsPaid").checked,
         delivered: overlay.querySelector("#lsDelivered").checked,
+        ...(podBox && podBox.checked ? { payOnDelivery: true } : {}),
         placedAt:  (readWhen_(overlay.querySelector("#lsDate")).at) || null,   // when the sale happened — also when it was paid / handed over
         sendInvoice: wantsInvoice,
       });
@@ -9058,7 +9104,8 @@ function wizScreen_(step){
       return { title: "How can customers pay?", help: "Card goes through Stripe; the others show your payment details after the order.",
         html: WIZ_PAYMENTS_.map(([k, l]) => check("wizPay", k, l, ep[k] !== false)).join(""),
         save: async () => { const on = picked("wizPay"); if (!on.length) return "Pick at least one way to pay.";
-          await wizSaveOrg_({ enabledPayments: Object.fromEntries(WIZ_PAYMENTS_.map(([k]) => [k, on.includes(k)])) }); return ""; } };
+          // The shop's other payment settings (pay on delivery, migrations/0105) are kept as they are.
+          await wizSaveOrg_({ enabledPayments: Object.assign({}, ep, Object.fromEntries(WIZ_PAYMENTS_.map(([k]) => [k, on.includes(k)]))) }); return ""; } };
     }
     case "deadline": {
       const d = o.orderDeadline ? String(o.orderDeadline).slice(0, 10) : "";
@@ -10029,6 +10076,9 @@ async function renderGlobalSettings(app){
         <label class="checkbox-row"><input type="checkbox" id="gPayZelle" ${checked("zelle")}> Zelle</label>
         <label class="checkbox-row"><input type="checkbox" id="gPayCheck" ${checked("check")}> Check</label>
         <div class="admin-note" style="margin-top:10px;">Disable all four to accept orders without any payment selection — useful for deposit-later or invoice workflows.</div>
+        <label class="checkbox-row" style="margin-top:14px;"><input type="checkbox" id="gPayOnDelivery" ${pay.onDelivery === true ? "checked" : ""}> Payment on delivery</label>
+        <label class="checkbox-row" style="margin-left:26px;"><input type="checkbox" id="gPayOnDeliveryLocal" ${pay.onDeliveryLocalOnly === true ? "checked" : ""}> Only for local sales (the Local sale window on Orders)</label>
+        <div class="admin-note" style="margin-top:6px;">An order set to pay on delivery goes through its steps — blanks, digitizing, the run, packing and delivery — before it's paid, and is completed once it's paid in full. It's set on Orders by a role with <strong>Set orders to pay on delivery</strong> (Manager and Admin unless changed under Users → Roles). Off here, no shop can use it; each shop can also turn it off or limit it to local sales for itself.</div>
 
         <h2 style="margin:22px 0 12px;">Sales tax</h2>
         <div class="admin-note" style="margin-bottom:14px;">Leave the rate at 0 if you don't collect sales tax. Orders shipped to another state, tax-exempt shops and non-taxable products carry no tax; shipping is never taxed. Changing the rate, the state or how prices are shown affects <strong>new orders only</strong> — every order keeps what it was placed with.</div>
@@ -10356,7 +10406,8 @@ async function submitGlobalSettings(){
   // after the desktop program's part below, which may stop the save first.)
   const collect = () => {
     const settings = {
-      payments: { card: $g("gPayCard").checked, venmo: $g("gPayVenmo").checked, zelle: $g("gPayZelle").checked, check: $g("gPayCheck").checked },
+      payments: { card: $g("gPayCard").checked, venmo: $g("gPayVenmo").checked, zelle: $g("gPayZelle").checked, check: $g("gPayCheck").checked,
+        onDelivery: $g("gPayOnDelivery").checked, onDeliveryLocalOnly: $g("gPayOnDeliveryLocal").checked },
       salesTax: { ratePercent: parseFloat($g("gTaxRate").value), jurisdiction: $g("gTaxJurisdiction").value.trim(), taxMode: ($g("gTaxMode") || {}).value || undefined },
     };
     // Region: the country decides how the ship-from address, and the tax state, are checked (the server does it first).
@@ -11372,6 +11423,8 @@ function applyCloneOrg(){
   document.getElementById("orgFormPayVenmo").checked = pay.venmo !== false;
   document.getElementById("orgFormPayZelle").checked = pay.zelle !== false;
   document.getElementById("orgFormPayCheck").checked = pay.check !== false;
+  document.getElementById("orgFormPayOnDelivery").checked = pay.onDelivery !== false;
+  document.getElementById("orgFormPayOnDeliveryLocal").checked = pay.onDeliveryLocalOnly === true;
 
   document.getElementById("orgFormOrderDeadline").value = src.orderDeadline || "";
   document.getElementById("orgFormClosedMessage").value = src.closedMessage || "";
@@ -11569,6 +11622,9 @@ function renderOrgForm(app, org){
         <label class="checkbox-row"><input type="checkbox" id="orgFormPayZelle" ${payChecked("zelle")}> Zelle</label>
         <label class="checkbox-row"><input type="checkbox" id="orgFormPayCheck" ${payChecked("check")}> Check</label>
         <div class="admin-note" style="margin-top:6px;">Uncheck all to accept orders without a payment selection for this shop.</div>
+        <label class="checkbox-row" style="margin-top:10px;"><input type="checkbox" id="orgFormPayOnDelivery" ${orgPay.onDelivery !== false ? "checked" : ""}> Payment on delivery</label>
+        <label class="checkbox-row" style="margin-left:26px;"><input type="checkbox" id="orgFormPayOnDeliveryLocal" ${orgPay.onDeliveryLocalOnly === true ? "checked" : ""}> Only for local sales</label>
+        <div class="admin-note" style="margin-top:6px;">Only where Global settings → Payment methods allows payment on delivery: this shop can turn it off or limit it to the Local sale window on Orders, not turn it on when it's off there.</div>
 
         <label style="margin-top:16px;">Order deadline (optional)
           <input type="date" id="orgFormOrderDeadline" value="${escapeHtml(deadline)}">
@@ -11747,7 +11803,9 @@ async function submitOrgForm(isEdit){
       card:  document.getElementById("orgFormPayCard").checked,
       venmo: document.getElementById("orgFormPayVenmo").checked,
       zelle: document.getElementById("orgFormPayZelle").checked,
-      check: document.getElementById("orgFormPayCheck").checked
+      check: document.getElementById("orgFormPayCheck").checked,
+      onDelivery: document.getElementById("orgFormPayOnDelivery").checked,
+      onDeliveryLocalOnly: document.getElementById("orgFormPayOnDeliveryLocal").checked
     },
     orderDeadline: document.getElementById("orgFormOrderDeadline").value.trim() || null,
     closedMessage: document.getElementById("orgFormClosedMessage").value.trim() || null,
@@ -14648,6 +14706,7 @@ const AUDIT_ACTION_LABELS = {
   "order.discount_set":       "Discount set",
   "order.customer_updated":   "Customer info updated",
   "order.created_local_sale": "Local sale created",
+  "order.pay_on_delivery_set": "Pay on delivery set",
   "order.fulfillment_stage":  "Fulfillment stage",
   "order.bulk_fulfillment_stage": "Bulk fulfillment stage",
   "order.edited":             "Order edited",
@@ -14726,7 +14785,8 @@ function auditDetailSummary(action, detail) {
       case "period.reopened":     return escapeHtml(detail.month || "");
       case "order.discount_set":  return adminMoney_(detail.amount || 0) + (detail.note ? " — " + escapeHtml(detail.note) : "");
       case "order.customer_updated": return escapeHtml((detail.fields || []).join(", ")) + (detail.orderIds && detail.orderIds.length > 1 ? ` (${detail.orderIds.length} orders)` : "");
-      case "order.created_local_sale": return escapeHtml(detail.customerName || "") + " · " + adminMoney_(detail.total || 0) + " · " + (detail.items || 0) + " item(s)" + (detail.paid ? " · Paid" : "");
+      case "order.created_local_sale": return escapeHtml(detail.customerName || "") + " · " + adminMoney_(detail.total || 0) + " · " + (detail.items || 0) + " item(s)" + (detail.paid ? " · Paid" : "") + (detail.payOnDelivery ? " · Pay on delivery" : "");
+      case "order.pay_on_delivery_set": return detail.to ? "On" : "Off";
       case "order.fulfillment_stage": return escapeHtml(detail.stage || "");
       case "order.bulk_fulfillment_stage": return escapeHtml(detail.stage || "") + " · " + (detail.updated || 0) + " orders";
       case "order.edited":        return [detail.removals && `−${detail.removals} removed`, detail.additions && `+${detail.additions} added`, detail.updates && `${detail.updates} updated`, detail.priceDiff ? `Δ${adminMoney_(detail.priceDiff)}` : null].filter(Boolean).join(" · ");

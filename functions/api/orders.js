@@ -2896,7 +2896,9 @@ async function handleOrdersPost_(context, listBefore = null) {
     const id = customerIdOf_(body.id);
     if (id === false) return jsonResponse({ status: "error", message: "That customer isn't valid." }, 400);
     return customersReady_(async () => {
-      const beforeRow = id ? await customerRow_(id) : null;
+      // A new customer reads the table too, so a database without migrations/0105 answers 503 before the
+      // exemption's audit row is written, not after.
+      const beforeRow = id ? await customerRow_(id) : (await env.DB.prepare("SELECT id FROM customers LIMIT 1").first(), null);
       if (id && !beforeRow) return customerNotFound_();
       if (beforeRow && beforeRow.mergedIntoId != null) return customerMergedAway_();
       const before = customerAuditView_(beforeRow);   // a new customer starts from blanks

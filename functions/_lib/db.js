@@ -10705,7 +10705,7 @@ async function orderCustomer_(db, order, opts) {
 export async function listCustomers(db, { q = "", includeArchived = false, limit = 50, offset = 0 } = {}) {
   const where = ["c.mergedIntoId IS NULL"], binds = [];
   if (!includeArchived) where.push("c.archivedAt IS NULL");
-  const needle = String(q == null ? "" : q).trim().slice(0, 200);
+  const needle = String(q == null ? "" : q).trim().slice(0, 200).trim();
   if (needle) {
     // instr on lowered text: what was typed is never a LIKE pattern, so % and _ mean themselves.
     where.push("(" + ["c.name", "c.company", "c.email", "c.phone"].map(col => `instr(lower(${col}), lower(?)) > 0`).join(" OR ") + ")");
@@ -10791,7 +10791,8 @@ export async function saveCustomer(db, c = {}) {
   let expires = old ? old.taxExemptExpires || null : null;
   if (c.taxExemptExpires !== undefined) {
     const d = String(c.taxExemptExpires == null ? "" : c.taxExemptExpires).trim();
-    if (d && !(CUSTOMER_DATE_RE_.test(d) && !isNaN(Date.parse(d + "T00:00:00Z")))) return { error: "The exemption's expiry date isn't a date." };
+    // Round-trip the day: Date.parse takes 2027-02-31 and rolls it into March.
+    if (d && !(CUSTOMER_DATE_RE_.test(d) && !isNaN(Date.parse(d + "T00:00:00Z")) && new Date(d + "T00:00:00Z").toISOString().slice(0, 10) === d)) return { error: "The exemption's expiry date isn't a date." };
     expires = d || null;   // an unset date is NULL
   }
   const phone = text(c.phone, old ? old.phone : "", 50), notes = text(c.notes, old ? old.notes : "", 2000);

@@ -3255,7 +3255,10 @@ async function handleOrdersPost_(context, listBefore = null) {
       let unitPrice = 0, personalizationFee = 0, lineConfig;
       let pricing = null;
       try {
-        pricing = await priceItem(env.DB, orgId, add.productId, add.size, Number(add.qty) || 1, !!add.personalized, add.config, { lookups });
+        // A new line of a plain product made from the customer's own design (ticked in the window): its entry, with
+        // no file yet (Files), and its add-on — as Local sale does. On a product with choices it's a pick in add.config.
+        pricing = await priceItem(env.DB, orgId, add.productId, add.size, Number(add.qty) || 1, !!add.personalized, add.config,
+          { lookups, ...(add.customDesign === true ? { custom: { [CUSTOM_PLAIN_LOCATION]: null } } : {}) });
       } catch (e) {
         if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400);
       }

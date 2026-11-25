@@ -304,6 +304,9 @@ const ordersJs = read("functions/api/orders.js");
     let r = await logged(Object.assign({}, base, { date: "2026-02-10" }), admin);
     ok("a payout dated in a closed month: 409 \"February 2026 is closed (already filed). Reopen it under Periods & Export to change it.\"",
       refused(r, 409, "February 2026 is closed (already filed). Reopen it under Periods & Export to change it.") && r.rows.length === 0 && expenseCount() === 0);
+    r = await logged(Object.assign({}, base, { date: " 2026-02-10 " }), admin);
+    ok("…and so is the same date with spaces around it (the date is saved trimmed, so it is checked trimmed)",
+      refused(r, 409, "February 2026 is closed (already filed). Reopen it under Periods & Export to change it.") && r.rows.length === 0 && expenseCount() === 0);
 
     r = await logged(Object.assign({}, base, { note: "  Spring check  " }), manager);
     firstPayout = r.body.id;
@@ -453,5 +456,14 @@ const ordersJs = read("functions/api/orders.js");
     ok("none of them wrote an audit row", db.q("SELECT count(*) n FROM audit_log")[0].n === log);
     r = await old({ action: "recordFundraiserPayout", org: "acme", amount: 0, date: "2026-03-10", accountId: 1 });
     ok("what is wrong with the request itself is still said first", refused(r, 400, AMOUNT));
+
+    // A database that is down (every query fails for a reason that has nothing to do with 0110): not "not ready".
+    const DOWN = "D1_ERROR: Network connection lost.";
+    const downDb = { ...db, prepare() { const fail = async () => { throw new Error(DOWN); }; const st = { first: fail, all: fail, run: fail }; return Object.assign({ bind: () => st }, st); } };
+    let downErr = "";
+    try { await api({ env: { DB: downDb }, waitUntil: () => {}, request: { url: "https://admin.example.com/api/orders",
+      json: async () => ({ key: "x", action: "getFundraisingReport", dateFrom: "2026-03-01", dateTo: "2026-03-31" }), headers: { get: () => null } } }); }
+    catch (e) { downErr = String(e && e.message); }
+    ok("getFundraisingReport on a database that is down passes the failure on (a server error), rather than the 503 “isn't ready yet”", downErr === DOWN);
   }
 })().catch((e) => { console.error(e); process.exit(1); });

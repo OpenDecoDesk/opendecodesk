@@ -236,6 +236,34 @@ const quietly = async (fn) => { const err = console.error; console.error = () =>
   const exAdded = (await order(exclusiveOrder)).items.filter(i => i.productId === "tee");
   ok("a line added to an order placed with tax added on top raises on its whole price (10% of $60.00, $6.00), by the order's tax mode, not the shop's now",
     r.status === 200 && exAdded.length === 2 && exAdded[1].fundraiserCents === 600);
+  { // What the line writers do when the database answers oddly while the line's fundraiser is worked out
+    // (storeLineFundraiser_ reads the line back, then the shop's fundraiser).
+    const LINE_READ = /AS taxMode FROM order_items oi JOIN orders o/, ORG_READ = /^SELECT fundraiserJson FROM orgs WHERE orgId=\?$/;
+    const DOWN = "D1_ERROR: Network connection lost.";
+    // d1, except that a query matching `re` first runs `before` (another request's write) and/or fails with `err`.
+    const odd = (re, { err, before } = {}) => ({ ...d1, prepare(sql) {
+      if (!re.test(sql)) return d1.prepare(sql);
+      if (before) before();
+      if (!err) return d1.prepare(sql);
+      const fail = async () => { throw new Error(err); }; const st = { first: fail, all: fail, run: fail };
+      return Object.assign({ bind: () => st }, st); } });
+    const thrown = async (p) => { try { await p; return ""; } catch (e) { return String(e && e.message); } };
+    const goneId = await S.addOrderItem(d1, E, "acme", { productId: "cap", name: "Club Cap", type: "cap", qty: 1, unitPrice: 15 });
+    const goneErr = await thrown(S.updateOrderItem(odd(LINE_READ, { before: () => d1.q("DELETE FROM order_items WHERE id = ?", goneId) }), goneId,
+      { productId: "cap", name: "Club Cap", type: "cap", qty: 2, unitPrice: 15 }));
+    ok("a line deleted (by another request) before its fundraiser is worked out again: the edit finishes quietly, and nothing is written back",
+      goneErr === "" && d1.q("SELECT COUNT(*) AS n FROM order_items WHERE id = ?", goneId)[0].n === 0);
+    const lineId = await S.addOrderItem(d1, E, "acme", { productId: "cap", name: "Club Cap", type: "cap", qty: 1, unitPrice: 15 });
+    ok("the database down while the line is read back: updateOrderItem passes the failure on",
+      (await thrown(S.updateOrderItem(odd(LINE_READ, { err: DOWN }), lineId, { productId: "cap", name: "Club Cap", type: "cap", qty: 2, unitPrice: 15 }))) === DOWN);
+    ok("…and while the shop's fundraiser is read: the failure is passed on too, not read as “no fundraiser”",
+      (await thrown(S.updateOrderItem(odd(ORG_READ, { err: DOWN }), lineId, { productId: "cap", name: "Club Cap", type: "cap", qty: 3, unitPrice: 15 }))) === DOWN &&
+      storedOf(lineId) === 150);
+    ok("a shops table without 0110's fundraiserJson (only the line's column there): the changed line raises nothing, and the edit goes through",
+      (await thrown(S.updateOrderItem(odd(ORG_READ, { err: "D1_ERROR: no such column: fundraiserJson: SQLITE_ERROR" }), lineId,
+        { productId: "cap", name: "Club Cap", type: "cap", qty: 4, unitPrice: 15 }))) === "" && storedOf(lineId) === 0 && q1("SELECT qty FROM order_items WHERE id = ?", lineId).qty === 4);
+    d1.q("DELETE FROM order_items WHERE id = ?", lineId);
+  }
 
   console.log("\n=== What an order raises: cancelled lines, refunds ===");
   o = await sale([{ productId: "tee", size: "M", qty: 3 }, { productId: "cap", qty: 2 }, { productId: "mug", qty: 1 }]);

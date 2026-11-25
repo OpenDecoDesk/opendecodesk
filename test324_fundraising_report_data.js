@@ -220,6 +220,46 @@ const fig = (s) => s && [s.orders, s.pieces, s.sales, s.raised, s.paidOut, s.owe
   const onlyNone = await lib.getFundraisingReport(d1, { dateFrom: "2027-03-01", dateTo: "2027-03-31", orgId: "no-such-shop" });
   ok("an unknown shop gives an empty report, not an error", !onlyNone.error && onlyNone.shops.length === 0 && same(onlyNone.totals, { orders: 0, pieces: 0, sales: 0, raised: 0, paidOut: 0, owed: 0 }));
 
+  console.log("=== The Fundraising report: shops with the same name, an emptied order, a fully refunded line ===");
+  { const od = await makeDb();
+    od.q("UPDATE orgs SET name = 'Example Twins' WHERE orgId IN ('club', 'band')");
+    await lib.setOrgFundraiser(od, "league", { mode: "percent", percent: 10, label: "Example League Parents" });
+    await lib.setOrgFundraiser(od, "band", { mode: "percent", percent: 10, label: "Example Band Parents" });
+    await lib.setOrgFundraiser(od, "club", { mode: "percent", percent: 10, label: "Example Boosters" });
+    // The club's order: every line cancelled, and the customer's name cleared (Edit customer with a blank name).
+    addOrder(od, { id: "Z1", org: "club", placedAt: "2027-03-02T10:00:00.000Z", shippedAt: "2027-03-03T10:00:00.000Z" },
+      [{ qty: 2, total: 2000, raise: 200, cancelDate: "2027-03-04T00:00:00.000Z" }]);
+    od.q("UPDATE orders SET customerName = '' WHERE orderId = 'Z1'");
+    // The band's only raising line, refunded in full in February: it raised nothing to date.
+    addOrder(od, { id: "Z2", org: "band", placedAt: "2027-02-02T10:00:00.000Z", shippedAt: "2027-02-03T10:00:00.000Z" }, [{ qty: 1, total: 1000, raise: 100, refund: 1000 }]);
+    const zr = await lib.getFundraisingReport(od, { dateFrom: "2027-03-01", dateTo: "2027-03-31" });
+    ok("two shops with the same name are listed by name, then by orgId (Example League, then the twins: band before club)",
+      same(zr.shops.map(s => s.orgId), ["league", "band", "club"]) && zr.shops[1].name === "Example Twins" && zr.shops[2].name === "Example Twins");
+    ok("an order whose every line was cancelled and whose customer's name was cleared: a row with \"\", 0 pieces, $0 sales, $0 raised",
+      same(zr.orders, [{ orderId: "Z1", orgId: "club", placedAt: "2027-03-02T10:00:00.000Z", customerName: "", pieces: 0, sales: 0, raised: 0 }]));
+    ok("…and its shop: 1 order, 0 pieces, $0 sales, $0 raised", same(fig(shopOf(zr, "club")), [1, 0, 0, 0, 0, 0]));
+    ok("a shop whose only line raising money was refunded in full owes nothing (0, not NaN)", same(fig(shopOf(zr, "band")), [0, 0, 0, 0, 0, 0]));
+    ok("the totals add up to numbers, not NaN", same(zr.totals, { orders: 1, pieces: 0, sales: 0, raised: 0, paidOut: 0, owed: 0 })); }
+
+  console.log("=== A database that is down is not mistaken for one without 0110 ===");
+  { const od = await makeDb();
+    await lib.setOrgFundraiser(od, "club", { mode: "percent", percent: 10, label: "Example Boosters" });
+    const acct = await lib.saveAccount(od, 0, { name: "Example Checking", type: "checking", openingBalance: 0, openingDate: "2027-01-01", active: true });
+    const DOWN = "D1_ERROR: Network connection lost.";
+    // od, except that every query matching `re` fails with DOWN.
+    const downOn = (re) => ({ ...od, prepare(sql) {
+      if (!re.test(sql)) return od.prepare(sql);
+      const fail = async () => { throw new Error(DOWN); }; const st = { first: fail, all: fail, run: fail };
+      return Object.assign({ bind: () => st }, st); } });
+    const thrown = async (p) => { try { await p; return ""; } catch (e) { return String(e && e.message); } };
+    ok("the report passes the failure on, rather than answering an empty report",
+      (await thrown(lib.getFundraisingReport(downOn(/./), { dateFrom: "2027-03-01", dateTo: "2027-03-31", basis: "shipped" }))) === DOWN);
+    ok("the payouts list passes it on, rather than answering []", (await thrown(lib.listFundraiserPayouts(downOn(/./), {}))) === DOWN);
+    const pay = (db) => lib.recordFundraiserPayout(db, { orgId: "club", amount: 5, date: "2027-03-01", accountId: acct, today: "2027-06-15" });
+    ok("a payout passes it on when the shop can't be read", (await thrown(pay(downOn(/FROM orgs/)))) === DOWN);
+    ok("…and when the expense can't be written, rather than saying “apply the migrations”", (await thrown(pay(downOn(/^INSERT INTO expenses/)))) === DOWN);
+    ok("…and nothing was written", od.q("SELECT count(*) AS n FROM expenses")[0].n === 0); }
+
   console.log("=== The Fundraising report: dates it refuses ===");
   const FORMAT = "Choose the dates as YYYY-MM-DD.";
   ok("a start date that isn't YYYY-MM-DD is refused", (await lib.getFundraisingReport(d1, { dateFrom: "2027-3-1", dateTo: "2027-03-31" })).error === FORMAT);

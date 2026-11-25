@@ -33,7 +33,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
   console.log("=== Migration 0012: seeded categories ===");
   let r = await call({ action: "listExpenseCategories" });
   const cats = r.body.categories, byName = (n) => cats.find(c => c.name === n);
-  console.log("16 starting categories, the built-in sales tax paid one (0090) and small equipment (0092):", cats.length === 18 && cats.filter(c => c.systemKey).map(c => c.systemKey).join() === "sales_tax_paid");
+  console.log("16 starting categories, the built-in sales tax paid one (0090), small equipment (0092) and fundraiser payouts (0110):", cats.length === 19 && cats.filter(c => c.systemKey).map(c => c.systemKey).join() === "fundraiser_payout,sales_tax_paid");
   console.log("machines → depreciation, line 13; meals → deductible 50%, line 24b; personal → none:",
     byName("Equipment & machines").deductionType === "depreciation" && byName("Equipment & machines").scheduleCLine === "13" &&
     byName("Meals (50%)").deductiblePct === 50 && byName("Meals (50%)").scheduleCLine === "24b" &&

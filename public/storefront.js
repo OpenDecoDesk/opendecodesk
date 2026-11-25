@@ -1287,12 +1287,18 @@ function renderOrgPage(app, orgId, org){
     new Date(String(org.orderDeadline).slice(0, 10) + "T23:59:59") < new Date();
   const ordersBlocked = deadlinePast && org.allowOrdersAfterDeadline === false;
 
+  // The shop's fundraiser (migrations/0110), as the catalog words it ("$2.00 of every item supports …"); only sent when
+  // the shop chose to show it. The shop typed the label, so it's escaped like any other shop text.
+  const fundraiserText = org.fundraiser && typeof org.fundraiser.text === "string" ? org.fundraiser.text.trim() : "";
+  const fundraiserHtml = fundraiserText ? `<p class="desc fundraiser-line" style="margin-top:8px;">${escapeHtml(fundraiserText)}</p>` : "";
+
   app.innerHTML = `
     <div class="org-hero" style="${orgAccentVars(org.accent)}">
       <div class="org-eyebrow-lg">${escapeHtml(org.eyebrow)}</div>
       <h1>${escapeHtml(org.name)}</h1>
       <div class="stitch stitch-thick"></div>
       <p class="desc">${escapeHtml(org.desc)}</p>
+      ${fundraiserHtml}
     </div>
     ${previewHtml}
     ${bannerHtml}

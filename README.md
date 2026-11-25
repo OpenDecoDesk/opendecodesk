@@ -102,6 +102,10 @@ and the tax and shipping features are built around a US business (see [Region](#
   receipt at once.
 - Sales tax: one rate and home state, prices that include tax or tax added at checkout, exempt shops
   and exempt customers, and a sales-tax report.
+- Fundraising for team, school and club shops: part of every sale goes back to the group — a percent of
+  the price or an amount per piece, inside the prices, optionally said on the shop page ("$2.00 of every
+  item supports Example Boosters"). A Fundraising report shows what each shop raised, what was paid out
+  to the group and what is still owed, and a payout is recorded as an expense.
 
 **Running it**
 - An admin panel on its own address, with a sign-in for each person, three roles (back office, manager, admin), two-step sign-in that can be required, and an audit log.

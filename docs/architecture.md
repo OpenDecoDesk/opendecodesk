@@ -133,6 +133,13 @@ About fifty tables (`schema.sql`). The main groups:
   `?estimate=` link — because "quote" already means a signed shipping-rate quote
   (`functions/_lib/quoteToken.js`); only the words people read say "quote". A product's quantity
   breaks are a column of `products` (`qtyBreaksJson`).
+- **Fundraising** — no tables of its own. A shop's fundraiser is a column of `orgs`
+  (`fundraiserJson`: empty for none, else the mode — a percent in basis points or an amount per
+  piece in cents —, who it supports and whether the shop page says so). Each order line keeps what
+  it raised in `order_items.fundraiserCents`. A payout to the group is an ordinary expense tied to
+  the shop (`expenses.fundraiserOrgId`), in the built-in category whose `systemKey` is
+  `fundraiser_payout` (Schedule C line 27a, other expenses), as `sales_tax_paid` is the built-in
+  category for sales tax paid.
 - **Inventory** — `blanks`, `blank_colors`, `blank_sizes`, `inventory_movements`; `transfers`,
   `transfer_movements`.
 - **Production** — `threads`, `hoops`, `designs`, `design_versions`, `machines`, `production_runs`.
@@ -166,6 +173,14 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
   `convertEstimateToOrder_` in `functions/api/orders.js`, which makes the order the way a local sale
   is made, at those prices and the quote's frozen tax rate (`insertOrder`'s `taxRateBps` option) —
   and makes it once: a second call answers the order already made.
+- **What a line raises is kept, not worked out again.** `insertOrder` (and Edit items, for the lines
+  it changes or adds) writes each line's `fundraiserCents` from the shop's fundraiser at that moment
+  (`fundraiserLineCents_` in `db.js`), so changing a shop's fundraiser never changes past orders. The
+  Fundraising report (`getFundraisingReport`) sums those lines for paid orders only, less cancelled
+  lines and refunded shares; the storefront only ever gets the sentence the shop page shows
+  (`functions/api/catalog.js`), never the setting.
+- **A built-in expense category can't be deleted.** A category with a `systemKey` (`sales_tax_paid`,
+  `fundraiser_payout`) is one the code looks up; it can be renamed, never removed.
 
 ## The security model
 

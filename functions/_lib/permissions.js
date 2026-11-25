@@ -71,6 +71,7 @@ export const PERMISSION_AREAS = [
     { hash: "salestax", label: "Sales tax report", fns: [["reports.salestax", "Sales tax report"]] },
     { hash: "cogs", label: "Inventory and COGS", fns: [["reports.cogs", "Inventory and COGS"]] },
     { hash: "runreport", label: "Run times", fns: [["reports.runtimes", "Run times"]] },
+    { hash: "fundraising", label: "Fundraising", fns: [["reports.fundraising", "Fundraising report"]] },
     { hash: "books", label: "Periods and export", fns: [["reports.books", "Closed periods and accountant's export"]] } ] },
   { key: "settings", label: "Settings", items: [
     { hash: "settings", label: "Global settings", fns: [["settings.global", "Global settings"]] },
@@ -137,7 +138,8 @@ const BY_FN = {
   "catalog.productFiles": { read: ["listProductFiles"], edit: ["addProductFileFromDesign"], full: ["deleteProductFile"] },
   "catalog.shops": {
     read: ["getPublishState", "getPreviewLink", "getOrgDomainStatus", "getShopWizard", "listShopWizards"],
-    edit: ["createOrg", "updateOrg", "setupOrgDomain", "publish", "createTestTransaction", "setOrgReady", "saveShopWizard", "buildProductFromBlank", "previewDiscardShopChanges"],
+    edit: ["createOrg", "updateOrg", "setupOrgDomain", "publish", "createTestTransaction", "setOrgReady", "saveShopWizard", "buildProductFromBlank", "previewDiscardShopChanges",
+      "setOrgFundraiser"],
     full: ["deleteShopWizard", "discardShopChanges"] },
   "catalog.designs": { read: ["listDesigns", "getDesign"], edit: ["saveDesign", "saveDesignVersion", "updateDesignVersionColors", "setDesignVersionStitches", "fillDesignStitchCounts"], full: ["deleteDesign"] },
   "catalog.graphics": { read: ["listGraphics"], edit: ["saveGraphic"], full: ["deleteGraphic"] },
@@ -175,7 +177,7 @@ const BY_FN = {
     full: ["deleteTransfer", "writeOffTransfers", "countTransferStock", "voidTransferMovement", "editTransferSheet"] },
   "finance.expenses": {
     read: ["listExpenses", "previewExpenseImport", "listRecurringExpenses", "listExpenseCategories"],
-    edit: ["saveExpense", "importExpenses", "saveRecurringExpense", "stopRecurringExpense", "saveExpenseCategory"],
+    edit: ["saveExpense", "importExpenses", "saveRecurringExpense", "stopRecurringExpense", "saveExpenseCategory", "recordFundraiserPayout"],
     full: ["deleteExpense", "deleteRecurringExpense", "deleteExpenseCategory"] },
   "finance.money": {
     read: ["listAccounts", "listMoney", "previewReceiptAccountChange", "listCashoutPayments"],
@@ -192,6 +194,9 @@ const BY_FN = {
   "reports.salestax": { read: ["getSalesTaxReport"] },
   "reports.cogs": { read: ["getInventoryReport"] },
   "reports.runtimes": { read: ["getRunReportByDesign"] },
+  // Fundraising (migrations/0110): what each shop's sales raised for its group, and what was paid out to it. Recording
+  // a payout is an expense, so it is Expenses' (finance.expenses Edit), not this report's.
+  "reports.fundraising": { read: ["getFundraisingReport", "listFundraiserPayouts"] },
   "reports.books": { read: ["listClosedPeriods", "getAccountantExport"], edit: ["closePeriod"], full: ["reopenPeriod"] },
   "settings.global": {
     read: ["getGlobalSettings", "getFeatures", "getBusinessProfile", "getLocaleSettings", "getSalesTaxSettings", "getShipFromAddress", "getSetupStatus",
@@ -269,7 +274,7 @@ const STAFF_FNS = only_({
   "production.machines": "edit", "production.maintenance": "edit", "production.maintenanceLog": "edit", "production.machinefiles": "edit",
   "production.hoops": "edit", "production.threads": "edit", "production.abortreasons": "edit",
   "inventory.blanks": "edit", "inventory.blankorder": "edit", "inventory.transfers": "edit",
-  "reports.runtimes": "read", "settings.comms": "read",
+  "reports.runtimes": "read", "reports.fundraising": "read", "settings.comms": "read",
 });
 const PRODUCTION_FNS = only_({
   "home.counts": "read",

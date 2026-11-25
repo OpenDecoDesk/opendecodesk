@@ -176,6 +176,8 @@ Manage catalog → the shop → **Edit**:
 - **Sales tax** — tax exemption (see [sales-tax.md](sales-tax.md)).
 - **Rush orders** — use the global rush fee, don't offer rush, or a rule of the shop's own (see
   "Rush orders" below).
+- **Fundraiser** — none, a percent of each item's price, or an amount per piece, for the group the
+  shop raises money for (see "Fundraising" below).
 - **Reorder QR code & option prices** — for configurable products.
 
 ## Product categories
@@ -712,6 +714,45 @@ page is hidden and the links answer "Quotes aren't available."
 A local sale takes as large an order as a quote: up to 5,000 pieces a line and 100 lines. The shop
 page keeps its own limits — 50 of an item at a time and 20 lines in the cart, with a note to contact
 the shop for more.
+
+## Fundraising
+
+A team, school or club shop often raises money for the group: part of every sale goes back to it. A
+shop's settings (above) can say how much, so the admin works it out for you instead of you doing it
+by hand:
+
+- **None** — the default.
+- **Percent** — a percentage of each item's price, from 0.01% to 50%.
+- **Per piece** — an amount for every piece sold, from $0.01 to $1,000.
+
+A fundraiser also needs **Supports** — who the money is for ("Example Boosters", up to 80
+characters) — and has a **Show on the shop** tick box.
+
+**It is inside your prices.** The customer pays the same; the amount is yours to give back to the
+group. Nothing is added at checkout, and the tax doesn't change
+([sales-tax.md](sales-tax.md#fundraisers)).
+
+What each line of an order raises is worked out **when the line is priced**, and kept on the line:
+an order from the shop page, a local sale, a quote turned into an order, an imported order, and a
+line added or changed with Edit items. So changing the fundraiser, or turning it off, affects new
+orders only; what earlier orders raised stays as it was.
+
+- **Percent** is taken of the line's price before tax — with prices that include tax, the tax is
+  taken out first — and personalization counts as part of the price.
+- **Per piece** is the amount times the quantity, but never more than the line itself comes to
+  before tax.
+- A custom line and a fee (on a local sale or from a quote) raise nothing. A piece filled from
+  finished stock raises like any other.
+
+**Show on the shop** puts one line under the shop's name on its page: "$2.00 of every item supports
+Example Boosters", or "10% of every purchase supports Example Boosters". Only that sentence reaches
+the storefront, never the setting itself. Unlike the shop's other settings, the fundraiser doesn't
+wait for [Publish](#publish): orders raise money by it, and the shop page shows its line, as soon as
+it's saved. It is never one of the shop's "unpublished changes", and Discard changes doesn't undo it.
+
+**Reports → Fundraising** shows what each shop raised, what you've paid the group, and what you
+still owe it; recording a payout is on the same page. See
+[operations.md](operations.md#fundraising-the-report-and-payouts).
 
 ## Rush orders
 

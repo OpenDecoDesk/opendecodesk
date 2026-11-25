@@ -25,7 +25,8 @@ const lib = new Function(strip(read("functions/_lib/db.js")) + "\nreturn { inser
     && one("SELECT name FROM expense_categories WHERE id = ?", [taxCat]) === "Sales tax paid to the state"
     && one("SELECT deductionType FROM expense_categories WHERE id = ?", [taxCat]) === "none");
   console.log("it can't be deleted, even unused:", (await lib.deleteExpenseCategory(d1, taxCat)) === false && !!one("SELECT id FROM expense_categories WHERE id = ?", [taxCat]));
-  console.log("the category list says which one it is:", (await lib.listExpenseCategories(d1)).filter(c => c.systemKey).map(c => c.id).join() === String(taxCat));
+  // Two built-in categories since 0110 (fundraiser payouts too); the list names this one by its key.
+  console.log("the category list says which one it is:", (await lib.listExpenseCategories(d1)).filter(c => c.systemKey === "sales_tax_paid").map(c => c.id).join() === String(taxCat));
   run("UPDATE expense_categories SET name = 'State sales tax' WHERE id = ?", [taxCat]);   // renamed: still found by its key
   const otherCat = one("SELECT id FROM expense_categories WHERE systemKey IS NULL AND capital = 0 ORDER BY id LIMIT 1");
 

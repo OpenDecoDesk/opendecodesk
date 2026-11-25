@@ -449,4 +449,15 @@ test("Changes asked: the quote follows the settings again, and sending the revis
   await expect(custTotal(visitor, "Sales tax")).toHaveText("$2.80");
   await expect(visitor.locator(".inv table.inv-totals")).toContainText("Sales tax (3.5%");
   await expect(custTotal(visitor, "Total")).toHaveText("$82.80");
+
+  // The customer accepts it now, when the rate is back to none: the order carries the quote's frozen tax, not today's,
+  // so it and its invoice come to exactly the $82.80 they accepted.
+  expect((await taxNow(api)).ratePercent).toBe(0);
+  await visitor.getByRole("button", { name: "Accept quote" }).click();
+  await expect(visitor.locator("#estConfirmText")).toContainText("place the order for $82.80");
+  await visitor.getByRole("button", { name: "Not yet" }).click();
+  const orderId = await acceptOnPage(visitor);
+  const order = await orderOf(api, shop, orderId);
+  expect(order).toMatchObject({ customerId: ray.id, taxMode: "exclusive", taxExempt: false, taxRate: RATE2, salesTax: 2.8, total: 82.8 });
+  expect(order.balanceDue).toBe(82.8);
 });

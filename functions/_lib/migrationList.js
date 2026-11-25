@@ -106,6 +106,7 @@ export const MIGRATIONS = [
   "0102_list_cache_versions.sql",
   "0103_inventory_period_snapshots.sql",
   "0104_blank_archive_audit_runs_indexes.sql",
+  "0105_customers.sql",
   "0105_pay_on_delivery.sql",
   "0106_orphan_scan_transfer_item_index.sql",
   "0107_receive_request_keys.sql",

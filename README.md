@@ -51,6 +51,9 @@ and the tax and shipping features are built around a US business (see [Region](#
 **Orders and production**
 - An Orders page per shop, and one across all shops: payments, discounts, refunds, line edits, stages
   from blanks ordered to delivered, packing and mailing labels, shipping labels and tracking.
+- Customers: a record for each customer, made from the email on their orders, with their order
+  history, what they've spent and what they owe. Search, edit, archive and merge duplicates; pick a
+  customer on a local sale; link an order to a customer by hand.
 - Local sales and orders entered by hand; payment links and invoices emailed to a customer (the
   invoice page lets them choose delivery and pay).
 - Orders from another store: **Import orders…** on Orders reads an Etsy "Order Items" file, a Shopify
@@ -91,8 +94,8 @@ and the tax and shipping features are built around a US business (see [Region](#
 - An account viewer: one account's register with a running balance and a receipt on every row. A stock
   purchase shows as one charge, as on the statement, and its paying account can be changed for the whole
   receipt at once.
-- Sales tax: one rate and home state, prices that include tax or tax added at checkout, exempt shops,
-  and a sales-tax report.
+- Sales tax: one rate and home state, prices that include tax or tax added at checkout, exempt shops
+  and exempt customers, and a sales-tax report.
 
 **Running it**
 - An admin panel on its own address, with a sign-in for each person, three roles (back office, manager, admin), two-step sign-in that can be required, and an audit log.

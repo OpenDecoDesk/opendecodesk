@@ -18,8 +18,8 @@ Orders imported from another store (Orders → Import orders…) get **no** sale
 Shopify charged their own, and the order is recorded as tax-exempt so it isn't charged twice. The
 import window names the tax the store charged.
 
-Changing any of them affects **new orders only**. Every order keeps the rate, the mode and its
-shop's exemption as they were when it was placed, so past reports don't change.
+Changing any of them affects **new orders only**. Every order keeps the rate, the mode and whether
+it was exempt as they were when it was placed, so past reports don't change.
 
 ## Prices that include tax, or tax added on top
 
@@ -50,7 +50,7 @@ A line of an order is taxed when **all** of these are true:
 
 1. **The product is taxable.** Each product has a "taxable" setting (on by default). Turn it off for
    work that isn't taxable where you are. A custom line on a local sale chooses for itself.
-2. **The shop is not tax-exempt** (below).
+2. **Neither the shop nor the customer is tax-exempt** (below).
 3. **The order is not shipped to another state.** An order with no shipping address — pickup, or
    one of a shop's own delivery options — counts as in your home state. If no home state is set,
    nothing counts as out of state.
@@ -60,7 +60,7 @@ Also:
 - **Shipping and delivery fees are never taxed.**
 - **A rush fee** is taxed only when Global settings → Rush orders → "Rush fee is taxable" is ticked
   (kept on each order as it was when the order was placed), and then like a taxable line: not for an
-  exempt shop or an order shipped out of state. The tax is inside the fee when prices include tax, and
+  exempt shop or customer, or an order shipped out of state. The tax is inside the fee when prices include tax, and
   added on top of it when tax is added on top.
 - **A discount** reduces the tax in proportion to the taxable goods it was taken off.
 - **Cancelled lines** carry no tax.
@@ -81,13 +81,48 @@ A shop (a school, a charity, a government body) can be marked tax-exempt: Manage
 warns you when it has passed. Orders for an exempt shop carry no tax, and the certificate details
 are never sent to the storefront.
 
+## Tax-exempt customers
+
+One customer can be exempt in a shop that isn't: a church that orders from a team's shop, say.
+Customers → the customer → **Tax exemption**: tick it, and enter the certificate number and, if the
+certificate has one, the date it expires. Changing any of the three needs the full level of the
+Customers permission ([operations.md](operations.md#users-and-roles)), and is written to the audit
+log before it is saved.
+
+An order carries no tax when you **picked** an exempt customer for it and they are exempt **on the
+order's date**: the box is ticked, and the expiry date is empty or hasn't passed. An order dated
+after the expiry is taxed like anyone else's, until you enter the new date.
+
+Which customer an order belongs to is decided when it is placed:
+
+- **A local sale** — the customer you picked in the Customer box. Their exemption applies. With none
+  picked, as below.
+- **Any other order** — the customer with the order's email address, for its history only. **The
+  exemption does not apply**: an order placed on the storefront, or a sale where you only typed the
+  email, is taxed as usual, because anyone can type an exempt customer's address. For an exempt
+  customer, enter the sale yourself and pick them.
+- An order with a phone number, or nothing, for its contact has no customer and is taxed as usual.
+
+Things to know:
+
+- It affects **new orders only**. Ticking the box doesn't take the tax off orders already placed,
+  and unticking it doesn't add any.
+- **Merging two customers doesn't carry the exemption over.** The customer you keep stays as it
+  was — exempt or not — and the certificate on the one merged away is not copied. Enter it on the
+  one you keep if it applies.
+- A shop's exemption and a customer's are separate: either one makes the order exempt. They treat
+  the expiry date differently: a customer's exemption stops on its own once the date has passed,
+  while a shop's expiry date is only a reminder and the shop stays exempt until you untick it.
+- The date an order is checked against is the day it was placed in the business's time zone
+  (Global settings → Region).
+
 ## The reports
 
 **Reports → Sales Tax Report**, for any range of months:
 
 - The totals for the period: tax collected, tax refunded, use tax, and what is due.
 - A month-by-month table laid out like a state sales and use tax return: gross sales, the amounts
-  taken off for exempt shops, out-of-state orders and non-taxable items, taxable sales, and tax.
+  taken off for exempt shops and customers, out-of-state orders and non-taxable items, taxable sales, and tax.
 - A breakdown by month, taxable or exempt, and ship-to state.
 
 Things to know when reading it:

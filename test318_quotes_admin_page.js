@@ -1101,4 +1101,23 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
     resolveEnsure(); await pause(60);
     ok("…and “New quote for this customer” pressed just before leaving opens nothing once the Quotes page arrives", !modal());
     w.ensureQuotesPage_ = realEnsure; }
+
+  console.log("\n=== Clicks and typing that aren't for the quote's own controls ===");
+  const QX = (await mk("acme", SAM, { title: "Clicks" })).id;
+  await saveItems(QX, [{ kind: "custom", name: "Club banner", qty: 2, unitPrice: 25, taxable: true }]);
+  await openQ(QX);
+  reset(); q("#qtTotals").dispatchEvent(new w.MouseEvent("click", { bubbles: true })); await pause(30);
+  ok("a click on the quote that isn't on a button or link does nothing", sent.length === 0 && !modal());
+  q("#qtTitle").dispatchEvent(new w.Event("change", { bubbles: true })); await pause(30);
+  ok("a change to a field that isn't a quantity saves nothing by itself", sent.length === 0);
+  qtyBox(0).dispatchEvent(new w.Event("input", { bubbles: true }));
+  reset(); q("#qtSend").click(); await wait(() => modal());
+  ok("typing in a line's quantity isn't typing above the lines: Send saves nothing first", sent.length === 0 && !!modal().querySelector("#qtSendForm"));
+  scripted = { action: "sendEstimate", body: { status: "ok", sentTo: "sam@example.com", emailSent: false, link: "https://acme.example.com/?estimate=" + "a".repeat(32) } };
+  modal().querySelector("#qtSendEmail").value = "sam@example.com";
+  modal().querySelector("#qtSendForm").dispatchEvent(new w.Event("submit", { cancelable: true }));
+  await wait(() => !modal().querySelector("#qtSendLinkWrap").hidden);
+  reset();
+  await redrawn(() => modal().querySelector("#qtSendCancel").click());
+  ok("once the quote is marked sent, the window's Cancel closes it and draws the quote again", !modal() && of("getEstimate").length === 1 && of("sendEstimate").length === 0);
 })();

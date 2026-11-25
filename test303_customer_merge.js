@@ -4,7 +4,7 @@ const { createD1 } = require("./testlib/d1-shim.js");
 const { makeAuth } = require("./testlib/auth-harness");
 const roles = require("./testlib/roles");
 
-// Merging two customer records (migrations/0105, 2026-11): db.js mergeCustomers and the mergeCustomers action.
+// Merging two customer records (migrations/0108, 2026-11): db.js mergeCustomers and the mergeCustomers action.
 //   - every order of the duplicate moves to the customer that is kept (test and voided orders too), in one batch
 //   - the duplicate is retired: marked as merged into the kept one and archived; its own fields stay for the record
 //   - what the kept customer has blank (email, phone, company, address, notes) is filled from the duplicate, and
@@ -170,10 +170,10 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const counting = (st) => ({ _sql: st._sql, _params: st._params, first: (...a) => st.first(...a), all: (...a) => st.all(...a), run: (...a) => { calls.writes++; return st.run(...a); } });
   const countedDb = { prepare: (sql) => { const p = d1.prepare(sql); return Object.assign(counting(p), { bind: (...v) => counting(p.bind(...v)) }); },
     batch: (stmts) => { calls.batches++; calls.inBatch += stmts.length; return d1.batch(stmts); } };
-  d1._raw.run(`CREATE TRIGGER t277_refuse BEFORE UPDATE OF notes ON customers WHEN NEW.id = ${into} BEGIN SELECT RAISE(ABORT, 'test277 refuses this write'); END;`);
+  d1._raw.run(`CREATE TRIGGER t277_refuse BEFORE UPDATE OF notes ON customers WHEN NEW.id = ${into} BEGIN SELECT RAISE(ABORT, 'test303 refuses this write'); END;`);
   let wasBefore = snapshot(), threw = "";
   try { await lib.mergeCustomers(d1, { fromId: from, intoId: into }); } catch (e) { threw = String(e && e.message); }
-  ok("when the last write of a merge fails, the merge fails", /test277 refuses this write/.test(threw));
+  ok("when the last write of a merge fails, the merge fails", /test303 refuses this write/.test(threw));
   ok("…and nothing of it is kept: the order hasn't moved and the duplicate isn't retired", snapshot() === wasBefore && same(ordersOf(from), [oBatch]) && row(from).mergedIntoId === null);
   d1._raw.run("DROP TRIGGER t277_refuse");
   r = await lib.mergeCustomers(countedDb, { fromId: from, intoId: into });
@@ -204,10 +204,10 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   ok("none of those refusals changed a customer or an order", snapshot() === wasBefore && same(ordersOf(a), [oA]));
   const pre = await createD1();
   pre._raw.exec(read("testlib/schema-pre-0006.sql"));
-  for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006" && f < "0105").sort()) pre.execFile(read("migrations/" + f));
+  for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006" && f < "0108").sort()) pre.execFile(read("migrations/" + f));
   threw = "";
   try { await lib.mergeCustomers(pre, { fromId: 1, intoId: 2 }); } catch (e) { threw = String(e && e.message); }
-  ok("on a database that hasn't had migrations/0105 it throws the database's own \"no such table\" (the action turns that into a plain answer)", /no such table: customers/.test(threw));
+  ok("on a database that hasn't had migrations/0108 it throws the database's own \"no such table\" (the action turns that into a plain answer)", /no such table: customers/.test(threw));
 
   // ---------------------------------------------------------------------------------------------------------
   console.log("\n=== The mergeCustomers action ===");
@@ -225,7 +225,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
       first: (...x) => { note(); return st.first(...x); }, all: (...x) => { note(); return st.all(...x); },
       run: async (...x) => {
         note();
-        if (isAudit && tap.failAudit) throw new Error("D1_ERROR: the audit log can't be written (test277)");
+        if (isAudit && tap.failAudit) throw new Error("D1_ERROR: the audit log can't be written (test303)");
         const res = await st.run(...x);
         if (isAudit && tap.afterMergedRow && st._params.includes("customer.merged")) { const f = tap.afterMergedRow; tap.afterMergedRow = null; f(); }
         return res;
@@ -348,7 +348,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   ok("…naming both customers and the reason, with no shop and no order", log.length === 1 && same(log[0].detail, { fromId: from, intoId: into, reason: "That customer has already been merged into another." }) &&
     log[0].orgId === null && log[0].orderId === null && /owner@example\.com/.test(String(log[0].actor)));
 
-  console.log("\n=== A database that hasn't had migrations/0105 yet ===");
+  console.log("\n=== A database that hasn't had migrations/0108 yet ===");
   const B = await makeAuth({ d1: pre });
   const admin2 = await B.firstAdmin("Olive Owner", "owner@example.com");
   r = await B.orders({ action: "mergeCustomers", fromId: 1, intoId: 2 }, admin2);

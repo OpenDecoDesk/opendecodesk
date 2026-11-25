@@ -10595,7 +10595,7 @@ export async function getOrderById(db, orderId) {
   return order;
 }
 
-// ---- Customers (migrations/0105) ---------------------------------------------------------------
+// ---- Customers (migrations/0108) ---------------------------------------------------------------
 // A customer record that orders belong to (orders.customerId): who they are, how to reach them, and a tax
 // exemption of their own. An order finds its customer by its contact when that is an email
 // (findOrCreateCustomerForOrder_); one whose contact is a phone number or nothing has none. A customer is never
@@ -10603,14 +10603,14 @@ export async function getOrderById(db, orderId) {
 // keeps its row for the record. "Live" below means not merged away — an archived customer is still live.
 
 // The email a customer is known by: trimmed and lower case, or "" when `s` isn't an email. The same shape
-// migrations/0105's backfill accepts (one @, a dot after it, no white space, at most 200 characters), and only
+// migrations/0108's backfill accepts (one @, a dot after it, no white space, at most 200 characters), and only
 // A–Z are lowered, as SQLite's lower() does, so the two can't disagree about which customer an email is.
 const CUSTOMER_EMAIL_RE_ = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export function normalizeCustomerEmail_(s) {
   const e = String(s == null ? "" : s).trim().replace(/[A-Z]/g, (c) => c.toLowerCase());
   return e.length <= 200 && CUSTOMER_EMAIL_RE_.test(e) ? e : "";
 }
-// The error of a database that hasn't had migrations/0105 yet (deploys and migrations aren't atomic, and
+// The error of a database that hasn't had migrations/0108 yet (deploys and migrations aren't atomic, and
 // tests pin older schemas): there are no customers there, which is not a failure.
 const noCustomersYet_ = (e) => /no such table: customers|no such column: (\w+\.)?customerId|no column named customerId/i.test(String(e && e.message));
 const customerId_ = (v) => { const n = Number(v); return v != null && v !== "" && Number.isInteger(n) && n > 0 ? n : null; };
@@ -10644,7 +10644,7 @@ const liveCustomerRow_ = (db, id) => db.prepare("SELECT * FROM customers WHERE i
 // The customer a new order belongs to: the live one with the order's email (an archived one still receives
 // its orders, and stays archived), else the one a duplicate with that email was merged into, else one made
 // now — with the order's name, phone and address.
-// null when the contact isn't an email, and on a database without migrations/0105. `findOnly`: never make
+// null when the contact isn't an email, and on a database without migrations/0108. `findOnly`: never make
 // one (a test order joins its customer but doesn't create a customer nobody really is).
 export async function findOrCreateCustomerForOrder_(db, { name, contact, phone, address, findOnly } = {}) {
   const email = normalizeCustomerEmail_(contact);
@@ -10674,7 +10674,7 @@ export async function findOrCreateCustomerForOrder_(db, { name, contact, phone, 
 // only for a PICKED customer — someone signed in chose them — never for one found by the email a shopper
 // typed, or anyone who knows an exempt customer's address could order untaxed. It counts on the order's date
 // — the business's calendar day it was placed — when the box is ticked and the certificate's expiry date is
-// empty or hasn't passed. { id: null, exempt: false } without a customer or before migrations/0105.
+// empty or hasn't passed. { id: null, exempt: false } without a customer or before migrations/0108.
 async function orderCustomer_(db, order, opts) {
   const none = { id: null, exempt: false };
   try {
@@ -10701,7 +10701,7 @@ async function orderCustomer_(db, order, opts) {
 
 // The Customers page's list, a page at a time: live customers (archived ones only when asked for) whose name,
 // company, email or phone contains `q`, by name (then id). orderCount / lastOrderAt leave out test and voided orders.
-// `total` is how many match in all. Empty on a database without migrations/0105.
+// `total` is how many match in all. Empty on a database without migrations/0108.
 export async function listCustomers(db, { q = "", includeArchived = false, limit = 50, offset = 0 } = {}) {
   const where = ["c.mergedIntoId IS NULL"], binds = [];
   if (!includeArchived) where.push("c.archivedAt IS NULL");
@@ -10879,7 +10879,7 @@ export async function setOrderCustomer(db, orderId, customerId) {
 // guarded UPDATE right after the line's INSERT, in the same batch, so two orders can't both get the last
 // piece. Only plain catalog lines qualify: not personalized, no color/graphic choices, no uploaded design,
 // and never on a test order.
-// The order's customer (migrations/0105): opts.customerId when it is a live customer (the one picked on a local
+// The order's customer (migrations/0108): opts.customerId when it is a live customer (the one picked on a local
 // sale), else the customer with the order's email, made now if there is none. Nothing on an older database.
 export async function insertOrder(db, order, pricedItems, opts = {}) {
   const stmts = [];
@@ -10948,7 +10948,7 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   if (order.rushRequested && order.rushPayBy && /^\d{4}-\d{2}-\d{2}$/.test(order.rushPayBy)) { extraCols.push("rushPayBy"); extraBinds.push(order.rushPayBy); }
   // An imported order (migrations/0087): the store it came from and that store's order number.
   if (order.source) { extraCols.push("source", "externalOrderId"); extraBinds.push(order.source, order.externalOrderId || null); }
-  // Its customer (migrations/0105), named only when there is one, so an older database still takes the order.
+  // Its customer (migrations/0108), named only when there is one, so an older database still takes the order.
   if (customer.id) { extraCols.push("customerId"); extraBinds.push(customer.id); }
   // What the customer owes: goods, shipping and the rush fee, plus the tax on the goods and on the fee when tax is
   // added on top. Stored on the order and answered below — one figure, so the two can't differ.
@@ -14312,7 +14312,7 @@ function parseOrder_(row, items, payments, labels) {
     orgId: row.orgId,
     customerName: row.customerName,
     contact: row.contact,
-    customerId: customerId_(row.customerId),   // its customer record (migrations/0105); null = none, or an older database
+    customerId: customerId_(row.customerId),   // its customer record (migrations/0108); null = none, or an older database
     paymentMethod: row.paymentMethod || "",
     paid: !!row.paid,
     paidAt: row.paidAt || "",

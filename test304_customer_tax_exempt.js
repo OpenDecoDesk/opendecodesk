@@ -1,4 +1,4 @@
-// A customer's tax exemption, end to end (migrations/0105).
+// A customer's tax exemption, end to end (migrations/0108).
 //   * An order is untaxed for its customer only when someone signed in PICKED that customer (createLocalSale's
 //     customerId → insertOrder opts.customerId). An order that merely carries an exempt customer's email (the
 //     storefront, a local sale with the email typed, an import) is linked to them for the history and taxed as usual.
@@ -455,8 +455,8 @@ async function newDb(upTo) {
   ok("…and nothing was: the customer's row is the same, name and all", JSON.stringify(cust(QUINN)) === quinnWas);
   r = await quietly(() => save({ name: "Never Added", taxExempt: true, taxExemptCertificate: "EX-0011" }));
   ok("…and adding a customer with an exemption answers 503 and adds nobody", r.status === 503 && count() === before);
-  r = await quietly(() => save({ id: QUINN, phone: "555-0105" }));
-  ok("a save that doesn't touch the exemption isn't held up by the audit log: it is saved", r.status === 200 && cust(QUINN).phone === "555-0105" && cust(QUINN).taxExempt === 1);
+  r = await quietly(() => save({ id: QUINN, phone: "555-0108" }));
+  ok("a save that doesn't touch the exemption isn't held up by the audit log: it is saved", r.status === 200 && cust(QUINN).phone === "555-0108" && cust(QUINN).taxExempt === 1);
   auditBroken = false;
   ok("(nothing reached the audit log while it couldn't be written)", auditSince(mark).length === 0);
   r = await save({ id: QUINN, taxExempt: false });
@@ -491,8 +491,8 @@ async function newDb(upTo) {
   r = await save({ id: DUP, taxExempt: false });
   ok("a customer merged into another: refused (400), its row and the log untouched", r.status === 400 && /merged into another/.test(r.body.message) && cust(DUP).taxExempt === 1 && auditSince(mark).length === 0);
 
-  section("Before the customers table exists (migrations/0105 not yet run)");
-  const old = await newDb("0105");
+  section("Before the customers table exists (migrations/0108 not yet run)");
+  const old = await newDb("0108");
   await lib.setSalesTaxSettings(old, { rateBps: 600, jurisdiction: "OH", taxMode: "inclusive" });
   const oldTax = (id) => { const x = old.q("SELECT taxExempt, totalCents FROM orders WHERE orderId = ?", id)[0], l = old.q("SELECT taxCents FROM order_items WHERE orderId = ?", id); return x ? [x.taxExempt, l.map(y => y.taxCents), x.totalCents] : null; };
   ok("(that database has no customers table and no orders.customerId)", old.q("SELECT count(*) AS n FROM sqlite_master WHERE name = 'customers'")[0].n === 0 && !old.q("PRAGMA table_info(orders)").some(c => c.name === "customerId"));

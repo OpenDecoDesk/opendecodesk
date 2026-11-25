@@ -1,4 +1,4 @@
-// Customer records (migrations/0105): a customer's tax exemption, and merging two customers, in a real browser.
+// Customer records (migrations/0108): a customer's tax exemption, and merging two customers, in a real browser.
 //
 // The exemption: the owner ticks it on the customer's page with a certificate and an expiry. It counts only when
 // staff PICK that customer on a Local sale (the sale then carries no sales tax); an order that merely has the

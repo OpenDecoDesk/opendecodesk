@@ -1,4 +1,4 @@
-// The Customers page (public/admin-customers.js, migrations/0105) in a real browser, as the owner: the menu button,
+// The Customers page (public/admin-customers.js, migrations/0108) in a real browser, as the owner: the menu button,
 // the list (search, Show archived, paging, the notes it shows instead of a list), + New customer and what it refuses,
 // one customer's page (every field edited and saved, what the form refuses, the tags, totals and orders, Archive and
 // Restore), the addresses that open it (#customers/<id> after a reload, #/customers/<id>, an unknown id, an id that
@@ -782,10 +782,10 @@ test("Archive asks first, then the customer is archived (tag, Restore, no New sa
   expect(sent).toEqual([expect.objectContaining({ id, archived: true })]);
   expect((await getCustomer(api, id)).archived).toBe(true);
   // An archived customer can still be edited.
-  await field(page, "Phone").fill("555-0105");
+  await field(page, "Phone").fill("555-0108");
   await saveAndRedraw(page);
   await expect(page.locator(".cust-sub .cust-tag")).toHaveText(["Archived"]);
-  expect(await getCustomer(api, id)).toMatchObject({ phone: "555-0105", archived: true });
+  expect(await getCustomer(api, id)).toMatchObject({ phone: "555-0108", archived: true });
 
   // Off the list, until Show archived.
   await page.locator("#custPage").getByRole("link", { name: "‹ Customers" }).click();

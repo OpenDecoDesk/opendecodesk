@@ -1,5 +1,5 @@
 // The Customers page (admin.js loads this file on demand, the first time #customers is opened:
-// ensureCustomersPage_). A customer is a record orders link to (migrations/0105): the list with a search, and one
+// ensureCustomersPage_). A customer is a record orders link to (migrations/0108): the list with a search, and one
 // customer's details, tax exemption, totals and orders, with archive and merge.
 //
 // A classic script like admin.js, so it uses admin.js's own helpers as they are (adminApi_, adminSetHash,

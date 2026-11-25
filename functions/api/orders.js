@@ -146,7 +146,7 @@ import { verifyTurnstile } from "../_lib/turnstile.js";
 import { expireCheckoutSession, createCheckoutSession, CHECKOUT_LINK_SECONDS, listCacheVersions_, readCachedList_, refreshCachedLists_, peekCachedList_, blankListDelta_ } from "../_lib/db.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9\-]{1,64}$/;
-// Customer records (migrations/0105). A customer id as sent: null when none was sent, the id, or false when what
+// Customer records (migrations/0108). A customer id as sent: null when none was sent, the id, or false when what
 // was sent isn't one (a whole number above zero).
 function customerIdOf_(v) {
   if (v === undefined || v === null || v === "") return null;
@@ -426,7 +426,7 @@ const NO_MONTH_ACTIONS = new Set([
   "deleteBlankShipment", "setOrderCompleted", "checkDeliveries", "recordTracking", "bulkRecordTracking", "createShippingPaymentLink", "sendInvoice",
   "resendEmail", "resendDownloads", "resetDownloads", "revokeDownloads", "importOrders",
   "setPayOnDelivery",   // pay on delivery (migrations/0105): no money moves, only whether the steps wait for it
-  // Customer records (migrations/0105): who an order belongs to and who is tax-exempt from now on. An order's own
+  // Customer records (migrations/0108): who an order belongs to and who is tax-exempt from now on. An order's own
   // tax was settled when it was placed, so linking, merging or exempting a customer changes no month's numbers.
   "saveCustomer", "setCustomerArchived", "mergeCustomers", "setOrderCustomer",
   // Run Order and transfer sheets
@@ -2699,7 +2699,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     // even when it's limited to local sales).
     if (body.payOnDelivery && !can_("orders.payOnDelivery", "edit")) return forbidden_("Your role can't set orders to pay on delivery. Ask an admin.");
     if (body.payOnDelivery && body.paid) return jsonResponse({ status: "error", message: "Choose Paid or Pay on delivery, not both." }, 400);
-    // The customer picked on the form (migrations/0105). Picking one can make the sale tax-exempt, so it needs
+    // The customer picked on the form (migrations/0108). Picking one can make the sale tax-exempt, so it needs
     // the Customers page's own permission, not only the sale's.
     const saleCustomerId = customerIdOf_(body.customerId);
     if (saleCustomerId === false) return jsonResponse({ status: "error", message: "That customer isn't valid. Pick one from the list." }, 400);
@@ -2844,11 +2844,11 @@ async function handleOrdersPost_(context, listBefore = null) {
     return jsonResponse({ status: "ok", orderId });
   }
 
-  // ---- Customer records (migrations/0105): the Customers page, the Local sale picker, an order's customer ----
+  // ---- Customer records (migrations/0108): the Customers page, the Local sale picker, an order's customer ----
   // Orders link to a customer record (orders.customerId). db.js does the work; here are the checks, who may, and
   // the audit log. A customer's row as stored, for those checks and the log's before / after.
   const customerRow_ = (id) => env.DB.prepare("SELECT * FROM customers WHERE id = ?").bind(id).first();
-  // Deploys and migrations aren't atomic: until 0105 has run there is no customers table, and these actions say so
+  // Deploys and migrations aren't atomic: until 0108 has run there is no customers table, and these actions say so
   // instead of failing with a database error.
   const customersReady_ = async (run) => {
     try { return await run(); }
@@ -2898,7 +2898,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     const id = customerIdOf_(body.id);
     if (id === false) return jsonResponse({ status: "error", message: "That customer isn't valid." }, 400);
     return customersReady_(async () => {
-      // A new customer reads the table too, so a database without migrations/0105 answers 503 before the
+      // A new customer reads the table too, so a database without migrations/0108 answers 503 before the
       // exemption's audit row is written, not after.
       const beforeRow = id ? await customerRow_(id) : (await env.DB.prepare("SELECT id FROM customers LIMIT 1").first(), null);
       if (id && !beforeRow) return customerNotFound_();

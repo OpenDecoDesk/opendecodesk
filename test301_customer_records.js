@@ -2,14 +2,14 @@ const fs = require("fs");
 const { ok } = require("./testlib/check");
 const { createD1 } = require("./testlib/d1-shim.js");
 
-// Customer records (migrations/0105), the data functions in db.js called directly:
+// Customer records (migrations/0108), the data functions in db.js called directly:
 //   normalizeCustomerEmail_   what counts as an email, and how it is stored
 //   saveCustomer              adding and changing one: every refusal, every length cap, what an unset field keeps,
 //                             the address that is kept, and the before / after it hands the audit log
 //   listCustomers             the search, archived and merged-away rows, the sort, paging, and the order counts
 //   getCustomer               one customer with its orders and what they add up to
 //   setCustomerArchived       archive and restore
-//   …and each of them (with the functions beside them) on a database that hasn't had migrations/0105 yet.
+//   …and each of them (with the functions beside them) on a database that hasn't had migrations/0108 yet.
 // Real SQL (sql.js) + the real db.js. Invented customers only; every date an order is placed on is fixed.
 
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
@@ -504,8 +504,8 @@ const NOT_FOUND = "That customer wasn't found.";
   ok("opening a customer passes it on (it is not shown as no such customer)", /not answering/.test(await thrown(() => lib.getCustomer(down, 1))));
 
   // =====================================================================================================
-  console.log("\n=== On a database that hasn't had migrations/0105 yet ===");
-  const old = await makeDb("0105");
+  console.log("\n=== On a database that hasn't had migrations/0108 yet ===");
+  const old = await makeDb("0108");
   ok("(that database has no customers table and no customer on its orders)",
     old.q("SELECT count(*) AS n FROM sqlite_master WHERE name = 'customers'")[0].n === 0 && !old.q("PRAGMA table_info(orders)").some(c => c.name === "customerId"));
   ok("the list is empty, not an error", same(await lib.listCustomers(old), { customers: [], total: 0 }));

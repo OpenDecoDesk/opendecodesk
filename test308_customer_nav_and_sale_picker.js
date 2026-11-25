@@ -6,7 +6,7 @@ const { createD1 } = require("./testlib/d1-shim.js");
 const { ok } = require("./testlib/check");
 const roles = require("./testlib/roles");
 
-// Customer records (migrations/0105), the part of them that lives in public/admin.js — RUN in the real admin page
+// Customer records (migrations/0108), the part of them that lives in public/admin.js — RUN in the real admin page
 // (jsdom) against the real orders.js / db.js on sql.js:
 //   adminCanCustomers_ and the menu — Customers among the top buttons right after Orders (after Home for a role
 //     without Orders), in the phone's menu sheet too, and only for a role that may open it;
@@ -470,4 +470,4 @@ const wait = async (cond, n = 500) => { for (let i = 0; i < n && !cond(); i++) a
   const { passed, failed } = require("./testlib/check").counts();
   console.log(`\n${failed ? "FAIL" : "PASS"} — ${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
-})().catch((e) => { console.error(e); console.log("test282 crashed: false"); process.exit(1); });
+})().catch((e) => { console.error(e); console.log("test308 crashed: false"); process.exit(1); });

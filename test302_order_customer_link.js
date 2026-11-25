@@ -1,10 +1,10 @@
-// How a new order gets its customer (migrations/0105, customer records phase 1), through the real handlers:
+// How a new order gets its customer (migrations/0108, customer records phase 1), through the real handlers:
 //   * a storefront order (the public order action, pickup and shipped on a signed quote), a local sale
 //     (createLocalSale, with and without a picked customer), an imported order (importOrders) and insertOrder itself;
 //   * findOrCreateCustomerForOrder_: an email finds or makes the customer (case and padding don't matter), a phone
 //     number or nothing links nothing, the name / phone / address are kept when one is made, a test order joins but
 //     never makes one, an archived customer still gets its orders, a merged-away duplicate's email goes to the
-//     customer that was kept, and a database without migrations/0105 still takes orders;
+//     customer that was kept, and a database without migrations/0108 still takes orders;
 //   * a picked customer (opts.customerId) beats the email; an unknown or merged-away pick falls back to the email;
 //     only a PICKED customer's tax exemption counts;
 //   * setOrderCustomer (link, relink, unlink, what it refuses) and the order readers' customerId.
@@ -389,8 +389,8 @@ const rejects = async (fn) => { try { await fn(); return ""; } catch (e) { retur
   ok("getOpenOrders: the same", check(await S.getOpenOrders(d1)));
   ok("every order the readers give has the field", (await S.getOrdersByOrg(d1, "acme")).every(o => o.customerId === null || (Number.isInteger(o.customerId) && o.customerId > 0)));
 
-  console.log("\n=== A database that hasn't had migrations/0105 yet ===");
-  const old = await newDb("0105");
+  console.log("\n=== A database that hasn't had migrations/0108 yet ===");
+  const old = await newDb("0108");
   ok("(it has no customers table and no orders.customerId)", d1.q("SELECT count(*) AS n FROM sqlite_master WHERE name = 'customers'")[0].n === 1 &&
     old.q("SELECT count(*) AS n FROM sqlite_master WHERE name = 'customers'")[0].n === 0 && !old.q("PRAGMA table_info(orders)").some(col => col.name === "customerId"));
   ok("findOrCreateCustomerForOrder_ answers null instead of failing", (await S.findOrCreateCustomerForOrder_(old, { name: "Pat Example", contact: "pat@example.com" })) === null &&
@@ -423,4 +423,4 @@ const rejects = async (fn) => { try { await fn(); return ""; } catch (e) { retur
   const broken = { prepare: () => { throw new Error("D1_ERROR: disk I/O error"); } };
   ok("findOrCreateCustomerForOrder_ passes on an error that isn't a missing migration", /disk I\/O error/.test(await rejects(() => S.findOrCreateCustomerForOrder_(broken, { contact: "pat@example.com" }))));
   ok("…but never touches the database for a contact that isn't an email", (await S.findOrCreateCustomerForOrder_(broken, { contact: "555-0100" })) === null);
-})().catch(e => { console.error(e); ok("test276 ran to the end without an error", false); });
+})().catch(e => { console.error(e); ok("test302 ran to the end without an error", false); });

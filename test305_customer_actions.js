@@ -4,12 +4,12 @@ const { createD1 } = require("./testlib/d1-shim.js");
 const roles = require("./testlib/roles");
 const { makeAuth, prelude, strip, read, request, answer } = require("./testlib/auth-harness");
 
-// Customer records (migrations/0105): the six customer actions of /api/orders and the customer picked on a
+// Customer records (migrations/0108): the six customer actions of /api/orders and the customer picked on a
 // local sale, through the real handler.
 //   - functions/_lib/permissions.js: the Customers area, each action's level, the built-in roles' defaults
 //   - who may: every built-in role and two made-up ones behind the REAL sign-in gate (adminAuth.js), signed out
 //   - every refusal and its sentence, the answers' shapes, the audit rows (only on a real change)
-//   - no period guard, and a database that hasn't had 0105 yet
+//   - no period guard, and a database that hasn't had 0108 yet
 // (What a merge moves and when an exemption applies are other files' business: here only who may.)
 // Real SQL (sql.js) under the real db.js and orders.js. Invented customers only.
 
@@ -331,23 +331,23 @@ const ordersJs = read("functions/api/orders.js");
     ok("a company alone is enough, and an empty id means a new customer", r.status === 200 && r.body.created === true && custRow(r.body.id).company === "Example Supply Room" && custRow(r.body.id).name === "" &&
       r.rows[0].action === "customer.created" && r.rows[0].detail.company === "Example Supply Room");
 
-    r = await logged({ action: "saveCustomer", id: savedId, name: "Robin Q. Example", company: "Example Club", email: "robin@example.com", phone: "555-0105", notes: "", address: { ...address, line1: "2 Example Road" } }, staff);
-    ok("changing one answers { status, id, created: false }", r.status === 200 && same(r.body, { status: "ok", id: savedId, created: false }) && custRow(savedId).name === "Robin Q. Example" && custRow(savedId).phone === "555-0105");
+    r = await logged({ action: "saveCustomer", id: savedId, name: "Robin Q. Example", company: "Example Club", email: "robin@example.com", phone: "555-0108", notes: "", address: { ...address, line1: "2 Example Road" } }, staff);
+    ok("changing one answers { status, id, created: false }", r.status === 200 && same(r.body, { status: "ok", id: savedId, created: false }) && custRow(savedId).name === "Robin Q. Example" && custRow(savedId).phone === "555-0108");
     const d = r.rows[0] && r.rows[0].detail;
     ok("…and is logged once as customer.updated: the customer's id, its name now, and from/to for each field that changed",
       r.rows.length === 1 && r.rows[0].action === "customer.updated" && keys(d) === "changes,customerId,name" && d.customerId === savedId && d.name === "Robin Q. Example" &&
-      same(d.changes.name, { from: "Robin Example", to: "Robin Q. Example" }) && same(d.changes.phone, { from: "555-0104", to: "555-0105" }) && same(d.changes.notes, { from: "Calls ahead", to: "" }) &&
+      same(d.changes.name, { from: "Robin Example", to: "Robin Q. Example" }) && same(d.changes.phone, { from: "555-0104", to: "555-0108" }) && same(d.changes.notes, { from: "Calls ahead", to: "" }) &&
       same(d.changes.address, { from: address, to: { ...address, line1: "2 Example Road" } }));
     ok("…with nothing for the fields that stayed (company, email) and never an exemption field", keys(d.changes) === "address,name,notes,phone" && r.rows[0].actor === "sam@example.com" && r.rows[0].orgId === null && r.rows[0].orderId === null);
     const stamp = custRow(savedId).updatedAt;
-    r = await logged({ action: "saveCustomer", id: savedId, name: "Robin Q. Example", company: "Example Club", email: "robin@example.com", phone: "555-0105", notes: "", address: { ...address, line1: "2 Example Road" } }, staff);
+    r = await logged({ action: "saveCustomer", id: savedId, name: "Robin Q. Example", company: "Example Club", email: "robin@example.com", phone: "555-0108", notes: "", address: { ...address, line1: "2 Example Road" } }, staff);
     ok("saving it again unchanged is fine and writes no audit row", r.status === 200 && r.body.created === false && r.rows.length === 0 && custRow(savedId).updatedAt >= stamp);
     r = await logged({ action: "saveCustomer", id: String(savedId), notes: "Second door" }, staff);
     ok("a field left out keeps what it had: sending only the notes changes only the notes", r.status === 200 && custRow(savedId).name === "Robin Q. Example" && custRow(savedId).company === "Example Club" && custRow(savedId).email === "robin@example.com" &&
-      custRow(savedId).phone === "555-0105" && JSON.parse(custRow(savedId).addressJson).line1 === "2 Example Road" && custRow(savedId).notes === "Second door" && keys(r.rows[0].detail.changes) === "notes");
+      custRow(savedId).phone === "555-0108" && JSON.parse(custRow(savedId).addressJson).line1 === "2 Example Road" && custRow(savedId).notes === "Second door" && keys(r.rows[0].detail.changes) === "notes");
     r = await logged({ action: "saveCustomer", id: savedId, phone: null, address: null }, staff);
     ok("a field sent as null is emptied: the phone and the address go, logged to \"\" and to null", r.status === 200 && custRow(savedId).phone === "" && custRow(savedId).addressJson === "" &&
-      same(r.rows[0].detail.changes.phone, { from: "555-0105", to: "" }) && r.rows[0].detail.changes.address.to === null && r.rows[0].detail.changes.address.from.line1 === "2 Example Road");
+      same(r.rows[0].detail.changes.phone, { from: "555-0108", to: "" }) && r.rows[0].detail.changes.address.to === null && r.rows[0].detail.changes.address.from.line1 === "2 Example Road");
     r = await logged({ action: "saveCustomer", id: savedId, name: null }, staff);
     ok("the name may be emptied while there is a company", r.status === 200 && custRow(savedId).name === "" && same(r.rows[0].detail.changes.name, { from: "Robin Q. Example", to: "" }) && r.rows[0].detail.name === "");
     await call({ action: "saveCustomer", id: savedId, name: "Robin Example" }, staff);
@@ -597,7 +597,7 @@ const ordersJs = read("functions/api/orders.js");
     role("admin");
   }
 
-  console.log("\n=== A database that hasn't had migrations/0105 yet ===");
+  console.log("\n=== A database that hasn't had migrations/0108 yet ===");
   {
     const db = await migrated("0104");
     ok("the database under test has no customers table and no orders.customerId", db.q("SELECT count(*) n FROM sqlite_master WHERE name = 'customers'")[0].n === 0 && !db.q("PRAGMA table_info(orders)").some(c => c.name === "customerId"));

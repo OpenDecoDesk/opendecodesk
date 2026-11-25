@@ -6,7 +6,7 @@ const { adminAs, asRole, effectivePermissions, DEFAULT_ROLES } = require("./test
 const { JSDOM, ResourceLoader, VirtualConsole } = require("jsdom");
 const { createD1 } = require("./testlib/d1-shim.js");
 
-// Customer records (migrations/0105) on the Orders page and from a customer's page — public/admin.js run in the real
+// Customer records (migrations/0108) on the Orders page and from a customer's page — public/admin.js run in the real
 // admin page (jsdom) against the real orders.js / db.js on sql.js:
 //   orderCustomerId_ / orderCustomerNameHtml_ — a linked order's customer name is a link to the customer's page, in
 //     the table and in the phone cards, for a role that may open Customers; plain text otherwise;
@@ -533,4 +533,4 @@ const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) a
   const c = counts();
   console.log(`\n${c.failed ? "FAIL" : "PASS"} — ${c.passed} passed, ${c.failed} failed`);
   process.exit(c.failed ? 1 : 0);
-})().catch((e) => { console.error(e); console.log("test283 crashed: false"); process.exit(1); });
+})().catch((e) => { console.error(e); console.log("test309 crashed: false"); process.exit(1); });

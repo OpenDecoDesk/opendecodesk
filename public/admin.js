@@ -698,7 +698,7 @@ async function adminRoute() {
   if (raw === "locations") { renderLocationsCatalog(app); return; }
   if (raw === "categories") { renderProductCategories(app); return; }
   if (raw === "abortreasons") { renderAbortReasons(app); return; }
-  // Customers (migrations/0105): the list, and #customers/<id> for one customer. The page is its own script
+  // Customers (migrations/0108): the list, and #customers/<id> for one customer. The page is its own script
   // (public/admin-customers.js), loaded the first time it is opened. An id that isn't a number is the list.
   const customersMatch = raw.match(/^customers(?:\/([^/]*))?$/);
   if (customersMatch) {
@@ -2754,7 +2754,7 @@ function renderAdminNav(){
   const navGroups = adminNavGroups_();   // pages of switched-off features are left out, here and in the sheet
   // The same top-level pages as the desktop row (Run Transfer Sheets was missing from the phone menu).
   const top = [["home", "Home"], ["orders", "Orders"], ["runorder", "Run Order"], ["runtransfer", "Run Transfer Sheets"], ["catalog", "Manage catalog"]].filter(it => adminCanOpen_(it[0]));
-  // Customers (migrations/0105) sits right after Orders — after Home for a role without Orders. It is put in here
+  // Customers (migrations/0108) sits right after Orders — after Home for a role without Orders. It is put in here
   // because test57 reads the list above as it is written.
   if (adminCanOpen_("customers")) top.splice(Math.max(top.findIndex(it => it[0] === "orders"), top.findIndex(it => it[0] === "home")) + 1, 0, ["customers", "Customers"]);
   const current = top.concat(...ADMIN_NAV_GROUPS.map(g => g.items.filter(Array.isArray))).find(it => it[0] === active);
@@ -4671,7 +4671,7 @@ function adminActionCell(org, o){
   const deleteBtn = !can("orders.details", "full") ? "" : `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" ${dataAttrs} data-need="orders.details:full" data-admin-action="deleteTransaction" style="margin-top:6px;">Void…</button>`;
 
   const paymentsBtn = !can("orders.payments", "read") ? "" : `<button class="admin-btn" ${dataAttrs} data-admin-action="showPaymentsModal" style="margin-top:4px;">💰 Payments</button>`;
-  // Link to a customer… / Unlink customer (migrations/0105). A voided order is left on the record it was on.
+  // Link to a customer… / Unlink customer (migrations/0108). A voided order is left on the record it was on.
   // Written out here, not through a helper: tests lift this function out of the file on its own.
   const customerBtn = o.voidedAt || !can("customers.records", "edit") ? ""
     : Number.isInteger(Number(o.customerId)) && Number(o.customerId) > 0
@@ -7284,7 +7284,7 @@ function showEditCustomerModal(orders){
   });
 }
 
-// ---- Customers (migrations/0105): what the rest of the admin needs of them ---------------------------
+// ---- Customers (migrations/0108): what the rest of the admin needs of them ---------------------------
 // The Customers page itself is public/admin-customers.js, loaded the first time it is opened (the way the
 // stitch-file readers are): it defines renderCustomers(app, id). A failed load can be tried again.
 let _customersPagePromise = null;
@@ -8069,7 +8069,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
     renumber();
 
     let sending = false;
-    // The customer picked from the records (migrations/0105): the sale is put on their record by its id, whatever
+    // The customer picked from the records (migrations/0108): the sale is put on their record by its id, whatever
     // is typed under Customer info afterwards — except the email. A different email is a different person, so
     // changing it forgets the pick (the server then goes by the email), as Clear does.
     let pickedCustomer = null;

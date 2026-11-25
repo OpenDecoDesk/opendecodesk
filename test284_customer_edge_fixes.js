@@ -5,6 +5,7 @@
 //   * listCustomers trims a search again after cutting it to 200 characters.
 //   * On a database without migrations/0105, adding an exempt customer answers 503 BEFORE the exemption's audit row
 //     is written, so the log never claims a change that didn't happen.
+//   * A local sale that isn't shipped keeps the phone typed on it for the customer it makes.
 // Real SQL (sql.js), the real db.js and orders.js. Invented customers only.
 
 const fs = require("fs");
@@ -65,6 +66,19 @@ const rows = (d1, sql) => { const st = d1._raw.prepare(sql); const out = []; whi
   const longQ = "pat example" + " ".repeat(189) + "zzz";
   ok("a search whose 200th character falls in trailing spaces is trimmed again, and still finds the customer", (await lib.listCustomers(d1, { q: longQ })).total === 1);
   ok("(a search of the same words with nothing after them finds them too)", (await lib.listCustomers(d1, { q: "pat example" })).total === 1);
+
+  // ---- A local sale that isn't shipped, from a new email ------------------------------------------------------
+  {
+    const sale = async (body) => { const res = await api({ env: { DB: d1 }, waitUntil: () => {},
+      request: { url: "https://admin.example.com/api/orders", json: async () => Object.assign({ key: "x", action: "createLocalSale", org: "acme",
+        items: [{ productId: "__custom__", name: "Patch", qty: 1, customUnitPrice: 5, type: "patch" }] }, body), headers: { get: () => null } } });
+      return { status: res.status, body: JSON.parse(await res.text()) }; };
+    const r = await sale({ customerName: "Robin Walk-in", contact: "robin@example.com", phone: " 555-0104 " });
+    const c = rows(d1, "SELECT phone FROM customers WHERE email = 'robin@example.com'")[0];
+    ok("a local sale with no shipping makes its new customer with the phone typed on the sale", r.status === 200 && !!c && c.phone === "555-0104");
+    const r2 = await sale({ customerName: "Robin Walk-in", contact: "robin@example.com", phone: "555-0199" });
+    ok("…and a later sale with another phone doesn't change the customer's", r2.status === 200 && rows(d1, "SELECT phone FROM customers WHERE email = 'robin@example.com'")[0].phone === "555-0104");
+  }
 
   // ---- A database without migrations/0105: no audit row for an exemption that wasn't saved --------------------
   {

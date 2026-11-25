@@ -499,12 +499,17 @@ export async function publishShop(db, orgId, by = "") {
 // locations, blank links and tier prices aren't in the snapshot (they're live), so they aren't touched.
 // planDiscardShopChanges says what would happen; discardShopChanges does it. null = never published.
 const PRODUCT_HISTORY_TABLES_ = ["order_items", "finished_goods_movements", "brand_approvals", "customer_design_uploads"];
+// Shop settings that take effect at once rather than on Publish, so they are never "unpublished changes" and Discard
+// leaves them as they are: the fundraiser (migrations/0110) — orders raise money by it the moment it's saved, so the
+// shop's line about it shows the same live setting (catalogShopFromRows_).
+const LIVE_ORG_COLS_ = ["fundraiserJson"];
+const withoutLiveOrgCols_ = (row) => { const out = { ...row }; for (const k of LIVE_ORG_COLS_) delete out[k]; return out; };
 export async function planDiscardShopChanges(db, orgId) {
   const snap = await getCatalogSnapshot(db, orgId);
   if (!snap) return null;
   const live = await liveShopRows_(db, orgId);
   if (!live) return null;
-  const skip = new Set(["updatedAt"]);
+  const skip = new Set(["updatedAt", ...LIVE_ORG_COLS_]);
   const diff = (a, b) => [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(k => !skip.has(k) && JSON.stringify(a[k] ?? null) !== JSON.stringify(b[k] ?? null));
   const pubBy = new Map(snap.products.map(p => [p.productId, p]));
   const restore = [], added = [], missing = [];
@@ -524,7 +529,8 @@ export async function planDiscardShopChanges(db, orgId) {
   const liveIds = new Set(live.products.map(p => p.productId));
   for (const p of snap.products) if (!liveIds.has(p.productId)) missing.push({ productId: p.productId, name: p.name || p.productId });
   const shopFields = diff(snap.org, live.org);
-  const shopChanged = JSON.stringify(Object.keys(snap.org).sort().map(k => [k, snap.org[k]])) !== JSON.stringify(Object.keys(live.org).sort().map(k => [k, live.org[k]]));
+  const pubOrg = withoutLiveOrgCols_(snap.org), liveOrg = withoutLiveOrgCols_(live.org);
+  const shopChanged = JSON.stringify(Object.keys(pubOrg).sort().map(k => [k, pubOrg[k]])) !== JSON.stringify(Object.keys(liveOrg).sort().map(k => [k, liveOrg[k]]));
   return { orgId, publishedAt: snap.publishedAt, publishedBy: snap.publishedBy, shopChanged, shopFields, restore, added, missing,
     anything: shopChanged || restore.length > 0 || added.length > 0 || missing.length > 0, snap, live };
 }
@@ -535,7 +541,7 @@ export async function discardShopChanges(db, orgId) {
   const orgCols = await cols("orgs"), productCols = await cols("products");
   const stmts = [];
   if (plan.shopChanged) {
-    const ks = Object.keys(plan.snap.org).filter(k => k !== "orgId" && orgCols.has(k));
+    const ks = Object.keys(plan.snap.org).filter(k => k !== "orgId" && orgCols.has(k) && !LIVE_ORG_COLS_.includes(k));
     if (ks.length) stmts.push(db.prepare(`UPDATE orgs SET ${ks.map(k => `"${k}"=?`).join(", ")} WHERE orgId=?`).bind(...ks.map(k => plan.snap.org[k]), orgId));
   }
   const pubBy = new Map(plan.snap.products.map(p => [p.productId, p]));
@@ -667,7 +673,7 @@ export async function getPublishState(db, orgIds = null) {
     const changed = [];
     for (const [id, k] of nowBy) if (pubBy.get(id) !== k) changed.push(id);
     for (const id of pubBy.keys()) if (!nowBy.has(id)) changed.push(id);
-    const shopChanged = key(rows.org) !== key(org);
+    const shopChanged = key(withoutLiveOrgCols_(rows.org)) !== key(withoutLiveOrgCols_(org));
     out[orgId] = { state: changed.length || shopChanged ? "changed" : "current", publishedAt: head.publishedAt, publishedBy: head.publishedBy || "", changedProducts: changed, shopChanged };
   }
   return out;
@@ -908,6 +914,135 @@ export async function setOrgDeliveryOptions(db, orgId, options) {
     .bind(JSON.stringify(options), options.some(o => o.type === "shipping") ? 1 : 0, new Date().toISOString(), orgId).run();
 }
 
+// ---- Fundraiser (migrations/0110) ----------------------------------------------------------------------------
+// A group shop can give part of every sale back to the team, school or club it's for: a percent of each item's price
+// or a fixed amount a piece, for the group named in `label`. It is INSIDE the listed price — the customer pays the same
+// and the shop owes the amount to the group — so it changes no total and no tax. Stored in orgs.fundraiserJson in
+// basis points / cents ('' = none); callers pass and get percent / dollars. Each order line keeps what it raised
+// (order_items.fundraiserCents), so changing the setting only affects orders placed afterwards.
+// It takes effect the moment it's saved, not on Publish (LIVE_ORG_COLS_): orders take the shop's live setting, and so
+// does the storefront's "… supports …" line (catalogShopFromRows_).
+const FUNDRAISER_MAX_LABEL_ = 80;
+const FUNDRAISER_NOT_READY_ = "Fundraising needs the latest database update. Apply the migrations, then try again.";
+const noFundraiserYet_ = (e) => /no such column: (\w+\.)?(fundraiserJson|fundraiserCents|fundraiserOrgId)\b/i.test(String(e && e.message));
+// The stored JSON → { mode: "percent", percent, label, showOnShop } or { mode: "perPiece", amount, label, showOnShop };
+// null for none — or for anything that isn't a whole, valid setup, so a damaged value never raises money by mistake.
+export function parseFundraiser_(json) {
+  const v = json ? tryParse_(json, null) : null;
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const label = typeof v.label === "string" ? v.label.trim() : "";
+  if (!label) return null;
+  const showOnShop = v.showOnShop === true;
+  if (v.mode === "percent") {
+    const bps = Number(v.percentBps);
+    return Number.isInteger(bps) && bps > 0 && bps <= 5000 ? { mode: "percent", percent: bps / 100, label, showOnShop } : null;
+  }
+  if (v.mode === "perPiece") {
+    const cents = Number(v.cents);
+    return Number.isInteger(cents) && cents > 0 && cents <= 100000 ? { mode: "perPiece", amount: fromCents(cents), label, showOnShop } : null;
+  }
+  return null;
+}
+// The stored form (bps / cents) of a parsed fundraiser — what fundraiserLineCents_ works from.
+function fundraiserStored_(f) {
+  if (!f) return null;
+  return f.mode === "percent" ? { mode: "percent", percentBps: Math.round(Number(f.percent) * 100), label: f.label, showOnShop: !!f.showOnShop }
+    : { mode: "perPiece", cents: toCents(f.amount), label: f.label, showOnShop: !!f.showOnShop };
+}
+// What the admin sent → { fundraiser } (null = none) or { error } written for the owner. A percent from 0.01 to 50 and an
+// amount from $0.01 to $1,000, each to the cent / hundredth; who it supports, 1–80 characters.
+export function normalizeFundraiser_(input) {
+  if (input === null || input === undefined || input === "" || (input && (input.mode === "none" || input.mode === ""))) return { fundraiser: null };
+  if (typeof input !== "object" || Array.isArray(input)) return { error: "That fundraiser setup can't be read." };
+  if (input.mode !== "percent" && input.mode !== "perPiece") return { error: "Pick how the fundraiser is worked out: a percent of each item, or an amount per piece." };
+  const label = typeof input.label === "string" ? input.label.trim() : "";
+  if (!label) return { error: "Enter who the fundraiser supports (for example, the team or club's name)." };
+  if (label.length > FUNDRAISER_MAX_LABEL_) return { error: `Who the fundraiser supports can be at most ${FUNDRAISER_MAX_LABEL_} characters.` };
+  if (input.showOnShop !== undefined && typeof input.showOnShop !== "boolean") return { error: "\"Show on the shop\" must be on or off." };
+  const showOnShop = input.showOnShop === true;
+  // Two decimals at most: 12.5% is fine, 12.345% isn't (it couldn't be stored as typed).
+  const twoDecimals = (n) => Math.abs(n * 100 - Math.round(n * 100)) < 1e-6;
+  if (input.mode === "percent") {
+    const raw = input.percent;
+    const p = raw === null || raw === undefined || raw === "" ? NaN : Number(raw);
+    if (!Number.isFinite(p) || p < 0.01 || p > 50) return { error: "The fundraiser's percent must be from 0.01 to 50." };
+    if (!twoDecimals(p)) return { error: "The fundraiser's percent can have at most two decimals." };
+    return { fundraiser: { mode: "percent", percent: Math.round(p * 100) / 100, label, showOnShop } };
+  }
+  const raw = input.amount;
+  const a = raw === null || raw === undefined || raw === "" ? NaN : Number(raw);
+  if (!Number.isFinite(a) || a < 0.01 || a > 1000) return { error: "The fundraiser's amount per piece must be from $0.01 to $1,000." };
+  if (!twoDecimals(a)) return { error: "The fundraiser's amount per piece must be in whole cents." };
+  return { fundraiser: { mode: "perPiece", amount: fromCents(toCents(a)), label, showOnShop } };
+}
+// Sets (or, with null, ends) a shop's fundraiser. { ok, before, fundraiser } — before / fundraiser parsed (null = none) —
+// or { error }. Orders already placed keep what their lines raised.
+export async function setOrgFundraiser(db, orgId, fundraiser) {
+  const n = normalizeFundraiser_(fundraiser);
+  if (n.error) return { error: n.error };
+  let row;
+  try { row = await db.prepare("SELECT orgId, fundraiserJson FROM orgs WHERE orgId=?").bind(String(orgId == null ? "" : orgId)).first(); }
+  catch (e) { if (noFundraiserYet_(e)) return { error: FUNDRAISER_NOT_READY_ }; throw e; }
+  if (!row) return { error: "That shop wasn't found." };
+  const stored = fundraiserStored_(n.fundraiser);
+  // updatedAt is left alone: a changed updatedAt alone counts as an unpublished change (getPublishState), and this
+  // setting is live, never published.
+  await db.prepare("UPDATE orgs SET fundraiserJson=? WHERE orgId=?").bind(stored ? JSON.stringify(stored) : "", row.orgId).run();
+  return { ok: true, before: parseFundraiser_(row.fundraiserJson), fundraiser: n.fundraiser };
+}
+// What one order line raises, in cents, from a STORED fundraiser (fundraiserStored_ / the JSON's shape; null = none).
+//   percent   percentBps of the line's goods before tax: its listed total (qty × (unit + personalization)), with the
+//             tax backed out first in a shop whose prices include it (splitTaxInclusive — the same split the line's
+//             tax uses), so the group never gets a share of the sales tax.
+//   perPiece  cents × qty, but never more than that same pre-tax amount: a piece sold for less than the fundraiser
+//             amount (a deep discount, a free item) can't owe the group more than it brought in.
+export function fundraiserLineCents_(f, { qty, unitCents, personalizationFeeCents, taxRateBps, taxMode } = {}) {
+  if (!f || typeof f !== "object") return 0;
+  const q = Math.max(0, Math.floor(Number(qty) || 0));
+  const gross = q * (Math.max(0, Math.round(Number(unitCents) || 0)) + Math.max(0, Math.round(Number(personalizationFeeCents) || 0)));
+  if (gross <= 0) return 0;
+  const net = taxMode_(taxMode) === "exclusive" ? gross : splitTaxInclusive(gross, taxRateBps).netCents;
+  if (f.mode === "percent") {
+    const bps = Math.max(0, Math.round(Number(f.percentBps) || 0));
+    return Math.max(0, Math.min(net, Math.round(net * bps / 10000)));
+  }
+  if (f.mode === "perPiece") return Math.max(0, Math.min(net, q * Math.max(0, Math.round(Number(f.cents) || 0))));
+  return 0;
+}
+// What a line raised once its refunds are taken off: in proportion to the part of the line refunded, never below 0 —
+// raised × (1 − refund / line total), with the refunded share rounded to the cent. FUNDRAISER_RAISED_SQL_ is the same
+// sum in SQL (ROUND of a positive number rounds half up, as Math.round does), so the order page and the Fundraising
+// report agree to the cent. A cancelled line raises nothing; the callers leave those out.
+export function fundraiserRaisedCents_(fundraiserCents, lineTotalCents, refundCents) {
+  const f = Math.max(0, Math.round(Number(fundraiserCents) || 0)), total = Math.round(Number(lineTotalCents) || 0);
+  if (!f || total <= 0) return 0;
+  return Math.max(0, f - Math.round(f * Math.max(0, Number(refundCents) || 0) / total));
+}
+const FUNDRAISER_RAISED_SQL_ = (oi) => `(CASE WHEN ${oi}.lineTotalCents > 0 THEN MAX(0, ${oi}.fundraiserCents - CAST(ROUND(${oi}.fundraiserCents * MAX(0, COALESCE(${oi}.refundCents, 0)) * 1.0 / ${oi}.lineTotalCents) AS INTEGER)) ELSE 0 END)`;
+// A line that can raise money: one for a catalog product. A custom line or a quote's fee ("__custom__", or no product)
+// is the shop's own work outside the shop's catalog, so it raises nothing.
+const fundraiserLine_ = (productId) => !!productId && productId !== "__custom__";
+// The shop's live fundraiser as stored (bps / cents), or null — none, or a database from before 0110.
+async function orgFundraiserStored_(db, orgId) {
+  try {
+    const r = await db.prepare("SELECT fundraiserJson FROM orgs WHERE orgId=?").bind(orgId).first();
+    return fundraiserStored_(parseFundraiser_(r && r.fundraiserJson));
+  } catch (e) { if (noFundraiserYet_(e)) return null; throw e; }
+}
+// Edit items (updateOrderItem / addOrderItem): the line just changed or added raises what the shop's fundraiser says
+// NOW, at the tax rate the line was just given. Lines the edit didn't touch keep what they raised.
+async function storeLineFundraiser_(db, itemId) {
+  try {
+    const row = await withTaxMode_((tm) => db.prepare(`SELECT oi.id, oi.orgId, oi.productId, oi.qty, oi.unitPriceCents, oi.personalizationFeeCents,
+        oi.taxRateBps, oi.fundraiserCents, ${tm} AS taxMode FROM order_items oi JOIN orders o ON o.orderId = oi.orderId WHERE oi.id=?`).bind(Number(itemId)).first());
+    if (!row) return;
+    const f = fundraiserLine_(row.productId) ? await orgFundraiserStored_(db, row.orgId) : null;
+    const cents = fundraiserLineCents_(f, { qty: row.qty, unitCents: row.unitPriceCents, personalizationFeeCents: row.personalizationFeeCents,
+      taxRateBps: row.taxRateBps, taxMode: row.taxMode });
+    if (cents !== Number(row.fundraiserCents)) await db.prepare("UPDATE order_items SET fundraiserCents=? WHERE id=?").bind(cents, row.id).run();
+  } catch (e) { if (noFundraiserYet_(e)) return; throw e; }
+}
+
 function parseOrg_(row) {
   // A stored list wins; without one the shop offers the default (see defaultDeliveryOptions).
   const stored = row.deliveryOptionsJson ? cleanDeliveryOptions(tryParse_(row.deliveryOptionsJson, null)) : null;
@@ -932,6 +1067,8 @@ function parseOrg_(row) {
     taxExempt: !!row.taxExempt,
     taxExemptCertificate: row.taxExemptCertificate || "",
     taxExemptExpires: row.taxExemptExpires || "",
+    // Fundraiser (migrations/0110): parsed (percent / dollars), or null = none — and on a database from before 0110.
+    fundraiser: parseFundraiser_(row.fundraiserJson),
     designImages: {
       shirt: row.designImageShirt || "",
       cap: row.designImageCap || "",
@@ -11498,9 +11635,13 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   // on the order so later rate/exemption changes never rewrite history.
   const [taxSettings, orgRow, customer] = await Promise.all([
     getSalesTaxSettings(db),
-    db.prepare("SELECT taxExempt FROM orgs WHERE orgId=?").bind(order.orgId).first(),
+    // Every column, so a database from before migrations/0110 (no fundraiserJson) still reads.
+    db.prepare("SELECT * FROM orgs WHERE orgId=?").bind(order.orgId).first(),
     orderCustomer_(db, order, opts),
   ]);
+  // The shop's fundraiser as it is now (migrations/0110): each catalog line keeps what it raises, so changing the
+  // setting later never rewrites this order. Lines filled from stock raise like any other sale.
+  const fundraiser = fundraiserStored_(parseFundraiser_(orgRow && orgRow.fundraiserJson));
   // opts.taxExempt: an order from another store (importOrdersCsv), whose sales tax that store charged — none is added here.
   const exemptNow = opts.taxExempt || (orgRow && orgRow.taxExempt) || customer.exempt ? 1 : 0;
   // opts.taxRateBps: a rate fixed in advance, already allowing for any exemption — a sent quote's (convertEstimateToOrder_
@@ -11580,19 +11721,17 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
       unitCents, it.personalized ? 1 : 0, it.persName || "",
       feeCents, lineCents, rate, taxCents, taxable ? 1 : 0,
     ];
-    if (hasConfig) {
-      stmts.push(db.prepare(`INSERT INTO order_items
-        (orderId,orgId,productId,name,type,size,qty,unitPriceCents,personalized,persName,
-         personalizationFeeCents,lineTotalCents,taxRateBps,taxCents,taxable,configJson)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .bind(...baseBinds, it.config ? JSON.stringify(it.config) : ""));
-    } else {
-      stmts.push(db.prepare(`INSERT INTO order_items
-        (orderId,orgId,productId,name,type,size,qty,unitPriceCents,personalized,persName,
-         personalizationFeeCents,lineTotalCents,taxRateBps,taxCents,taxable)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .bind(...baseBinds));
-    }
+    // What it raises (migrations/0110), named only when it raises something: a shop with a fundraiser has had 0110,
+    // and every other line takes the column's default 0 — so an older database still takes the order.
+    const raised = fundraiserLine_(it.productId) ? fundraiserLineCents_(fundraiser, { qty, unitCents, personalizationFeeCents: feeCents, taxRateBps: rate, taxMode: mode }) : 0;
+    const lineCols = [], lineBinds = [];
+    if (hasConfig) { lineCols.push("configJson"); lineBinds.push(it.config ? JSON.stringify(it.config) : ""); }
+    if (raised > 0) { lineCols.push("fundraiserCents"); lineBinds.push(raised); }
+    stmts.push(db.prepare(`INSERT INTO order_items
+      (orderId,orgId,productId,name,type,size,qty,unitPriceCents,personalized,persName,
+       personalizationFeeCents,lineTotalCents,taxRateBps,taxCents,taxable${lineCols.map(c => "," + c).join("")})
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?${",?".repeat(lineCols.length)})`)
+      .bind(...baseBinds, ...lineBinds));
     // The customer's own design files for this line (migrations/0054), recorded on the line as it is
     // written: the line just inserted is this order's highest id, and the batch is one transaction.
     for (const f of (Array.isArray(it.customFiles) ? it.customFiles : [])) {
@@ -12108,6 +12247,7 @@ export async function updateOrderItem(db, id, { productId, name, type, size, qty
     }
   }
   await recomputeOrderTax_(db, item.orderId);
+  await storeLineFundraiser_(db, id);   // what the changed line raises now (migrations/0110), at its new tax rate
 }
 
 // A catalog product's taxable flag; for a custom line (no such product) the
@@ -12139,6 +12279,7 @@ export async function addOrderItem(db, orderId, orgId, { productId, name, type, 
     await db.prepare("UPDATE order_items SET configJson=? WHERE id=?").bind(JSON.stringify(config), newId).run();
   }
   await recomputeOrderTax_(db, orderId);
+  await storeLineFundraiser_(db, newId);   // what the added line raises (migrations/0110), at its tax rate
   return newId;
 }
 
@@ -12388,8 +12529,12 @@ export async function getOrderTotal(db, orderId) {
 
 // One shop as the storefront needs it, from its rows (published, or live for a draft preview). `pre`: the whole
 // install's lookups (catalogPrefetch_) when every shop is being built at once; without it the shop reads its own.
-async function catalogShopFromRows_(db, rows, rushSettings, pre) {
+async function catalogShopFromRows_(db, rows, rushSettings, pre, liveOrgRow) {
   const org = parseOrg_(rows.org);
+  // The fundraiser (migrations/0110) is live, not published (LIVE_ORG_COLS_): the shop's current setting, whatever the
+  // snapshot holds. catalog.js turns it into the line the shop shows, and only when it's to be shown.
+  const live = liveOrgRow || (pre && pre.liveOrgs[org.orgId]);
+  if (live) org.fundraiser = parseFundraiser_(live.fundraiserJson);
   // The rush fee this shop offers (migrations/0082), resolved here — its own rule, else the global one — as the shop page
   // needs it (dollars; null = no rush). Never the tax setting.
   const rushSet = rushSettings || await getRushSettings(db).catch(() => null);
@@ -12565,11 +12710,11 @@ export async function getPublicCatalogShop(db, orgId) {
   const id = String(orgId == null ? "" : orgId);
   if (!id) return null;
   const [known, rows] = await Promise.all([
-    db.prepare("SELECT 1 AS ok FROM orgs WHERE orgId=?").bind(id).first(),
+    db.prepare("SELECT * FROM orgs WHERE orgId=?").bind(id).first(),
     publishedShopRows_(db, id),
   ]);
   if (!known || !rows) return null;
-  return catalogShopFromRows_(db, rows, await getRushSettings(db));
+  return catalogShopFromRows_(db, rows, await getRushSettings(db), undefined, known);
 }
 
 // Attaches `colorImages` { <productColor>: [imageUrls] } to each product, resolved from its blank
@@ -13215,6 +13360,7 @@ function parseExpense_(r) {
     // A refund is a negative expense (money back for something bought) in the ORIGINAL's category.
     isRefund: Number(r.amountCents) < 0, refundOfId: r.refundOfId == null ? null : Number(r.refundOfId),
     recurringId: r.recurringId == null ? null : Number(r.recurringId),   // recorded from a recurring expense (0085)
+    fundraiserOrgId: r.fundraiserOrgId == null ? null : String(r.fundraiserOrgId),   // a payout to this shop's fundraiser (0110)
   };
 }
 
@@ -13289,9 +13435,12 @@ export async function saveExpense(db, id, x) {
       WHERE id = ? AND deletedAt IS NULL`).bind(...vals, now, Number(id)).run();
     return Number(id);
   }
+  // A fundraiser payout (recordFundraiserPayout, migrations/0110) is tied to its shop as it's written; the column is
+  // named only then, so every other expense still saves on a database from before 0110. An edit keeps the tie.
+  const fr = x.fundraiserOrgId ? [String(x.fundraiserOrgId)] : [];
   const r = await db.prepare(`INSERT INTO expenses (expenseDate, description, categoryId, amountCents, vendor, businessUsePct,
-    receiptKey, receiptName, placedInService, depMethod, vendorChargedTax, accountId, paidPersonally, refundOfId, createdAt, updatedAt, receiptGroup) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`)
-    .bind(...vals, now, now, x.receiptGroup ? String(x.receiptGroup).slice(0, 64) : null).first();
+    receiptKey, receiptName, placedInService, depMethod, vendorChargedTax, accountId, paidPersonally, refundOfId, createdAt, updatedAt, receiptGroup${fr.length ? ", fundraiserOrgId" : ""}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${fr.length ? ", ?" : ""}) RETURNING id`)
+    .bind(...vals, now, now, x.receiptGroup ? String(x.receiptGroup).slice(0, 64) : null, ...fr).first();
   return Number(r.id);
 }
 // How much of a purchase has already been refunded (positive cents), counting the live refund
@@ -14987,6 +15136,9 @@ function parseOrder_(row, items, payments, labels) {
     // hasDigital: some active line is — its downloads go out once the order is paid.
     digitalOnly: (items || []).some(it => !it.cancelDate) && (items || []).filter(it => !it.cancelDate).every(it => it.digital),
     hasDigital: (items || []).some(it => !it.cancelDate && it.digital),
+    // What the order raises for its shop's fundraiser (migrations/0110): its lines still on it, less any refunded share —
+    // the figure the Fundraising report counts once the order is paid. 0 = nothing (no fundraiser when it was placed).
+    fundraiserRaised: fromCents(activeItems.reduce((s, it) => s + fundraiserRaisedCents_(it.fundraiserCents, toCents(it.lineTotal), toCentsOrNull(it.refundAmount) || 0), 0)),
     blankCondition: row.blankCondition || "",
     manufacturedAt: row.manufacturedAt || "",
     digitizingCompleteAt: row.digitizingCompleteAt || "",
@@ -15036,6 +15188,10 @@ function parseItem_(row) {
     lateCancel: !!row.lateCancel,
     refundDate: row.refundDate || "",
     refundAmount: fromCentsOrNull(row.refundCents),
+    // What the line raises for its shop's fundraiser (migrations/0110), as worked out when it was priced: in cents as
+    // stored (fundraiserCents) and in dollars (fundraiser). 0 = none, and on a database from before 0110.
+    fundraiserCents: Number(row.fundraiserCents) || 0,
+    fundraiser: fromCents(row.fundraiserCents),
     blankCondition: row.blankCondition || "",
     blankConditionNote: row.blankConditionNote || "",
     // Per-line-item blank fulfillment (migrations/0039).
@@ -15547,6 +15703,139 @@ export async function getRevenueData(db, dateFrom, dateTo, { basis } = {}) {
       shippingCost: fromCents(a.shippingCents), rushFee: fromCents(a.rushCents), salesTax: fromCents(a.taxCents), effectiveTotal: fromCents(a.owedCents), received: r.received,
       netSalesCents: a.netSalesCents, rushNetCents: a.rushNetCents, shippingCents: a.shippingCents };
   });
+}
+
+// ---- Fundraising (migrations/0110): what each shop's sales raised for its group, and what was paid out ----------------
+// Raised = the lines' fundraiserCents (worked out when each was priced), counted only for PAID orders (orders.paid, the
+// ledger's cache) that aren't voided or test orders; a cancelled line raises nothing and a refunded one less, in
+// proportion (fundraiserRaisedCents_). Orders count on their sale date, like the Revenue report (getSaleDateBasis), so
+// an order that hasn't shipped yet under the "shipped" basis isn't counted until it does. Paid out = live expenses tied
+// to the shop (expenses.fundraiserOrgId), by their date.
+export const FUNDRAISER_PAYOUT_KEY = "fundraiser_payout";
+const ymdOk_ = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ""));
+// A report date (YYYY-MM-DD) as the bound of a sale-date range, as orders.js passes the Revenue report's.
+const dayStart_ = (d) => String(d) + "T00:00:00.000Z", dayEnd_ = (d) => String(d) + "T23:59:59.999Z";
+// The goods an order line sold, before tax and less its refunded share — the Fundraising report's "sales".
+const FUNDRAISER_SALES_SQL_ = (oi, tm) => `(CASE WHEN ${oi}.lineTotalCents > 0 THEN MAX(0, (${oi}.lineTotalCents - CASE WHEN ${tm} = 'exclusive' THEN 0 ELSE ${oi}.taxCents END)
+  - CAST(ROUND((${oi}.lineTotalCents - CASE WHEN ${tm} = 'exclusive' THEN 0 ELSE ${oi}.taxCents END) * MAX(0, COALESCE(${oi}.refundCents, 0)) * 1.0 / ${oi}.lineTotalCents) AS INTEGER)) ELSE 0 END)`;
+
+// { dateFrom, dateTo } YYYY-MM-DD (inclusive), `orgId` for one shop. Dollars out:
+//   shops   [{ orgId, name, label, mode, orders, pieces, sales, raised, paidOut, owed }] — every shop with a fundraiser
+//           now, and any other that raised or paid out something in the range (a fundraiser since ended), by name.
+//           label / mode are its fundraiser's now ("" / null when it has none).
+//   orders  [{ orderId, orgId, placedAt, customerName, pieces, sales, raised }] — those shops' paid orders sold in the
+//           range, oldest first. pieces: the catalog lines' quantities (the ones that can raise); sales: every line's
+//           goods before tax, less refunds (discounts, shipping and the rush fee aren't goods).
+//   totals  the shops' figures added up.
+// paidOut is the payouts DATED in the range. owed is what the shop owes its group as of dateTo (`owedAsOf`): everything
+// raised up to that day less everything paid out up to that day — over ALL time, not just the range, since money raised
+// last term and paid this term would otherwise show as owed in one and overpaid in the other. Below 0 = paid out more
+// than raised. A database from before 0110 answers with nothing raised and no shops.
+export async function getFundraisingReport(db, { dateFrom, dateTo, orgId = null, basis } = {}) {
+  if (!ymdOk_(dateFrom) || !ymdOk_(dateTo)) return { error: "Choose the dates as YYYY-MM-DD." };
+  if (dateFrom > dateTo) return { error: "The start date is after the end date." };
+  const only = orgId ? String(orgId) : null;
+  const empty = () => ({ shops: [], orders: [], totals: { orders: 0, pieces: 0, sales: 0, raised: 0, paidOut: 0, owed: 0 }, dateFrom, dateTo, owedAsOf: dateTo });
+  const sale = saleDateSql_(basis || await getSaleDateBasis(db), "o");
+  const orgFilter = only ? " AND o.orgId = ?" : "", orgBinds = only ? [only] : [];
+  let orgRows, orderRows, raisedToDate, payoutRows;
+  try {
+    [orgRows, orderRows, raisedToDate, payoutRows] = await Promise.all([
+      db.prepare(`SELECT orgId, name, fundraiserJson FROM orgs${only ? " WHERE orgId = ?" : ""}`).bind(...orgBinds).all().then(r => r.results || []),
+      // The range's paid orders, a row each (shops without a fundraiser are dropped below, once it's known which count).
+      withTaxMode_((tm) => db.prepare(`SELECT o.orderId, o.orgId, o.placedAt, o.customerName,
+          COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL AND oi.productId <> '' AND oi.productId <> '__custom__' THEN oi.qty ELSE 0 END), 0) AS pieces,
+          COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL THEN ${FUNDRAISER_SALES_SQL_("oi", tm)} ELSE 0 END), 0) AS salesCents,
+          COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL THEN ${FUNDRAISER_RAISED_SQL_("oi")} ELSE 0 END), 0) AS raisedCents
+        FROM orders o LEFT JOIN order_items oi ON oi.orderId = o.orderId
+        WHERE ${sale} >= ? AND ${sale} <= ? AND o.paid = 1 AND o.isTest = 0 AND o.voidedAt IS NULL${orgFilter}
+        GROUP BY o.orderId ORDER BY ${sale}, o.orderId`).bind(dayStart_(dateFrom), dayEnd_(dateTo), ...orgBinds).all()).then(r => r.results || []),
+      // Everything raised up to dateTo, per shop — for what's owed.
+      db.prepare(`SELECT o.orgId, COALESCE(SUM(${FUNDRAISER_RAISED_SQL_("oi")}), 0) AS c
+        FROM orders o JOIN order_items oi ON oi.orderId = o.orderId
+        WHERE ${sale} <= ? AND oi.cancelDate IS NULL AND oi.fundraiserCents > 0 AND o.paid = 1 AND o.isTest = 0 AND o.voidedAt IS NULL${orgFilter}
+        GROUP BY o.orgId`).bind(dayEnd_(dateTo), ...orgBinds).all().then(r => r.results || []),
+      // Every live payout up to dateTo, per shop: in the range (paid out) and in all (for what's owed).
+      db.prepare(`SELECT fundraiserOrgId AS orgId, COALESCE(SUM(CASE WHEN expenseDate >= ? THEN amountCents ELSE 0 END), 0) AS inRange,
+          COALESCE(SUM(amountCents), 0) AS toDate
+        FROM expenses WHERE fundraiserOrgId IS NOT NULL AND deletedAt IS NULL AND expenseDate <= ?${only ? " AND fundraiserOrgId = ?" : ""}
+        GROUP BY fundraiserOrgId`).bind(dateFrom, dateTo, ...orgBinds).all().then(r => r.results || []),
+    ]);
+  } catch (e) { if (noFundraiserYet_(e)) return empty(); throw e; }
+  const raisedBy = new Map(raisedToDate.map(r => [r.orgId, Number(r.c) || 0]));
+  const payBy = new Map(payoutRows.map(r => [r.orgId, { inRange: Number(r.inRange) || 0, toDate: Number(r.toDate) || 0 }]));
+  const byOrg = new Map();
+  for (const r of orderRows) (byOrg.get(r.orgId) || byOrg.set(r.orgId, []).get(r.orgId)).push(r);
+  const shops = [], orders = [];
+  const t = { orders: 0, pieces: 0, sales: 0, raised: 0, paidOut: 0, owed: 0 };
+  for (const org of orgRows) {
+    const f = parseFundraiser_(org.fundraiserJson), rows = byOrg.get(org.orgId) || [], pay = payBy.get(org.orgId) || { inRange: 0, toDate: 0 };
+    const raisedCents = rows.reduce((s, r) => s + (Number(r.raisedCents) || 0), 0);
+    if (!f && !raisedCents && !pay.inRange) continue;
+    const s = { orders: rows.length, pieces: rows.reduce((n, r) => n + (Number(r.pieces) || 0), 0),
+      sales: rows.reduce((n, r) => n + (Number(r.salesCents) || 0), 0), raised: raisedCents, paidOut: pay.inRange,
+      owed: (raisedBy.get(org.orgId) || 0) - pay.toDate };
+    for (const k of Object.keys(t)) t[k] += s[k];
+    shops.push({ orgId: org.orgId, name: org.name || org.orgId, label: f ? f.label : "", mode: f ? f.mode : null,
+      orders: s.orders, pieces: s.pieces, sales: fromCents(s.sales), raised: fromCents(s.raised), paidOut: fromCents(s.paidOut), owed: fromCents(s.owed) });
+    for (const r of rows) orders.push({ orderId: r.orderId, orgId: r.orgId, placedAt: r.placedAt || "", customerName: r.customerName || "",
+      pieces: Number(r.pieces) || 0, sales: fromCents(r.salesCents), raised: fromCents(r.raisedCents) });
+  }
+  shops.sort((a, b) => String(a.name).localeCompare(String(b.name)) || String(a.orgId).localeCompare(String(b.orgId)));
+  return { shops, orders, totals: { orders: t.orders, pieces: t.pieces, sales: fromCents(t.sales), raised: fromCents(t.raised),
+    paidOut: fromCents(t.paidOut), owed: fromCents(t.owed) }, dateFrom, dateTo, owedAsOf: dateTo };
+}
+
+// The built-in "Fundraiser payouts" category (migrations/0110), found by its key, not its name (the owner may rename it).
+async function fundraiserPayoutCategory_(db) {
+  try { return await db.prepare("SELECT id, name FROM expense_categories WHERE systemKey = ?").bind(FUNDRAISER_PAYOUT_KEY).first(); }
+  catch (e) { if (/no such column: systemKey/i.test(String(e && e.message))) return null; throw e; }
+}
+// Records money paid to a shop's group: an ordinary expense (saveExpense) in the built-in category, tied to the shop, so
+// it shows wherever expenses do (Expenses, the account's register and reconciliation, the accountant export) and the
+// Fundraising report counts it as paid out. { orgId, amount (dollars), date YYYY-MM-DD, accountId (the account it was
+// paid from — required), note, actor }. { id } or { error } written for the owner. The caller checks the closed months
+// (periodGuard) and audits. `today` (YYYY-MM-DD) is the latest date allowed; by default the UTC day, as saveExpense's.
+export async function recordFundraiserPayout(db, { orgId, amount, date, accountId, note, actor, today } = {}) {
+  const day = ymdOk_(today) ? today : new Date().toISOString().slice(0, 10);
+  if (!ymdOk_(date)) return { error: "Choose the date it was paid." };
+  if (date > day) return { error: "The date can't be in the future." };
+  const a = amount === null || amount === undefined || amount === "" ? NaN : Number(amount);
+  if (!Number.isFinite(a) || a <= 0 || a > 1000000) return { error: "The amount must be more than $0 and at most $1,000,000." };
+  if (Math.abs(a * 100 - Math.round(a * 100)) > 1e-6) return { error: "The amount must be in whole cents." };
+  const text = String(note == null ? "" : note).trim();
+  if (text.length > 200) return { error: "The note can be at most 200 characters." };
+  let org;
+  try { org = await db.prepare("SELECT orgId, name, fundraiserJson FROM orgs WHERE orgId = ?").bind(String(orgId == null ? "" : orgId)).first(); }
+  catch (e) { if (noFundraiserYet_(e)) return { error: FUNDRAISER_NOT_READY_ }; throw e; }
+  if (!org) return { error: "That shop wasn't found." };
+  const cat = await fundraiserPayoutCategory_(db);
+  if (!cat) return { error: FUNDRAISER_NOT_READY_ };
+  const acct = accountId ? await getAccount(db, accountId) : null;
+  if (!acct || !acct.active) return { error: "Choose the account it was paid from." };
+  // Who got it: the group the shop's fundraiser supports, else (a fundraiser since ended) the shop.
+  const f = parseFundraiser_(org.fundraiserJson), to = (f && f.label) || org.name || org.orgId;
+  const description = (`Fundraiser payout — ${to}` + (text ? ` — ${text}` : "")).slice(0, 300);
+  try {
+    const id = await saveExpense(db, 0, { date, description, categoryId: Number(cat.id), amount: fromCents(toCents(a)), vendor: String(to).slice(0, 120),
+      businessUsePct: 100, vendorChargedTax: true, accountId: acct.id, paidPersonally: false, fundraiserOrgId: org.orgId });
+    return { id };
+  } catch (e) { if (noFundraiserYet_(e)) return { error: FUNDRAISER_NOT_READY_ }; throw e; }
+}
+// The payouts recorded to shops' fundraisers (live ones), newest first, each as listExpenses gives an expense plus the
+// shop's orgId and name and the account's name. { orgId, dateFrom, dateTo } all optional (YYYY-MM-DD). [] before 0110.
+export async function listFundraiserPayouts(db, { orgId = null, dateFrom = null, dateTo = null } = {}) {
+  const where = ["e.fundraiserOrgId IS NOT NULL", "e.deletedAt IS NULL"], binds = [];
+  if (orgId) { where.push("e.fundraiserOrgId = ?"); binds.push(String(orgId)); }
+  if (ymdOk_(dateFrom)) { where.push("e.expenseDate >= ?"); binds.push(dateFrom); }
+  if (ymdOk_(dateTo)) { where.push("e.expenseDate <= ?"); binds.push(dateTo); }
+  try {
+    const { results } = await db.prepare(`SELECT e.*, c.name AS categoryName, c.deductionType, c.scheduleCLine, c.deductiblePct, c.useTaxable, c.capital,
+        g.name AS orgName, a.name AS accountName
+      FROM expenses e JOIN expense_categories c ON c.id = e.categoryId LEFT JOIN orgs g ON g.orgId = e.fundraiserOrgId LEFT JOIN accounts a ON a.id = e.accountId
+      WHERE ${where.join(" AND ")} ORDER BY e.expenseDate DESC, e.id DESC`).bind(...binds).all();
+    return (results || []).map(r => ({ ...parseExpense_(r), orgId: r.fundraiserOrgId, orgName: r.orgName || r.fundraiserOrgId, accountName: r.accountName || "" }));
+  } catch (e) { if (noFundraiserYet_(e)) return []; throw e; }
 }
 
 // ---- Admin home dashboard (2026-11): the step each open order is waiting on ------------------------

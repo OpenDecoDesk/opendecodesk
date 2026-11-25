@@ -111,4 +111,5 @@ export const MIGRATIONS = [
   "0107_receive_request_keys.sql",
   "0108_customers.sql",
   "0109_estimates.sql",
+  "0110_fundraising.sql",
 ];

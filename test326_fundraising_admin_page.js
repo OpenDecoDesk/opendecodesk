@@ -827,6 +827,73 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
       /Fundraiser set/.test(app.textContent) && /none → \$1\.50 of every item supports Example Boosters/.test(app.textContent));
     ok("…and nothing in them is read as HTML", !app.querySelector("i, b") || ![...app.querySelectorAll("i, b")].some(el => /Band|1043/.test(el.textContent))); }
 
+  // ==============================================================================================================
+  console.log("\n=== Odd cases on the report page ===");
+  // ==============================================================================================================
+  await go();
+  { // An older request that fails after a newer one was drawn.
+    await generate("2024-01-01", "2024-12-31", "");
+    let fail; hold = { action: "getFundraisingReport", gate: new Promise((_, rej) => { fail = rej; }) };
+    reset();
+    id("frOrg").value = "band"; fire(id("frOrg"), "change");
+    await wait(() => of("getFundraisingReport").length === 1);
+    id("frOrg").value = "club"; fire(id("frOrg"), "change");
+    await wait(() => of("getFundraisingReport").length === 2 && drawn()); await idle();
+    fail(new Error("offline")); await pause(50); await idle();
+    ok("an older request that fails after a newer answer was drawn shows no error over it", shopRows().length === 1 && /Example Club/.test(text(shopRows()[0])) &&
+      !results().querySelector(".admin-error")); }
+  features({ bookkeeping: false });
+  await generate(null, null, "plain");
+  ok("with Bookkeeping off, the empty shop table's one cell spans the 7 columns there are (no payout column)",
+    text(shopRows()[0]).startsWith("No shop has a fundraiser") && shopRows()[0].children[0].getAttribute("colspan") === "7" && qa("#frShops thead th").length === 7);
+  features({});
+  { // A paid order whose only line was cancelled, and whose customer's name was cleared (Edit customer, blank).
+    order("CLUB-9", "club", "", "2024-09-05T15:00:00.000Z", "2024-09-06T15:00:00.000Z", 1, [{ productId: "cap", name: "Club cap", qty: 1, unit: 2000, raised: 200 }]);
+    d1.q("UPDATE order_items SET cancelDate = '2024-09-07T00:00:00.000Z' WHERE orderId = 'CLUB-9'");
+    await generate("2024-09-01", "2024-09-30", "club");
+    ok("its row: the day, the order, the shop, an empty customer, 0 pieces, $0.00 sales and $0.00 raised",
+      same(cellsOf(rowOf("CLUB-9")), [day("2024-09-05T15:00:00.000Z"), "CLUB-9", "Example Club", "", "0", "$0.00", "$0.00"]));
+    reset();
+    q("#frResults button[data-admin-action='fundraisingExportCsv_']").click();
+    await wait(() => downloads.length === 1);
+    const lines = (await blobText(downloads[0].blob)).split("\r\n");
+    ok("…and in Export CSV: an empty customer and 0, 0, 0", lines[1] === "2024-09-05,CLUB-9,Example Club,Example Boosters,,0,0,0"); }
+  { // A browser that refuses the page's storage (blocked site data): Record payout… still works, it just can't remember the account.
+    await generate("2024-01-01", "2024-12-31", "");
+    const before = d1.q("SELECT COUNT(*) AS n FROM expenses WHERE fundraiserOrgId = 'club'")[0].n;
+    Object.defineProperty(w, "localStorage", { configurable: true, get() { throw new w.DOMException("The operation is insecure.", "SecurityError"); } });
+    reset();
+    m = await openPay("club");
+    ok("with the browser's storage blocked, Record payout… still opens, Paid from at “Choose…”", !!m && m.querySelector("#frpAccount").value === "");
+    m.querySelector("#frpAmount").value = "0.25"; m.querySelector("#frpDate").value = "2024-08-01"; m.querySelector("#frpAccount").value = "1";
+    await save();
+    await wait(() => !modal()); await idle();
+    ok("…and the payout is saved, the window closed, and the report drawn again",
+      !modal() && lastToast().m === "Payout of $0.25 recorded for Example Boosters." && d1.q("SELECT COUNT(*) AS n FROM expenses WHERE fundraiserOrgId = 'club'")[0].n === before + 1 &&
+      of("getFundraisingReport").length === 1);
+    delete w.localStorage; }
+  { // Leaving the page while a payout is saving: nothing is drawn (or asked for) on the page you went to.
+    reset();
+    m = await openPay("club");
+    m.querySelector("#frpAmount").value = "0.10"; m.querySelector("#frpDate").value = "2024-08-02"; m.querySelector("#frpAccount").value = "1";
+    let release; hold = { action: "recordFundraiserPayout", gate: new Promise(r => { release = r; }) };
+    reset();
+    m.querySelector("#frpSave").click();
+    await wait(() => of("recordFundraiserPayout").length === 1);
+    w.location.hash = "#home";
+    await wait(() => !results()); await idle();
+    release(); await pause(50); await idle();
+    ok("a payout saved after leaving the report is recorded, and the report isn't asked for again on the page you went to",
+      lastToast().m === "Payout of $0.10 recorded for Example Boosters." && of("getFundraisingReport").length === 0 && !results() &&
+      d1.q("SELECT COUNT(*) AS n FROM expenses WHERE fundraiserOrgId = 'club' AND amountCents = 10")[0].n === 1); }
+  { // That payout changed under Finance → Expenses to “paid personally” (no account), shown before the page has its accounts.
+    d1.q("UPDATE expenses SET accountId = NULL, paidPersonally = 1 WHERE fundraiserOrgId = 'club' AND amountCents = 10");
+    w.eval("_accountsCache = null;");
+    await go();
+    await generate("2024-08-01", "2024-08-31", "club");
+    ok("a payout paid personally has an empty Paid from, even before the page has loaded its accounts; the other still names its account",
+      payRows().length === 2 && same(cellsOf(payRows()[0]).slice(2, 4), ["$0.10", ""]) && same(cellsOf(payRows()[1]).slice(2, 4), ["$0.25", "Business checking"])); }
+
   ok("nothing typed anywhere ran as HTML", w.__xss326 === undefined);
   await idle();
 })().catch((e) => { console.error(e); ok("test326 ran to the end", false); });

@@ -372,4 +372,20 @@ const PER = (amount, extra = {}) => ({ mode: "perPiece", amount, label: "Example
   ok("an invalid setup still gets its own message first", same(await lib.setOrgFundraiser(pre, "club", PER(0)), { error: MSG.amount }));
   ok("the readers' pure helpers don't need the database", lib.parseFundraiser_("") === null && lib.fundraiserLineCents_(null, { qty: 1, unitCents: 100 }) === 0);
   ok("and the shop row is untouched", pre.q("SELECT updatedAt FROM orgs WHERE orgId = 'club'")[0].updatedAt === "t0");
+
+  // =====================================================================================================
+  say("=== Odd cases: a shop that isn't there, a stored setup missing its number, a database that is down ===");
+  const od = await makeDb();
+  ok("getPublishedOrg for a shop that doesn't exist (never published, no row) gives null", (await lib.getPublishedOrg(od, "nope")) === null);
+  ok("a stored percent setup without its percentBps raises nothing (0, never NaN)",
+    lib.fundraiserLineCents_({ mode: "percent" }, { qty: 2, unitCents: 1000, taxMode: "exclusive" }) === 0);
+  ok("a stored per-piece setup without its cents raises nothing (0, never NaN)",
+    lib.fundraiserLineCents_({ mode: "perPiece", cents: "x" }, { qty: 2, unitCents: 1000, taxMode: "exclusive" }) === 0);
+  // Every query fails for a reason that has nothing to do with 0110 (the database out of reach).
+  const DOWN = "D1_ERROR: Network connection lost.";
+  const down = { ...od, prepare() { const fail = async () => { throw new Error(DOWN); }; const st = { first: fail, all: fail, run: fail }; return Object.assign({ bind: () => st }, st); } };
+  const thrown = async (p) => { try { await p; return ""; } catch (e) { return String(e && e.message); } };
+  ok("setOrgFundraiser on a database that is down passes the failure on, not “apply the migrations”",
+    (await thrown(lib.setOrgFundraiser(down, "club", PCT(10)))) === DOWN);
+  ok("…and nothing was saved", od.q("SELECT fundraiserJson FROM orgs WHERE orgId = 'club'")[0].fundraiserJson === "");
 })().catch((e) => { console.log("the fundraiser setup checks ran to the end:", false); console.error(e); process.exitCode = 1; });

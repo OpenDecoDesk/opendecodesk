@@ -999,7 +999,8 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (a === "setPaymentDate" && b.paymentId) months.push(await paymentMonth(env.DB, b.paymentId));
     if (a === "saveExpense" && b.expense && /^\d{4}-\d{2}-\d{2}$/.test(String(b.expense.date || ""))) months.push(String(b.expense.date).slice(0, 7));
     // A fundraiser payout is an expense dated when it was paid (migrations/0110).
-    if (a === "recordFundraiserPayout" && /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || ""))) months.push(String(b.date).slice(0, 7));
+    // The handler trims the date before saving it, so the month is read from the trimmed date too.
+    if (a === "recordFundraiserPayout" && /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || "").trim())) months.push(String(b.date).trim().slice(0, 7));
     if (["saveExpense", "deleteExpense"].includes(a) && (b.expenseId || (b.expense && b.expense.id))) months.push(await expenseMonth(env.DB, b.expenseId || b.expense.id));
     if (["saveMoneyEntry", "deleteMoneyEntry"].includes(a) && ["income", "owner", "transfer"].includes(b.kind)) {
       if (b.entry && /^\d{4}-\d{2}-\d{2}$/.test(String(b.entry.date || ""))) months.push(String(b.entry.date).slice(0, 7));

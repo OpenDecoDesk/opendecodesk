@@ -274,7 +274,8 @@ CREATE TABLE IF NOT EXISTS orders (
   downloadSalt        TEXT,                       -- migrations/0086: makes the order's download link (http.js downloadToken)
   downloadsEmailedAt  TEXT,                       -- migrations/0086: when the "Your downloads" email went out
   source              TEXT NOT NULL DEFAULT '',   -- migrations/0087: '' = made here; 'etsy' / 'shopify' / 'csv' = imported
-  externalOrderId     TEXT                        -- migrations/0087: the store's own order number
+  externalOrderId     TEXT,                       -- migrations/0087: the store's own order number
+  payOnDelivery       INTEGER NOT NULL DEFAULT 0 CHECK (payOnDelivery IN (0, 1))   -- migrations/0105: steps go on before it's paid
 );
 
 CREATE TABLE IF NOT EXISTS order_items (

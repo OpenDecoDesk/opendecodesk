@@ -27,6 +27,7 @@ export const PERMISSION_AREAS = [
       ["orders.stepsLate", "Steps: made, QA packed, shipped and completed"],
       ["orders.shipping", "Shipping labels and tracking"],
       ["orders.payments", "Payments, discounts and refunds"],
+      ["orders.payOnDelivery", "Set orders to pay on delivery"],
       ["orders.invoices", "Invoices and receipts"],
       ["orders.downloads", "Digital downloads"],
       ["orders.import", "Import orders"]] } ] },
@@ -100,6 +101,9 @@ const BY_FN = {
   "orders.payments": {
     edit: ["markPaidManual", "addPayment", "setPaymentDate", "setDiscount", "setShippingPaidAmount", "createShippingPaymentLink", "setPaymentAccount"],
     full: ["setRushFee", "recordRefund", "setRefundShipping", "deletePayment", "voidPayment", "setLineItemRefund"] },
+  // Pay on delivery (migrations/0105): the order's steps go on before it's paid. Its own function, so who may let work
+  // start unpaid is chosen apart from who records payments: Manager and Admin by default (Back office and Production none).
+  "orders.payOnDelivery": { edit: ["setPayOnDelivery"] },
   "orders.invoices": { read: ["getInvoiceDocument", "getOrderPdf"], edit: ["sendInvoice", "resendEmail"] },
   "orders.downloads": { read: ["getOrderDownloads"], edit: ["resendDownloads", "resetDownloads"], full: ["revokeDownloads"] },
   "orders.import": { edit: ["importOrders"] },

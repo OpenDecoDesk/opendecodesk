@@ -189,7 +189,7 @@ const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) a
   ok("every open order across the shops, oldest first; the completed one left out", actions().join() === "getOpenOrders" && dashRows() === "H1,H2,H3");
   ok("…the line of counts: 3 open orders, $20.00 balance due, per shop", /3 open orders · \$20\.00 balance due · Example Club: 2 · Rec League: 1/.test(dash().textContent.replace(/\s+/g, " ")));
   const chips = () => [...dash().querySelectorAll(".dash-chip")].map(b => b.textContent.trim());
-  ok("…a chip per status present, with its count", JSON.stringify(chips()) === JSON.stringify(["All (3)", "Awaiting payment (1)", "Paid — not started (1)", "Manufactured (1)"]));
+  ok("…a chip per status present, with its count", JSON.stringify(chips()) === JSON.stringify(["All (3)", "Awaiting payment (1)", "Paid or pay on delivery — not started (1)", "Manufactured (1)"]));
   const r1 = dash().querySelector('.dash-row[data-order="H1"]');
   ok("…each row: its age, shop, customer, items, total, what's owed and its status", /25 days ago/.test(r1.textContent) && /Example Club/.test(r1.textContent) && /Customer H1/.test(r1.textContent) &&
     /1× Club cap/.test(r1.textContent) && /\$20\.00/.test(r1.textContent) && /Awaiting payment/.test(r1.textContent) && /Paid/.test(dash().querySelector('.dash-row[data-order="H2"]').textContent));

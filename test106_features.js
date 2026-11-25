@@ -423,7 +423,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     // Orders, payments, fulfilment stages (incl. Mark manufactured, which uses blanks)
     "listOrgs", "getOrders", "getOrdersByIds", "getOrdersAllShops", "getOpenOrders", "getPendingCommunications", "sendTestEmail", "checkMailbox", "setOrderCompleted", "useBlanksFromStock", "markPaidManual", "resendEmail",
     "addPayment", "recordRefund", "setRefundShipping", "backfillStripeFees", "setPaymentDate", "deletePayment", "voidPayment", "setDiscount", "deleteOrder", "voidOrder",
-    "updateCustomerInfo", "createLocalSale", "importOrders", "createTestTransaction", "setFulfillmentStage", "bulkSetFulfillmentStage", "cancelLineItem", "bulkCancelLineItems", "setLineItemRefund", "editOrder",
+    "updateCustomerInfo", "createLocalSale", "setPayOnDelivery", "importOrders", "createTestTransaction", "setFulfillmentStage", "bulkSetFulfillmentStage", "cancelLineItem", "bulkCancelLineItems", "setLineItemRefund", "editOrder",
     "setRushFee", "recordTracking", "bulkRecordTracking", "setShippingInfo", "setShippingPaidAmount", "createShippingPaymentLink", "sendInvoice", "getInvoiceDocument", "getOrderPdf", "updateOrderDate", "setOrderDates", "setOrderDueDate", "bulkSetDueDate",
     "addBlankShipment", "updateBlankShipment", "deleteBlankShipment", "getBlankShipments", "getOrderItemFiles", "saveOrderItemFile", "deleteOrderItemFile",
     // Reports that aren't bookkeeping

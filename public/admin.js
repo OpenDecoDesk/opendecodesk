@@ -7232,9 +7232,16 @@ async function createLocalSaleOnce_(orgId){
     return;
   }
 
+  // A product where the customer picks a garment color and a graphic at each location (migrations/0036) needs the
+  // shop's graphics and their add-on prices, as on its page and in Edit items (the server checks and prices them again).
+  let graphics = [], tiersCents = {};
+  if(products.some(p => p.configurable)){
+    try{ const g = await hoopApi_({ action: "listGraphics", org: orgId }); graphics = g.graphics || []; tiersCents = g.tiersCents || {}; }
+    catch(e){ showToast("Could not load the shop's graphics: " + ((e && e.message) || "unknown error"), true); }
+  }
   // Pay on delivery (migrations/0105): offered where the shop allows it (limited to local sales or not) to a role that may set it.
   const pod = podRule_(orgId);
-  const result = await showLocalSaleModal(products, blanks, { payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit") });
+  const result = await showLocalSaleModal(products, blanks, { payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"), graphics, tiersCents });
   if(!result) return;
   const { sendInvoice: wantsInvoice, ...sale } = result;
   // This sale's key: the server makes one order (and books one payment) per key, so the retry below, or a
@@ -7320,6 +7327,14 @@ function showLocalSaleModal(products, blanks, opts = {}){
           </label>
         </div>
 
+        <div data-f="cfgWrap" style="display:none;">
+          <div data-f="colorWrap">
+            ${LS("Garment color", false, fid("lsColor", n))}
+            <select id="${fid("lsColor", n)}" data-f="color" style="${IS()}"></select>
+          </div>
+          <div data-f="cfgLocs"></div>
+        </div>
+
         <div id="${fid("lsSizeWrap", n)}" data-f="sizeWrap" style="display:none;">
           ${LS("Size", false, fid("lsSize", n))}
           <select id="${fid("lsSize", n)}" data-f="size" style="${IS()}"></select>
@@ -7327,6 +7342,13 @@ function showLocalSaleModal(products, blanks, opts = {}){
 
         ${LS("Qty", false, fid("lsQty", n))}
         <input type="number" id="${fid("lsQty", n)}" data-f="qty" min="1" max="50" value="1" style="${IS()}">
+
+        <div data-f="customDesignWrap" style="display:none;margin-bottom:10px;">
+          <label style="font-size:14px;font-weight:500;display:flex;align-items:flex-start;gap:8px;">
+            <input type="checkbox" id="${fid("lsCustomDesign", n)}" data-f="customDesign" style="width:auto;margin:3px 0 0;">
+            <span>Customer's own design <span data-f="customDesignNote" style="font-weight:400;color:var(--ink-soft,#888);font-size:13px;"></span></span>
+          </label>
+        </div>
 
         <div id="${fid("lsPersWrap", n)}" data-f="persWrap" style="display:none;">
           <label style="font-size:14px;font-weight:500;display:flex;align-items:center;gap:8px;margin-bottom:8px;">
@@ -7461,6 +7483,109 @@ function showLocalSaleModal(products, blanks, opts = {}){
     const f = (line, name) => line.querySelector(`[data-f="${name}"]`);
     const isSized_ = (p) => !!p && p.pricingMode !== "flat" && p.sizePricing && Object.keys(p.sizePricing).length > 0;
 
+    // ---- The shop page's choices (public/storefront.js renderConfigurableProduct / cfgRefresh_ / addToCart) ----
+    // A product with choices (migrations/0036): a garment color and, at each location, a graphic (with its thread
+    // color when it has several) or the customer's own design; the price follows the color's price group
+    // (migrations/0064) plus each graphic's add-on. A plain product may take the customer's own design
+    // (migrations/0054). The server checks and prices all of it again (createLocalSale → priceItem).
+    const gById = {}; (opts.graphics || []).forEach(g => { gById[g.id] = g; });
+    const addOnCents_ = (g) => (g && g.tier ? Number((opts.tiersCents || {})[g.tier]) || 0 : 0);
+    const isCfg_ = (p) => !!(p && p.configurable);
+    // A location's graphics for this color, filtered as the shop's page filters them (cfgOptionsForLocation_).
+    const cfgOpts_ = (p, loc, color) => (loc.graphicIds || []).map(id => gById[id]).filter(Boolean)
+      .filter(g => g.visible !== false)
+      .filter(g => !(g.allowedLocations && g.allowedLocations.length) || g.allowedLocations.includes(loc.key))
+      .filter(g => !(g.allowedGarmentColors && g.allowedGarmentColors.length) || !color || g.allowedGarmentColors.includes(color))
+      .filter(g => !(color && (p.blockedGraphicColors || []).some(b => Number(b.graphicId) === Number(g.id) && b.color === color)));
+    // The price before add-ons: the color's price group, else the product's own (cfgBasePrice_).
+    const basePrice_ = (p, color, size) => {
+      const grp = color ? (p.colorGroups || []).find(x => (x.colors || []).includes(color)) : null;
+      if(isSized_(p)){ const v = grp && grp.sizePricing ? grp.sizePricing[size] : undefined; return typeof v === "number" ? v : Number((p.sizePricing || {})[size] || 0); }
+      return grp && typeof grp.flatPrice === "number" ? grp.flatPrice : Number(p.flatPrice || 0);
+    };
+    // The customer's own design: a location's own add-on, else the product's.
+    const customDesignPrice_ = (p, loc) => loc && loc.customDesignPriceCents != null && loc.customDesignPriceCents !== "" && Number.isFinite(Number(loc.customDesignPriceCents))
+      ? Number(loc.customDesignPriceCents) / 100 : Number(p.customDesignPrice) || 0;
+    const plus_ = (v) => v > 0 ? ` (+$${v.toFixed(2)})` : "";
+    // A plain product with no design of its own is made from the customer's (db.js customDesignRequired).
+    const customDesignRequired_ = (p) => !!(p && p.customDesign && !p.configurable && p.designId == null && !p.noDesignNeeded);
+    const cfgColor_ = (line, p) => (p.garmentColors || []).length ? f(line, "color").value : "";
+    const locSel_ = (line, key) => [...line.querySelectorAll('select[data-f="loc"]')].find(s => s.dataset.loc === key);
+    const inkSel_ = (line, key) => [...line.querySelectorAll('select[data-f="ink"]')].find(s => s.dataset.loc === key);
+
+    // Draws a product's color and per-location lists; `keep` keeps the picks that are still offered (after a color
+    // or graphic change).
+    function drawCfg(line, keep){
+      const p = productMap[f(line, "product").value];
+      const wrap = f(line, "cfgWrap");
+      if(!isCfg_(p)){ wrap.style.display = "none"; f(line, "cfgLocs").innerHTML = ""; return; }
+      wrap.style.display = "";
+      const colors = p.garmentColors || [];
+      const colorSel = f(line, "color");
+      f(line, "colorWrap").style.display = colors.length ? "" : "none";
+      if(!keep){ colorSel.innerHTML = colors.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join(""); }
+      const color = cfgColor_(line, p);
+      const prev = {}, prevInk = {};
+      if(keep) for(const loc of (p.locations || [])){ const s = locSel_(line, loc.key), k = inkSel_(line, loc.key); if(s) prev[loc.key] = s.value; if(k) prevInk[loc.key] = k.value; }
+      const n = Number(line.dataset.line) || 0;
+      const locs = p.locations || [];
+      const fixed = (p.fixedTransfers || []).length > 0;
+      f(line, "cfgLocs").innerHTML = locs.map((loc, i) => {
+        const options = cfgOpts_(p, loc, color);
+        const custom = !!p.customDesign;
+        // One location and nothing fixed: there's nothing to leave blank, so no None and the first is picked.
+        const onlyLoc = locs.length === 1 && (options.length > 0 || custom) && !fixed;
+        const ids = [...options.map(g => String(g.id)), ...(custom ? ["custom"] : [])];
+        const value = keep && prev[loc.key] != null && (prev[loc.key] === "" ? !onlyLoc : ids.includes(prev[loc.key])) ? prev[loc.key] : (onlyLoc ? (ids[0] || "") : "");
+        const id = fid("lsLoc", n) + "_" + i, inkId = fid("lsInk", n) + "_" + i;
+        const g = value && value !== "custom" ? gById[value] : null;
+        const inks = g && Array.isArray(g.inkColors) && g.inkColors.length > 1 ? g.inkColors : [];
+        const ink = inks.includes(prevInk[loc.key]) ? prevInk[loc.key] : (inks[0] || "");
+        return `${LS(escapeHtml(loc.label || loc.key), false, id)}
+          <select id="${id}" data-f="loc" data-loc="${escapeHtml(loc.key)}" style="${IS()}">
+            ${onlyLoc ? "" : `<option value="" ${value === "" ? "selected" : ""}>None</option>`}
+            ${options.map(o => `<option value="${o.id}" ${String(o.id) === value ? "selected" : ""}>${escapeHtml(o.name)}${plus_(addOnCents_(o) / 100)}</option>`).join("")}
+            ${custom ? `<option value="custom" ${value === "custom" ? "selected" : ""}>Customer's own design${plus_(customDesignPrice_(p, loc))}</option>` : ""}
+          </select>
+          <select id="${inkId}" data-f="ink" data-loc="${escapeHtml(loc.key)}" aria-label="Thread color for ${escapeHtml(loc.label || loc.key)}" style="${IS()}${inks.length ? "" : "display:none;"}margin-top:-6px;">
+            ${inks.map(c => `<option value="${escapeHtml(c)}" ${c === ink ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}
+          </select>`;
+      }).join("");
+    }
+    // The line's choices as the shop's page sends them: { garmentColor, locations: [{location, graphicId, ink} | {location, custom: true}] }.
+    function cfgConfig_(line, p){
+      const locations = [];
+      for(const loc of (p.locations || [])){
+        const v = (locSel_(line, loc.key) || {}).value || "";
+        if(!v) continue;
+        if(v === "custom"){ locations.push({ location: loc.key, custom: true }); continue; }
+        const g = gById[v], k = inkSel_(line, loc.key);
+        const ink = k && k.style.display !== "none" ? k.value : (g && Array.isArray(g.inkColors) && g.inkColors.length === 1 ? g.inkColors[0] : "");
+        locations.push({ location: loc.key, graphicId: Number(v), ink });
+      }
+      return { garmentColor: cfgColor_(line, p), locations };
+    }
+    // What one of the product costs before personalization: the color's price (or the size's) plus the add-ons.
+    function catalogUnit_(line, p){
+      const size = isSized_(p) ? f(line, "size").value : "";
+      if(isCfg_(p)){
+        const c = cfgConfig_(line, p);
+        let u = basePrice_(p, c.garmentColor, size);
+        for(const l of c.locations) u += l.custom ? customDesignPrice_(p, (p.locations || []).find(x => x.key === l.location)) : addOnCents_(gById[l.graphicId]) / 100;
+        return u;
+      }
+      const u = isSized_(p) ? Number((p.sizePricing || {})[size] || 0) : Number(p.flatPrice || 0);
+      return u + (p.customDesign && f(line, "customDesign").checked ? Number(p.customDesignPrice) || 0 : 0);
+    }
+    // The size list, priced for the color chosen; the size picked stays picked.
+    function drawSizes(line, p){
+      const sel = f(line, "size"), was = sel.value;
+      const color = isCfg_(p) ? cfgColor_(line, p) : "";
+      sel.innerHTML = productSizes_(p.sizePricing)
+        .map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)} — $${basePrice_(p, color, s).toFixed(2)}</option>`).join("");
+      if(was && [...sel.options].some(o => o.value === was)) sel.value = was;
+    }
+
     function updateForProduct(line){
       const pid = f(line, "product").value;
       const custom = pid === "__custom__";
@@ -7471,6 +7596,9 @@ function showLocalSaleModal(products, blanks, opts = {}){
       if(custom){
         f(line, "sizeWrap").style.display = "none";
         f(line, "persWrap").style.display = "none";
+        f(line, "cfgWrap").style.display = "none";
+        f(line, "cfgLocs").innerHTML = "";
+        f(line, "customDesignWrap").style.display = "none";
         f(line, "override").checked = false;
         f(line, "overridePriceWrap").style.display = "none";
         updatePricePreview();
@@ -7483,12 +7611,20 @@ function showLocalSaleModal(products, blanks, opts = {}){
       const isSized = isSized_(p);
       const hasPers = p.personalizationPrice != null;
 
+      drawCfg(line, false);
       f(line, "sizeWrap").style.display = isSized ? "" : "none";
-      if(isSized){
-        f(line, "size").innerHTML = productSizes_(p.sizePricing)
-          .map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)} — $${Number(p.sizePricing[s]).toFixed(2)}</option>`)
-          .join("");
-      }
+      f(line, "size").innerHTML = "";
+      if(isSized) drawSizes(line, p);
+
+      // The customer's own design on a plain product: a choice, or (no design of its own) what it's made from.
+      const takesOwn = !!p.customDesign && !isCfg_(p);
+      const needsOwn = customDesignRequired_(p);
+      f(line, "customDesignWrap").style.display = takesOwn ? "" : "none";
+      f(line, "customDesign").checked = needsOwn;
+      f(line, "customDesign").disabled = needsOwn;
+      f(line, "customDesignNote").textContent = takesOwn
+        ? plus_(Number(p.customDesignPrice) || 0).trim() + (needsOwn ? " — this product is made from it." : "") + " Attach the file with Files on the order once it's recorded."
+        : "";
 
       f(line, "persWrap").style.display = hasPers ? "" : "none";
       if(hasPers){
@@ -7525,9 +7661,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
       const p = productMap[pid];
       if(!p) return { total: 0, text: "" };
 
-      const isSized = isSized_(p);
-      const size = isSized ? f(line, "size").value : "OSFA";
-      const catalogUnitPrice = isSized ? Number((p.sizePricing || {})[size] || 0) : Number(p.flatPrice || 0);
+      const catalogUnitPrice = catalogUnit_(line, p);
       const personalized = p.personalizationPrice != null && f(line, "pers").checked;
       const persFee = personalized ? Number(p.personalizationPrice) : 0;
 
@@ -7593,6 +7727,18 @@ function showLocalSaleModal(products, blanks, opts = {}){
         updatePricePreview();
       });
       f(line, "customPrice").addEventListener("input", updatePricePreview);
+      f(line, "customDesign").addEventListener("change", updatePricePreview);
+      // A product's choices: a new color or graphic redraws the lists (what's offered for that color, the graphic's
+      // thread colors) and the size prices; a thread color only changes what's sent.
+      f(line, "cfgWrap").addEventListener("change", (e) => {
+        const p = productMap[f(line, "product").value];
+        if(!isCfg_(p)) return;
+        if(e.target.matches('[data-f="color"], [data-f="loc"]')){
+          drawCfg(line, true);
+          if(isSized_(p)) drawSizes(line, p);
+        }
+        updatePricePreview();
+      });
       const rm = f(line, "remove");
       if(rm) rm.addEventListener("click", () => {
         const all = lines(), at = all.indexOf(line);
@@ -7644,6 +7790,16 @@ function showLocalSaleModal(products, blanks, opts = {}){
         const optVal = f(line, "persOptionWrap").style.display !== "none" ? f(line, "persOption").value.trim() : "";
         persName = f(line, "persName").value.trim() || optVal;
       }
+      // A product with choices: what the customer picked, as the shop's page sends it — a graphic somewhere unless
+      // the product is decorated already (its printed transfers) or has no locations.
+      let config = null;
+      if(isCfg_(p)){
+        config = cfgConfig_(line, p);
+        if(!config.locations.length && !(p.fixedTransfers || []).length && (p.locations || []).length){
+          return { error: "Choose a graphic for at least one location.", focus: line.querySelector('select[data-f="loc"]') || f(line, "product") };
+        }
+      }
+      const customDesign = !!p.customDesign && !isCfg_(p) && f(line, "customDesign").checked;
       let customUnitPrice = null;
       if(f(line, "override").checked){
         customUnitPrice = parseFloat(f(line, "customPrice").value);
@@ -7651,6 +7807,8 @@ function showLocalSaleModal(products, blanks, opts = {}){
       }
       return { item: { productId: p.productId, name: p.name, type: p.type,
                size, qty, personalized, persName,
+               ...(config ? { config } : {}),
+               ...(customDesign ? { customDesign: true } : {}),
                ...(customUnitPrice !== null ? { customUnitPrice } : {}) } };
     }
 

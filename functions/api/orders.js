@@ -2667,14 +2667,22 @@ async function handleOrdersPost_(context, listBefore = null) {
             throw Object.assign(new Error("Custom items require a description."), { userFacing: true });
           }
           let unitPrice, personalizationFee, lineConfig, catalogName = "", catalogType = "";
+          // The customer's own design on a plain product (migrations/0054), ticked in the window: the line gets the
+          // design's entry with no file yet (attached with Files on the order) and its add-on. On a product with
+          // choices it is one of the location picks in it.config instead.
+          const custom = !isCustomItem && it.customDesign === true ? { [CUSTOM_PLAIN_LOCATION]: null } : undefined;
           if (hasCustom) {
-            // For catalog products: validate the product exists but ignore its price.
-            // For __custom__ items: no catalog lookup needed.
-            if (!isCustomItem) { const v = await priceItem(env.DB, org, it.productId, it.size, qty, false, undefined, { lookups }); catalogName = v.name; catalogType = v.type; }
+            // For catalog products: the product and its choices (garment color, a graphic at each location) are
+            // checked as for any sale, and the line keeps the choices — production makes it from them — but the
+            // price typed in replaces the catalog's. For __custom__ items: no catalog lookup needed.
+            if (!isCustomItem) {
+              const v = await priceItem(env.DB, org, it.productId, it.size, qty, false, it.config, { lookups, custom });
+              catalogName = v.name; catalogType = v.type; lineConfig = v.config;
+            }
             unitPrice = rawCustom;
             personalizationFee = 0;
           } else {
-            const priced = await priceItem(env.DB, org, it.productId, it.size, qty, !!it.personalized, it.config, { lookups });
+            const priced = await priceItem(env.DB, org, it.productId, it.size, qty, !!it.personalized, it.config, { lookups, custom });
             ({ unitPrice, personalizationFee } = priced);
             lineConfig = priced.config;
             catalogName = priced.name; catalogType = priced.type;

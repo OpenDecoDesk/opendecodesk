@@ -20,6 +20,9 @@ const { createD1 } = require("./testlib/d1-shim.js");
 //     of its own), and the line keeps the design's entry for Files, with its add-on;
 //   - the server: Override price on a product with choices now checks those choices and keeps them on the line
 //     (it priced it without them and failed the same way); the customer's own design on a plain product is kept.
+//   - Edit items → + Add item had the same gap (an added line of such a product had no lists, and Save failed the same
+//     way): an added line now gets the color and graphic lists (labelled), the customer's own design, the color's price,
+//     the same refusal when nothing is picked, and is saved with its choices (editOrder additions).
 // Invented data only.
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1");
@@ -220,6 +223,57 @@ const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) a
   ok("…all three lines are recorded: the logo tee with the design's entry ($23), the tee on Navy with Star ($20), the cap ($15)", !!made2 &&
     byProduct(made2, "logo-tee").unitPrice === 23 && byProduct(made2, "logo-tee").config.locations.some(l => l.custom && l.location === "customdesign") &&
     byProduct(made2, "tee").unitPrice === 20 && byProduct(made2, "tee").config.garmentColor === "Navy" && byProduct(made2, "cap").unitPrice === 15);
+
+  console.log("\n=== Edit items: + Add item with a product's choices ===");
+  // An order with one cap, as the Orders page has it (its list is what Edit items opens from).
+  r = await sale([{ productId: "cap", size: "OSFA", qty: 1 }], { customerName: "Edit Me" });
+  const editId = r.body.orderId;
+  w._ordersCache = { club: (await call({ action: "getOrders", org: "club" })).body.orders };
+  toasts.length = 0; sent.length = 0;
+  const editing = w.editOrder("club", editId);
+  const rowsEl = () => d.querySelector("#editOrderRows");
+  await wait(() => !!rowsEl());
+  ok("Edit items opens", !!rowsEl());
+  d.querySelector("#editOrderAddRow").click();
+  const newRow = () => rowsEl().querySelectorAll("tr")[1];
+  choose(newRow().querySelector('select[data-field="productId"]'), "tee");
+  const cfgSel = (field, loc) => newRow().querySelector(`select[data-cfgfield="${field}"]${loc ? `[data-loc="${loc}"]` : ""}`);
+  ok("an added Club Tee shows its garment colors and a graphic list for each location", !!cfgSel("color") && optTexts(cfgSel("color")).join("|") === "Navy|Heather" &&
+    !!cfgSel("graphic", CHEST) && !!cfgSel("graphic", BACK));
+  ok("…labelled for a screen reader", !!cfgSel("color") && cfgSel("color").getAttribute("aria-label") === "Garment color" && !!cfgSel("graphic", CHEST) && cfgSel("graphic", CHEST).getAttribute("aria-label") === "Left chest");
+  ok("…its product can still be changed (a new line)", !!newRow().querySelector('select[data-field="productId"]'));
+  ok("…Left chest offers the customer's own design on a new line", optTexts(cfgSel("graphic", CHEST)).includes("Customer's own design (+$6.00)"));
+  d.querySelector("#editOrderSave").click();
+  await pause(20);
+  ok("with no graphic anywhere, Save is refused in the window and nothing is sent", /Choose a graphic for at least one location\./.test((d.querySelector("#editOrderErr") || {}).textContent || "") &&
+    !sent.some(b => b.action === "editOrder"));
+  if (cfgSel("color")) choose(cfgSel("color"), "Heather");
+  ok("on Heather, Star and Wave are gone", optTexts(cfgSel("graphic", CHEST)).join("|") === "None|Crest (+$3.00)|Customer's own design (+$6.00)");
+  if (cfgSel("graphic", CHEST)) choose(cfgSel("graphic", CHEST), String(crest));
+  ok("picking Crest shows its thread colors", !!cfgSel("ink", CHEST) && optTexts(cfgSel("ink", CHEST)).join("|") === "White|Gold");
+  if (cfgSel("ink", CHEST)) choose(cfgSel("ink", CHEST), "Gold");
+  choose(newRow().querySelector('select[data-field="size"]'), "M");
+  ok("the new total adds Heather's $24 + Crest's $3 to the cap's $15 ($42.00)", /\$42\.00/.test(d.querySelector("#editOrderNewTotal").textContent));
+  // A plain product made from the customer's own design, added too.
+  d.querySelector("#editOrderAddRow").click();
+  const row3 = () => rowsEl().querySelectorAll("tr")[2];
+  choose(row3().querySelector('select[data-field="productId"]'), "logo-tee");
+  const own = row3().querySelector('input[data-field="customDesign"]');
+  ok("an added Your Logo Tee has the customer's own design ticked and fixed", !!own && own.checked && own.disabled);
+  ok("…and the new total adds its $18 + $5 ($65.00)", /\$65\.00/.test(d.querySelector("#editOrderNewTotal").textContent));
+  d.querySelector("#editOrderSave").click();
+  // Before the fix the window stays open (or the server refuses): don't wait for a sale that never comes.
+  await Promise.race([editing, pause(3000)]);
+  const editReq = sent.find(b => b.action === "editOrder");
+  ok("Save sends the new lines with their choices", !!editReq && editReq.additions.length === 2 &&
+    JSON.stringify(editReq.additions[0].config) === JSON.stringify({ garmentColor: "Heather", locations: [{ location: CHEST, graphicId: crest, ink: "Gold" }] }) &&
+    editReq.additions[1].customDesign === true && !editReq.additions[1].config);
+  const edited = await lib.getOrderById(d1, editId);
+  const added = (pid) => edited.items.find(i => i.productId === pid && !i.cancelDate);
+  ok("…the order now has the tee on Heather with Crest in Gold at $27", toasts.some(t => /^Order updated/.test(t.m) && !t.err) && !!added("tee") && added("tee").unitPrice === 27 &&
+    added("tee").config.garmentColor === "Heather" && added("tee").config.locations.some(l => l.graphicId === crest && l.ink === "Gold"));
+  ok("…and the logo tee with the design's entry, waiting for the file, at $23", !!added("logo-tee") && added("logo-tee").unitPrice === 23 &&
+    !!added("logo-tee").config && added("logo-tee").config.locations.some(l => l.custom && l.location === "customdesign" && !l.uploadId));
 
   finished = true;
   console.log(`\n${pass} passed, ${fail} failed`);

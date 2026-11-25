@@ -11,6 +11,7 @@
 // - Override price on such a product keeps the choices too;
 // - a plain product that takes only the customer's own design has the box ticked, and the line keeps the design's
 //   entry for Files, with its add-on.
+// - Edit items → + Add item: an added line of a product with choices gets the same lists and is saved with them.
 //
 // Each test makes its own shop, location, graphics and products through the owner's API; the sale is made through
 // the page.
@@ -131,4 +132,38 @@ test("Local sale: a product made from the customer's own design has it ticked, a
   const line = await lineOf(api, shop, customer);
   expect(line.unitPrice).toBe(23);
   expect(line.config.locations.find(l => l.custom)).toMatchObject({ location: "customdesign", uploadId: null });
+});
+
+// Edit items → + Add item had the same gap: an added line of a product with choices had no color or graphic lists, so
+// Save answered "Edit failed: Pick a garment color."
+test("Edit items: + Add item sells a product with choices too, at the color's price plus the add-on", async ({ page, api }) => {
+  const { shop, tee, key, location, crestId } = await optionsShop(api, { logoTee: false });
+  // An order with one cap, made through Local sale's own request.
+  await api("createProduct", { org: shop.orgId, productId: "cap", type: "cap", name: "Club Cap", pricingMode: "flat", flatPrice: 15, visible: true, images: [], noDesignNeeded: true });
+  await api("publish", { org: shop.orgId });
+  const customer = uniq("Edit Mee");
+  const { orderId } = await api("createLocalSale", { org: shop.orgId, customerName: customer, paymentMethod: "Cash", items: [{ productId: "cap", size: "OSFA", qty: 1 }] });
+
+  if (page.url().startsWith(ADMIN)) await leaveAdmin(page);
+  await openAdmin(page, "orders/" + shop.orgId);
+  await page.locator(`tr[data-order="${orderId}"]`).first().locator("td[data-action-td]").getByRole("button", { name: "Edit items" }).click();
+  const rows = page.locator("#editOrderRows");
+  await expect(rows).toBeVisible();
+  await page.getByRole("button", { name: "+ Add item" }).click();
+  const added = rows.locator("tr").nth(1);
+  await added.locator('select[data-field="productId"]').selectOption({ label: tee.name });
+  const color = added.getByLabel("Garment color");
+  await expect(color.locator("option")).toHaveText(["Navy", "Heather"]);
+  await color.selectOption("Heather");
+  await added.getByLabel(location, { exact: true }).selectOption({ label: "Crest (+$3.00)" });
+  await added.getByLabel("Thread color for " + location).selectOption("Gold");
+  await expect(page.locator("#editOrderNewTotal")).toHaveText("$42.00");   // the cap's $15 + Heather's $24 + Crest's $3
+  await page.locator("#editOrderSave").click();
+  await expect(toast(page)).toContainText("Order updated");
+
+  const order = (await api("getOrders", { org: shop.orgId })).orders.find(o => o.orderId === orderId);
+  const line = order.items.find(i => i.productId === tee.productId);
+  expect(line.unitPrice).toBe(27);
+  expect(line.config.garmentColor).toBe("Heather");
+  expect(line.config.locations.find(l => l.location === key)).toMatchObject({ graphicId: crestId, ink: "Gold" });
 });

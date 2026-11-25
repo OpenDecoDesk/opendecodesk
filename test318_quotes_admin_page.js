@@ -686,7 +686,15 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
     lines()[2].querySelector("[data-qt-remove]").click(); await pause(30);
     ok("a second change while one is being saved: “Still saving — try again in a moment.”, nothing more sent", q("#qtErr").textContent === "Still saving — try again in a moment." && of("saveEstimate").length === 1);
     release(); await wait(() => cells(lines()[0])[5] !== "" && qtyBox(0).value === "14" && q("#qtSaved").textContent === "Saved.");
-    ok("…the first one is saved, and the line it would have removed is still there", lines().length === 4 && itemsOf(Q1)[0].qty === 14 && itemsOf(Q1).length === 4); }
+    ok("…the first one is saved, and the line it would have removed is still there", lines().length === 4 && itemsOf(Q1)[0].qty === 14 && itemsOf(Q1).length === 4);
+    ok("…and “Still saving” is gone once it has (it can be tried again now)", q("#qtErr").textContent === ""); }
+  { let release; const gate = new Promise(r => { release = r; });
+    scripted = { action: "saveEstimate", status: 400, body: async () => { await gate; return { status: "error", message: "Line 1: couldn't price it. Try again." }; } };
+    reset(); setQty(0, "16"); await wait(() => of("saveEstimate").length === 1);
+    lines()[2].querySelector("[data-qt-remove]").click(); await pause(30);
+    release(); await wait(() => q("#qtErr").textContent !== "Still saving — try again in a moment.");
+    ok("…when the first save is refused, its own reason replaces “Still saving”", q("#qtErr").textContent === "Line 1: couldn't price it. Try again." && itemsOf(Q1)[0].qty === 14);
+    scripted = null; }
   { let release; hold = { action: "saveEstimate", gate: new Promise(r => { release = r; }) };
     reset(); setQty(0, "15"); await wait(() => of("saveEstimate").length === 1);
     await go("quotes");
@@ -806,12 +814,17 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   ok("Done closes the window and draws the quote again, sending nothing more", !modal() && of("sendEstimate").length === 0 && of("getEstimate").length === 1);
   globalThis.__mailOk318 = true;
   ok("a sent quote is tagged “Sent”, says when and to whom", q("h2.cust-name .qt-st-sent").textContent === "Sent" && qa("#qtPage .cust-sub")[1].textContent === "Sent " + w.adminDate_(est(QSAM).sentAt) + " to sam@example.com");
-  ok("…says its lines and prices are fixed", qa("#qtPage .cust-note").some(n => n.textContent === "This quote has been sent, so its lines and prices are fixed; its title, notes and expiry can still change. Its lines can change again if the customer asks for changes."));
+  ok("…says it is fixed as sent, all but its internal note", qa("#qtPage .cust-note").some(n => n.textContent === "This quote has been sent, so it is fixed as the customer has it: its lines, prices, title, note to the customer and expiry. Only the internal note can change. The rest can change again if the customer asks for changes."));
   ok("…its lines can't be changed: no add buttons, the quantity as text, no Change or Remove", !q(".qt-add") && !q("#qtLines input") && !q("[data-qt-edit]") && !q("[data-qt-remove]") && qa("#qtLines thead th").length === 6 && cells(lines()[0])[1] === "1");
   ok("…no word about catalog prices any more", !q("#qtTotals .cust-note"));
-  ok("…the fields above stay open, with Save; the button reads “Send again…”", !q("#qtTitle").disabled && !q("#qtInternal").disabled && q("#qtSave").textContent === "Save" && q("#qtSend").textContent === "Send again…");
-  q("#qtInternal").value = "Waiting on the art."; reset(); q("#qtSave").click(); await wait(() => toasts.length === 1);
-  ok("Save on a sent quote sends the fields but no lines, and the internal note is stored", of("saveEstimate").length === 1 && !("items" in of("saveEstimate")[0]) && lastToast().m === "Quote saved." && est(QSAM).internalNote === "Waiting on the art.");
+  ok("…only the internal note stays open (title, note to the customer and expiry can't change), with Save; the button reads “Send again…”",
+    q("#qtTitle").disabled && q("#qtMessage").disabled && q("#qtExpires").disabled && !q("#qtInternal").disabled && q("#qtSave").textContent === "Save" && q("#qtSend").textContent === "Send again…");
+  const titleWas = est(QSAM).title;
+  q("#qtTitle").value = "Changed while disabled"; q("#qtInternal").value = "Waiting on the art."; q("#qtInternal").dispatchEvent(new w.Event("input", { bubbles: true }));
+  reset(); q("#qtSave").click(); await wait(() => toasts.length === 1);
+  ok("Save on a sent quote sends the internal note alone (no lines, no title, note or expiry), and it is stored",
+    of("saveEstimate").length === 1 && same(Object.keys(of("saveEstimate")[0]).filter(k => k !== "key").sort(), ["action", "id", "internalNote"]) && lastToast().m === "Quote saved." &&
+    est(QSAM).internalNote === "Waiting on the art." && est(QSAM).title === titleWas && q("#qtErr").textContent === "");
   q("#qtSend").click(); await wait(() => modal());
   ok("Send again… opens “Send again: <number>”, to the address it went to, saying it is the same link", sm().querySelector("[data-dialog-title]").textContent === "Send again: " + est(QSAM).number && sm().querySelector("#qtSendEmail").value === "sam@example.com" &&
     sm().querySelector(".cust-note").textContent === "The customer gets the same link again." && sm().querySelector("#qtSendGo").textContent === "Send again" && sm().querySelector("#qtSendMsg").value === "Here is your <quote>.");

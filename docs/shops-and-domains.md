@@ -243,7 +243,8 @@ A product can cost less per piece in bulk. On the product form, **Quantity break
 each step: from how many pieces, and how much comes off each piece — "from 12 pieces, $2.00 off
 each; from 48, $3.50 off each". Up to six rows. Each row starts at more pieces than the one before
 (from 2 up to 100,000) and takes more off, and no row can take a piece down to nothing: the amount
-off has to be less than the product's lowest price.
+off has to be less than the product's lowest price. That holds when you lower a price, too: a
+price at or under a break's amount is refused until the break is lowered.
 
 - **What counts.** The pieces of that product in one order, across all its sizes and colors, added
   together. Other products don't count towards it, and neither do cancelled lines. A version of a
@@ -694,8 +695,8 @@ and neither does the tax rate ([sales-tax.md](sales-tax.md#quotes)).
   emails them its invoice ([Invoices](#invoices)) to choose delivery and pay. **Convert to order**
   does the same from the back office (tick the box to email the invoice), when the customer says
   yes another way.
-- **The order** is a local sale in the quote's shop, linked to the customer (so their tax
-  exemption applies), at the prices quoted. Each fee becomes a line of its own ("Setup fee — …").
+- **The order** is a local sale in the quote's shop, linked to the customer, at the prices and
+  with the tax quoted ([sales-tax.md](sales-tax.md#quotes)). Each fee becomes a line of its own ("Setup fee — …").
   The order shows **From quote Q-…**, and the quote links to the order. A quote makes one order:
   converting it again only gives you the same order, and the customer's link, once accepted, names it.
   Staff can convert a quote whatever its expiry date; only a cancelled one can't be.

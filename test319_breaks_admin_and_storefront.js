@@ -391,6 +391,8 @@ const reply = (status, body) => ({ ok: status < 400, status, json: async () => b
   ok("an accept refused meanwhile shows the server's reason, in the customer's words, as an alert",
     text(id("estErr")) === "This quote expired on Saturday, January 15, 2000 — contact us for a new one." && id("estErr").getAttribute("role") === "alert");
   ok("…the confirmation closes, and the order isn't made", !id("estConfirm") && d1.q("SELECT status FROM estimates WHERE id=?", q7.id)[0].status === "sent");
+  ok("…and the page is drawn again from the quote the server sent back: expired, with no Accept quote or Ask for changes",
+    !id("estAccept") && !id("estAskOpen") && !id("estAcceptYes") && /^This quote expired on January 15, 2000, so it can't be accepted\./.test(text(app().querySelector(".inv-banner"))));
   d1._raw.exec(`UPDATE estimates SET expiresOn='2999-12-31' WHERE id=${q7.id}`);
   let postMode = "drop";
   ({ w, d } = await estPage(q7.token, { estimateFetch: async (u, init) => {

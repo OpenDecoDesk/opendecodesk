@@ -128,10 +128,12 @@ quote has no shipping address, so it counts as in your home state.
 - **Sending it keeps** the rate and whether prices include tax, as they were that moment (a rate of
   nothing when the shop or the customer was exempt). Changing the settings afterwards doesn't
   change a quote already sent; sending a revised one takes them again.
-- **The order it becomes** is made like a local sale with the customer picked, on the day it is
-  accepted or converted, and taxed as that sale would be: by the settings and the exemptions of
-  that day, and by the delivery the customer chooses on the invoice. When nothing has changed in
-  between, that is the tax the quote showed.
+- **The order it becomes**, when it is accepted or converted, carries the quote's tax: a quote that
+  was sent keeps the rate and mode it was sent with (and the exemptions as they were then), so the
+  order and its invoice come to exactly the total the customer accepted, whatever the settings say
+  that day. A quote converted while still a draft, or while waiting on changes, is taxed by the
+  settings and exemptions of that day, as it shows them. After that the order is like any other:
+  a delivery the customer chooses on the invoice can still change its tax (shipped out of state).
 - Quotes aren't sales: they are not in the reports. The order is, from the month it was made.
 
 ## The reports

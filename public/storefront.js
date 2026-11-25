@@ -883,6 +883,10 @@ function estDraw_(){
       ${v.expiresOn ? `<p class="inv-detail" style="font-size:14px;margin:0 0 10px;">You can accept this quote until ${escapeHtml(estLongDay_(v.expiresOn))}.</p>` : ""}
       <div class="inv-pay">${_est.asking ? "" : acceptPart}${askPart}</div>
       <div class="inv-err" id="estErr" role="alert">${escapeHtml(_est.err)}</div>`;
+  } else if (_est.err) {
+    // Refused because the quote changed meanwhile (the server's answer redrew it): the buttons are gone, and the
+    // reason stays in view.
+    actHtml = `<div class="inv-err" id="estErr" role="alert">${escapeHtml(_est.err)}</div>`;
   }
 
   const sub = [v.number ? `Quote <b>${escapeHtml(v.number)}</b>` : "Quote", v.customerName ? escapeHtml(v.customerName) : "",

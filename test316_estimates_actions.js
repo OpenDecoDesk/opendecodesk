@@ -518,7 +518,7 @@ const ordersJs = read("functions/api/orders.js");
     ok("a quote sent with tax added makes an order with tax added, even after the setting changed", r.status === 200 && orderRow(r.body.orderId).taxMode === "exclusive" && orderRow(r.body.orderId).totalCents === 1100);
     setTax(1000, "exclusive");
 
-    // The picked customer's exemption, and the rate as of the day of conversion.
+    // The picked customer's exemption, and the rate the quote was sent with.
     const K = (await newQuote({ customerId: kim })).id;
     await save(K, [{ kind: "product", productId: "polo", qty: 2 }]);
     r = await call({ action: "convertEstimate", id: K }, admin);
@@ -529,7 +529,7 @@ const ordersJs = read("functions/api/orders.js");
     await call({ action: "sendEstimate", id: P2 }, staff);
     setTax(500, "exclusive");
     r = await call({ action: "convertEstimate", id: P2 }, admin);
-    ok("the order's tax rate is the one set on the day it is made (only the mode comes from the quote)", r.status === 200 && orderRow(r.body.orderId).taxRateBps === 500 && orderRow(r.body.orderId).totalCents === 10500);
+    ok("the order's tax rate is the one the quote was sent with, not the one set since (the customer accepted that total)", r.status === 200 && orderRow(r.body.orderId).taxRateBps === 1000 && orderRow(r.body.orderId).totalCents === 11000);
     setTax(1000, "exclusive");
 
     const Z = (await newQuote()).id;

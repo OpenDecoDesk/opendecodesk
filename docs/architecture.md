@@ -164,7 +164,8 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
   price and the tax settings as they were; nothing prices it again. Accepting it on the customer's
   page and **Convert to order** in the admin both go through one function,
   `convertEstimateToOrder_` in `functions/api/orders.js`, which makes the order the way a local sale
-  is made, at those prices — and makes it once: a second call answers the order already made.
+  is made, at those prices and the quote's frozen tax rate (`insertOrder`'s `taxRateBps` option) —
+  and makes it once: a second call answers the order already made.
 
 ## The security model
 

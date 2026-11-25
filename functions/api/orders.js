@@ -251,13 +251,19 @@ export async function convertEstimateToOrder_(env, estimate, { actor = "", ip = 
     paymentMethod: "", subtotal: Number(totals.subtotal) || 0, shippingCost: 0, total: Number(totals.subtotal) || 0,
     shippingMethod: "", shippingAddress: null, totalWeightOz: 0,
     placedAt: new Date().toISOString(),
-    // Tax in the prices or added to them: as the quote was sent (a quote never sent follows today's setting).
-    ...(est.sentAt && est.taxMode ? { taxMode: est.taxMode } : {}),
+    // Tax in the prices or added to them: as the quote shows it (as it was sent, or today's while it is being worked on).
+    ...(totals.taxMode ? { taxMode: totals.taxMode } : {}),
   };
+  // The rate, too: a sent quote's is frozen (its taxRateBps, which already allows for an exemption the shop or the
+  // customer had when it was sent), so the order and its invoice come to exactly the total the customer accepted, even
+  // if the rate or an exemption changed since. A quote still being worked on (a draft, or one sent back for changes)
+  // is taxed by today's settings, as it shows.
+  const frozenTax = !!est.sentAt && !["draft", "changes"].includes(est.status);
   // As a Local sale: a stocked product's lines come out of finished stock when there is enough. They aren't pulled
   // now (pullStockLines) — nothing is handed over yet; they go when the order ships, as a storefront order's do.
   try {
-    await insertOrder(env.DB, order, pricedItems, { fillFromStock: true, customerId: Number(est.customerId) });
+    await insertOrder(env.DB, order, pricedItems, { fillFromStock: true, customerId: Number(est.customerId),
+      ...(frozenTax ? { taxRateBps: Number(totals.taxRateBps) || 0 } : {}) });
   } catch (e) {
     // Two calls at the same moment: the order and its lines go in as one batch, so the second fails whole on the
     // order number and the first one's order is the quote's.
@@ -3329,15 +3335,26 @@ async function handleOrdersPost_(context, listBefore = null) {
     const id = customerIdOf_(body.id);
     if (!id) return jsonResponse({ status: "error", message: "That quote isn't valid." }, 400);
     const withItems = body.items !== undefined;
-    // A price typed over the catalog's is a discount: what a custom price needs elsewhere (Payments).
-    if (withItems && Array.isArray(body.items) && body.items.some(it => it && it.kind === "product" && it.customUnitPrice !== undefined && it.customUnitPrice !== null && it.customUnitPrice !== "")
-      && !can_("orders.payments", "edit")) return forbidden_("Your role can't set a custom price. Ask an admin.");
     const f = estimateFieldsOf_(body);
     if (f.error) return jsonResponse({ status: "error", message: f.error }, 400);
     return estimatesReady_(async () => {
       const got = await getEstimate(env.DB, id);
       if (!got) return estimateNotFound_();
       const est = got.estimate;
+      // A price typed over the catalog's is a discount: what a custom price needs elsewhere (Payments). Only a NEW or
+      // CHANGED one: the page sends every hand-priced line back with each save (a quantity, another line removed), and a
+      // price someone allowed set stays the quote's — each stored hand price (product and amount) covers one line sent.
+      if (withItems && Array.isArray(body.items) && !can_("orders.payments", "edit")) {
+        const kept = (got.items || []).filter(it => it.kind === "product" && it.customPrice).map(it => ({ productId: it.productId, unitPrice: Number(it.unitPrice) }));
+        const newPrice = body.items.some(it => {
+          if (!it || it.kind !== "product" || it.customUnitPrice === undefined || it.customUnitPrice === null || it.customUnitPrice === "") return false;
+          const at = kept.findIndex(k => k.productId === it.productId && Math.abs(k.unitPrice - Number(it.customUnitPrice)) < 0.005);
+          if (at < 0) return true;
+          kept.splice(at, 1);
+          return false;
+        });
+        if (newPrice) return forbidden_("Your role can't set a custom price. Ask an admin.");
+      }
       if (!estimateEditable_(est) && !(est.status === "sent" && !withItems)) {
         return jsonResponse({ status: "error", message: est.status === "sent" ? "This quote was sent: its lines can't change unless the customer asks for changes. Cancel it and make a new one instead."
           : est.status === "converted" ? "This quote is already an order." : est.status === "cancelled" ? "This quote was cancelled." : "The customer accepted this quote: it can't change now." }, 409);
@@ -3406,7 +3423,9 @@ async function handleOrdersPost_(context, listBefore = null) {
       const base = org.subdomain ? `https://${org.subdomain}.${rootDomain(env)}` : new URL(request.url).origin;
       const link = `${base}/?estimate=${token}`;
       const message = body.message !== undefined ? String(body.message == null ? "" : body.message).slice(0, 3000) : (sent.estimate.message || "");
-      const emailSent = !!(await sendEstimateEmail(env, { estimate: sent.estimate, items: sent.items, totals: sent.totals, orgName: org.name || "", link, message }));
+      // The greeting names the customer on file (their company when the record has no person's name).
+      const customerName = String((sent.customer && (sent.customer.name || sent.customer.company)) || "");
+      const emailSent = !!(await sendEstimateEmail(env, { estimate: sent.estimate, items: sent.items, totals: sent.totals, orgName: org.name || "", link, message, customerName }));
       audit({ orgId: est.orgId, orderId: null, action: "estimate.sent",
         detail: { estimateId: id, number: est.number, to: email, emailSent, total: sent.totals ? sent.totals.total : null, sendCount: Number(sent.estimate.sendCount) || 1 } });
       return jsonResponse({ status: "ok", sentTo: email, emailSent, link });
@@ -4132,11 +4151,17 @@ async function handleOrdersPost_(context, listBefore = null) {
     // Quantity breaks (migrations/0109): body.qtyBreaks ([{ minQty, off }], dollars off each piece) as it will be saved —
     // { breaks } in order, { skip: true } when not sent (an update keeps what the product has), or { error }. A break
     // can't take a piece to nothing: db.js holds its amount off under the product's lowest price as it will be saved
-    // (the prices sent, else the ones it has).
+    // (the prices sent, else the ones it has). That holds when only the prices are sent, too: the breaks the product
+    // already has are checked against the new prices, so lowering a price can't make a break give pieces away.
     const productQtyBreaks_ = (b, before) => {
-      if (b.qtyBreaks === undefined) return { skip: true };
       const pick = (k) => b[k] !== undefined ? b[k] : before ? before[k] : undefined;
-      const r = normalizeQtyBreaks_(b.qtyBreaks, { pricingMode: pick("pricingMode"), flatPrice: pick("flatPrice"), sizePricing: pick("sizePricing"), colorGroups: pick("colorGroups") });
+      const prices = { pricingMode: pick("pricingMode"), flatPrice: pick("flatPrice"), sizePricing: pick("sizePricing"), colorGroups: pick("colorGroups") };
+      if (b.qtyBreaks === undefined) {
+        const kept = before && Array.isArray(before.qtyBreaks) ? before.qtyBreaks : [];
+        const r = kept.length ? normalizeQtyBreaks_(kept, prices) : null;
+        return r && r.error ? { error: r.error + " Lower the quantity breaks first, or keep the price." } : { skip: true };
+      }
+      const r = normalizeQtyBreaks_(b.qtyBreaks, prices);
       if (!r || r.error || !Array.isArray(r.breaks)) return { error: (r && r.error) || "The quantity breaks aren't valid." };
       return { breaks: r.breaks };
     };
@@ -4465,9 +4490,12 @@ async function handleOrdersPost_(context, listBefore = null) {
       // row; its links stay) can meet a MAP here.
       if (breaks.breaks && breaks.breaks.length) { const below = await qtyBreaksBelowMap_(body, breaks.breaks); if (below) return below; }
       await createProduct(env.DB, body.org, body);
+      const created = await productOf_(body.org, body.productId);
       audit({ orgId: body.org, orderId: null, action: "product.created",
-        detail: { productId: body.productId, changes: diff_(null, await productOf_(body.org, body.productId), PRODUCT_AUDIT_FIELDS) } });
-      if (breaks.breaks && breaks.breaks.length) audit({ orgId: body.org, orderId: null, action: "product.qty_breaks_changed", detail: { productId: body.productId, from: [], to: breaks.breaks } });
+        detail: { productId: body.productId, changes: diff_(null, created, PRODUCT_AUDIT_FIELDS) } });
+      // The breaks as they were saved, read back: a database without migrations/0109 keeps none, and logs none.
+      const savedBreaks = qtyBreaksOfProduct_(created);
+      if (savedBreaks.length) audit({ orgId: body.org, orderId: null, action: "product.qty_breaks_changed", detail: { productId: body.productId, from: [], to: savedBreaks } });
       return jsonResponse({ status: "ok" });
     }
 

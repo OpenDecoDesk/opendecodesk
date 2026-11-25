@@ -331,12 +331,14 @@ test("A quote end to end: the owner builds it with a quantity break, a custom li
   await expect(page.locator("#qtSend")).toHaveText("Send again…");
   await expect(page.locator("#qtPage .cust-sub").nth(1)).toContainText("to " + c.email);
   await expect(page.locator("#qtPage .cust-sub").nth(1)).not.toContainText("times");
-  await expect(page.locator("#qtPage .cust-note").first()).toHaveText("This quote has been sent, so its lines and prices are fixed; its title, notes and expiry can still change. Its lines can change again if the customer asks for changes.");
+  await expect(page.locator("#qtPage .cust-note").first()).toHaveText("This quote has been sent, so it is fixed as the customer has it: its lines, prices, title, note to the customer and expiry. Only the internal note can change. The rest can change again if the customer asks for changes.");
   await expect(page.locator("#qtAddProduct")).toHaveCount(0);
   await expect(page.locator("#qtLines input[data-qt-qty]")).toHaveCount(0);
   await expect(page.locator("#qtLines").getByRole("button", { name: /^Change / })).toHaveCount(0);
   await expect(page.locator("#qtTotals .cust-note")).toHaveCount(0);
   await expect(page.locator("#qtSave")).toHaveText("Save");
+  for (const sel of ["#qtTitle", "#qtMessage", "#qtExpires"]) await expect(page.locator(sel)).toBeDisabled();
+  await expect(page.locator("#qtInternal")).toBeEnabled();
   // Send again… keeps the same link.
   await page.locator("#qtSend").click();
   send = page.getByRole("dialog", { name: "Send again: " + number });

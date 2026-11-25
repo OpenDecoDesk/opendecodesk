@@ -75,7 +75,14 @@ function makeSecrets() {
   // SIGNING_SECRET: short-lived links to receipts and design files. PROXY_ADMIN_PASSPHRASE: the
   // installer's passphrase (adminAuth.js) — the way in to a new install, which the program uses
   // for the first sign-in and nobody types. VENDOR_CREDENTIALS_KEY: encrypts saved supplier logins.
-  return { SIGNING_SECRET: newSecret(), PROXY_ADMIN_PASSPHRASE: newSecret(), VENDOR_CREDENTIALS_KEY: newSecret() };
+  // PASSWORD_PEPPER: the key every stored password is hashed with (adminAuth.js).
+  return { SIGNING_SECRET: newSecret(), PROXY_ADMIN_PASSPHRASE: newSecret(), VENDOR_CREDENTIALS_KEY: newSecret(), PASSWORD_PEPPER: newSecret() };
+}
+// Secrets a newer program needs that an older one didn't make, added to the saved ones — never replacing one that
+// is there: a new PASSWORD_PEPPER would void every password made under the old one. (Passwords from before there
+// was a pepper keep working, and move to it as each user next signs in.)
+function withNewSecrets(secrets) {
+  return secrets.PASSWORD_PEPPER ? secrets : { ...secrets, PASSWORD_PEPPER: newSecret() };
 }
 
 // public/_headers is written for the web. In the window (main.js) its Content-Security-Policy is
@@ -168,7 +175,7 @@ async function startServer({ dataDir, port, protect, unprotect, log = () => {}, 
     throw Object.assign(new Error("The saved secrets in desktop.json couldn't be read on this computer."), { code: "SECRETS_UNREADABLE" });
   }
   const fresh = !secrets;
-  if (fresh) secrets = makeSecrets();
+  secrets = fresh ? makeSecrets() : withNewSecrets(secrets);   // saved below (saveConfig), before this returns and the window opens
   const src = readSources(root);
   const latest = src.migrations[src.migrations.length - 1].name;
   // Before a newer program updates an existing database, keep a copy of it as it was.
@@ -414,7 +421,7 @@ function restoreState(dataDir, from) {
   return { aside };
 }
 
-module.exports = { startServer, adminHasUsablePassword, copyState, restoreState, pruneUpdateCopies, resetSignIn, setShippoKey, setSupplierConnections, setSmtp, setEmailOn, savedSmtpPassword, recordBackup, stamp, statePaths, IMAGES_HOST, IMAGES_BASE, WORKER_OUTBOUND, desktopCsp };
+module.exports = { startServer, adminHasUsablePassword, withNewSecrets, copyState, restoreState, pruneUpdateCopies, resetSignIn, setShippoKey, setSupplierConnections, setSmtp, setEmailOn, savedSmtpPassword, recordBackup, stamp, statePaths, IMAGES_HOST, IMAGES_BASE, WORKER_OUTBOUND, desktopCsp };
 
 if (require.main === module) {
   const dataDir = path.resolve(process.argv[2] || path.join(process.cwd(), "desktop-data"));

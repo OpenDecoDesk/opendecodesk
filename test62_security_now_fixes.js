@@ -164,6 +164,8 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
       "const updateUser = async (db, id, patch) => { if ('totpSecret' in patch) { if (patch.totpSecret) __s.save(patch.totpSecret); else __s.clear(); } };\n" +
       "const claimUserTotpCounter = async () => true;\n" +
       "const verifyTOTP = async (secret, code) => ({ valid: code === '123456', counter: 1 });\n" +
+      // Sealing the secret at rest is test258's; here it is stored as given.
+      "const sealTotp = async (env, s) => s, openTotp = async (env, s) => s || '', totpIsSealed = () => true;\n" +
       "const insertAuditLog = async (db, row) => __s.audit(row);\n" +
       strip(read("functions/api/admin-2fa.js")) + "\nreturn onRequestPost;");
     const tfaPost = tfa.call(null);

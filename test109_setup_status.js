@@ -53,10 +53,19 @@ const FULL_SETTINGS = { business: { name: "Thread & Needle", ownerEmail: "owner@
   const st = (env, settings) => by(lib.setupStatus(env, settings || {}));
   ok("root domain: unset or the example.com placeholder is not ready", !st({}).rootDomain.ready && !st({ ROOT_DOMAIN: "example.com" }).rootDomain.ready && st({ ROOT_DOMAIN: "MyShop.com" }).rootDomain.ready &&
     /DEFAULT_ROOT_DOMAIN = "example\.com"/.test(read("functions/_lib/hostConfig.js")));
-  ok("signing secret: SIGNING_SECRET is ready; a fallback counts but is called out; none is not ready", st({ SIGNING_SECRET: "x" }).signingSecret.note === "" && st({ STRIPE_SECRET_KEY: "x" }).signingSecret.ready &&
+  ok("signing secret: SIGNING_SECRET is ready; an older fallback counts but is called out; none is not ready", st({ SIGNING_SECRET: "x" }).signingSecret.note === "" &&
     /fallback/.test(st({ QUOTE_SIGNING_SECRET: "x" }).signingSecret.note) && !st({}).signingSecret.ready);
-  ok("…the same fallbacks the signing code uses", /env\.SIGNING_SECRET \|\| env\.QUOTE_SIGNING_SECRET \|\| env\.STRIPE_SECRET_KEY/.test(read("functions/_lib/quoteToken.js")) &&
-    /env\.SIGNING_SECRET \|\| env\.LINK_SIGNING_SECRET \|\| env\.QUOTE_SIGNING_SECRET \|\| env\.STRIPE_SECRET_KEY/.test(read("functions/api/receipt.js")));
+  ok("…the Stripe key is no longer one (review #83): with only that, it isn't ready and says to run npm run setup", !st({ STRIPE_SECRET_KEY: "x" }).signingSecret.ready && /npm run setup/.test(st({ STRIPE_SECRET_KEY: "x" }).signingSecret.note) &&
+    /npm run setup/.test(st({}).signingSecret.note));
+  ok("…the same fallbacks the signing code uses", /env\.SIGNING_SECRET \|\| env\.QUOTE_SIGNING_SECRET \|\| ""/.test(read("functions/_lib/quoteToken.js")) &&
+    /env\.SIGNING_SECRET \|\| env\.LINK_SIGNING_SECRET \|\| env\.QUOTE_SIGNING_SECRET \|\| ""/.test(read("functions/api/receipt.js")));
+  {
+    // A Deploy-button site signing with the copy it keeps in the database (src/worker.js marks it SIGNING_SECRET_FROM_DB).
+    const stored = lib.setupStatus({ SIGNING_SECRET: "x", SIGNING_SECRET_FROM_DB: true }, {}), sb = by(stored);
+    ok("a signing secret kept in the database: links work, and a warning says how to move it to the Worker", sb.signingSecret.ready && sb.signingSecretStored && !sb.signingSecretStored.ready &&
+      sb.signingSecretStored.level === "recommended" && /Your domain/.test(sb.signingSecretStored.note) && /npm run setup/.test(sb.signingSecretStored.note) && stored.length === 19);
+    ok("…and no such warning once the Worker has its own", !st({ SIGNING_SECRET: "x" }).signingSecretStored && !st({ SIGNING_SECRET: "x", SIGNING_SECRET_FROM_DB: "true" }).signingSecretStored);
+  }
   ok("email: Resend key, or a Cloudflare binding, or the Cloudflare token WITH the account id", st({ RESEND_API_KEY: "k" }).email.ready && st({ EMAIL: { send(){} } }).email.ready && /binding/.test(st({ EMAIL: { send(){} } }).email.note) &&
     st({ CF_EMAIL_API_TOKEN: "t", CF_ACCOUNT_ID: "a" }).email.ready && /API token/.test(st({ CF_EMAIL_API_TOKEN: "t", CF_ACCOUNT_ID: "a" }).email.note));
   ok("…a token without the account id is not ready and says which half is missing; nothing at all says what to set", !st({ CF_EMAIL_API_TOKEN: "t" }).email.ready && /CF_ACCOUNT_ID is not/.test(st({ CF_EMAIL_API_TOKEN: "t" }).email.note) &&

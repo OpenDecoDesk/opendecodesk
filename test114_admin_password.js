@@ -97,7 +97,10 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU";
   ok("the old password works with no email, and still asks for the authenticator code", a.status === 200 && a.body.status === "totp_required");
   ok("…a wrong code is refused", (await B.signIn("", "the owner's old password", "000000")).status === 401);
   a = await B.signIn("the-owner@types.anything", "the owner's old password", totpNow(SECRET));
-  ok("with the code they are in, as the one admin, active, with their two-step secret kept", a.status === 200 && old.q("SELECT role, status, totpSecret FROM users").map(u => u.role + u.status + u.totpSecret).join() === "adminactive" + SECRET);
+  // The secret is kept sealed in the user's row (totp.js sealTotp): what is stored opens to it, and isn't it.
+  const sealedAs = async (H, stored, secret) => typeof stored === "string" && stored.startsWith("v1:") && !stored.includes(secret) && (await H.lib.openTotp(H.env, stored)) === secret;
+  ok("with the code they are in, as the one admin, active, with their two-step secret kept", a.status === 200 && old.q("SELECT role, status FROM users").map(u => u.role + u.status).join() === "adminactive" &&
+    await sealedAs(B, old.q("SELECT totpSecret FROM users")[0].totpSecret, SECRET));
   const patCookie = a.cookie;
   ok("…their password can't be replaced in that step without the one they have", a.body.pending === "account" &&
     (await B.password({ action: "account", name: "Pat Owner", email: "pat@myshop.com", next: "a brand new password" }, patCookie)).status === 401 &&
@@ -111,10 +114,35 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU";
   B.d1._raw.exec(`INSERT INTO global_settings (key, value) VALUES ('totpSecret', '${SECRET2}')`);
   ok("an owner still on the passphrase with two-step on is asked for the code, not let in without it", (a = await B.signIn("", B.PRINTED)).body.status === "totp_required" && (await B.users({ action: "me", key: B.PRINTED }, "")).status === 401);
   a = await B.signIn("", B.PRINTED, totpNow(SECRET2));
-  ok("…and with it they are in, two-step still on", a.status === 200 && a.body.pending === "account" && B.d1.q("SELECT totpSecret FROM users")[0].totpSecret === SECRET2);
+  ok("…and with it they are in, two-step still on", a.status === 200 && a.body.pending === "account" && await sealedAs(B, B.d1.q("SELECT totpSecret FROM users")[0].totpSecret, SECRET2));
   // The oldest installs kept the secret in an environment variable.
   B = await makeAuth(); B.env.TOTP_SECRET = SECRET;
-  ok("a two-step secret set as TOTP_SECRET by hand is carried across too", (await B.signIn("", B.PRINTED)).body.status === "totp_required" && (await B.signIn("", B.PRINTED, totpNow(SECRET))).status === 200 && B.d1.q("SELECT totpSecret FROM users")[0].totpSecret === SECRET);
+  ok("a two-step secret set as TOTP_SECRET by hand is carried across too", (await B.signIn("", B.PRINTED)).body.status === "totp_required" && (await B.signIn("", B.PRINTED, totpNow(SECRET))).status === 200 && await sealedAs(B, B.d1.q("SELECT totpSecret FROM users")[0].totpSecret, SECRET));
+
+  console.log("\n=== Guessing the current password from a signed-in session (review #85) ===");
+  // The real limiter: a borrowed session can't try password after password through "change" (or "account").
+  const R = await makeAuth({ realLimits: true });
+  const rAdmin = await R.firstAdmin();
+  const PAT = "pat's own password", QUINN = "quinn's own password";
+  const pat = await R.addUser(rAdmin, "staff", "Pat Staff", "pat@example.test", PAT);
+  const quinn = await R.addUser(rAdmin, "staff", "Quinn Staff", "quinn@example.test", QUINN);
+  const failedRows = () => R.d1.q("SELECT count(*) n FROM failed_admin_logins")[0].n;
+  const from = (ip) => ({ headers: { "cf-connecting-ip": ip } });
+  const rowsBefore = failedRows(), patRecord = R.user("pat@example.test").password;
+  let wrong = [];
+  for (let i = 0; i < 10; i++) wrong.push((await R.password({ action: "change", current: "guess number " + i, next: "a new password here" }, pat, from("192.0.2.10"))).status);
+  a = await R.password({ action: "change", current: PAT, next: "a new password here" }, pat, from("192.0.2.10"));
+  ok("ten wrong guesses are refused one by one; the eleventh is refused (429) even with the right password, and nothing changes", wrong.every(s => s === 401) && a.status === 429 &&
+    R.user("pat@example.test").password === patRecord);
+  ok("…and each wrong guess is recorded for the owner's security alert", failedRows() === rowsBefore + 10);
+  a = await R.password({ action: "change", current: "correct horse battery", next: "the admin's next password" }, rAdmin, from("192.0.2.10"));
+  ok("the address that made them is held up for everyone's current password (the sign-in budget, per minute)", a.status === 429);
+  wrong = [];
+  for (let i = 0; i < 10; i++) wrong.push((await R.password({ action: "change", current: "guess number " + i, next: "a new password here" }, quinn, from("198.51.100." + (i + 1)))).status);
+  a = await R.password({ action: "change", current: QUINN, next: "a new password here" }, quinn, from("198.51.100.77"));
+  ok("one user's guesses from many addresses run out too (ten in 15 minutes), the right password included", wrong.every(s => s === 401) && a.status === 429);
+  a = await R.password({ action: "change", current: "correct horse battery", next: "the admin's next password" }, rAdmin, from("198.51.100.1"));
+  ok("…without holding up another user at one of those addresses", a.status === 200);
 
   console.log("\n=== When the database misbehaves ===");
   B = await makeAuth();

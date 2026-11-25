@@ -11,6 +11,9 @@
  *   4. store the key and the ids as Worker secrets — CF_API_TOKEN, CF_ACCOUNT_ID, CF_ZONE_ID,
  *      CF_WORKER_NAME, and ROOT_DOMAIN last, the switch that makes the site use its domain — the same
  *      names the command-line installer uses, so "Automatic hostnames for new shops" works from then on.
+ *      Before them, SIGNING_SECRET, when the site signs with one it keeps in the database (src/worker.js
+ *      withSigningSecret): the same value, so links already sent keep working, and the database copy is
+ *      deleted once the Worker has it.
  *
  * The caller (the connectCloudflare action in functions/api/orders.js) records the domain in the database
  * (the `site` setting, which the build reads) and attaches the hostnames of shops built before the domain.
@@ -70,15 +73,16 @@ const refused_ = (r) => (r.status === 401 || r.status === 403) ? RECREATE_KEY : 
 const ZONE_WAITING = (name) => `Cloudflare is still waiting for ${name} to point at it. At the company where you bought the domain, change its nameservers to the two Cloudflare shows for it (Cloudflare → Domains → ${name}). It can take up to a day; when it shows Active, come back and connect again.`;
 
 /**
- * connectCloudflare({ token, domain, hostname, adminSubdomain })
+ * connectCloudflare({ token, domain, hostname, adminSubdomain, signingSecret })
  *   token     the key the owner pasted
  *   domain    the chosen domain, or "" to pick the only one
  *   hostname  the address this request came in on (must be this Worker's workers.dev address)
+ *   signingSecret  the signing secret kept in the database, to save as the Worker's SIGNING_SECRET ("" for none)
  * → { status: "choose", zones: [{ name, active }] }  when there is more than one domain to pick from, or
  *   { status: "connected", rootDomain, adminHost, adminUrl, steps, cfg }  (cfg holds the key: for the caller
  *   to attach shop hostnames with, never to send back)
  */
-export async function connectCloudflare({ token, domain, hostname, adminSubdomain = "admin" }) {
+export async function connectCloudflare({ token, domain, hostname, adminSubdomain = "admin", signingSecret = "" }) {
   token = String(token || "").trim();
   if (!token) throw setupError_("Paste the key Cloudflare showed you.");
   if (!/^[A-Za-z0-9_-]{20,200}$/.test(token)) throw setupError_("That doesn't look like a Cloudflare key: it is one line of letters, numbers, - and _. Copy it again from Cloudflare's page.");
@@ -117,8 +121,10 @@ export async function connectCloudflare({ token, domain, hostname, adminSubdomai
     throw setupError_(`${rootDomain} is on a different Cloudflare account from this site. Add the domain to the account this site runs on, or make the key while signed in to that account.`);
   const settings = await cfSetup_(token, "GET", `/accounts/${accountId}/workers/scripts/${encodeURIComponent(here.worker)}/settings`);
   if (!settings.ok) throw setupError_("Couldn't find this site's Worker on Cloudflare: " + cfSetupMessage_(settings) + "." + refused_(settings));
+  // SIGNING_SECRET first, when there is a stored one to move; ROOT_DOMAIN stays last.
+  const names = signingSecret ? ["SIGNING_SECRET", ...SETUP_SECRET_NAMES] : SETUP_SECRET_NAMES;
   // A plain setting (in wrangler.toml [vars]) of the same name would clash with the secret.
-  const plain = ((settings.data.result || {}).bindings || []).filter(b => b.type === "plain_text" && SETUP_SECRET_NAMES.includes(b.name)).map(b => b.name);
+  const plain = ((settings.data.result || {}).bindings || []).filter(b => b.type === "plain_text" && names.includes(b.name)).map(b => b.name);
   if (plain.length) throw setupError_(`This site already sets ${plain.join(", ")} in wrangler.toml. It was installed from the command line: change the domain with \`npm run setup\` instead.`);
 
   // 3. admin.<domain>
@@ -128,12 +134,12 @@ export async function connectCloudflare({ token, domain, hostname, adminSubdomai
   const steps = [adminHost + ": " + (attached.steps || []).join(", ")];
 
   // 4. The secrets; ROOT_DOMAIN last.
-  const values = { CF_API_TOKEN: token, CF_ACCOUNT_ID: accountId, CF_ZONE_ID: zone.id, CF_WORKER_NAME: here.worker, ROOT_DOMAIN: rootDomain };
-  for (const name of SETUP_SECRET_NAMES) {
+  const values = { SIGNING_SECRET: signingSecret, CF_API_TOKEN: token, CF_ACCOUNT_ID: accountId, CF_ZONE_ID: zone.id, CF_WORKER_NAME: here.worker, ROOT_DOMAIN: rootDomain };
+  for (const name of names) {
     const r = await cfSetup_(token, "PUT", `/accounts/${accountId}/workers/scripts/${encodeURIComponent(here.worker)}/secrets`, { name, text: values[name], type: "secret_text" });
     if (!r.ok) throw setupError_(`Couldn't save the setting ${name} on this site's Worker: ${cfSetupMessage_(r)}.` + refused_(r) + " Nothing is lost: connect again.");
   }
-  steps.push("saved on the Worker: " + SETUP_SECRET_NAMES.join(", "));
+  steps.push("saved on the Worker: " + names.join(", "));
   return { status: "connected", rootDomain, adminHost, adminUrl: "https://" + adminHost + "/", steps, cfg };
 }
 

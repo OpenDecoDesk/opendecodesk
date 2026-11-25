@@ -3944,7 +3944,8 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (refused) return refused;
       const adminLabel = adminSubdomains(env)[0];
       let done;
-      try { done = await connectCloudflare({ token: body.token, domain: wanted, hostname: host, adminSubdomain: adminLabel }); }
+      // A signing secret the site keeps in the database (src/worker.js withSigningSecret) is saved on the Worker too.
+      try { done = await connectCloudflare({ token: body.token, domain: wanted, hostname: host, adminSubdomain: adminLabel, signingSecret: env.SIGNING_SECRET_FROM_DB === true ? env.SIGNING_SECRET : "" }); }
       catch (e) {
         if (!e.userFacing) console.error("connectCloudflare failed:", e && e.message);
         audit({ orgId: null, orderId: null, action: "site.domain_connect_failed", detail: { domain: wanted || null, error: e.userFacing ? e.message : "unexpected" } });

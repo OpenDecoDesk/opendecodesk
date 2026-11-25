@@ -138,7 +138,7 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
     "\nreturn { post: onRequestPost, get: onRequestGet, setAdmin: (v) => { _admin = v; } };")();
   const store = new Map();
   const renv = { RECEIPTS: { put: async (k, b, o) => { store.set(k, { b, o }); }, get: async (k) => store.has(k) ? { body: store.get(k).b } : null },
-    STRIPE_SECRET_KEY: "sk_test_x" };
+    SIGNING_SECRET: "test-signing-secret" };
   const upReq = (type, bytes, host = "admin.example.com") => ({ url: `https://${host}/api/receipt?name=Receipt%20%231.pdf`,
     headers: { get: (h) => ({ "content-type": type, "content-length": String(bytes.length) })[h.toLowerCase()] || null },
     arrayBuffer: async () => new Uint8Array(bytes).buffer, body: null });

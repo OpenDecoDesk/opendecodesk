@@ -574,7 +574,7 @@ function legacyLabels_(env, label) {
 
 const PREVIEW_TOKEN_TTL_SECONDS_ = 60 * 60;
 function previewMac_(env, data, label = "odd-catalog-preview-v1:") {
-  const secret = (env && (env.SIGNING_SECRET || env.LINK_SIGNING_SECRET || env.QUOTE_SIGNING_SECRET || env.STRIPE_SECRET_KEY)) || "";
+  const secret = (env && (env.SIGNING_SECRET || env.LINK_SIGNING_SECRET || env.QUOTE_SIGNING_SECRET)) || "";
   if (!secret) return Promise.resolve(null);
   const enc = new TextEncoder();
   return crypto.subtle.importKey("raw", enc.encode(label + secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
@@ -2919,13 +2919,20 @@ export async function setSettingRaw(db, key, value) {
 // password. Made once (32 random bytes) and kept here ('signingSecret'), never sent to a page;
 // INSERT OR IGNORE so two first requests at once end up with the same one. src/worker.js passes it
 // on as env.SIGNING_SECRET. A Worker secret set later must be this same value, or links already sent
-// (previews, invoices, receipts) stop working.
+// (previews, invoices, receipts) stop working: the Deploy-button domain step (cloudflareSetup.js) saves it so.
 export async function ensureSigningSecret(db) {
   const have = await getSettingRaw(db, "signingSecret");
   if (have) return have;
   const fresh = Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, "0")).join("");
   await db.prepare("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('signingSecret', ?)").bind(fresh).run();
   return await getSettingRaw(db, "signingSecret");
+}
+// …and once the Worker has that value as its own SIGNING_SECRET, the copy here is deleted (src/worker.js), so a copy
+// of the database alone can't sign links. Only a copy equal to the Worker's secret: true when one was removed.
+export async function dropStoredSigningSecret(db, workerSecret) {
+  if (!workerSecret) return false;
+  const r = await db.prepare("DELETE FROM global_settings WHERE key = 'signingSecret' AND value = ?").bind(String(workerSecret)).run();
+  return !!(r && r.meta && r.meta.changes);
 }
 
 // The site's own address ('site'): { rootDomain, adminSubdomain, adminHostSeen }. adminHostSeen is

@@ -253,7 +253,7 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     ok("it explains the two ways the tables are made: a new database from schema.sql, an existing one from new migrations only", /a NEW database gets every table from schema\.sql and a record that all \d+ migrations are part of it/.test(text) && /an EXISTING database skips that/.test(text));
     ok("it says what it would write into wrangler.toml", /would set database_id, add the hostname admin\.myshop\.com, and set: ADMIN_SUBDOMAIN, R2_PUBLIC_BASE, ROOT_DOMAIN, TIMEZONE/.test(text) &&
       /would also set: CF_ACCOUNT_ID, CF_WORKER_NAME, CF_ZONE_ID, TURNSTILE_SITE_KEY/.test(text));
-    ok("it names the secrets it would store — names only", /would write 9 secrets to a temporary file[^\n]*\(AGENT_TOKEN, CF_API_TOKEN, CRON_SECRET, PROXY_ADMIN_PASSPHRASE, RESEND_API_KEY, SHIPPO_API_KEY, SIGNING_SECRET, STRIPE_SECRET_KEY, TURNSTILE_SECRET_KEY\)/.test(text));
+    ok("it names the secrets it would store — names only", /would write 10 secrets to a temporary file[^\n]*\(AGENT_TOKEN, CF_API_TOKEN, CRON_SECRET, PASSWORD_PEPPER, PROXY_ADMIN_PASSPHRASE, RESEND_API_KEY, SHIPPO_API_KEY, SIGNING_SECRET, STRIPE_SECRET_KEY, TURNSTILE_SECRET_KEY\)/.test(text));
     ok("no typed secret appears anywhere in the output or in a command", typedSecrets.every(s => !text.includes(s)) && run.log.every(c => typedSecrets.every(s => !c.includes(s))));
     ok("no generated secret appears either: nothing on screen looks like a 64-character key or a passphrase", !/[0-9a-f]{64}/.test(text) && !/([a-z2-9]{4}-){5}[a-z2-9]{4}/.test(text) && !/Shown ONCE/.test(text));
     ok("it is plainly marked as a dry run", /DRY RUN: nothing is created, changed or deployed/.test(text) && /Dry run finished — nothing was changed/.test(text));
@@ -290,8 +290,8 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     ok("the migrations ran against a config that already had the database id", S.readWranglerToml(st.tomlAtMigrate).databaseId === UUID);
     ok("the deploy saw the finished config", st.tomlAtDeploy === fs.readFileSync(cfgPath, "utf8"));
     ok("no secret is in wrangler.toml", [...typedSecrets, ...Object.values(st.secretsSeen)].every(s => !fs.readFileSync(cfgPath, "utf8").includes(s)));
-    ok("the secrets reached the deploy in one file: the three generated ones, the typed ones and the send-agent token", Object.keys(st.secretsSeen).sort().join() ===
-      "AGENT_TOKEN,CF_API_TOKEN,CRON_SECRET,PROXY_ADMIN_PASSPHRASE,RESEND_API_KEY,SHIPPO_API_KEY,SIGNING_SECRET,STRIPE_SECRET_KEY,TURNSTILE_SECRET_KEY" &&
+    ok("the secrets reached the deploy in one file: the four generated ones, the typed ones and the send-agent token", Object.keys(st.secretsSeen).sort().join() ===
+      "AGENT_TOKEN,CF_API_TOKEN,CRON_SECRET,PASSWORD_PEPPER,PROXY_ADMIN_PASSPHRASE,RESEND_API_KEY,SHIPPO_API_KEY,SIGNING_SECRET,STRIPE_SECRET_KEY,TURNSTILE_SECRET_KEY" &&
       st.secretsSeen.STRIPE_SECRET_KEY === SK && st.secretsSeen.RESEND_API_KEY === RESEND && /^[0-9a-f]{64}$/.test(st.secretsSeen.SIGNING_SECRET) && st.secretsSeen.SIGNING_SECRET !== st.secretsSeen.CRON_SECRET && st.secretsSeen.AGENT_TOKEN.length >= 32);
     ok("…a file only its owner could read, deleted (with its folder) as soon as the deploy returned", st.secretsMode === 0o600 && !fs.existsSync(st.secretsPath) && !fs.existsSync(path.dirname(st.secretsPath)));
     ok("the webhook secret left blank was not stored (and didn't cancel Stripe)", !("STRIPE_WEBHOOK_SECRET" in st.secretsSeen) && result.chosen.includes("stripe"));
@@ -299,7 +299,8 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     ok("no typed secret is ever printed", typedSecrets.every(s => !text.includes(s)));
     const count = (needle) => text.split(needle).length - 1;
     ok("the new admin passphrase is shown exactly once, at the very end", count(st.secretsSeen.PROXY_ADMIN_PASSPHRASE) === 1 && text.indexOf(st.secretsSeen.PROXY_ADMIN_PASSPHRASE) > text.indexOf("What to do next") && /Shown ONCE/.test(text));
-    ok("…as is the send-agent token (the agent's computer needs it), and nothing else that was generated", count(st.secretsSeen.AGENT_TOKEN) === 1 && count(st.secretsSeen.SIGNING_SECRET) === 0 && count(st.secretsSeen.CRON_SECRET) === 0);
+    ok("…as is the send-agent token (the agent's computer needs it), and nothing else that was generated", count(st.secretsSeen.AGENT_TOKEN) === 1 && count(st.secretsSeen.SIGNING_SECRET) === 0 && count(st.secretsSeen.CRON_SECRET) === 0 && count(st.secretsSeen.PASSWORD_PEPPER) === 0 &&
+      /^[0-9a-f]{64}$/.test(st.secretsSeen.PASSWORD_PEPPER) && st.secretsSeen.PASSWORD_PEPPER !== st.secretsSeen.SIGNING_SECRET);
     ok("every secret was asked for with hidden input, and nothing else was", io.asked.filter(q => q.secret).map(q => q.id.split(".")[1]).sort().join() === "CF_API_TOKEN,RESEND_API_KEY,SHIPPO_API_KEY,STRIPE_SECRET_KEY,STRIPE_WEBHOOK_SECRET,TURNSTILE_SECRET_KEY" &&
       io.asked.filter(q => !q.secret).every(q => !S.SECRET_NAMES.includes(q.id.split(".")[1])));
     ok("every optional service was offered, with skipping as the default", ["stripe", "shippo", "email", "turnstile", "access", "domains", "agent"].every(id => io.asked.some(q => q.id === id)) &&
@@ -322,7 +323,7 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     ok("nothing is created twice: the database and the buckets are found and reused", !calls2.some(c => /d1 create|bucket create/.test(c)) && st.dbs.length === 1 && st.buckets.length === 3 && /Already exists — using it/.test(t2));
     ok("a second run that skips the Email question doesn't claim email isn't set up", !/Email isn't set up/.test(t2) && /Verify myshop\.com as a sending domain/.test(t2));
     ok("the tables aren't rebuilt: an existing database only gets `migrations apply` (nothing to do here)", st.files.length === 1 && !calls2.some(c => /--file/.test(c)) && calls2.filter(c => /migrations apply/.test(c)).length === 1 && st.migrateTodo === 0 && /are up to date/.test(t2));
-    ok("no new passphrase or signing secrets: only the webhook secret typed this time is stored", Object.keys(st.secretsSeen).join() === "STRIPE_WEBHOOK_SECRET" && st.secretsSeen.STRIPE_WEBHOOK_SECRET === WH && !/Shown ONCE/.test(t2) && /nothing new \(already set\)/.test(t2));
+    ok("no new passphrase, signing secrets or password pepper (a new pepper would void every password): only the webhook secret typed this time is stored", Object.keys(st.secretsSeen).join() === "STRIPE_WEBHOOK_SECRET" && st.secretsSeen.STRIPE_WEBHOOK_SECRET === WH && !/Shown ONCE/.test(t2) && /nothing new \(already set\)/.test(t2));
     ok("…the Stripe key that's already set was kept by pressing Enter", second.io.asked.find(q => q.id === "stripe.STRIPE_SECRET_KEY").question.includes("already set — Enter keeps it") && second.result.chosen.includes("stripe"));
     ok("the business profile isn't written when nothing was typed", st.sql.length === 1 && !calls2.some(c => /INSERT INTO global_settings/.test(c)));
     ok("wrangler.toml comes out identical", fs.readFileSync(cfgPath, "utf8") === tomlBefore);
@@ -345,7 +346,7 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     ok("Cloudflare email without the account id sets neither", !("CF_EMAIL_API_TOKEN" in st.secretsSeen) && !("CF_ACCOUNT_ID" in t.vars) && !result.chosen.some(c => c.startsWith("email")));
     ok("Access with only the team domain sets neither (it would lock the admin)", !("ACCESS_TEAM_DOMAIN" in t.vars) && !("ACCESS_AUD" in t.vars));
     ok("it says each was skipped, that email isn't set up, and how to make the images bucket public", (io.text().match(/Left blank — skipped/g) || []).length === 3 && /Email isn't set up, so no email is sent/.test(io.text()) && /Make the images bucket "opendecodesk-images" public/.test(io.text()));
-    ok("a bare install stores just the three generated secrets", Object.keys(st.secretsSeen).sort().join() === "CRON_SECRET,PROXY_ADMIN_PASSPHRASE,SIGNING_SECRET");
+    ok("a bare install stores just the four generated secrets", Object.keys(st.secretsSeen).sort().join() === "CRON_SECRET,PASSWORD_PEPPER,PROXY_ADMIN_PASSPHRASE,SIGNING_SECRET");
     ok("without automatic hostnames, it says how a new shop's hostname gets attached, and to deploy with npm run deploy from now on", /Then run `npm run deploy`: it lists the shop's hostname in/.test(io.text()) && /not a bare `wrangler deploy`, which detaches any shop hostname that isn't listed/.test(io.text()));
   }
   {

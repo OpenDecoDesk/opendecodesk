@@ -427,7 +427,7 @@ export const INTEGRATIONS = [
     about: "Only if you run the separate send-agent program on a computer in the shop. A token is generated and shown once at the end; the agent needs it.",
     generate: ["AGENT_TOKEN"] },
 ];
-export const SECRET_NAMES = ["PROXY_ADMIN_PASSPHRASE", "SIGNING_SECRET", "CRON_SECRET", "AGENT_TOKEN",
+export const SECRET_NAMES = ["PROXY_ADMIN_PASSPHRASE", "SIGNING_SECRET", "CRON_SECRET", "PASSWORD_PEPPER", "AGENT_TOKEN",
   ...INTEGRATIONS.flatMap(i => [...(i.fields || []), ...Object.values((i.choice || {}).options || {}).flat(), ...(i.after || [])]).filter(f => f.secret).map(f => f.name)];
 
 export const STRIPE_WEBHOOK_EVENTS = ["checkout.session.completed", "checkout.session.async_payment_succeeded", "checkout.session.async_payment_failed",
@@ -591,7 +591,10 @@ export async function setup({ io, run, files, configPath = "wrangler.toml", flag
   if (!r.skipped && r.ok) existing = parseSecretList(r.stdout);   // a failure here just means the Worker doesn't exist yet
   const secrets = {}, shown = {};
   if (!existing.includes("PROXY_ADMIN_PASSPHRASE") || flags.newPassphrase) { secrets.PROXY_ADMIN_PASSPHRASE = generatePassphrase(); shown.PROXY_ADMIN_PASSPHRASE = secrets.PROXY_ADMIN_PASSPHRASE; }
-  for (const name of ["SIGNING_SECRET", "CRON_SECRET"]) if (!existing.includes(name)) secrets[name] = generateSecret();
+  // PASSWORD_PEPPER keys the stored passwords (adminAuth.js): made once, never again — a new one would void every
+  // password made under the old one. An install from before it existed gets one now; its passwords move to it as
+  // each user next signs in.
+  for (const name of ["SIGNING_SECRET", "CRON_SECRET", "PASSWORD_PEPPER"]) if (!existing.includes(name)) secrets[name] = generateSecret();
   say("   Generated: " + (Object.keys(secrets).join(", ") || "nothing new (already set)") + ".");
 
   say(""); say("   Optional services — Enter skips each one. You can run setup again later to add any of them.");

@@ -376,7 +376,7 @@ function reqSignedIn(ip, extra){
   {
     const kv = makeD1();
     const env = {
-      DB: kv, STRIPE_SECRET_KEY: "sk_test_fake"
+      DB: kv, SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY: "sk_test_fake"
     };
     // checkout.js calls getOrderTotal(env.DB) directly — global mock returns 10.
     // It still calls fetch() for the Stripe API.
@@ -386,7 +386,7 @@ function reqSignedIn(ip, extra){
     };
     const ip = "8.8.8.8";
     const mkReq = () => reqWithIp(ip, {
-      json: async () => ({checkoutToken: await require("./testlib/order-token").orderTokenFor({STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-RL1"), orderId:"ORD-RL1", orgId:"league-101", customerName:"X", contact:"x@example.com"}),
+      json: async () => ({checkoutToken: await require("./testlib/order-token").orderTokenFor({SIGNING_SECRET:"test-signing-secret", STRIPE_SECRET_KEY:"sk_test_fake"}, "ORD-RL1"), orderId:"ORD-RL1", orgId:"league-101", customerName:"X", contact:"x@example.com"}),
       url: "https://example.com/api/checkout"
     });
     let last;

@@ -42,6 +42,7 @@ import { verifyTurnstile } from "./turnstile.js";
 import { jsonResponse } from "./http.js";
 import { accessEnabled, verifyAccess } from "./access.js";
 import { DEFAULT_ROLES, normalizePermissions, roleAllows, effectiveLevel, permRank } from "./permissions.js";
+import { sealTotp } from "./totp.js";
 import {
   insertAdminSession, deleteAdminSession, getSettingRaw, setSettingRaw, getAdminSession, setAdminSessionPending,
   deleteAllAdminSessions, getBootstrapState, insertFirstAdmin, updateUser, replaceRecoveryCodes, deleteUserSessions,
@@ -268,16 +269,31 @@ export async function getActiveSecret(env){
 
 // ---- Passwords ---------------------------------------------------------------------------------
 // Each user's password is kept as a salted hash in users.password.
-//   - The hash is keyed with the PROXY_ADMIN_PASSPHRASE secret, so a copy of the database alone
-//     can't be used to guess anyone's password. That is also why the stretching is light: a
-//     Worker gets very little CPU per request, and sign-in has to fit in it.
-//   - A short mark of the secret is stored in each record. Replace the secret
-//     (`npm run setup -- --new-passphrase`) and no record's mark matches any more: every stored
+//   - The hash is keyed with a secret, so a copy of the database alone can't be used to guess anyone's
+//     password: PASSWORD_PEPPER, a random secret of its own, when the install has one (`npm run setup`
+//     and the desktop program make it), else the PROXY_ADMIN_PASSPHRASE secret. A record made under the
+//     pepper says so (`pepper`, a short mark of it), so adding a pepper later voids nobody: the next
+//     sign-in remakes the record under it.
+//   - PBKDF2 rounds: 100,000 in the desktop edition; on Cloudflare 10,000, because a Worker on the Free
+//     plan gets very little CPU per request and sign-in has to fit in it. PASSWORD_ITERATIONS (at most
+//     100,000, the most a Worker's PBKDF2 allows) raises it on a paid plan. A record made with fewer
+//     rounds is remade with the new number the next time its password is typed.
+//   - A short mark of the passphrase is stored in each record, whichever key made the hash. Replace the
+//     passphrase (`npm run setup -- --new-passphrase`) and no record's mark matches any more: every stored
 //     password is void. That is the price of recovering a locked-out install, and the Users page
 //     says who needs a new one.
 const LEGACY_PASSWORD_SETTING = "adminPassword";   // where the one shared password lived before users
 const SECRET_MARK_SETTING = "adminSecretMark";     // the mark of the secret last used to get in or set a password
 const PASSWORD_ITERATIONS = 10000;
+const MAX_PASSWORD_ITERATIONS = 100000;
+// The rounds a new record gets here. The desktop edition is told by EDITION (hostConfig.js isDesktopEdition,
+// repeated so the files pasted together with this one in tests needn't include it).
+export function passwordIterations(env){
+  if(String((env && env.EDITION) || "").trim().toLowerCase() === "desktop") return MAX_PASSWORD_ITERATIONS;
+  const raw = env && env.PASSWORD_ITERATIONS, n = Number(raw);
+  if(raw == null || String(raw).trim() === "" || !Number.isFinite(n)) return PASSWORD_ITERATIONS;
+  return Math.min(MAX_PASSWORD_ITERATIONS, Math.max(PASSWORD_ITERATIONS, Math.floor(n)));
+}
 export const MIN_PASSWORD_LENGTH = 12;
 export const MAX_PASSWORD_LENGTH = 200;
 
@@ -296,12 +312,21 @@ async function hmacHex_(keyText, data){
   const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(keyText), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return hex_(await crypto.subtle.sign("HMAC", k, typeof data === "string" ? new TextEncoder().encode(data) : data));
 }
-async function passwordHash_(env, password, saltHex, iterations){
+// `keyText`: the secret the hash is keyed with (passwordKey_).
+async function passwordHash_(keyText, password, saltHex, iterations){
   const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
   const salt = Uint8Array.from(saltHex.match(/../g), h => parseInt(h, 16));
-  return hmacHex_(env.PROXY_ADMIN_PASSPHRASE, await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, k, 256));
+  return hmacHex_(keyText, await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, k, 256));
 }
 async function secretMark_(env, label = "odd-admin-password-v1"){ return (await hmacHex_(env.PROXY_ADMIN_PASSPHRASE, label)).slice(0, 16); }
+// The mark a record made under PASSWORD_PEPPER carries ("" with no pepper set): which pepper made it.
+async function pepperMark_(env){ return env && env.PASSWORD_PEPPER ? (await hmacHex_(env.PASSWORD_PEPPER, "odd-password-pepper-v1")).slice(0, 16) : ""; }
+// The key a record's hash is made with: the pepper for a record that says so, else the passphrase. With no
+// record (a new one), the pepper when there is one.
+function passwordKey_(env, rec){
+  if(rec) return rec.pepper ? env.PASSWORD_PEPPER : env.PROXY_ADMIN_PASSPHRASE;
+  return env.PASSWORD_PEPPER || env.PROXY_ADMIN_PASSPHRASE;
+}
 // Is this a mark made under the secret in force now (under any accepted label — see legacyLabels_)?
 async function markIsCurrent_(env, mark){
   if(!mark) return false;
@@ -316,13 +341,16 @@ function passwordRecord_(raw){
   let rec;
   try{ rec = JSON.parse(raw); }catch(e){ return null; }
   if(!rec || typeof rec.hash !== "string" || typeof rec.salt !== "string" || !/^(?:[0-9a-f]{2}){8,64}$/.test(rec.salt)) return null;
-  if(!Number.isInteger(rec.iterations) || rec.iterations < 1 || rec.iterations > 100000) return null;
+  if(!Number.isInteger(rec.iterations) || rec.iterations < 1 || rec.iterations > MAX_PASSWORD_ITERATIONS) return null;
+  if(rec.pepper != null && !(typeof rec.pepper === "string" && /^[0-9a-f]{16}$/.test(rec.pepper))) return null;
   return rec;
 }
-// …and only if it was made under the secret in force now.
+// …and only if it was made under the secret in force now — and, for one made under a pepper, that same pepper.
 async function usableRecord_(env, raw){
   const rec = passwordRecord_(raw);
-  return rec && env.PROXY_ADMIN_PASSPHRASE && await markIsCurrent_(env, rec.mark) ? rec : null;
+  if(!rec || !env.PROXY_ADMIN_PASSPHRASE || !(await markIsCurrent_(env, rec.mark))) return null;
+  if(rec.pepper && rec.pepper !== await pepperMark_(env)) return null;
+  return rec;
 }
 
 export async function userHasUsablePassword(env, user){
@@ -334,12 +362,20 @@ export async function userHasUsablePassword(env, user){
 export async function verifyUserPassword(env, user, key){
   if(!env.PROXY_ADMIN_PASSPHRASE || typeof key !== "string" || key.length > MAX_PASSWORD_LENGTH) return false;
   const rec = user ? await usableRecord_(env, user.password) : null;
-  const got = await passwordHash_(env, key, rec ? rec.salt : "00112233445566778899aabbccddeeff", rec ? rec.iterations : PASSWORD_ITERATIONS);
+  const got = await passwordHash_(passwordKey_(env, rec), key, rec ? rec.salt : "00112233445566778899aabbccddeeff", rec ? rec.iterations : passwordIterations(env));
   const ok = !!rec && timingSafeEqual(got, rec.hash);
-  // A record marked under a legacy label (an adopted install) is re-marked under the odd- label the first time its
-  // password is typed — the hash doesn't change — so LEGACY_LABEL_PREFIX can be removed once everyone has signed in.
-  const now = ok ? await secretMark_(env) : "";
-  if(ok && rec.mark !== now && user.id != null){
+  if(!ok || user.id == null) return ok;
+  const now = await secretMark_(env);
+  if(rec.iterations < passwordIterations(env) || (env.PASSWORD_PEPPER && !rec.pepper)){
+    // Made with fewer rounds than this install now uses, or before it had a pepper: made again from the password
+    // just typed, with a new salt. When it was last changed stays as it was.
+    const fresh = JSON.parse(await passwordRecordFor_(env, key));
+    if(rec.changedAt) fresh.changedAt = rec.changedAt;
+    await updateUser(env.DB, user.id, { password: JSON.stringify(fresh) }).catch(() => {});
+    await setSettingRaw(env.DB, SECRET_MARK_SETTING, now).catch(() => {});
+  }else if(rec.mark !== now){
+    // A record marked under a legacy label (an adopted install) is re-marked under the odd- label the first time its
+    // password is typed — the hash doesn't change — so LEGACY_LABEL_PREFIX can be removed once everyone has signed in.
     await updateUser(env.DB, user.id, { password: JSON.stringify(Object.assign({}, rec, { mark: now })) }).catch(() => {});
     await setSettingRaw(env.DB, SECRET_MARK_SETTING, now).catch(() => {});
   }
@@ -347,9 +383,11 @@ export async function verifyUserPassword(env, user, key){
 }
 
 async function passwordRecordFor_(env, password){
-  const salt = hex_(crypto.getRandomValues(new Uint8Array(16)));
-  return JSON.stringify({ v: 1, salt, iterations: PASSWORD_ITERATIONS, hash: await passwordHash_(env, password, salt, PASSWORD_ITERATIONS),
-    mark: await secretMark_(env), changedAt: new Date().toISOString() });
+  const salt = hex_(crypto.getRandomValues(new Uint8Array(16))), iterations = passwordIterations(env), pepper = await pepperMark_(env);
+  const rec = { v: 1, salt, iterations, hash: await passwordHash_(passwordKey_(env, null), password, salt, iterations),
+    mark: await secretMark_(env), changedAt: new Date().toISOString() };
+  if(pepper) rec.pepper = pepper;
+  return JSON.stringify(rec);
 }
 
 export async function setUserPassword(env, userId, password, { mustChange = false } = {}){
@@ -399,7 +437,9 @@ export async function bootstrapState(env){
     const oldTotp = (await getSettingRaw(env.DB, "totpSecret")) || env.TOTP_SECRET || "";
     if(oldPassword || oldTotp){
       const counter = parseInt(await getSettingRaw(env.DB, "totpLastCounter"), 10);
-      await insertFirstAdmin(env.DB, { password: oldPassword ? JSON.stringify(oldPassword) : null, totpSecret: oldTotp || null, totpLastCounter: Number.isInteger(counter) ? counter : null });
+      // The two-step secret goes into the user's row sealed (totp.js sealTotp), as every new one is.
+      const totpSecret = !oldTotp ? null : env.PROXY_ADMIN_PASSPHRASE ? await sealTotp(env, oldTotp) : oldTotp;
+      await insertFirstAdmin(env.DB, { password: oldPassword ? JSON.stringify(oldPassword) : null, totpSecret, totpLastCounter: Number.isInteger(counter) ? counter : null });
       if(oldPassword && oldPassword.mark && !(await getSettingRaw(env.DB, SECRET_MARK_SETTING))) await setSettingRaw(env.DB, SECRET_MARK_SETTING, oldPassword.mark);
       st = await getBootstrapState(env.DB);
     }

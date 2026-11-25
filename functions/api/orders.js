@@ -18,7 +18,7 @@ import { requireAdmin, adminActor, adminUser, adminCan } from "../_lib/adminAuth
 import { ACTION_PERM, stageFn } from "../_lib/permissions.js";
 import { copyVendorImage } from "../_lib/vendorImages.js";
 import { countStitches } from "../_lib/stitchCount.js";
-import { findOrphanImages, deleteOrphanImages } from "../_lib/orphanImages.js";
+import { scanOrphanImages, deleteOrphanImages } from "../_lib/orphanImages.js";
 import { searchPsCompanies, getPsEndpoints, fetchVendorProduct, PS_OVERRIDES, psSendPO } from "../_lib/promostandards.js";
 import { vendorLogFetch, listVendorApiLog, getVendorApiLogEntry } from "../_lib/vendorLog.js";
 import { supplierConnection, supplierShipMethods, supplierShipTo, planSupplierOrder, checkSupplierShipments, supplierOrderApprovalCheck } from "../_lib/supplierOrders.js";
@@ -68,9 +68,9 @@ import {
   listProductGraphicImages, setProductGraphicImage, deleteProductGraphicImage, getProductLocationBaseImages,
   listGraphics, getGraphic, createGraphic, updateGraphic, graphicGlobalProblem, setProductGraphicColorBlocked, deleteGraphic,
   getTierPrices, setTierPrices, setOrgReorderQr, setOrgReorderQrTransfer,
-  listTransfers, createTransfer, updateTransfer, deleteTransfer, receiveTransferSheet, transferSheetShares, SHEET_PCT_TOLERANCE,
+  listTransfers, createTransfer, updateTransfer, deleteTransfer, receiveTransferSheetOnce, transferSheetShares, SHEET_PCT_TOLERANCE,
   getTransferSheet, editTransferSheet, transferSheetLabel,
-  writeOffTransfers, setTransferCount, getTransferMovements, voidTransferMovement, transferMovementVoidable, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferValuations, getTransferCogs,
+  writeOffTransfers, setTransferCounts, getTransferMovements, voidTransferMovement, transferMovementVoidable, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferValuations, getTransferCogs,
   getTransferQueue, setTransferReceived, getGangSheet, makeTransferLine, setTransfersApplied, lineHasEmbroidery, refreshOrderLinesFromCatalog,
   listDesigns, getDesign, saveDesign, deleteDesign, listDesignVersions, addDesignVersion, updateDesignVersionThreads, setProductDesign,
   listProductDesigns, setProductDesigns, listOrderItemDesigns, addOrderItemDesign, getCatalogIssues, getBlankReadyByOrg,
@@ -103,7 +103,7 @@ import {
   getSalesTaxSettings, setSalesTaxSettings, setOrgTaxExemption, getSalesTaxReport,
   getSalesTaxRefunds, PAYMENT_METHODS, methodFromPaymentMethod, getCardPaymentsMissingFees, setPaymentFee, getSalesTaxReturn, getTaxedResalePurchases, getStripeLinkedPayments, setPaymentDate, countStripePaymentsToCheck, markStripeChecked, stripeRefsTaken,
   getDigestState, getDigestRun, getOrdersForDigest, getUnsentOwnerNotices, getFailedAdminLogins,
-  ACCOUNT_TYPES, OTHER_INCOME_TYPES, listAccounts, saveAccount, getAccount, getMoneyDefaults, setMoneyDefaults,
+  ACCOUNT_TYPES, OTHER_INCOME_TYPES, listAccounts, listAccountNames, saveAccount, getAccount, getMoneyDefaults, setMoneyDefaults,
   listMoneyEntries, getMoneyEntry, saveMoneyEntry, deleteMoneyEntry, moneyEntryMonth, getMoneySummary, setPaymentAccount,
   importStatementLines, autoMatchStatement, getStatementLine, matchStatementLine, unmatchStatementLine, setStatementLineIgnored,
   getReconciliationData, setReconciled, clearReconciled, isReconciled, saveCsvMapping, previewExpenseRows, landedCostLines, spreadCents,
@@ -112,7 +112,7 @@ import {
   RECURRING_FREQUENCIES, recurringDueDates, recurringIndexAfter, listRecurringExpenses, getRecurringExpense, saveRecurringExpense, stopRecurringExpense,
   deleteRecurringExpense, recordDueRecurringExpenses, getRecurringExpensesRecorded,
   getRefundedCents, getDepositPayments, linkPaymentsToCashout, cashoutNetCents_,
-  receiveBlanks, writeOffBlanks, setBlankCount, getBlankMovements, markBlankPricesChecked, setBlankArchived, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection,
+  writeOffBlanks, getBlankMovements, markBlankPricesChecked, setBlankArchived, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection, receiveBlanksOnce, receiptGroupForKey, receiptEntryId, setBlankCounts,
   getSiteSetting, setSiteDomain,
   getPublishedOrg, setOrgReady, getShopWizard, saveShopWizard, deleteShopWizard, listShopWizards, setProductLinksFromBlank, publishShop, getPublishState, getDraftCatalogShop, signPreviewToken,
   planDiscardShopChanges, discardShopChanges, applyProductPrices,
@@ -162,6 +162,11 @@ const ORDERS_BY_IDS_MAX = 100;
 const BULK_STAGE_MAX = 20;
 // The same for the lighter bulk changes — complete, due date, customer info — a query or two per order.
 const BULK_ORDERS_MAX = 100;
+// Shops one publish request takes ("Publish all shops" sends more in groups — admin.js publishCatalog).
+const PUBLISH_SHOPS_MAX = 10;
+// Rows one stock count correction takes (countBlankStock / countTransferStock): the group is read in two queries and
+// written in one batch (db.js setBlankCounts), and the count window sends a bigger count in groups of this size.
+const COUNT_ROWS_MAX = 100;
 // Lines one bulk cancel takes (review #9): each runs several queries (the line, the cancel, the stock it gave back,
 // the paid state) plus its order's email, so the admin page sends a bigger selection in groups of whole orders.
 const BULK_CANCEL_LINES_MAX = 20;
@@ -415,8 +420,9 @@ const NO_MONTH_ACTIONS = new Set([
   "saveBlankLinks", "deleteBlankLink", "applyBlankCatchUp", "importBlanks", "applyVendorBlanks", "copyVendorImage", "removeBlankImages", "deleteInventoryItem",
   "deleteBlank", "mergeBlanks", "recomputeBlankAverageCosts", "recordRestockOrder", "cancelRestockOrder", "saveVendor", "deleteVendor", "previewSupplierOrder",
   "placeSupplierOrder", "cancelSupplierOrder", "saveTransfer", "applyTransferCatchUp", "deleteTransfer",
-  // Finance set-up, statements, and the periods themselves
-  "listExpenseCategories", "saveRecurringExpense", "stopRecurringExpense", "saveExpenseCategory", "deleteRecurringExpense", "deleteExpenseCategory",
+  // Finance set-up, statements, and the periods themselves (listAccounts and listExpenseCategories only read: they
+  // are here because the Receive forms' pickers ask for them at Edit)
+  "listAccounts", "listExpenseCategories", "saveRecurringExpense", "stopRecurringExpense", "saveExpenseCategory", "deleteRecurringExpense", "deleteExpenseCategory",
   "saveAccount", "saveMoneyDefaults", "setRecordReceipt", "importStatement", "autoMatchStatement", "matchStatementLine", "unmatchStatementLine",
   "ignoreStatementLine", "reconcileMonth", "unreconcileMonth", "saveShopRate", "closePeriod", "reopenPeriod",
   // Settings
@@ -916,36 +922,53 @@ async function handleOrdersPost_(context, listBefore = null) {
   // Records a planned blank order; returns the money-movement keys it created
   // (for statement matching). Paid with personal funds, the personal part is
   // simply not a business transaction, so nothing is recorded for it.
-  const commitBlankOrder_ = async (plan, { date, accountId, paidPersonally, fallbackName, source }) => {
+  // `requestKey` (requestKeyOf — migrations/0107): the Record order form's key for this Save. Each blank is then
+  // recorded once under "<key>:<its place in the order>" (receiveBlanksOnce), and the R&D expense and the personal
+  // draw once under the receipt group worked out from the key (receiptGroupFor_), so the same request again — a
+  // retry after a lost answer, or after a failure part-way — writes only what is missing and answers as the first
+  // one would have. `wrote` says whether this call recorded anything itself.
+  const commitBlankOrder_ = async (plan, { date, accountId, paidPersonally, fallbackName, source, requestKey = null }) => {
     const { vendor, vendorRef } = plan;
     const what = (vendor || String(fallbackName || "Blank order")).slice(0, 200) + (vendorRef ? ` #${vendorRef}` : "");
     const keys = [], parts = {};
-    const receiptGroup = newReceiptGroup_();
-    for (const g of plan.groups) {
-      const ids = await receiveBlanks(env.DB, { blankId: g.blankId, lines: g.lines, vendor, vendorRef,
+    const receiptGroup = await receiptGroupFor_(requestKey);
+    let wrote = false;
+    for (const [n, g] of plan.groups.entries()) {
+      const { ids, written } = await receiveBlanksOnce(env.DB, { blankId: g.blankId, lines: g.lines, vendor, vendorRef,
         receivedAt: date + "T12:00:00.000Z", vendorChargedTax: plan.vendorChargedTax, accountId: paidPersonally ? null : accountId, paidPersonally,
         note: g.ship ? `Received (landed cost incl. $${(g.ship / 100).toFixed(2)} shipping & other costs)` : "Received",
-        receiptKey: plan.receiptKey, receiptName: plan.receiptName, receiptGroup });
-      audit({ orgId: null, orderId: null, action: "inventory.received", detail: { blankId: g.blankId, lines: g.lines, extraCost: g.ship / 100, vendor, vendorRef, ...source } });
+        receiptKey: plan.receiptKey, receiptName: plan.receiptName, receiptGroup, requestKey: requestKey ? `${requestKey}:${n}` : null });
+      if (written) { wrote = true; audit({ orgId: null, orderId: null, action: "inventory.received", detail: { blankId: g.blankId, lines: g.lines, extraCost: g.ship / 100, vendor, vendorRef, ...source } }); }
       ids.forEach(id => keys.push(`blanks:${id}`));
     }
     if (plan.groups.length) parts.inventory = plan.invCents / 100;
     if (plan.rdTotal) {
       const cat = plan.rdCat;
-      const id = await saveExpense(env.DB, 0, { date, description: `R&D / testing — ${what}`, categoryId: cat.id, amount: plan.rdTotal / 100, vendor,
-        businessUsePct: 100, receiptKey: plan.receiptKey || "", receiptName: plan.receiptName || "", placedInService: cat.deductionType === "depreciation" ? date : null,
-        depMethod: cat.deductionType === "depreciation" ? "ask_cpa" : null, vendorChargedTax: true, accountId: paidPersonally ? null : accountId, paidPersonally, receiptGroup });
+      let id = requestKey ? await receiptEntryId(env.DB, "expenses", receiptGroup) : 0;
+      if (!id) {
+        id = await saveExpense(env.DB, 0, { date, description: `R&D / testing — ${what}`, categoryId: cat.id, amount: plan.rdTotal / 100, vendor,
+          businessUsePct: 100, receiptKey: plan.receiptKey || "", receiptName: plan.receiptName || "", placedInService: cat.deductionType === "depreciation" ? date : null,
+          depMethod: cat.deductionType === "depreciation" ? "ask_cpa" : null, vendorChargedTax: true, accountId: paidPersonally ? null : accountId, paidPersonally, receiptGroup });
+        wrote = true;
+      }
       keys.push(`expense:${id}`); parts.rd = plan.rdTotal / 100;
     }
     if (plan.personalTotal && !paidPersonally) {
-      const id = await saveMoneyEntry(env.DB, "owner", 0, { date, amount: plan.personalTotal / 100, kind: "draw", accountId, note: `Personal items — ${what}`, receiptGroup });
+      let id = requestKey ? await receiptEntryId(env.DB, "owner_transactions", receiptGroup) : 0;
+      if (!id) {
+        id = await saveMoneyEntry(env.DB, "owner", 0, { date, amount: plan.personalTotal / 100, kind: "draw", accountId, note: `Personal items — ${what}`, receiptGroup });
+        wrote = true;
+      }
       keys.push(`owner:${id}`); parts.personal = plan.personalTotal / 100;
     }
-    return { keys, parts };
+    return { keys, parts, wrote };
   };
   // One id for everything a single receive writes (stock rows, R&D / written-off expense, personal draw), so the
   // whole receipt can be corrected together later (migrations/0061).
   const newReceiptGroup_ = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, "0")).join("");
+  // …and for a receive that came with its form's key (migrations/0107) the id is worked out from the key, so a
+  // retry of the same Save lands in the group its first try used (db.js receiptGroupForKey).
+  const receiptGroupFor_ = async (requestKey) => requestKey ? receiptGroupForKey(requestKey) : newReceiptGroup_();
   const auditStrict = async (args) => {
     try { await insertAuditLog(env.DB, auditEntry(args)); return null; }
     catch (e) {
@@ -1526,6 +1549,15 @@ async function handleOrdersPost_(context, listBefore = null) {
     const meta = async () => ({ accountTypes: ACCOUNT_TYPES, otherIncomeTypes: OTHER_INCOME_TYPES, defaults: await getMoneyDefaults(env.DB) });
 
     if (body.action === "listAccounts") {
+      // What each account holds is for a role with Accounts and money (as Home keeps the business's money from a
+      // role without costs.view). Everyone else let in is here for an account picker — a payment, an expense, the
+      // Account viewer, Reconcile, receiving blanks or transfers (permissions.js) — and gets the names only: no
+      // balances, no opening balance, no statement-file settings, no money defaults, and the sums aren't run.
+      // Fails closed like the checks at the top. (saveAccount's reply below carries balances too: it needs
+      // Accounts and money at Edit.)
+      if (!can_("finance.money", "read")) {
+        return jsonResponse({ status: "ok", accounts: await listAccountNames(env.DB), accountTypes: ACCOUNT_TYPES, otherIncomeTypes: OTHER_INCOME_TYPES, defaults: {} });
+      }
       return jsonResponse({ status: "ok", accounts: await listAccounts(env.DB, ymd(body.asOf) ? body.asOf : undefined), ...(await meta()) });
     }
     if (body.action === "saveAccount") {
@@ -4646,11 +4678,15 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (r.removed) audit({ orgId: null, orderId: null, action: "inventory.blank_images_removed", detail: { blankId, removed: r.removed, removals: body.removals.slice(0, 200) } });
       return jsonResponse({ status: "ok", ...r });
     }
-    // Settings → Orphaned images: files in the image store nothing points to; delete re-checks each one first.
+    // Settings → Orphaned images: files in the image store nothing points to. The scan runs in steps the page drives
+    // (one request does a bounded share and answers with a scanId to carry on with — orphanImages.js); delete takes
+    // only files that scan listed, checked again against references the page has just had read again.
     if (body.action === "findOrphanImages" || body.action === "deleteOrphanImages") {
+      const idOf = (v) => /^[0-9a-f]{8,64}$/.test(String(v || "")) ? String(v) : "";
+      const scanId = idOf(body.scanId);
       try {
-        if (body.action === "findOrphanImages") return jsonResponse({ status: "ok", ...(await findOrphanImages(env, env.DB)) });
-        const r = await deleteOrphanImages(env, env.DB, body.keys);
+        if (body.action === "findOrphanImages") return jsonResponse({ status: "ok", ...(await scanOrphanImages(env, env.DB, { scanId, recheck: !!scanId && body.recheck === true, replaces: idOf(body.replaces) })) });
+        const r = await deleteOrphanImages(env, env.DB, body.keys, { scanId });
         if (r.deleted.length) audit({ orgId: null, orderId: null, action: "images.orphans_deleted", detail: { count: r.deleted.length, keys: r.deleted.slice(0, 500) } });
         return jsonResponse({ status: "ok", ...r });
       } catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
@@ -4895,7 +4931,8 @@ async function handleOrdersPost_(context, listBefore = null) {
     }
 
     // ---- Publish per shop (migrations/0076): what's unpublished, and a signed link to preview a shop's draft ----
-    if (body.action === "getPublishState") return jsonResponse({ status: "ok", publishState: await getPublishState(env.DB) });
+    // { orgs: [ids] } asks for those shops only (the shop bar: the one it shows); none = every shop (Manage catalog).
+    if (body.action === "getPublishState") return jsonResponse({ status: "ok", publishState: await getPublishState(env.DB, Array.isArray(body.orgs) ? body.orgs.slice(0, 1000).map(String) : null) });
     if (body.action === "getPreviewLink") {
       const org = await getOrgById(env.DB, String(body.org || ""));
       if (!org) return jsonResponse({ status: "error", message: "Shop not found" }, 404);
@@ -5482,30 +5519,43 @@ async function handleOrdersPost_(context, listBefore = null) {
       const chk = await checkTransferSheet_(body); if (chk.error) return chk.error;
       const { date, rows, totalCents, pcts, woPct, pePct, woWhat, peWhat, woCat } = chk;
       const { writeoffCents, personalCents } = transferSheetShares(pcts, woPct, pePct, totalCents);
-      const receiptGroup = newReceiptGroup_();
-      const ids = await receiveTransferSheet(env.DB, { rows, totalCents, writeoffPct: woPct, personalPct: pePct, receiptGroup,
+      // Recorded once per Save of the form (requestKeyOf — migrations/0107): the same request again — a retry after
+      // a dropped answer, or after a failure part-way — writes only what is missing (the rows by their own keys,
+      // the written-off expense and the personal draw by the receipt group worked out from the key).
+      const requestKey = requestKeyOf(body, "transferSheet");
+      const receiptGroup = await receiptGroupFor_(requestKey);
+      const { ids, written } = await receiveTransferSheetOnce(env.DB, { rows, totalCents, writeoffPct: woPct, personalPct: pePct, receiptGroup, requestKey,
         vendor: body.vendor, vendorRef: body.vendorRef, receivedAt: date,
         accountId: body.accountId, paidPersonally: !!body.paidPersonally, note: body.note, receiptKey: body.receiptKey, receiptName: body.receiptName });
+      let wrote = written > 0;
       const sheet = transferSheetLabel(body.vendor, body.vendorRef);
       const accountId = body.paidPersonally ? null : Number(body.accountId);
       let woRecorded = null, peRecorded = null;
       if (woPct > 0) {
         woRecorded = { pct: Math.round(woPct * 100) / 100, amount: writeoffCents / 100, description: woWhat };
         if (writeoffCents > 0) {
-          woRecorded.expenseId = await saveExpense(env.DB, 0, { date, description: `Transfer sheet written off — ${woWhat} (${sheet})`, categoryId: woCat.id, amount: writeoffCents / 100,
-            vendor: String(body.vendor || "").trim().slice(0, 100), businessUsePct: 100, receiptKey: String(body.receiptKey || ""), receiptName: String(body.receiptName || "").slice(0, 200),
-            placedInService: woCat.deductionType === "depreciation" ? date : null, depMethod: woCat.deductionType === "depreciation" ? "ask_cpa" : null,
-            vendorChargedTax: true, accountId, paidPersonally: !!body.paidPersonally, receiptGroup });
+          woRecorded.expenseId = requestKey ? await receiptEntryId(env.DB, "expenses", receiptGroup) : 0;
+          if (!woRecorded.expenseId) {
+            woRecorded.expenseId = await saveExpense(env.DB, 0, { date, description: `Transfer sheet written off — ${woWhat} (${sheet})`, categoryId: woCat.id, amount: writeoffCents / 100,
+              vendor: String(body.vendor || "").trim().slice(0, 100), businessUsePct: 100, receiptKey: String(body.receiptKey || ""), receiptName: String(body.receiptName || "").slice(0, 200),
+              placedInService: woCat.deductionType === "depreciation" ? date : null, depMethod: woCat.deductionType === "depreciation" ? "ask_cpa" : null,
+              vendorChargedTax: true, accountId, paidPersonally: !!body.paidPersonally, receiptGroup });
+            wrote = true;
+          }
         }
       }
       if (pePct > 0) {
         peRecorded = { pct: Math.round(pePct * 100) / 100, amount: personalCents / 100, description: peWhat };
         if (body.paidPersonally) peRecorded.notRecorded = true; // paid with personal funds: not a business transaction at all
         else if (personalCents > 0) {
-          peRecorded.ownerEntryId = await saveMoneyEntry(env.DB, "owner", 0, { date, amount: personalCents / 100, kind: "draw", accountId, note: `Personal items — ${peWhat} (${sheet})`, receiptGroup });
+          peRecorded.ownerEntryId = requestKey ? await receiptEntryId(env.DB, "owner_transactions", receiptGroup) : 0;
+          if (!peRecorded.ownerEntryId) {
+            peRecorded.ownerEntryId = await saveMoneyEntry(env.DB, "owner", 0, { date, amount: personalCents / 100, kind: "draw", accountId, note: `Personal items — ${peWhat} (${sheet})`, receiptGroup });
+            wrote = true;
+          }
         }
       }
-      audit({ orgId: null, orderId: null, action: "transfer.received", detail: { rows, total: Number(body.total) || 0, vendorRef: body.vendorRef || "",
+      if (wrote) audit({ orgId: null, orderId: null, action: "transfer.received", detail: { rows, total: Number(body.total) || 0, vendorRef: body.vendorRef || "",
         ...(woRecorded ? { writeoff: woRecorded } : {}), ...(peRecorded ? { personal: peRecorded } : {}) } });
       return jsonResponse({ status: "ok", ids, writeoff: woRecorded, personal: peRecorded, transfers: await listTransfers(env.DB, body.org || null) });
     }
@@ -5557,21 +5607,21 @@ async function handleOrdersPost_(context, listBefore = null) {
       audit({ orgId: null, orderId: null, action: "transfer.writeoff", detail: { transferId: Number(body.transferId), qty: Number(body.qty), note: body.note || "" } });
       return jsonResponse({ status: "ok", transfers: await listTransfers(env.DB, body.org || null) });
     }
-    // Count stock (transfers): the same as countBlankStock (setTransferCount). rows: [{transferId, counted, onHand}].
+    // Count stock (transfers): the same as countBlankStock (setTransferCounts). rows: [{transferId, counted, onHand}].
     if (body.action === "countTransferStock") {
-      const rows = Array.isArray(body.rows) ? body.rows.slice(0, 2000) : [];
+      const rows = Array.isArray(body.rows) ? body.rows : [];
       if (!rows.length) return jsonResponse({ status: "error", message: "Nothing to correct" }, 400);
+      if (rows.length > COUNT_ROWS_MAX) return jsonResponse({ status: "error", message: `Too many rows at once (max ${COUNT_ROWS_MAX})` }, 400);
       if (rows.some(r => !r || !Number(r.transferId) || !Number.isInteger(Number(r.counted)) || Number(r.counted) < 0))
         return jsonResponse({ status: "error", message: "Enter a whole count of 0 or more on every row" }, 400);
       const when = actionTime(body);
       if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
       { const locked = await periodGuard(body); if (locked) return locked; }
       const note = String(body.note || "").trim().slice(0, 200), done = [], failed = [];
-      for (const r of rows) {
-        const row = { transferId: Number(r.transferId), counted: Number(r.counted), onHand: Number(r.onHand) };
-        try { const x = await setTransferCount(env.DB, { ...row, note, at: when ? when.at : null }); if (x.delta) done.push({ ...row, delta: x.delta }); }
-        catch (e) { if (!e.userFacing) throw e; failed.push({ ...row, error: e.message }); }
-      }
+      const list = rows.map(r => ({ transferId: Number(r.transferId), counted: Number(r.counted), onHand: Number(r.onHand) }));
+      (await setTransferCounts(env.DB, list, { note, at: when ? when.at : null })).forEach((x, i) => {
+        if (x.error) failed.push({ ...list[i], error: x.error }); else if (x.delta) done.push({ ...list[i], delta: x.delta });
+      });
       if (done.length) audit({ orgId: null, orderId: null, action: "transfer.counted", detail: { rows: done, ...(note ? { note } : {}), occurredAt: when ? when.at : null } });
       return jsonResponse({ status: "ok", corrected: done, failed, transfers: await listTransfers(env.DB, body.org || null) });
     }
@@ -6113,8 +6163,11 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (body.orderTotal != null && body.orderTotal !== "" && Math.round(Number(body.orderTotal) * 100) !== plan.totalCents) {
         return bad(`The parts add up to $${(plan.totalCents / 100).toFixed(2)}, but the order total is $${Number(body.orderTotal).toFixed(2)}`);
       }
-      const { keys, parts } = await commitBlankOrder_(plan, { date, accountId, paidPersonally, fallbackName: "Blank order", source: { blankOrder: true } });
-      audit({ orgId: null, orderId: null, action: "inventory.order_received", detail: { date, accountId, paidPersonally, keys, parts, total: plan.totalCents / 100 } });
+      // Recorded once per Save of the form (requestKeyOf): the same request again — a retry after a dropped answer,
+      // or after a failure part-way — writes only what is missing, and is answered like the first.
+      const { keys, parts, wrote } = await commitBlankOrder_(plan, { date, accountId, paidPersonally, fallbackName: "Blank order", source: { blankOrder: true },
+        requestKey: requestKeyOf(body, "blankOrder") });
+      if (wrote) audit({ orgId: null, orderId: null, action: "inventory.order_received", detail: { date, accountId, paidPersonally, keys, parts, total: plan.totalCents / 100 } });
       // The received blanks' average cost moved: products using them that are now below a pricing target.
       const belowTarget = await belowForBlanks_(plan.groups.map(g => g.blankId));
       return withList_({ status: "ok", parts, total: plan.totalCents / 100, belowTarget }, "blanks", "blanks", blankCostsFor_);
@@ -6143,9 +6196,12 @@ async function handleOrdersPost_(context, listBefore = null) {
       const landed = extraCost > 0
         ? landedCostLines(lines.map(l => ({ color: l.color || "", size: l.size, qty: Number(l.qty), cents: Number(l.qty) * Math.round(Number(l.unitCost) * 100) })), Math.round(extraCost * 100))
         : lines;
-      await receiveBlanks(env.DB, { blankId, lines: landed, vendor, vendorRef, receivedAt, vendorChargedTax, accountId, paidPersonally, receiptGroup: newReceiptGroup_(),
+      // Recorded once per Save of the form (requestKeyOf — migrations/0107): the same request again writes nothing more.
+      const requestKey = requestKeyOf(body, "receiveBlanks");
+      const { written } = await receiveBlanksOnce(env.DB, { blankId, lines: landed, vendor, vendorRef, receivedAt, vendorChargedTax, accountId, paidPersonally,
+        receiptGroup: await receiptGroupFor_(requestKey), requestKey,
         note: extraCost ? `Received (landed cost incl. $${extraCost.toFixed(2)} shipping & other costs)` : "Received" });
-      audit({ orgId: null, orderId: null, action: "inventory.received", detail: { blankId, lines, extraCost, vendor, vendorRef, receivedAt: receivedAt || null, vendorChargedTax } });
+      if (written) audit({ orgId: null, orderId: null, action: "inventory.received", detail: { blankId, lines, extraCost, vendor, vendorRef, receivedAt: receivedAt || null, vendorChargedTax } });
       return withList_({ status: "ok" }, "blanks", "blanks", blankCostsFor_);
     }
     if (body.action === "writeOffBlanks") {
@@ -6174,23 +6230,24 @@ async function handleOrdersPost_(context, listBefore = null) {
       return withList_({ status: "ok" }, "blanks", "blanks", blankCostsFor_);
     }
     // Count stock (blanks): each row's counted number, recorded as a correction for the difference
-    // (setBlankCount). rows: [{blankId, color, size, counted, onHand}] — one row from a row's Correct count,
-    // many from Correct all remaining differences. A row that fails (its stock changed since the window
-    // read it) comes back in `failed`; the rest still apply.
+    // (setBlankCounts). rows: [{blankId, color, size, counted, onHand}] — one row from a row's Correct count,
+    // many from Correct all remaining differences, at most COUNT_ROWS_MAX a request (the window sends more in
+    // groups). A row that fails (its stock changed since the window read it) comes back in `failed`; the rest
+    // still apply, in one batch, with one audit entry for the group.
     if (body.action === "countBlankStock") {
-      const rows = Array.isArray(body.rows) ? body.rows.slice(0, 2000) : [];
+      const rows = Array.isArray(body.rows) ? body.rows : [];
       if (!rows.length) return jsonResponse({ status: "error", message: "Nothing to correct" }, 400);
+      if (rows.length > COUNT_ROWS_MAX) return jsonResponse({ status: "error", message: `Too many rows at once (max ${COUNT_ROWS_MAX})` }, 400);
       if (rows.some(r => !r || !Number(r.blankId) || !Number.isInteger(Number(r.counted)) || Number(r.counted) < 0))
         return jsonResponse({ status: "error", message: "Enter a whole count of 0 or more on every row" }, 400);
       const when = actionTime(body);
       if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
       { const locked = await periodGuard(body); if (locked) return locked; }
       const note = String(body.note || "").trim().slice(0, 200), done = [], failed = [];
-      for (const r of rows) {
-        const row = { blankId: Number(r.blankId), color: String(r.color ?? ""), size: String(r.size ?? ""), counted: Number(r.counted), onHand: Number(r.onHand) };
-        try { const x = await setBlankCount(env.DB, { ...row, note, at: when ? when.at : null }); if (x.delta) done.push({ ...row, delta: x.delta }); }
-        catch (e) { if (!e.userFacing) throw e; failed.push({ ...row, error: e.message }); }
-      }
+      const list = rows.map(r => ({ blankId: Number(r.blankId), color: String(r.color ?? ""), size: String(r.size ?? ""), counted: Number(r.counted), onHand: Number(r.onHand) }));
+      (await setBlankCounts(env.DB, list, { note, at: when ? when.at : null })).forEach((x, i) => {
+        if (x.error) failed.push({ ...list[i], error: x.error }); else if (x.delta) done.push({ ...list[i], delta: x.delta });
+      });
       if (done.length) audit({ orgId: null, orderId: null, action: "inventory.counted", detail: { rows: done, ...(note ? { note } : {}), occurredAt: when ? when.at : null } });
       return withList_({ status: "ok", corrected: done, failed }, "blanks", "blanks", blankCostsFor_);
     }
@@ -6500,19 +6557,24 @@ async function handleOrdersPost_(context, listBefore = null) {
   }
 
   // ---- publish — bump the catalog version to invalidate the edge cache -------
-  // Publish (migrations/0076): one shop ({org}) or every shop (no org). Its current rows become what shoppers see
-  // and orders are priced from; the cache version is bumped so the change shows at once.
+  // Publish (migrations/0076): one shop ({org}), some ({orgs: [ids]}) or every shop (neither). Its current rows
+  // become what shoppers see and orders are priced from; the cache version is bumped so the change shows at once.
+  // At most PUBLISH_SHOPS_MAX shops a request — each takes a few queries, and one request may run only so many — so
+  // "Publish all shops" sends them in groups (admin.js publishCatalog). The answer's publishState covers the shops
+  // this request published; the page keeps the others' as it had them.
   if (body.action === "publish") {
     const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_PERM_[body.action]);
     if (denied) return denied;
-    const orgIds = body.org ? [String(body.org)] : (await getAllOrgs(env.DB)).map(o => o.orgId);
+    const named = body.org ? [String(body.org)] : Array.isArray(body.orgs) ? [...new Set(body.orgs.map(String))] : null;
+    const orgIds = named || (await getAllOrgs(env.DB)).map(o => o.orgId);
+    if (orgIds.length > PUBLISH_SHOPS_MAX) return jsonResponse({ status: "error", message: `Too many shops at once (max ${PUBLISH_SHOPS_MAX})` }, 400);
     const published = [];
     for (const id of orgIds) { const r = await publishShop(env.DB, id, adminActor(request)); if (r) published.push(id); }
-    if (body.org && !published.length) return jsonResponse({ status: "error", message: "Shop not found" }, 404);
+    if (named && !published.length) return jsonResponse({ status: "error", message: "Shop not found" }, 404);
     const next = await bumpCatalogVersion(env.DB);
     invalidateCatalogVersionCache();
     audit({ orgId: body.org || null, orderId: null, action: "catalog.published", detail: { shops: published } });
-    return jsonResponse({ status: "ok", version: next, published, publishState: await getPublishState(env.DB) });
+    return jsonResponse({ status: "ok", version: next, published, publishState: await getPublishState(env.DB, published) });
   }
 
   // ---- Apply these prices (Brand rules → Show price impact): changes [{org, productId, group, size, price}] ----
@@ -6543,7 +6605,7 @@ async function handleOrdersPost_(context, listBefore = null) {
         audit({ orgId: org, orderId: null, action: "product.prices_applied", detail: { productId, source: "price rule", changed: r.changed } });
       }
     }
-    return jsonResponse({ status: "ok", products: done, prices: done.reduce((n, p) => n + p.changed.length, 0), skipped, publishState: await getPublishState(env.DB) });
+    return jsonResponse({ status: "ok", products: done, prices: done.reduce((n, p) => n + p.changed.length, 0), skipped, publishState: await getPublishState(env.DB, [...new Set(done.map(p => p.org))]) });
   }
 
   // ---- Discard a shop's unpublished changes: back to what was last published (planDiscardShopChanges) ----
@@ -6561,7 +6623,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (!r) return jsonResponse({ status: "error", message: "This shop hasn't been published yet, so there's nothing to go back to." }, 409);
     const { removedRows, ...res } = r;
     audit({ orgId: org, orderId: null, action: "catalog.changes_discarded", detail: { ...res, removedProducts: removedRows } });
-    return jsonResponse({ status: "ok", ...res, publishState: await getPublishState(env.DB) });
+    return jsonResponse({ status: "ok", ...res, publishState: await getPublishState(env.DB, [org]) });
   }
 
   // ---- sendDesignVerification — batch email design proofs to customers ---------

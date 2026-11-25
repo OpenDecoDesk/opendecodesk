@@ -86,7 +86,8 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
     ok("…and new secrets (nothing readable to keep) include one", /^[0-9a-f]{64}$/.test(JSON.parse(fs.readFileSync(path.join(tmp, "desktop.json"), "utf8")).secrets.PASSWORD_PEPPER));
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
   const setupSrc = fs.readFileSync(__dirname + "/scripts/setup.mjs", "utf8");
-  ok("the installer makes it only when the Worker hasn't one (test108 runs it twice)", /for \(const name of \["SIGNING_SECRET", "CRON_SECRET", "PASSWORD_PEPPER"\]\) if \(!existing\.includes\(name\)\)/.test(setupSrc) &&
+  ok("the installer makes it only when the Worker hasn't one (test108 runs it twice; test290 when the secrets can't be listed)", /const missing = \(name\) => !existing\.includes\(name\) && /.test(setupSrc) &&
+    /for \(const name of \["SIGNING_SECRET", "CRON_SECRET", "PASSWORD_PEPPER"\]\) if \(missing\(name\)\)/.test(setupSrc) &&
     /SECRET_NAMES = \[[^\]]*"PASSWORD_PEPPER"/.test(setupSrc));
   ok("the settings are documented", /`PASSWORD_ITERATIONS`/.test(fs.readFileSync(__dirname + "/docs/configuration.md", "utf8")) && /`PASSWORD_PEPPER`/.test(fs.readFileSync(__dirname + "/docs/configuration.md", "utf8")));
 

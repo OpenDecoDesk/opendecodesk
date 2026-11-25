@@ -3,11 +3,15 @@ const { createD1 } = require("./testlib/d1-shim.js");
 
 // The housekeeping step cleanUpUnsavedUploads (review #24, functions/_lib/unsavedUploads.js): receipts (RECEIPTS
 // under receipts/) and design / order / digital files (DESIGNS under designs/, order-files/, digital/) uploaded more
-// than 48 hours ago that no …Key column in the database names are deleted — at most 1,000 a run, within a time
+// than 30 days ago that no …Key column in the database names are deleted — at most 1,000 a run, within a time
 // limit, carrying on where the last run stopped. Anything named anywhere is kept, as is anything newer, anything
 // under another prefix, and everything when the columns can't be found. A missing bucket is skipped quietly; a
 // failed deletion is recorded as a system issue by the housekeeping. Real SQL (sql.js) on the migrated schema, an
 // in-memory stand-in for R2. Invented data only.
+//
+// Why 30 days and not the 48 hours it once was: after the database is restored to an earlier point, every file saved
+// since then is one nothing names, and deleting is for good. The owner gets 30 days from each file's upload to
+// re-enter the records ("After a restore" below).
 
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 let failed = 0, passed = 0;
@@ -46,7 +50,8 @@ function bucket(name) {
 (async () => {
   const lib = await import("./functions/_lib/unsavedUploads.js");
   const NOW = Date.parse("2026-11-20T12:00:00Z");
-  const OLD = NOW - 72 * 3600 * 1000, NEW = NOW - 2 * 3600 * 1000, EDGE = NOW - 47 * 3600 * 1000;
+  const HOUR = 3600 * 1000, DAY = 24 * HOUR;
+  const OLD = NOW - 45 * DAY, NEW = NOW - 2 * HOUR, EDGE = NOW - (30 * DAY - HOUR);
   const hex = (n) => n.toString(16).padStart(32, "0");
 
   console.log("=== Every column that names an upload is found ===");
@@ -94,7 +99,7 @@ function bucket(name) {
   }
   ok("(a row naming an old file was added for every column)", named.length === cols.length);
 
-  // The files nothing names: old (deleted), new and just under 48 hours (kept), and files under other prefixes (kept).
+  // The files nothing names: old (deleted), new and just under 30 days (kept), and files under other prefixes (kept).
   const unsavedOld = [`receipts/2025/${hex(901)}.jpg`, `designs/12/${hex(902)}.dst`, `order-files/44/${hex(903)}.pdf`, `digital/acme/hat/${hex(904)}.zip`, `order-files/pending/${hex(905)}.png`];
   unsavedOld.forEach(k => (k.startsWith("receipts/") ? R : D).put(k, OLD));
   const fresh = [`receipts/2026/${hex(911)}.png`, `designs/12/${hex(912)}.dst`, `digital/acme/hat/${hex(913)}.zip`];
@@ -110,13 +115,38 @@ function bucket(name) {
   ok("every file a …Key column names is kept, in every table", named.every(there));
   ok("old files nothing names are deleted, in both buckets and under every prefix", unsavedOld.every(k => !there(k)) && r1.deleted === unsavedOld.length);
   ok("…including a customer upload whose row is gone (one with its row waits for its own clean-up)", !there(unsavedOld[4]) && there(named.find(k => k.startsWith("order-files/pending/"))));
-  ok("files uploaded in the last 48 hours are kept", fresh.every(there) && there(`designs/12/${hex(914)}.dst`) && r1.recent === 4);
+  ok("the wait is 30 days", lib.UNSAVED_UPLOADS_KEEP_DAYS === 30);
+  ok("files uploaded in the last 30 days are kept", fresh.every(there) && there(`designs/12/${hex(914)}.dst`) && r1.recent === 4);
   ok("files under other prefixes (the vendor log's own) are never looked at", elsewhere.every(there));
   ok("the run says what it did: finished, nothing skipped, no errors", r1.finished === true && r1.skipped.length === 0 && r1.errors.length === 0 && r1.referenced === named.length);
   ok("one deletion call per bucket", R.deletes.join() === "1" && D.deletes.join() === "4");
   const r1b = await lib.cleanUpUnsavedUploads(env, { now: NOW });
   ok("a second run finds nothing more to delete", r1b.deleted === 0 && named.every(there) && fresh.every(there));
-  ok("…and a file comes due once it is 48 hours old", (await lib.cleanUpUnsavedUploads(env, { now: NOW + 47 * 3600 * 1000 })).deleted === 4 && !fresh.some(there));
+  ok("…and a file comes due once it is 30 days old", (await lib.cleanUpUnsavedUploads(env, { now: NOW + 30 * DAY - HOUR })).deleted === 4 && !fresh.some(there));
+
+  console.log("\n=== After a restore: files the database no longer names ===");
+  {
+    // A receipt and a design file saved three days ago and a receipt saved 31 days ago, each named by a row. Then
+    // the database is put back to an earlier point: the rows are gone, the files are still in the buckets.
+    const R9 = bucket("RECEIPTS"), D9 = bucket("DESIGNS");
+    const receipt = `receipts/2026/${hex(701)}.pdf`, design = `designs/7/${hex(702)}.dst`, stale = `receipts/2026/${hex(703)}.pdf`;
+    R9.put(receipt, NOW - 3 * DAY); D9.put(design, NOW - 3 * DAY); R9.put(stale, NOW - 31 * DAY);
+    d1._raw.run("CREATE TABLE restore_test (id INTEGER PRIMARY KEY, receiptKey TEXT)");
+    d1._raw.run("INSERT INTO restore_test (receiptKey) VALUES (?), (?), (?)", [receipt, design, stale]);
+    const env9 = { DB: d1, RECEIPTS: R9, DESIGNS: D9 };
+    const before = await lib.cleanUpUnsavedUploads(env9, { now: NOW });
+    ok("(while the rows are there, all three files are named and kept)", before.deleted === 0 && R9.objects.size === 2 && D9.objects.size === 1);
+    d1._raw.run("DELETE FROM restore_test");   // the restore
+    const a = await lib.cleanUpUnsavedUploads(env9, { now: NOW });
+    ok("a 3-day-old file nothing names any more is kept", R9.objects.has(receipt) && D9.objects.has(design));
+    ok("a 31-day-old one is deleted", !R9.objects.has(stale) && a.deleted === 1);
+    const b = await lib.cleanUpUnsavedUploads(env9, { now: NOW + 26 * DAY });
+    ok("…the kept files are still there 29 days after their upload", b.deleted === 0 && R9.objects.has(receipt) && D9.objects.has(design));
+    d1._raw.run("INSERT INTO restore_test (receiptKey) VALUES (?)", [receipt]);   // the owner re-enters one record in time
+    const c = await lib.cleanUpUnsavedUploads(env9, { now: NOW + 28 * DAY });
+    ok("…after 30 days the one whose record was re-entered stays, the other goes", c.deleted === 1 && R9.objects.has(receipt) && !D9.objects.has(design));
+    d1._raw.run("DROP TABLE restore_test");
+  }
 
   console.log("\n=== At most 1,000 a run, carrying on next time ===");
   {

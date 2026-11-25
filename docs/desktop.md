@@ -291,7 +291,9 @@ keeps everything.
 
 There is no cloud copy. **File → Back up…** asks for a folder (a USB drive, a synced folder) and
 copies everything into `OpenDecoDesk backup <date and time>` there: the database, pictures, receipts
-and design files. The program closes the database for the few seconds this takes.
+and design files. The program closes the database for the few seconds this takes. If the copy
+can't finish (the disk is full, the drive was pulled out), it says the backup was not made and
+leaves no folder behind: a folder with that name is always a whole backup.
 
 It reminds you: once your last backup is a week old, or a day after you first used the program with
 no backup yet, a note under the menu says so, with **Back up now**. **Later** hides it until the
@@ -299,7 +301,8 @@ program is next opened.
 
 **File → Restore a backup…** puts one back. What was there is moved to `backups/before-restore-…`
 in the data folder, not deleted. You sign in with the password that was in use when the backup was
-made.
+made. If the backup can't be read in full, nothing is changed: the program says so and opens on the
+data it had.
 
 A newer version of the program updates the database on its first start (the same migrations as a
 cloud install, `desktop/migrate.js`), and copies it to `backups/before-update-…` first. Each of

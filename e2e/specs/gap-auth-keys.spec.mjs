@@ -2,10 +2,10 @@
 //   - the installer's setup passphrase is the way in to a new install through the sign-in page only. Sent with an
 //     API request — as `key` in the body, as the X-Admin-Key header, with a picture upload — it opens nothing.
 //   - failed sign-ins are counted per account (under a hash of the email typed) as well as per address and for
-//     the whole install. Past 10 for one account in the 15-minute window, a sign-in to it from an address that
-//     hasn't signed in here lately is held up (this install has no Turnstile keys, so it is refused until the
-//     window ends) — even with the right password. Other accounts, and addresses that signed in within the
-//     last 30 days, are not held up.
+//     the whole install. Past 10 for one account in the 15-minute window, a sign-in to it is held up (this
+//     install has no Turnstile keys, so it is refused until the window ends) — even with the right password, and
+//     from an address that signed in here lately too (such an address skips only the install-wide budget). Other
+//     accounts are not held up.
 //
 // The users this spec signs in as are its own, made here. P3's ten wrong passwords are the only failed sign-ins it
 // sends: they spend 10 of the install's 100-per-15-minutes budget of failed sign-ins (which every spec's sign-ins
@@ -109,7 +109,7 @@ test.describe("the setup passphrase is no API key", () => {
 test.describe("the per-account sign-in budget", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("past 10 failed sign-ins one account is held up from new addresses only; other accounts and known addresses are not", async ({ api }, testInfo) => {
+  test("past 10 failed sign-ins one account is held up from every address, one that signed in lately included; other accounts are not", async ({ api }, testInfo) => {
     // The failure counts run in fixed 15-minute windows (from the epoch, on the server's clock — this computer's).
     // Ten failures and the checks after them take a few seconds; if the window is about to turn, wait for the new
     // one, or the count would start again half-way.
@@ -160,10 +160,16 @@ test.describe("the per-account sign-in budget", () => {
     expect(otherIn.body.user.email).toBe(other.email);
     expect(otherIn.cookie).toMatch(/HttpOnly.*Max-Age=86400/);
 
-    // And the address U signed in from before is let past the spent budget: U signs in there with the right password.
+    // The address U signed in from before is NOT let past an account's own budget (it skips only the install-wide
+    // one): U's right password is held up there too, before it is checked…
     const back = await signIn(known, u.email, u.password);
-    expect(back.status).toBe(200);
-    expect(back.body.user.email).toBe(u.email);
-    expect(back.cookie).toMatch(/HttpOnly.*Max-Age=86400/);
+    expect(back.status).toBe(429);
+    expect(back.body.message).toMatch(/Too many requests/);
+    expect(back.cookie).toBe("");
+    // …while another account signs in from that same address.
+    const otherThere = await signIn(known, other.email, other.password);
+    expect(otherThere.status).toBe(200);
+    expect(otherThere.body.user.email).toBe(other.email);
+    expect(otherThere.cookie).toMatch(/HttpOnly.*Max-Age=86400/);
   });
 });

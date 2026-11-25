@@ -46,6 +46,7 @@ import { sealTotp } from "./totp.js";
 import {
   insertAdminSession, deleteAdminSession, getSettingRaw, setSettingRaw, getAdminSession, setAdminSessionPending,
   deleteAllAdminSessions, getBootstrapState, insertFirstAdmin, updateUser, replaceRecoveryCodes, deleteUserSessions,
+  recordFailedAdminLogin,
 } from "./db.js";
 
 const ADMIN_AUTH_BUCKET = "admin_auth";
@@ -85,8 +86,10 @@ async function accountKey_(email){
   const e = String(email || "").trim().toLowerCase();
   return e ? (await sha256Hex_("odd-signin-account:" + e)).slice(0, 32) : "";
 }
-// An address that signed in here (a right password) in the last 30 days is let past a spent budget without a
-// check: the people who work here keep signing in while someone else floods the sign-in page.
+// An address that signed in here (a right password) in the last 30 days is let past a spent install-wide budget
+// without a check: the people who work here keep signing in while someone else floods the sign-in page. It is NOT
+// let past an account's own budget: the mark belongs to the address, not to an account, so everyone behind an
+// office's or a phone carrier's shared address would otherwise guess at any account without that limit.
 const ADMIN_KNOWN_BUCKET = "admin_known";
 const ADMIN_KNOWN_SECONDS = 30 * 24 * 60 * 60;
 export async function noteSignInAddress(env, request){
@@ -97,16 +100,16 @@ const turnstileReady_ = (env) => !!(env && env.TURNSTILE_SECRET_KEY && env.TURNS
 const askForCheck_ = (env, message) => jsonResponse({ status: "error", code: "turnstile_required", siteKey: env.TURNSTILE_SITE_KEY,
   message: message || "There have been many failed sign-ins on this site just now. Complete the check to go on." }, 429);
 // Before checking a credential sent without a session (/api/admin-session): this address's share (refused past
-// it), then — unless the address signed in here lately — the whole budget and this account's. Past either, a
-// Turnstile check (`turnstileToken`) is needed instead; a site without Turnstile keys refuses as before.
+// it), then the whole budget — unless the address signed in here lately — and, from every address, this account's.
+// Past either, a Turnstile check (`turnstileToken`) is needed instead; a site without Turnstile keys refuses as before.
 // Returns null, or the answer to send back.
 export async function signInBudgetBlocked(env, request, { email = "", turnstileToken = "" } = {}){
   const share = adminAuthIpShare(env);
   if(!(share > 0)) return null;
   const mine = await rateLimitCheck(env, ADMIN_AUTH_IP_SHARE_BUCKET, request, share, ADMIN_AUTH_GLOBAL_WINDOW);
   if(mine.blocked) return rateLimitResponse(mine.retryAfter);
-  if(await rateLimitMarked(env, ADMIN_KNOWN_BUCKET, request)) return null;
-  const all = await rateLimitCheckGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, adminAuthGlobalLimit(env), ADMIN_AUTH_GLOBAL_WINDOW);
+  const known = await rateLimitMarked(env, ADMIN_KNOWN_BUCKET, request);
+  const all = known ? { blocked: false } : await rateLimitCheckGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, adminAuthGlobalLimit(env), ADMIN_AUTH_GLOBAL_WINDOW);
   const account = await accountKey_(email);
   const acct = account ? await rateLimitCheck(env, ADMIN_AUTH_ACCOUNT_BUCKET, "acct:" + account, adminAuthAccountLimit(env), ADMIN_AUTH_GLOBAL_WINDOW) : { blocked: false };
   if(!all.blocked && !acct.blocked) return null;
@@ -380,6 +383,31 @@ export async function verifyUserPassword(env, user, key){
     await setSettingRaw(env.DB, SECRET_MARK_SETTING, now).catch(() => {});
   }
   return ok;
+}
+
+// The password of a user who is ALREADY signed in, asked for again before a change to how they sign in: a new
+// password (admin-password.js), turning two-step on (admin-2fa.js). Returns null when it is right, else the
+// answer to send. A wrong one counts against the same failure budget as a wrong sign-in (10 an address a minute)
+// and against this user's own (10 in 15 minutes, from any address, one budget for both screens), and is recorded
+// for the owner's security alert. Past either budget the password isn't even checked, so a borrowed session
+// can't guess it.
+const CURRENT_PW_USER_BUCKET = "admin_pw_user", CURRENT_PW_USER_LIMIT = 10, CURRENT_PW_USER_WINDOW = 15 * 60;
+export async function checkCurrentPassword(env, request, user, current){
+  const fromHere = await rateLimitCheck(env, ADMIN_AUTH_BUCKET, request, ADMIN_AUTH_LIMIT);
+  const forUser = await rateLimitCheck(env, CURRENT_PW_USER_BUCKET, "user:" + user.id, CURRENT_PW_USER_LIMIT, CURRENT_PW_USER_WINDOW);
+  if(fromHere.blocked || forUser.blocked) return rateLimitResponse(Math.max(fromHere.retryAfter || 0, forUser.retryAfter || 0, 1));
+  let good;
+  try{ good = await verifyUserPassword(env, user, current); }
+  catch(e){
+    console.error("could not check the current password:", e);
+    return jsonResponse({status:"error", message:"Sign-in service temporarily unavailable — try again shortly."}, 503);
+  }
+  if(good) return null;
+  await rateLimitHit(env, ADMIN_AUTH_BUCKET, request);
+  await rateLimitHit(env, CURRENT_PW_USER_BUCKET, "user:" + user.id, CURRENT_PW_USER_WINDOW);
+  try{ await recordFailedAdminLogin(env.DB, "current-password", request.headers.get("CF-Connecting-IP") || ""); }
+  catch(e){ console.error("could not record the failed attempt:", e); }
+  return jsonResponse({status:"error", code:"wrong_password", message:"The current password is not right."}, 401);
 }
 
 async function passwordRecordFor_(env, password){

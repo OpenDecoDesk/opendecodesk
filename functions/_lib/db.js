@@ -634,21 +634,41 @@ export async function publishedProductRow_(db, orgId, productId, lk) {
 }
 // Per shop: never published, published and current, or with unpublished changes (which products / shop settings).
 // A row "changed" when any stored value differs — updatedAt included, so saving with no change also counts.
-export async function getPublishState(db) {
-  const { results: orgs } = await db.prepare("SELECT orgId FROM orgs ORDER BY orgId").all();
+// `orgIds`: only these shops (the shop bar asks for the one it shows); none given = every shop.
+// Read in a fixed number of queries however many shops (review round 2: it was four queries a shop, one after
+// another, and D1 caps the queries one request may run): the snapshots, their parts, the shops' rows and their
+// products, each in one query, then compared here shop by shop exactly as before.
+export async function getPublishState(db, orgIds = null) {
+  const only = Array.isArray(orgIds) ? JSON.stringify([...new Set(orgIds.map(String))]) : null;
+  const where = (col) => only === null ? "" : ` WHERE ${col} IN (SELECT value FROM json_each(?))`;
+  const all = (sql) => (only === null ? db.prepare(sql) : db.prepare(sql).bind(only)).all();
+  const { results: orgs } = await all(`SELECT * FROM orgs${where("orgId")} ORDER BY orgId`);
+  let heads = [];
+  try { heads = (await all(`SELECT orgId, json, publishedAt, publishedBy FROM catalog_snapshots${where("orgId")}`)).results || []; } catch (e) {}   // before 0076: none published
+  const headBy = new Map(heads.map(h => [h.orgId, h]));
+  // Parts and live products only for the shops that have a snapshot: a shop never published is compared with nothing.
+  const partsBy = new Map(), liveBy = new Map();
+  if (heads.length) {
+    let parts = [];
+    try { parts = (await all(`SELECT orgId, part, json FROM catalog_snapshot_parts${where("orgId")} ORDER BY orgId, part`)).results || []; }
+    catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }   // before 0101: every snapshot holds its own products
+    for (const p of parts) (partsBy.get(p.orgId) || partsBy.set(p.orgId, []).get(p.orgId)).push(p);
+    const { results: products } = await db.prepare("SELECT * FROM products WHERE orgId IN (SELECT value FROM json_each(?)) ORDER BY orgId, productId").bind(JSON.stringify(heads.map(h => h.orgId))).all();
+    for (const p of products || []) (liveBy.get(p.orgId) || liveBy.set(p.orgId, []).get(p.orgId)).push(p);
+  }
+  const key = (r) => JSON.stringify(Object.keys(r).sort().map(k => [k, r[k]]));
   const out = {};
-  for (const { orgId } of orgs) {
-    const snap = await getCatalogSnapshot(db, orgId);
-    if (!snap) { out[orgId] = { state: "never" }; continue; }
-    const live = await liveShopRows_(db, orgId);
-    const key = (r) => JSON.stringify(Object.keys(r).sort().map(k => [k, r[k]]));
-    const pubBy = new Map(snap.products.map(p => [p.productId, key(p)]));
-    const liveBy = new Map(live.products.map(p => [p.productId, key(p)]));
+  for (const org of orgs || []) {
+    const orgId = org.orgId, head = headBy.get(orgId);
+    const rows = head ? await snapshotRows_(db, orgId, head.json, partsBy.get(orgId) || []) : null;
+    if (!rows) { out[orgId] = { state: "never" }; continue; }
+    const pubBy = new Map(rows.products.map(p => [p.productId, key(p)]));
+    const nowBy = new Map((liveBy.get(orgId) || []).map(p => [p.productId, key(p)]));
     const changed = [];
-    for (const [id, k] of liveBy) if (pubBy.get(id) !== k) changed.push(id);
-    for (const id of pubBy.keys()) if (!liveBy.has(id)) changed.push(id);
-    const shopChanged = key(snap.org) !== key(live.org);
-    out[orgId] = { state: changed.length || shopChanged ? "changed" : "current", publishedAt: snap.publishedAt, publishedBy: snap.publishedBy, changedProducts: changed, shopChanged };
+    for (const [id, k] of nowBy) if (pubBy.get(id) !== k) changed.push(id);
+    for (const id of pubBy.keys()) if (!nowBy.has(id)) changed.push(id);
+    const shopChanged = key(rows.org) !== key(org);
+    out[orgId] = { state: changed.length || shopChanged ? "changed" : "current", publishedAt: head.publishedAt, publishedBy: head.publishedBy || "", changedProducts: changed, shopChanged };
   }
   return out;
 }
@@ -6633,18 +6653,20 @@ async function blankScalarColor_(db, blankId) {
 // m.blankName must already be resolved (blankName_).
 // m.reason (migrations/0060): a write-off's reason (WRITEOFF_REASONS), or 'finished' on a consume
 // that moved the blank into finished stock. Only written when given.
+// m.requestKey (migrations/0107): the Receive form's key for this row. With one, the row is written only if no
+// movement carries that key yet (INSERT OR IGNORE on its unique index) — the caller reads whether it was.
 function movementStmt_(db, m) {
   const now = new Date().toISOString();
-  const withReason = !!m.reason;
+  const withReason = !!m.reason, key = m.requestKey ? String(m.requestKey) : null;
   return db.prepare(
-    `INSERT INTO inventory_movements (blankId, blankName, color, size, qtyDelta, unitCostCents, kind, orderId, itemId, vendor, vendorRef, note, occurredAt, createdAt, vendorChargedTax, accountId, paidPersonally, receiptKey, receiptName, receiptGroup${withReason ? ", reason" : ""})
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${withReason ? ", ?" : ""})`
+    `INSERT${key ? " OR IGNORE" : ""} INTO inventory_movements (blankId, blankName, color, size, qtyDelta, unitCostCents, kind, orderId, itemId, vendor, vendorRef, note, occurredAt, createdAt, vendorChargedTax, accountId, paidPersonally, receiptKey, receiptName, receiptGroup${withReason ? ", reason" : ""}${key ? ", requestKey" : ""})
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${withReason ? ", ?" : ""}${key ? ", ?" : ""})`
   ).bind(Number(m.blankId), m.blankName || "", m.color || "", m.size || "", Math.trunc(m.qtyDelta),
     Math.max(0, Math.round(Number(m.unitCostCents) || 0)), m.kind, m.orderId || null, m.itemId || null,
     String(m.vendor || "").slice(0, 100), String(m.vendorRef || "").slice(0, 100), String(m.note || "").slice(0, 300),
     m.occurredAt || now, now, m.vendorChargedTax ? 1 : 0, m.accountId ? Number(m.accountId) : null, m.paidPersonally ? 1 : 0,
     String(m.receiptKey || "").slice(0, 300), String(m.receiptName || "").slice(0, 200), m.receiptGroup ? String(m.receiptGroup).slice(0, 64) : null,
-    ...(withReason ? [String(m.reason).slice(0, 20)] : []));
+    ...(withReason ? [String(m.reason).slice(0, 20)] : []), ...(key ? [key] : []));
 }
 
 async function insertMovement_(db, m) {
@@ -6686,11 +6708,18 @@ export function landedCostLines(sizes, extraCents = 0) {
 }
 
 // Returns the new purchase movements' ids (one per size received).
-export async function receiveBlanks(db, { blankId, lines, vendor, vendorRef, receivedAt, vendorChargedTax, accountId, paidPersonally, note, receiptKey, receiptName, receiptGroup }) {
+export async function receiveBlanks(db, args) { return (await receiveBlanksOnce(db, args)).ids; }
+// The same, recorded once per `requestKey` (the Receive form's key for this Save and this blank — migrations/0107).
+// Each line's movement carries "<key>:<its place in the lines>", and the line — movement and stock together — is
+// written only if no movement has that key yet. So the same request again (a retry after a lost answer, or after
+// a failure part-way) writes only what is missing: `ids` still names every line's movement, and `written` is how
+// many this call wrote itself (0 = it was all on file). Without a key every line is written, as before.
+export async function receiveBlanksOnce(db, { blankId, lines, vendor, vendorRef, receivedAt, vendorChargedTax, accountId, paidPersonally, note, receiptKey, receiptName, receiptGroup, requestKey = null }) {
   const name = await blankName_(db, blankId);
   const defColor = await blankScalarColor_(db, blankId);
   const ids = [];
-  for (const l of lines) {
+  let written = 0;
+  for (const [n, l] of lines.entries()) {
     const color = (l.color == null ? defColor : String(l.color)).slice(0, 80);
     const size = String(l.size || "").slice(0, 20);
     const qty = Math.floor(Number(l.qty) || 0);
@@ -6700,21 +6729,44 @@ export async function receiveBlanks(db, { blankId, lines, vendor, vendorRef, rec
     // transaction), and the new weighted average is computed INSIDE the upsert from the row's
     // current values — two receives of the same color+size can't both start from a stale average.
     // Same formula as before: round((onHand × avg + qty × cost) / (onHand + qty)), onHand ≥ 0.
+    // With a key, the stock moves only when the movement above it was new (changes() chains from that row, as
+    // addOrderPayment's shipping part does), so a line already recorded under the key changes nothing.
+    const lineKey = requestKey ? `${requestKey}:${n}` : null;
     const res = await db.batch([
       movementStmt_(db, { blankId, blankName: name, color, size, qtyDelta: qty, unitCostCents: costCents, kind: "purchase",
         vendor, vendorRef, note: note || "Received", occurredAt: receivedAt, vendorChargedTax: !!vendorChargedTax,
-        accountId: paidPersonally ? null : (accountId || null), paidPersonally: !!paidPersonally, receiptKey, receiptName, receiptGroup }),
+        accountId: paidPersonally ? null : (accountId || null), paidPersonally: !!paidPersonally, receiptKey, receiptName, receiptGroup, requestKey: lineKey }),
       db.prepare(
-        `INSERT INTO blank_sizes (blankId, color, size, purchasePriceCents, quantity) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO blank_sizes (blankId, color, size, purchasePriceCents, quantity) ${lineKey ? "SELECT ?, ?, ?, ?, ? WHERE changes() > 0" : "VALUES (?, ?, ?, ?, ?)"}
          ON CONFLICT(blankId, color, size) DO UPDATE SET
            purchasePriceCents = CAST(ROUND((MAX(blank_sizes.quantity, 0) * blank_sizes.purchasePriceCents + ? * ?) * 1.0
                                            / (MAX(blank_sizes.quantity, 0) + ?)) AS INTEGER),
            quantity = blank_sizes.quantity + ?`
       ).bind(Number(blankId), color, size, costCents, qty, qty, costCents, qty, qty),
     ]);
-    ids.push(Number(res[0] && res[0].meta && res[0].meta.last_row_id) || 0);
+    if (!lineKey || tookRow_(res[0])) { ids.push(Number(res[0] && res[0].meta && res[0].meta.last_row_id) || 0); written++; continue; }
+    ids.push(await keyedMovementId_(db, "inventory_movements", lineKey));
   }
-  return ids;
+  return { ids, written };
+}
+// The movement already on file under a Receive form's key (migrations/0107). A keyed row that was neither written
+// nor found was refused for some other reason, which must not pass for "already recorded".
+async function keyedMovementId_(db, table, key) {
+  const row = await db.prepare(`SELECT id FROM ${table} WHERE requestKey = ?`).bind(key).first();
+  if (!row) throw new Error("That stock couldn't be recorded — reload the page and try again.");
+  return Number(row.id);
+}
+// A keyed receive's receipt group (migrations/0061, 0107): worked out from the form's key instead of drawn at
+// random, so a retry of the same Save lands in the group its first try used. That is how the R&D / written-off
+// expense and the personal-use draw of that receive, which carry no key of their own, are found again
+// (receiptEntryId) and not written twice.
+export async function receiptGroupForKey(requestKey) { return (await sha256Hex_("receipt|" + requestKey)).slice(0, 24); }
+// The expense (`table` "expenses") or owner draw ("owner_transactions") already written under a receipt group —
+// deleted since or not, it was written — as its id, or 0 when there is none.
+export async function receiptEntryId(db, table, receiptGroup) {
+  if (!receiptGroup || !["expenses", "owner_transactions"].includes(table)) return 0;
+  const row = await db.prepare(`SELECT id FROM ${table} WHERE receiptGroup = ? ORDER BY id LIMIT 1`).bind(String(receiptGroup)).first();
+  return row ? Number(row.id) : 0;
 }
 
 // Blanks removed from stock without a sale — damaged, lost/miscounted, or used for
@@ -6741,28 +6793,61 @@ export async function writeOffBlanks(db, { blankId, color, size, qty, note, occu
 // refused if the stock changed since (both statements are guarded on it, in one batch), so a use or
 // receipt recorded while counting is never overwritten. Returns { delta }.
 export async function setBlankCount(db, { blankId, color, size, counted, onHand, note, at }) {
-  const want = Math.floor(Number(counted)), shown = Math.trunc(Number(onHand));
-  if (!Number.isFinite(want) || want < 0) throw pricingError_("Enter a count of 0 or more.");
-  if (!Number.isFinite(shown)) throw pricingError_("Reload the count window and try again.");
-  const clr = color == null ? await blankScalarColor_(db, blankId) : String(color), sz = String(size || "");
-  const cur = await db.prepare("SELECT quantity, purchasePriceCents, vendorPriceCents FROM blank_sizes WHERE blankId=? AND color=? AND size=?").bind(Number(blankId), clr, sz).first();
-  if (!cur) throw pricingError_("That size isn't on file for this blank.");
-  if (Number(cur.quantity) !== shown) throw pricingError_(`The stock changed while you were counting (it's ${Number(cur.quantity)} now) — count that row again.`);
-  const delta = want - shown;
-  if (!delta) return { delta: 0 };
-  const unit = Number(cur.purchasePriceCents) || (delta > 0 ? Number(cur.vendorPriceCents) || 0 : 0);
-  const now = new Date().toISOString();
-  const G = "(SELECT quantity FROM blank_sizes WHERE blankId=? AND color=? AND size=?) = ?", gb = [Number(blankId), clr, sz, shown];
-  const res = await db.batch([
-    db.prepare(`INSERT INTO inventory_movements (blankId, blankName, color, size, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
+  const [r] = await setBlankCounts(db, [{ blankId, color, size, counted, onHand }], { note, at });
+  if (r.error) throw pricingError_(r.error);
+  return { delta: r.delta };
+}
+// The same for a group of rows (review round 2) — [{blankId, color, size, counted, onHand}] — in a fixed number of
+// queries however many rows: D1 caps the queries one request may run, and a row at a time took three or four each
+// (a physical count with a few hundred differences never finished). The blanks and the sizes' current rows are read
+// in two queries; every row that's still as the window showed it is written in ONE batch, each pair of statements
+// guarded on its own row's quantity exactly as before, so a row whose stock changed in between is refused and the
+// rest still apply. Returns one answer per row, in order: { delta } (0 = nothing to correct) or { error }.
+export async function setBlankCounts(db, rows, { note, at } = {}) {
+  const out = rows.map(() => null), todo = [];
+  rows.forEach((r, i) => {
+    const want = Math.floor(Number(r.counted)), shown = Math.trunc(Number(r.onHand));
+    if (!Number.isFinite(want) || want < 0) out[i] = { error: "Enter a count of 0 or more." };
+    else if (!Number.isFinite(shown)) out[i] = { error: "Reload the count window and try again." };
+    else todo.push({ i, blankId: Number(r.blankId), color: r.color == null ? null : String(r.color), size: String(r.size || ""), want, shown });
+  });
+  if (!todo.length) return out;
+  const { results: blanks } = await db.prepare("SELECT id, name, brand, color FROM blanks WHERE id IN (SELECT value FROM json_each(?))")
+    .bind(JSON.stringify([...new Set(todo.map(t => t.blankId))])).all();
+  const blankBy = new Map((blanks || []).map(b => [Number(b.id), b]));
+  // A row sent without a color means the blank's own (blankScalarColor_).
+  for (const t of todo) if (t.color == null) { const b = blankBy.get(t.blankId); t.color = b ? (b.color || "") : ""; }
+  const { results: sizes } = await db.prepare(`SELECT s.blankId, s.color, s.size, s.quantity, s.purchasePriceCents, s.vendorPriceCents FROM json_each(?) k
+      JOIN blank_sizes s ON s.blankId = json_extract(k.value, '$[0]') AND s.color = json_extract(k.value, '$[1]') AND s.size = json_extract(k.value, '$[2]')`)
+    .bind(JSON.stringify(todo.map(t => [t.blankId, t.color, t.size]))).all();
+  const keyOf = (blankId, color, size) => blankId + "\u0001" + color + "\u0001" + size;
+  const curBy = new Map((sizes || []).map(z => [keyOf(Number(z.blankId), z.color, z.size), z]));
+  const now = new Date().toISOString(), text = String(note ? "Stock count: " + note : "Stock count").slice(0, 300);
+  const G = "(SELECT quantity FROM blank_sizes WHERE blankId=? AND color=? AND size=?) = ?";
+  const stmts = [], wrote = [];
+  for (const t of todo) {
+    const cur = curBy.get(keyOf(t.blankId, t.color, t.size));
+    if (!cur) { out[t.i] = { error: "That size isn't on file for this blank." }; continue; }
+    if (Number(cur.quantity) !== t.shown) { out[t.i] = { error: `The stock changed while you were counting (it's ${Number(cur.quantity)} now) — count that row again.` }; continue; }
+    const delta = t.want - t.shown;
+    if (!delta) { out[t.i] = { delta: 0 }; continue; }
+    const unit = Number(cur.purchasePriceCents) || (delta > 0 ? Number(cur.vendorPriceCents) || 0 : 0);
+    const b = blankBy.get(t.blankId), gb = [t.blankId, t.color, t.size, t.shown];
+    wrote.push({ i: t.i, delta, at: stmts.length });
+    stmts.push(db.prepare(`INSERT INTO inventory_movements (blankId, blankName, color, size, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
       SELECT ?, ?, ?, ?, ?, ?, 'adjust', ?, ?, ? WHERE ${G}`)
-      .bind(Number(blankId), await blankName_(db, blankId), clr, sz, delta, Math.max(0, Math.round(unit)),
-        String(note ? "Stock count: " + note : "Stock count").slice(0, 300), at || now, now, ...gb),
-    db.prepare(`UPDATE blank_sizes SET quantity = ? WHERE blankId=? AND color=? AND size=? AND quantity = ?`).bind(want, Number(blankId), clr, sz, shown),
-  ]);
-  if (!tookRow_(res[0])) throw pricingError_("The stock changed while you were counting — count that row again.");
-  if (!Number(cur.purchasePriceCents) && delta > 0 && unit) await db.prepare("UPDATE blank_sizes SET purchasePriceCents = ? WHERE blankId=? AND color=? AND size=? AND purchasePriceCents = 0").bind(unit, Number(blankId), clr, sz).run();
-  return { delta };
+      .bind(t.blankId, b ? (b.name || [b.brand, b.color].filter(Boolean).join(" ")) : "", t.color, t.size, delta, Math.max(0, Math.round(unit)), text, at || now, now, ...gb));
+    // A size with no cost yet that gains stock takes its vendor price as its first cost — in the same guarded
+    // statement, so only when the correction itself is written.
+    stmts.push(!Number(cur.purchasePriceCents) && delta > 0 && unit
+      ? db.prepare("UPDATE blank_sizes SET quantity = ?, purchasePriceCents = CASE WHEN purchasePriceCents = 0 THEN ? ELSE purchasePriceCents END WHERE blankId=? AND color=? AND size=? AND quantity = ?").bind(t.want, unit, ...gb)
+      : db.prepare("UPDATE blank_sizes SET quantity = ? WHERE blankId=? AND color=? AND size=? AND quantity = ?").bind(t.want, ...gb));
+  }
+  if (stmts.length) {
+    const res = await db.batch(stmts);
+    for (const w of wrote) out[w.i] = tookRow_(res[w.at]) ? { delta: w.delta } : { error: "The stock changed while you were counting — count that row again." };
+  }
+  return out;
 }
 
 // Called when an order is marked "manufactured": each active line whose
@@ -6841,7 +6926,9 @@ async function makeItemPieces_(db, item, fromQty, toQty, at = null) {
 // Making the WHOLE order: consume whatever pieces each active line still has left (so calling this
 // after some pieces were already made per-piece never double-consumes), and mark every active line
 // fully made. Idempotent — a line with nothing remaining is skipped, and a line another request is
-// finishing at the same moment is consumed by exactly one of them.
+// finishing at the same moment is consumed by exactly one of them. A line finished here uses its
+// transfers too (migrations/0036), so marking an order Manufactured from the Orders screen books the
+// same stock and cost as finishing it on Run Order.
 // The garment color an order line consumes stock in: a configurable line's chosen
 // config.garmentColor, else '' (a classic single-color product). Used to resolve the color-aware
 // product_blank_links row (migrations/0037).
@@ -6862,9 +6949,19 @@ export async function consumeBlanksForOrder(db, orderId, at = null) {
     const qty = Math.max(1, Number(it.qty) || 1);
     const made = Math.max(0, Number(it.manufacturedQty) || 0);
     if (made >= qty) continue;
-    if ((await makeItemPieces_(db, { ...it, color: itemColor_(it) }, made, qty, at)).consumed) consumed++;
+    const r = await makeItemPieces_(db, { ...it, color: itemColor_(it) }, made, qty, at);
+    if (r.consumed) consumed++;
+    // The line this call finished also uses its transfers, as its last piece on Run Order does
+    // (markItemPieceManufactured) — once per line, and only asked for a line that names a transfer. A line that
+    // was already fully made is skipped above and left as it is ("Use transfers for past orders" repairs those).
+    if (r.claimed && lineNamesTransfer_(it)) await consumeLineTransfersOnce_(db, orderId, Number(it.id), at);
   }
   return consumed;
+}
+// Whether a line's saved choices put a transfer on it (what consumeLineTransfersOnce_ would use).
+function lineNamesTransfer_(row) {
+  const cfg = tryParse_(row.configJson, null);
+  return !!cfg && (cfg.locations || []).some(l => l && l.kind === "transfer" && Number(l.transferId));
 }
 
 // Mark ONE physical piece of a line item manufactured: consume one blank for it and bump its
@@ -8121,16 +8218,17 @@ async function transferName_(db, id) {
 }
 
 // `guard` ({ sql, binds }, optional): the row is written only while that condition holds (applyTransferCatchUp).
+// m.requestKey (migrations/0107): the Receive form's key for this row — written only if no movement carries it yet.
 function transferMovementStmt_(db, m, guard = null) {
-  const now = new Date().toISOString();
+  const now = new Date().toISOString(), key = m.requestKey ? String(m.requestKey) : null;
   return db.prepare(
-    `INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, orderId, itemId, vendor, vendorRef, note, pctOfSheet, occurredAt, createdAt, accountId, paidPersonally, receiptKey, receiptName, receiptGroup)
-     ${guard ? "SELECT" : "VALUES ("} ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${guard ? " WHERE " + guard.sql : ")"}`
+    `INSERT${key ? " OR IGNORE" : ""} INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, orderId, itemId, vendor, vendorRef, note, pctOfSheet, occurredAt, createdAt, accountId, paidPersonally, receiptKey, receiptName, receiptGroup${key ? ", requestKey" : ""})
+     ${guard ? "SELECT" : "VALUES ("} ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${key ? ", ?" : ""}${guard ? " WHERE " + guard.sql : ")"}`
   ).bind(Number(m.transferId), m.transferName || "", Math.trunc(m.qtyDelta), Math.max(0, Math.round(Number(m.unitCostCents) || 0)),
     m.kind, m.orderId || null, m.itemId || null, String(m.vendor || "").slice(0, 100), String(m.vendorRef || "").slice(0, 100),
     String(m.note || "").slice(0, 300), m.pctOfSheet == null ? null : Number(m.pctOfSheet), m.occurredAt || now, now,
     m.accountId ? Number(m.accountId) : null, m.paidPersonally ? 1 : 0, String(m.receiptKey || "").slice(0, 300), String(m.receiptName || "").slice(0, 200),
-    m.receiptGroup ? String(m.receiptGroup).slice(0, 64) : null, ...(guard ? guard.binds : []));
+    m.receiptGroup ? String(m.receiptGroup).slice(0, 64) : null, ...(key ? [key] : []), ...(guard ? guard.binds : []));
 }
 
 // How a transfer sheet's cost divides: each row gets its own percentage of the sheet, and the two parts
@@ -8150,24 +8248,31 @@ export function transferSheetShares(pcts, writeoffPct, personalPct, totalCents) 
 // that doesn't divide evenly becomes two unit costs a cent apart — same trick as landedCostLines).
 // Each part writes a `purchase` movement and updates the item's weighted-average cost + quantity in
 // one batch (atomic, race-safe), exactly like receiveBlanks. rows: [{transferId, count, pctOfSheet}].
-export async function receiveTransferSheet(db, { rows, totalCents, vendor, vendorRef, receivedAt, accountId, paidPersonally, note, receiptKey, receiptName, receiptGroup, writeoffPct = 0, personalPct = 0 }) {
+export async function receiveTransferSheet(db, args) { return (await receiveTransferSheetOnce(db, args)).ids; }
+// The same, recorded once per `requestKey` (the Receive form's key for this Save — migrations/0107), the way
+// receiveBlanksOnce does it: each movement carries "<key>:<its place in the sheet's movements>" and is written,
+// with its stock, only if none has that key yet. `written` = how many this call wrote itself.
+export async function receiveTransferSheetOnce(db, { rows, totalCents, vendor, vendorRef, receivedAt, accountId, paidPersonally, note, receiptKey, receiptName, receiptGroup, writeoffPct = 0, personalPct = 0, requestKey = null }) {
   const specs = transferSheetMovementSpecs(rows, totalCents, writeoffPct, personalPct);
   const ids = [], names = new Map();
-  for (const p of specs) {
+  let written = 0;
+  for (const [n, p] of specs.entries()) {
     if (!names.has(p.transferId)) names.set(p.transferId, await transferName_(db, p.transferId));
+    const partKey = requestKey ? `${requestKey}:${n}` : null;
     const res = await db.batch([
       transferMovementStmt_(db, { transferId: p.transferId, transferName: names.get(p.transferId), qtyDelta: p.qty, unitCostCents: p.unit, kind: "purchase",
         vendor, vendorRef, note: note || "Received", pctOfSheet: p.pct, occurredAt: receivedAt,
-        accountId: paidPersonally ? null : (accountId || null), paidPersonally: !!paidPersonally, receiptKey, receiptName, receiptGroup }),
+        accountId: paidPersonally ? null : (accountId || null), paidPersonally: !!paidPersonally, receiptKey, receiptName, receiptGroup, requestKey: partKey }),
       db.prepare(
         `UPDATE transfers SET
            purchasePriceCents = CAST(ROUND((MAX(quantity, 0) * purchasePriceCents + ? * ?) * 1.0 / (MAX(quantity, 0) + ?)) AS INTEGER),
-           quantity = quantity + ?, updatedAt = ? WHERE id = ?`
+           quantity = quantity + ?, updatedAt = ? WHERE id = ?${partKey ? " AND changes() > 0" : ""}`
       ).bind(p.unit, p.qty, p.qty, p.qty, new Date().toISOString(), p.transferId),
     ]);
-    ids.push(Number(res[0] && res[0].meta && res[0].meta.last_row_id) || 0);
+    if (!partKey || tookRow_(res[0])) { ids.push(Number(res[0] && res[0].meta && res[0].meta.last_row_id) || 0); written++; continue; }
+    ids.push(await keyedMovementId_(db, "transfer_movements", partKey));
   }
-  return ids;
+  return { ids, written };
 }
 
 // The purchase movements one sheet writes, as [{transferId, row, qty, unit, pct}]: each row's $ (its % of the
@@ -8234,25 +8339,44 @@ export async function writeOffTransfers(db, { transferId, qty, note, occurredAt 
 // difference at the transfer's current average cost, refused if its stock changed since the count
 // window read it. Returns { delta }.
 export async function setTransferCount(db, { transferId, counted, onHand, note, at }) {
-  const want = Math.floor(Number(counted)), shown = Math.trunc(Number(onHand));
-  if (!Number.isFinite(want) || want < 0) throw pricingError_("Enter a count of 0 or more.");
-  if (!Number.isFinite(shown)) throw pricingError_("Reload the count window and try again.");
-  const cur = await db.prepare("SELECT name, quantity, purchasePriceCents FROM transfers WHERE id=?").bind(Number(transferId)).first();
-  if (!cur) throw pricingError_("That transfer isn't on file.");
-  if (Number(cur.quantity) !== shown) throw pricingError_(`The stock changed while you were counting (it's ${Number(cur.quantity)} now) — count that row again.`);
-  const delta = want - shown;
-  if (!delta) return { delta: 0 };
-  const now = new Date().toISOString();
-  const G = "(SELECT quantity FROM transfers WHERE id=?) = ?", gb = [Number(transferId), shown];
-  const res = await db.batch([
-    db.prepare(`INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
-      SELECT ?, ?, ?, ?, 'adjust', ?, ?, ? WHERE ${G}`)
-      .bind(Number(transferId), cur.name || "", delta, Math.max(0, Number(cur.purchasePriceCents) || 0),
-        String(note ? "Stock count: " + note : "Stock count").slice(0, 300), at || now, now, ...gb),
-    db.prepare("UPDATE transfers SET quantity = ?, updatedAt = ? WHERE id = ? AND quantity = ?").bind(want, now, Number(transferId), shown),
-  ]);
-  if (!tookRow_(res[0])) throw pricingError_("The stock changed while you were counting — count that row again.");
-  return { delta };
+  const [r] = await setTransferCounts(db, [{ transferId, counted, onHand }], { note, at });
+  if (r.error) throw pricingError_(r.error);
+  return { delta: r.delta };
+}
+// The same for a group of rows — [{transferId, counted, onHand}] — as setBlankCounts: the transfers read in one
+// query, every row still as the window showed it written in ONE batch of guarded statements. One answer per row,
+// in order: { delta } or { error }.
+export async function setTransferCounts(db, rows, { note, at } = {}) {
+  const out = rows.map(() => null), todo = [];
+  rows.forEach((r, i) => {
+    const want = Math.floor(Number(r.counted)), shown = Math.trunc(Number(r.onHand));
+    if (!Number.isFinite(want) || want < 0) out[i] = { error: "Enter a count of 0 or more." };
+    else if (!Number.isFinite(shown)) out[i] = { error: "Reload the count window and try again." };
+    else todo.push({ i, transferId: Number(r.transferId), want, shown });
+  });
+  if (!todo.length) return out;
+  const { results: transfers } = await db.prepare("SELECT id, name, quantity, purchasePriceCents FROM transfers WHERE id IN (SELECT value FROM json_each(?))")
+    .bind(JSON.stringify([...new Set(todo.map(t => t.transferId))])).all();
+  const curBy = new Map((transfers || []).map(t => [Number(t.id), t]));
+  const now = new Date().toISOString(), text = String(note ? "Stock count: " + note : "Stock count").slice(0, 300);
+  const stmts = [], wrote = [];
+  for (const t of todo) {
+    const cur = curBy.get(t.transferId);
+    if (!cur) { out[t.i] = { error: "That transfer isn't on file." }; continue; }
+    if (Number(cur.quantity) !== t.shown) { out[t.i] = { error: `The stock changed while you were counting (it's ${Number(cur.quantity)} now) — count that row again.` }; continue; }
+    const delta = t.want - t.shown;
+    if (!delta) { out[t.i] = { delta: 0 }; continue; }
+    wrote.push({ i: t.i, delta, at: stmts.length });
+    stmts.push(db.prepare(`INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
+      SELECT ?, ?, ?, ?, 'adjust', ?, ?, ? WHERE (SELECT quantity FROM transfers WHERE id=?) = ?`)
+      .bind(t.transferId, cur.name || "", delta, Math.max(0, Number(cur.purchasePriceCents) || 0), text, at || now, now, t.transferId, t.shown));
+    stmts.push(db.prepare("UPDATE transfers SET quantity = ?, updatedAt = ? WHERE id = ? AND quantity = ?").bind(t.want, now, t.transferId, t.shown));
+  }
+  if (stmts.length) {
+    const res = await db.batch(stmts);
+    for (const w of wrote) out[w.i] = tookRow_(res[w.at]) ? { delta: w.delta } : { error: "The stock changed while you were counting — count that row again." };
+  }
+  return out;
 }
 
 // Consume one application per garment of each given transfer for one line (customer-chosen options +
@@ -10543,6 +10667,9 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   if (order.rushRequested && order.rushPayBy && /^\d{4}-\d{2}-\d{2}$/.test(order.rushPayBy)) { extraCols.push("rushPayBy"); extraBinds.push(order.rushPayBy); }
   // An imported order (migrations/0087): the store it came from and that store's order number.
   if (order.source) { extraCols.push("source", "externalOrderId"); extraBinds.push(order.source, order.externalOrderId || null); }
+  // What the customer owes: goods, shipping and the rush fee, plus the tax on the goods and on the fee when tax is
+  // added on top. Stored on the order and answered below — one figure, so the two can't differ.
+  const totalCents = subtotalCents + shippingCents + rushCents + taxAddedCents + (mode === "exclusive" ? rushTaxCents : 0);
   stmts.push(db.prepare(`INSERT INTO orders
     (orderId,orgId,customerName,contact,paymentMethod,subtotalCents,shippingCostCents,totalCents,
      shippingMethod,shippingAddress,totalWeightOz,placedAt,taxExempt,taxRateBps,isTest${extraCols.map(c => "," + c).join("")})
@@ -10550,7 +10677,7 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
     .bind(
       order.orderId, order.orgId, order.customerName, order.contact,
       order.paymentMethod || "", subtotalCents,
-      shippingCents, subtotalCents + shippingCents + rushCents + taxAddedCents + (mode === "exclusive" ? rushTaxCents : 0),
+      shippingCents, totalCents,
       order.shippingMethod || "",
       order.shippingAddress ? JSON.stringify(order.shippingAddress) : null,
       order.totalWeightOz || 0, order.placedAt || new Date().toISOString(),
@@ -10602,10 +10729,12 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   }
 
   await db.batch(stmts);
-  // What was recorded, in dollars: `total` is what the customer owes (tax included either way).
+  // What was recorded, in dollars: `total` is what the customer owes (tax included either way) and `salesTax` the
+  // tax in it — the rush fee and its tax counted in both, as getOrderById reads the same order back (the storefront
+  // shows this total and asks for it by Venmo or Zelle; a repeated submit is answered from getOrderById).
   const taxCents = taxed.reduce((sum, t) => sum + t.taxCents, 0);
-  return { taxMode: mode, subtotal: fromCents(subtotalCents), shippingCost: fromCents(shippingCents), salesTax: fromCents(taxCents),
-    total: fromCents(subtotalCents + shippingCents + taxAddedCents) };
+  return { taxMode: mode, subtotal: fromCents(subtotalCents), shippingCost: fromCents(shippingCents), salesTax: fromCents(taxCents + rushTaxCents),
+    total: fromCents(totalCents) };
 }
 
 // Kept for callers that mean "this order is paid": records the outstanding
@@ -12629,6 +12758,12 @@ export async function listAccounts(db, asOf = new Date().toISOString().slice(0, 
   }
   return accts.map(a => ({ id: Number(a.id), name: a.name, type: a.type, openingBalance: fromCents(a.openingBalanceCents),
     openingDate: a.openingDate, active: !!a.active, csvMapping: a.csvMapping || "", balance: fromCents(Number(a.openingBalanceCents) + (moved[a.id] || 0)), moves: moves[a.id] || 0 }));
+}
+// The accounts by name only, for an account picker shown to a role kept from the business's money (orders.js
+// listAccounts): no opening balance, no balance, and none of the sums above are run.
+export async function listAccountNames(db) {
+  const { results } = await db.prepare("SELECT id, name, type, active FROM accounts ORDER BY id").all();
+  return results.map(a => ({ id: Number(a.id), name: a.name, type: a.type, active: !!a.active }));
 }
 export async function saveAccount(db, id, { name, type, openingBalance, openingDate, active }) {
   const now = new Date().toISOString();
@@ -14902,34 +15037,60 @@ export async function setRefundShipping(db, paymentId, shippingAmount) {
 // with the tax portion backed out at the refunded order's own rate — the
 // money going back always includes its tax, whether the tax was inside the
 // listed price or added to it. Dollars out.
+// A cancelled line is already left out of tax collected (getSalesTaxReport, getSalesTaxReturn), so the money
+// refunded for it carries no tax to take off again. An order's refunds therefore cover its cancelled lines' money
+// first, oldest refund first, and only what goes back beyond that backs tax out. This needs no link between a
+// refund and a line, so the line's Record refund, a card refund and a manual one all work alike. Every refund of
+// the order up to the period's end is walked (not only the period's own), so the cancelled money is used up in order.
 export async function getSalesTaxRefunds(db, dateFrom, dateTo) {
   const { results } = await withTaxMode_((tm) => db.prepare(`
-    SELECT substr(p.receivedAt, 1, 7) AS month, -p.amountCents AS refundCents, COALESCE(p.shippingCents, 0) AS shippingCents,
-           o.taxExempt, o.taxRateBps, o.shipState, ${tm} AS taxMode,
+    SELECT p.orderId, p.receivedAt, substr(p.receivedAt, 1, 7) AS month, -p.amountCents AS refundCents, COALESCE(p.shippingCents, 0) AS shippingCents,
+           o.taxExempt, o.taxRateBps, o.shipState, ${tm} AS taxMode, COALESCE(o.discountCents, 0) AS discountCents,
            COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL), 0) AS grossCents,
-           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND i.taxable = 1), 0) AS taxableCents
+           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND i.taxable = 1), 0) AS taxableCents,
+           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NOT NULL), 0) AS cancelledCents,
+           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NOT NULL AND i.taxable = 1), 0) AS cancelledTaxableCents,
+           (SELECT COUNT(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NOT NULL) AS cancelledLines
     FROM order_payments p JOIN orders o ON o.orderId = p.orderId
-    WHERE p.kind IN ('refund', 'dispute') AND p.receivedAt >= ? AND p.receivedAt <= ?
+    WHERE p.kind IN ('refund', 'dispute') AND p.receivedAt <= ?
       AND p.voidedAt IS NULL AND o.isTest = 0 AND o.voidedAt IS NULL
-  `).bind(dateFrom, dateTo).all());
+      AND p.orderId IN (SELECT orderId FROM order_payments WHERE kind IN ('refund', 'dispute') AND receivedAt >= ? AND receivedAt <= ? AND voidedAt IS NULL)
+    ORDER BY p.receivedAt, p.id
+  `).bind(dateTo, dateFrom, dateTo).all());
   const { jurisdiction } = await getSalesTaxSettings(db);
-  const byMonth = {};
+  const byMonth = {}, cancelledLeft = byId_();
   for (const r of results) {
-    const m = (byMonth[r.month] = byMonth[r.month] || { month: r.month, refundCents: 0, taxCents: 0, count: 0 });
     const refund = Number(r.refundCents);
     // Tax only on the taxable share of an in-state, non-exempt order — and never on the refund's
     // shipping part (shipping isn't taxed; migrations/0035).
     const rate = r.taxExempt || isOutOfState(r.shipState, jurisdiction) ? 0 : Number(r.taxRateBps) || 0;
+    const exclusive = taxMode_(r.taxMode) === "exclusive";
     let gross = Number(r.grossCents), taxable = Number(r.taxableCents);
+    if (cancelledLeft[r.orderId] === undefined) {
+      // What the customer paid for the cancelled lines: their listed total, plus their tax when it was added on
+      // top. The discount stays on the lines still active (as the reports share it), so it comes off here only
+      // where it is bigger than those lines can hold.
+      const cancelled = Number(r.cancelledCents), over = Math.max(0, Number(r.discountCents) - gross);
+      const paid = Math.max(0, cancelled - over);
+      const paidTaxable = cancelled > 0 ? Math.round(Math.min(Number(r.cancelledTaxableCents), cancelled) * paid / cancelled) : 0;
+      cancelledLeft[r.orderId] = paid + (exclusive ? addTaxExclusive(paidTaxable, rate).taxCents : 0);
+    }
     // The refund is money the customer paid. With tax on top, the taxable lines' share of that
     // money is their listed total PLUS their tax, so weigh them that way before backing it out.
-    if (taxMode_(r.taxMode) === "exclusive") {
+    if (exclusive) {
       taxable = Math.min(taxable, gross);
       const added = addTaxExclusive(taxable, rate).taxCents;
       gross += added; taxable += added;
     }
     const goods = Math.max(0, refund - Math.min(Math.max(0, Number(r.shippingCents) || 0), Math.max(0, refund)));
-    const taxablePart = gross > 0 ? Math.round(goods * Math.min(taxable, gross) / gross) : goods;
+    const covered = Math.min(goods, cancelledLeft[r.orderId]);   // the cancelled lines' money: no tax in "collected", none to take off
+    cancelledLeft[r.orderId] -= covered;
+    if (r.receivedAt < dateFrom) continue;   // an earlier refund only uses up the cancelled money; it's reported in its own period
+    const beyond = goods - covered;
+    // With every line cancelled the order has no tax left in "collected", so nothing more comes off either. (An
+    // order with no lines at all keeps the old reading: the whole refund is taxable.)
+    const taxablePart = gross > 0 ? Math.round(beyond * Math.min(taxable, gross) / gross) : Number(r.cancelledLines) > 0 ? 0 : beyond;
+    const m = (byMonth[r.month] = byMonth[r.month] || { month: r.month, refundCents: 0, taxCents: 0, count: 0 });
     m.refundCents += refund;
     m.taxCents += splitTaxInclusive(taxablePart, rate).taxCents;
     m.count++;

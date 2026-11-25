@@ -20,9 +20,10 @@ Free plan). A clean-up that fails is recorded and reported in the roll-up an hou
 - Deletes vendor web-service logs older than 30 days.
 - Deletes customers' design uploads (see [shops-and-domains.md](shops-and-domains.md#customers-own-designs))
   that are older than 48 hours and on no order — up to 200 a day, in one go; any more wait for the next day.
-- Deletes receipts and design, order and digital-product files uploaded more than 48 hours ago that nothing in
+- Deletes receipts and design, order and digital-product files uploaded more than 30 days ago that nothing in
   the database names (their form was never saved) — up to 1,000 a day, looking through at most 8,000 files a run
   (and 20 seconds); the next day carries on where it stopped. A storage bucket that isn't set up is skipped.
+  The 30 days are there for a restored database: see [Restoring](#restoring).
 
 **What the roll-up's tick does**, in order:
 
@@ -141,6 +142,14 @@ It is not a substitute for backups you hold yourself.
 
 **Files are not in the database.** Pictures, receipts and design files are in the R2 buckets. This
 script does not copy them; protect those buckets separately if losing them would hurt.
+
+**After a restore, re-enter what was lost within 30 days.** A restored database no longer names the
+receipts and design, order and digital-product files that were saved after the restore point. The
+files themselves are still in the buckets, and the daily housekeeping leaves each one alone until
+30 days after it was uploaded. Re-enter those records within that time, uploading each file again
+(`npx wrangler r2 object get <bucket>/<file> --remote --file <name>` fetches one from a bucket if you
+no longer have it). After the 30 days, the housekeeping deletes any file the database still doesn't
+name, for good.
 
 ## Migrations
 
@@ -286,11 +295,13 @@ What a role can't use isn't shown: no menu entry, link or button for it.
   10 every 15 minutes for one account, and 100 every 15 minutes across the whole site from anywhere
   (`ADMIN_AUTH_ACCOUNT_LIMIT`, `ADMIN_AUTH_GLOBAL_LIMIT`, see [configuration.md](configuration.md)).
   One address may use no more than a fifth of the site-wide budget (20 failures in 15 minutes)
-  before it is refused on its own. Past the site's budget or an account's, a sign-in from an address
-  that hasn't signed in here in the last 30 days is asked for a Turnstile check first — when the
-  Turnstile keys are set; without them it waits for the window to end. Someone already signed in is
-  never locked out by them. Against a flood from many addresses, add a Cloudflare rate-limiting rule
-  (WAF → Rate limiting rules; the free plan includes one) for the path `/api/admin-session`.
+  before it is refused on its own. Past the site's budget or an account's, a sign-in is asked for a
+  Turnstile check first — when the Turnstile keys are set; without them it waits for the window to
+  end. An address that signed in here in the last 30 days is let past the site's budget, so the
+  people who work here keep signing in during a flood; it is never let past an account's own.
+  Someone already signed in is never locked out by them. Against a flood from many addresses, add
+  a Cloudflare rate-limiting rule (WAF → Rate limiting rules; the free plan includes one) for the
+  path `/api/admin-session`.
 - **Everything above is in the audit log** (Reports → Audit Log → Security & users).
 
 ### Locked out
@@ -357,7 +368,9 @@ Times report shows stitches per run. It's part of the Production feature.
 - **Settings → Orphaned images** (admins) lists files in the image store that nothing points to any more —
   a photo replaced or removed, an upload whose form was never saved. **Scan the image store**, then
   **Download selected (.zip)** to keep a copy and **Remove selected from storage**. Anything uploaded in
-  the last day is left alone, and each file is checked again just before it's removed.
+  the last day is left alone, and each file is checked again just before it's removed. The scan works
+  through the database in steps and shows how far it is. A mention in the audit log (or another record of
+  the past) doesn't count as a use, so a photo you replaced is listed; a picture on an order still counts.
 
 Admin screens keep your place after a change: the scroll position, open sections, ticked boxes and
 search stay as they were, and what changed is briefly highlighted.

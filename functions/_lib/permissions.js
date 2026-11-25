@@ -212,7 +212,11 @@ const ALSO = {
   getBlankReadyCounts: [["home.counts", "read"], ["inventory.blanks", "read"]],
   getBoxPresets: [["orders.shipping", "read"]],
   listBrandApprovals: [["catalog.products", "read"]],   // a product's page lists its brand approvals
-  listAccounts: [["orders.payments", "read"], ["finance.expenses", "read"]],
+  // The "paid from" / account picker of the payment window, the expense form, the Account viewer, Reconcile and the
+  // Receive blanks / Receive transfers forms. Only Accounts and money gets balances with it: everyone here gets the
+  // accounts' names and nothing else (orders.js listAccounts).
+  listAccounts: [["orders.payments", "read"], ["finance.expenses", "read"], ["finance.accountviewer", "read"], ["finance.reconcile", "read"],
+    ["inventory.blanks", "edit"], ["inventory.transfers", "edit"]],
   listExpenseCategories: [["finance.money", "read"], ["inventory.blanks", "read"], ["inventory.transfers", "read"], ["orders.payments", "edit"]],
   listClosedPeriods: [["orders.payments", "read"], ["finance.money", "read"], ["finance.expenses", "read"]],
   getRunStats: [["reports.runtimes", "read"]],

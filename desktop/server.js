@@ -117,13 +117,50 @@ const statePaths = (dataDir) => {
   return { state, d1: path.join(state, "d1"), files: path.join(state, "files"), r2: path.join(state, "r2"), durableObjects: path.join(state, "do") };
 };
 
+// Why a copy stopped, in plain words, from the system's error (a full disk, a drive pulled out, …).
+const COPY_FAILURES = {
+  ENOSPC: "the disk is full", EDQUOT: "the disk is full", EROFS: "that disk can't be written to",
+  EACCES: "this program isn't allowed to read or write there", EPERM: "this program isn't allowed to read or write there",
+  ENOENT: "a folder or file was no longer there (was the disk disconnected?)", EIO: "the disk reported an error", ENOTCONN: "the disk was disconnected",
+};
+function copyFailure(e) {
+  const plain = COPY_FAILURES[e && e.code], raw = String((e && e.message) || e);
+  return plain ? plain + " (" + raw + ")" : raw;
+}
+const rmQuietly = (dir) => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* best effort */ } };
+// Renames a folder, trying again for a couple of seconds when the system says it is busy: on Windows
+// a virus scanner or the search index often still has a just-copied file open for a moment.
+function renameFolder(from, to) {
+  for (let tries = 0; ; tries++) {
+    try { return fs.renameSync(from, to); }
+    catch (e) {
+      if (tries >= 10 || !["EPERM", "EACCES", "EBUSY"].includes(e && e.code)) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    }
+  }
+}
+
 // Copies the stored state (database, files, mailbox) to a new folder — only while the server is
-// stopped, so the copy is whole. Returns the folder.
-function copyState(dataDir, dest) {
+// stopped, so the copy is whole. Returns the folder (null when there is nothing to copy yet).
+// The copy is made under another name, <dest>.partial, and gets its real name only once every file
+// is there: a folder named like a backup is always a whole one. When the copy stops part-way (a full
+// disk, a drive pulled out) the half-made folder is removed and this throws; nothing is left at dest.
+// `cp` is fs.cpSync, replaced in the tests.
+const PARTIAL = ".partial";
+function copyState(dataDir, dest, { cp = fs.cpSync } = {}) {
   const { state } = statePaths(dataDir);
   if (!fs.existsSync(state)) return null;
+  if (fs.existsSync(dest)) throw new Error("There is already a folder named " + dest + "; nothing was copied.");
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.cpSync(state, dest, { recursive: true, errorOnExist: true, force: false });
+  const partial = dest + PARTIAL;
+  rmQuietly(partial);   // left by a copy that was cut off (the program closed part-way)
+  try {
+    cp(state, partial, { recursive: true, errorOnExist: true, force: false });
+    renameFolder(partial, dest);
+  } catch (e) {
+    rmQuietly(partial);
+    throw Object.assign(new Error("Copying the data to " + dest + " did not finish: " + copyFailure(e) + ". The half-made copy was removed."), { code: "COPY_FAILED", why: copyFailure(e) });
+  }
   return dest;
 }
 const stamp = () => new Date().toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
@@ -133,12 +170,19 @@ const stamp = () => new Date().toISOString().replace(/[:.]/g, "-").replace("T", 
 // updated the database without trouble. Only folders named before-update-<stamp> directly inside
 // backups/ are ever touched — never the data itself (state/), the owner's own backups, or the copies
 // made before a restore (before-restore-…), which are the only copy of what was there.
+// A before-update-<stamp>.partial folder is a copy that was cut off before it finished (copyState):
+// it is never counted as one of the copies to keep, and is deleted here.
 const KEEP_UPDATE_COPIES = 3;
 const UPDATE_COPY_RE = /^before-update-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
+const UPDATE_PARTIAL_RE = /^before-update-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.partial$/;
 function pruneUpdateCopies(dataDir, { keep = KEEP_UPDATE_COPIES, log = () => {} } = {}) {
   const backups = path.join(dataDir, "backups");
   let names;
-  try { names = fs.readdirSync(backups, { withFileTypes: true }).filter((d) => d.isDirectory() && UPDATE_COPY_RE.test(d.name)).map((d) => d.name); }
+  try {
+    const dirs = fs.readdirSync(backups, { withFileTypes: true }).filter((d) => d.isDirectory());
+    names = dirs.filter((d) => UPDATE_COPY_RE.test(d.name)).map((d) => d.name);
+    for (const d of dirs) if (UPDATE_PARTIAL_RE.test(d.name)) rmQuietly(path.join(backups, d.name));
+  }
   catch (e) { return []; }   // no backups folder yet
   const old = names.sort().reverse().slice(Math.max(1, keep));   // the stamps sort by time; the newest is always kept
   const state = path.resolve(statePaths(dataDir).state);
@@ -407,17 +451,56 @@ function recordBackup(dataDir, { protect, unprotect } = {}) {
   saveConfig(dataDir, { ...cfg, lastBackupAt: new Date().toISOString() }, secrets, { protect });
 }
 
+// Whether a state folder (or a copy of one) holds a database: a file with something in it somewhere
+// under its d1 folder (Miniflare keeps the database a folder or two down).
+function hasDatabase(dir) {
+  const size = (f) => { try { return fs.statSync(f).size; } catch (e) { return 0; } };
+  const walk = (d, depth) => {
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return false; }
+    return entries.some((x) => x.isDirectory() ? depth < 4 && walk(path.join(d, x.name), depth + 1) : x.isFile() && size(path.join(d, x.name)) > 0);
+  };
+  return walk(path.join(dir, "d1"), 0);
+}
+
 // Puts a copy made by copyState back, after moving the current state aside (never deleting it).
-function restoreState(dataDir, from) {
+// The backup is first copied whole into a folder next to the state (state.restoring) and checked;
+// only then is the current state moved aside and the copy given its place, by two renames. If the
+// backup can't be copied in full (a drive pulled out, files not downloaded, a half-made backup) the
+// copy is removed and the current state is exactly as it was: the program never restarts on half a
+// database or an empty one. `cp` is fs.cpSync and `rename` renameFolder, replaced in the tests.
+const NOT_RESTORED = "The backup was not restored, and your data is unchanged: ";
+function restoreState(dataDir, from, { cp = fs.cpSync, rename = renameFolder } = {}) {
   const { state } = statePaths(dataDir);
+  if (String(from).replace(/[\\/]+$/, "").endsWith(PARTIAL)) throw new Error("That folder is a backup that didn't finish (its name ends in " + PARTIAL + "), so it can't be restored. Choose a finished backup.");
   if (!fs.existsSync(path.join(from, "d1"))) throw new Error("That folder isn't an OpenDecoDesk backup (it has no d1 folder).");
-  let aside = null;
-  if (fs.existsSync(state)) {
-    aside = path.join(dataDir, "backups", "before-restore-" + stamp());
-    fs.mkdirSync(path.dirname(aside), { recursive: true });
-    fs.renameSync(state, aside);
+  if (!hasDatabase(from)) throw new Error("That folder isn't a whole OpenDecoDesk backup (there is no database in its d1 folder).");
+  const incoming = state + ".restoring";
+  rmQuietly(incoming);   // left by a restore that was cut off
+  try {
+    cp(from, incoming, { recursive: true });
+    if (!hasDatabase(incoming)) throw new Error("the copy of the backup has no database in it");
+  } catch (e) {
+    rmQuietly(incoming);
+    throw new Error(NOT_RESTORED + "copying the backup did not finish — " + copyFailure(e) + ".");
   }
-  fs.cpSync(from, state, { recursive: true });
+  let aside = null;
+  try {
+    if (fs.existsSync(state)) {
+      const to = path.join(dataDir, "backups", "before-restore-" + stamp());
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      rename(state, to);
+      aside = to;
+    }
+    rename(incoming, state);
+  } catch (e) {
+    // Put back what was moved aside, so the program starts on the data it had.
+    let putBack = true;
+    if (aside) { try { renameFolder(aside, state); } catch (e2) { putBack = false; } }
+    rmQuietly(incoming);
+    if (!putBack) throw new Error("The backup was not restored: " + copyFailure(e) + ". Your data was moved to " + aside + " and could not be moved back; move that folder back to " + state + " before using the program.");
+    throw new Error(NOT_RESTORED + copyFailure(e) + ".");
+  }
   return { aside };
 }
 

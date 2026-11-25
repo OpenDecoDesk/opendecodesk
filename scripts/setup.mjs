@@ -266,7 +266,11 @@ export function parseD1List(stdout, name) {
 }
 export function parseD1Create(stdout) { const m = UUID_RE.exec(String(stdout || "")); return m ? m[0].toLowerCase() : ""; }
 export function parseBucketList(stdout) { return [...String(stdout || "").matchAll(/^\s*name:\s*(\S+)\s*$/gm)].map(m => m[1]); }
-export function parseSecretList(stdout) { const list = jsonIn(stdout); return Array.isArray(list) ? list.map(s => s && s.name).filter(Boolean) : []; }
+// The names in `wrangler secret list`'s answer — or null when the answer isn't a list at all (an
+// error, a warning in the way). "None are set" and "couldn't tell" must never look the same: the
+// installer makes a new secret for every name it believes is missing.
+export function readSecretList(stdout) { const list = jsonIn(stdout); return Array.isArray(list) ? list.map(s => s && s.name).filter(Boolean) : null; }
+export function parseSecretList(stdout) { return readSecretList(stdout) || []; }
 
 // ---- the commands (argument lists for `wrangler`, never a shell string) ---------------------------
 export const commands = {
@@ -299,6 +303,10 @@ export const DB_STATE_SQL = "SELECT (SELECT count(*) FROM sqlite_master WHERE ty
   "(SELECT count(*) FROM sqlite_master WHERE type='table' AND name='d1_migrations') AS hasLog";
 export const DB_APPLIED_SQL = "SELECT count(*) AS n FROM d1_migrations";
 export const DB_ORDERS_SQL = "SELECT count(*) AS n FROM orders";
+// Is this install in use? A user means someone has signed in and has a password keyed by
+// PASSWORD_PEPPER; a shop means links signed with SIGNING_SECRET may be out. (That the database
+// already had its tables is not enough: a first run that stopped at the deploy leaves those too.)
+export const DB_IN_USE_SQL = "SELECT (SELECT count(*) FROM users) AS users, (SELECT count(*) FROM orgs) AS shops";
 export function migrationRecordSql(names) {
   const list = [...names].filter(n => /^\d{4}_[A-Za-z0-9_.-]+\.sql$/.test(n)).sort();
   if (!list.length) throw new SetupError("No migration files found in migrations/.");
@@ -588,16 +596,36 @@ export async function setup({ io, run, files, configPath = "wrangler.toml", flag
 
   // ---- 7. Secrets and optional services --------------------------------------------------------
   step(7, "Secrets");
-  let existing = [];
   r = run(commands.secretList(configPath));
-  if (!r.skipped && r.ok) existing = parseSecretList(r.stdout);   // a failure here just means the Worker doesn't exist yet
+  // `alreadySet` is the names wrangler listed, or null when it listed nothing we can read: the command
+  // failed, or its answer wasn't a list. On a NEW install that is expected (there is no Worker yet,
+  // so there is nothing to list) and every secret is made. On an install that is in use it must
+  // never be read as "no secrets yet": a new pepper voids every password, a new signing secret every
+  // link and session already out, and neither old value can be read back. So that case stops here.
+  const alreadySet = !r.skipped && r.ok ? readSecretList(r.stdout) : null;
+  let inUse = false;
+  if (!r.skipped && alreadySet === null) {
+    const q = run(commands.d1Query(configPath, DB_IN_USE_SQL));
+    const row = q.ok ? parseD1Rows(q.stdout) : null;
+    const stopHint = "No secret was changed and this run deployed nothing. Check that the sign-in (or API token) wrangler is using can list this Worker's secrets — `npx wrangler " +
+      commands.secretList(configPath).join(" ") + "` should print them — then run `npm run setup` again. If the Worker itself was deleted, run `npm run deploy` first, then setup again.";
+    if (!row) fail("Could not list the secrets that are already set, and could not check whether this install is in use.", r.ok ? q : r, stopHint);
+    inUse = Number(row.users) > 0 || Number(row.shops) > 0;
+    if (inUse) fail(r.ok ? "Could not read wrangler's list of the secrets that are already set." : "Could not list the secrets that are already set.", r,
+      "This install already has shops or users, so setup won't guess that no secrets are set: new ones would void every password and every link already sent. " + stopHint);
+  }
+  const existing = alreadySet || [];
+  // A second lock, should the stop above ever be loosened: on an install in use, a secret counts as
+  // missing only when the list itself showed that it is.
+  const missing = (name) => !existing.includes(name) && !(inUse && !alreadySet);
   const secrets = {}, shown = {};
-  if (!existing.includes("PROXY_ADMIN_PASSPHRASE") || flags.newPassphrase) { secrets.PROXY_ADMIN_PASSPHRASE = generatePassphrase(); shown.PROXY_ADMIN_PASSPHRASE = secrets.PROXY_ADMIN_PASSPHRASE; }
+  if (missing("PROXY_ADMIN_PASSPHRASE") || flags.newPassphrase) { secrets.PROXY_ADMIN_PASSPHRASE = generatePassphrase(); shown.PROXY_ADMIN_PASSPHRASE = secrets.PROXY_ADMIN_PASSPHRASE; }
   // PASSWORD_PEPPER keys the stored passwords (adminAuth.js): made once, never again — a new one would void every
   // password made under the old one. An install from before it existed gets one now; its passwords move to it as
   // each user next signs in.
-  for (const name of ["SIGNING_SECRET", "CRON_SECRET", "PASSWORD_PEPPER"]) if (!existing.includes(name)) secrets[name] = generateSecret();
+  for (const name of ["SIGNING_SECRET", "CRON_SECRET", "PASSWORD_PEPPER"]) if (missing(name)) secrets[name] = generateSecret();
   say("   Generated: " + (Object.keys(secrets).join(", ") || "nothing new (already set)") + ".");
+  if (dry) say("   [dry run] that is what a new install gets. A real run first lists the secrets already set and makes only the missing ones; on an install with shops or users it stops, changing no secret, if that list can't be read.");
 
   say(""); say("   Optional services — Enter skips each one. You can run setup again later to add any of them.");
   const ctx = { workerName: cfg.name };

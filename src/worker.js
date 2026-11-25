@@ -195,7 +195,7 @@ async function runHousekeeping_(env) {
     out.customerDesigns = c;
     if (c.deleted) console.log("Deleted", c.deleted, "customer design upload(s) no order used");
   } catch (e) { console.error("Cleaning up customer design uploads failed:", e); out.customerDesigns = { error: String(e && e.message) }; await recordSystemIssue(env.DB, "cleanup_failed", "Customer design uploads: " + (e && e.message)); }
-  // Receipts and design / order / digital files uploaded more than 48 hours ago that nothing in the database names
+  // Receipts and design / order / digital files uploaded more than 30 days ago that nothing in the database names
   // (their form was never saved): at most 1,000 a run, within a time limit; a missing bucket is skipped.
   try {
     const u = await cleanUpUnsavedUploads(env);

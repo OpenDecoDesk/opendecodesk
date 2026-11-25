@@ -65,6 +65,30 @@ export function verifyDownloadToken(env, orderId, salt, token){
   });
 }
 
+// ---- Proof that a two-step secret is one this server made (functions/api/admin-2fa.js) -------------
+// "generate" hands the browser a new secret together with this proof: an expiry and an HMAC over the user's id, the
+// secret and that expiry, under the install's signing secret and a label of its own. "activate" takes only a secret
+// whose proof checks, so a session can't enrol a secret of its own choosing (a short or a public one) or one made
+// for another user, and a set-up left open is no use after 15 minutes. null / false without a signing secret.
+const TWO_STEP_PROOF_TTL_SECONDS = 15 * 60;
+export function signTwoStepProof(env, userId, secret){
+  const key = orderTokenSecret_(env);
+  if(!key || userId == null || !secret) return Promise.resolve(null);
+  const exp = Math.floor(Date.now() / 1000) + TWO_STEP_PROOF_TTL_SECONDS;
+  return orderTokenMac_(key, String(userId) + "|" + String(secret) + "|" + exp, "odd-2fa-enrol-v1:").then(mac => exp + "." + mac);
+}
+export function verifyTwoStepProof(env, userId, secret, proof){
+  const key = orderTokenSecret_(env);
+  const m = /^(\d{9,12})\.([0-9a-f]{64})$/.exec(typeof proof === "string" ? proof : "");
+  if(!key || userId == null || !secret || !m) return Promise.resolve(false);
+  if(Number(m[1]) < Math.floor(Date.now() / 1000)) return Promise.resolve(false);
+  return orderTokenMac_(key, String(userId) + "|" + String(secret) + "|" + m[1], "odd-2fa-enrol-v1:").then(expected => {
+    let diff = 0;
+    for(let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ m[2].charCodeAt(i);
+    return diff === 0;
+  });
+}
+
 export function jsonResponse(obj, status){
   return new Response(JSON.stringify(obj), {
     status: status || 200,

@@ -21,7 +21,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   console.log("=== Turning two-step on ===");
   let g = await A.twoFactor({ action: "generate" }, sam);
   const SAM_SECRET = g.body.secret;
-  let a = await A.twoFactor({ action: "activate", proposedSecret: SAM_SECRET, code: totpNow(SAM_SECRET) }, sam);
+  let a = await A.twoFactor({ action: "activate", proposedSecret: SAM_SECRET, proof: g.body.proof, current: SAM_PW, code: totpNow(SAM_SECRET) }, sam);
   const samCodes = a.body.recoveryCodes;
   ok("the secret is stored sealed: prefixed, not the secret, and it opens to it", a.status === 200 && /^v1:[A-Za-z0-9+/]+=*$/.test(stored("sam@example.test")) &&
     !stored("sam@example.test").includes(SAM_SECRET) && (await opens("sam@example.test")) === SAM_SECRET);

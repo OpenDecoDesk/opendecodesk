@@ -25,18 +25,14 @@
 import { classifyHost }   from "../_lib/hostConfig.js";
 import { getCatalogData } from "../_lib/catalogCache.js";
 import { jsonResponse }   from "../_lib/http.js";
-import { rateLimitCheck, rateLimitHit, rateLimitResponse } from "../_lib/rateLimit.js";
 import {
-  requireAdmin, adminActor, adminUser, verifyUserPassword, userHasUsablePassword, setUserPassword, passwordProblem,
+  requireAdmin, adminActor, adminUser, checkCurrentPassword, userHasUsablePassword, setUserPassword, passwordProblem,
   refreshPending, clearSessionCookieHeader, MIN_PASSWORD_LENGTH,
 } from "../_lib/adminAuth.js";
-import { insertAuditLog, getUserById, getUserByEmail, updateUser, deleteUserSessions, recordFailedAdminLogin } from "../_lib/db.js";
+import { insertAuditLog, getUserById, getUserByEmail, updateUser, deleteUserSessions } from "../_lib/db.js";
 
 const unavailable = () => jsonResponse({status:"error", message:"Sign-in service temporarily unavailable — try again shortly."}, 503);
 const EMAIL_RE = /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/;
-// Wrong current passwords: the sign-in budget per address per minute, and one per user over 15 minutes.
-const SIGNIN_BUCKET = "admin_auth", SIGNIN_LIMIT = 10;
-const USER_BUCKET = "admin_pw_user", USER_LIMIT = 10, USER_WINDOW = 15 * 60;
 
 export async function onRequestPost(context){
   const { request, env } = context;
@@ -83,22 +79,9 @@ export async function onRequestPost(context){
     return res;
   };
 
-  // Checks the current password, within both budgets (see the top). Returns null when it is right, else the answer
-  // to send. Past either budget it isn't checked at all; a wrong one counts against both and is recorded.
-  const checkCurrent = async (current) => {
-    const fromHere = await rateLimitCheck(env, SIGNIN_BUCKET, request, SIGNIN_LIMIT);
-    const forUser = await rateLimitCheck(env, USER_BUCKET, "user:" + user.id, USER_LIMIT, USER_WINDOW);
-    if(fromHere.blocked || forUser.blocked) return rateLimitResponse(Math.max(fromHere.retryAfter || 0, forUser.retryAfter || 0, 1));
-    let good;
-    try{ good = await verifyUserPassword(env, user, current); }
-    catch(e){ console.error("admin-password: could not check the password:", e); return unavailable(); }
-    if(good) return null;
-    await rateLimitHit(env, SIGNIN_BUCKET, request);
-    await rateLimitHit(env, USER_BUCKET, "user:" + user.id, USER_WINDOW);
-    try{ await recordFailedAdminLogin(env.DB, "current-password", request.headers.get("CF-Connecting-IP") || ""); }
-    catch(e){ console.error("admin-password: could not record the failed attempt:", e); }
-    return jsonResponse({status:"error", message:"The current password is not right."}, 401);
-  };
+  // Checks the current password, within both budgets (see the top; adminAuth.js checkCurrentPassword, which turning
+  // two-step on asks too). Returns null when it is right, else the answer to send.
+  const checkCurrent = (current) => checkCurrentPassword(env, request, user, current);
 
   if(action === "status"){
     try{

@@ -3848,10 +3848,15 @@ export async function buildLocaleSettings(db, p) {
 export async function resolveTimeZone(env) {
   let saved = "";
   try { saved = (await getLocaleSettings(env && env.DB)).timeZone; } catch (e) { /* fall through */ }
-  const fromEnv = env && env.TIMEZONE ? String(env.TIMEZONE).trim() : "";
-  const tz = saved || (isValidTimeZone(fromEnv) ? fromEnv : DEFAULT_TIME_ZONE);
+  const tz = pickTimeZone(saved, env);
   _shopTimeZone_ = tz;   // what shopTime_ writes times in from now on
   return tz;
+}
+// resolveTimeZone's choice from a saved Region zone already in hand (the storefront catalog carries it): the saved
+// one, else the TIMEZONE variable, else UTC.
+export function pickTimeZone(saved, env) {
+  const fromEnv = env && env.TIMEZONE ? String(env.TIMEZONE).trim() : "";
+  return (typeof saved === "string" && saved) || (isValidTimeZone(fromEnv) ? fromEnv : DEFAULT_TIME_ZONE);
 }
 // The install's time zone as last resolved (resolveTimeZone), for shopTime_'s messages; "" until then.
 let _shopTimeZone_ = "";
@@ -3867,6 +3872,40 @@ export function dateInTimeZone(date, timeZone) {
 // Today's date where the business is — what "not in the future" and "overdue" are measured against.
 export async function localToday(env, now) {
   return dateInTimeZone(now || new Date(), await resolveTimeZone(env));
+}
+// The last moment of a calendar day ("YYYY-MM-DD") in a time zone, as an ISO time: 11:59:59.999 pm there, the
+// moment before the next day starts. When a shop's order deadline passes — on the storefront and at order placement
+// alike. null for anything that isn't a day; an unknown zone counts as UTC. Clock changes are allowed for: the day's
+// own offset is used (a winter day in New York ends at 04:59:59.999Z, a summer one at 03:59:59.999Z), and in a zone
+// whose clocks skip midnight the day ends when the calendar turns over.
+export function localDayEndInstant(day, timeZone) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day == null ? "" : day).slice(0, 10));
+  if (!m) return null;
+  const tz = isValidTimeZone(timeZone) ? timeZone.trim() : DEFAULT_TIME_ZONE;
+  const fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+  // How far the zone's wall clock is ahead of UTC at moment t (ms; negative west of UTC).
+  const offsetAt = (t) => {
+    const p = {};
+    for (const x of fmt.formatToParts(new Date(t))) p[x.type] = x.value;
+    return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second) - Math.floor(t / 1000) * 1000;
+  };
+  const want = Date.UTC(+m[1], +m[2] - 1, +m[3] + 1);   // the next day's midnight, as if the zone were UTC
+  if (!Number.isFinite(want)) return null;
+  const nextDay = new Date(want).toISOString().slice(0, 10);
+  // Next midnight by the offset at `want`, then by the offset at that first guess; normally the two agree. Where the
+  // clocks jump at midnight they don't, and the day ends at the earlier one that is already on the next day.
+  const first = want - offsetAt(want), second = want - offsetAt(first);
+  const starts = [first, second].filter(t => dateInTimeZone(new Date(t), tz) >= nextDay).sort((a, b) => a - b);
+  const start = starts.length ? starts[0] : Math.max(first, second);
+  return new Date(start - 1).toISOString();
+}
+// A time zone's short name at a moment, for a shopper: New York's winter abbreviation, "GMT+9", "UTC". "" if the zone isn't known.
+export function timeZoneShortName(when, timeZone) {
+  if (!isValidTimeZone(timeZone)) return "";
+  try {
+    const part = new Intl.DateTimeFormat("en-US", { timeZone: timeZone.trim(), timeZoneName: "short" }).formatToParts(new Date(when)).find(x => x.type === "timeZoneName");
+    return part ? part.value : "";
+  } catch (e) { return ""; }
 }
 
 // ---- Business profile -----------------------------------------------------------------------
@@ -4103,6 +4142,30 @@ export function methodFromPaymentMethod(paymentMethod) {
 // opts: { method, reference, feeCents, kind: 'payment'|'refund'|'dispute',
 // receivedAt }. Refunds and lost disputes are NEGATIVE amounts.
 // Returns the new row id, or 0 when it was already recorded.
+// What counts as received when the balance is worked out: the payments, less the money given back for lines that
+// came off the order. Refunds and lost disputes count against it only up to the refund credit of the cancelled
+// lines (each cancelled line's refundCents, at most its total with its tax when tax is added on top), so a goodwill
+// refund, or a refund on a line still on the order, never puts a balance back; money returned for a cancelled line
+// does, once an item is added in its place. A card refund counts once its webhook row is in. One rule for every
+// place that compares money in with what's owed (paidRefreshSql_, refreshPaidStatus, getOrderCheckoutState, the
+// customer's per-order balance, parseOrder_'s balanceDue via balanceReceivedCents_ below). `oid` spells the
+// order's id, `tm` its tax mode (as paidRefreshSql_). The raw payments (paymentsSql_) are still what
+// addOrderPayment's expectReceivedCents compares.
+const paymentsSql_ = (oid) => `COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = ${oid} AND kind = 'payment' AND voidedAt IS NULL), 0)`;
+const balanceReceivedSql_ = (oid, tm) => `(${paymentsSql_(oid)} - MAX(0, MIN(
+    COALESCE((SELECT -SUM(amountCents) FROM order_payments WHERE orderId = ${oid} AND kind IN ('refund', 'dispute') AND voidedAt IS NULL), 0),
+    COALESCE((SELECT SUM(MIN(refundCents, lineTotalCents + (CASE WHEN ${tm} = 'exclusive' THEN COALESCE(taxCents, 0) ELSE 0 END)))
+      FROM order_items WHERE orderId = ${oid} AND cancelDate IS NOT NULL AND refundCents > 0), 0))))`;
+// The JS twin of balanceReceivedSql_, from an order's parsed payments and lines (parseOrder_). In cents.
+function balanceReceivedCents_(payments, items, taxMode) {
+  const live = (payments || []).filter(p => !p.voidedAt);
+  const paid = live.filter(p => (p.kind || "payment") === "payment").reduce((s, p) => s + toCents(p.amount), 0);
+  const refunded = -live.filter(p => p.kind === "refund" || p.kind === "dispute").reduce((s, p) => s + toCents(p.amount), 0);
+  const credit = (items || []).filter(it => it.cancelDate && toCents(it.refundAmount || 0) > 0).reduce((s, it) =>
+    s + Math.min(toCents(it.refundAmount), toCents(it.lineTotal) + (taxMode_(taxMode) === "exclusive" ? toCents(it.tax || 0) : 0)), 0);
+  return paid - Math.max(0, Math.min(refunded, credit));
+}
+
 // The order's paid flag worked out from the ledger in ONE statement — the same rule as
 // refreshPaidStatus below, orderAmounts' "owed" (items + shipping + rush fee − discount, plus the sales tax
 // when it's added on top, migrations/0052; test124 checks the two agree) — so it can ride in the same batch
@@ -4118,7 +4181,8 @@ const paidRefreshSql_ = (tm) => {
   // What's owed for the work itself — everything but the rush fee (paidForWork) — and in all.
   const workOwed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN COALESCE(shippingCostCents, 0) ELSE 0 END) - COALESCE(discountCents, 0) + ${taxAdded})`;
   const owed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN COALESCE(shippingCostCents, 0) ELSE 0 END) + ${rush} - COALESCE(discountCents, 0) + ${taxAdded})`;
-  const received = "COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = orders.orderId AND kind = 'payment' AND voidedAt IS NULL), 0)";
+  // Less the refunds for cancelled lines (see above); the tax mode is the order's, spelled so the lines' subquery reads it.
+  const received = balanceReceivedSql_("orders.orderId", legacy ? tm : "orders." + tm);
   return `UPDATE orders SET
     paidAt = CASE WHEN ${owed} = 0 THEN paidAt
                   WHEN ${received} >= ${owed} THEN (CASE WHEN paid = 1 THEN paidAt ELSE COALESCE((SELECT MAX(receivedAt) FROM order_payments WHERE orderId = orders.orderId AND kind = 'payment' AND voidedAt IS NULL), ?) END)
@@ -4153,13 +4217,21 @@ export async function addOrderPayment(db, orderId, amount, note, externalRef = "
   // opts.expectReceivedCents (settleOrderBalance): insert only while the order's payments still add up to what the
   // caller saw when it worked out the balance — two "Mark as paid"s, or one racing a card payment, can't both book it.
   const expect = Number.isFinite(opts.expectReceivedCents);
+  // opts.withinKept (a refund recorded by hand): insert only while the order still holds at least the refund — its
+  // live rows of every kind (Net kept) add up to that much — in the same statement, so two refunds saved at once
+  // can't both take the same money. Refused, it inserts nothing and returns 0, as a repeat does; the caller tells
+  // them apart by the request key.
+  const withinKept = !!opts.withinKept && toCents(amount) < 0;
+  const conds = [], condBinds = [];
+  if (expect) { conds.push("(SELECT COALESCE(SUM(amountCents), 0) FROM order_payments WHERE orderId = ? AND kind = 'payment' AND voidedAt IS NULL) = ?"); condBinds.push(orderId, Math.round(opts.expectReceivedCents)); }
+  if (withinKept) { conds.push("(SELECT COALESCE(SUM(amountCents), 0) FROM order_payments WHERE orderId = ? AND voidedAt IS NULL) >= ?"); condBinds.push(orderId, -toCents(amount)); }
   const insert = db.prepare(
     `INSERT OR IGNORE INTO order_payments (orderId, amountCents, note, receivedAt, externalRef, method, reference, feeCents, kind, accountId${requestKey ? ", requestKey" : ""})
      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${requestKey ? ", ?" : ""}` +
-    (expect ? " WHERE (SELECT COALESCE(SUM(amountCents), 0) FROM order_payments WHERE orderId = ? AND kind = 'payment' AND voidedAt IS NULL) = ?" : "")
+    (conds.length ? " WHERE " + conds.join(" AND ") : "")
   ).bind(orderId, toCents(amount), note || "", receivedAt, externalRef || "", method,
     String(opts.reference || "").slice(0, 100), Math.max(0, Math.round(Number(opts.feeCents) || 0)), kind, accountId,
-    ...(requestKey ? [requestKey] : []), ...(expect ? [orderId, Math.round(opts.expectReceivedCents)] : []));
+    ...(requestKey ? [requestKey] : []), ...condBinds);
   const stmts = [insert];
   // How much of a refund was shipping (migrations/0035): set on the row just inserted, and only then.
   if (opts.shippingCents > 0) stmts.push(db.prepare("UPDATE order_payments SET shippingCents=? WHERE id = last_insert_rowid() AND changes() > 0").bind(Math.round(opts.shippingCents)));
@@ -4236,10 +4308,10 @@ export async function setOrderDiscount(db, orderId, amount, note) {
 }
 
 // Recomputes the cached orders.paid / paidAt from the payments ledger.
-// Only kind='payment' rows count toward "paid": a later refund or lost
-// dispute is money going back out, recorded separately (parseOrder_'s
-// refundedAmount / netReceived) — it doesn't turn a settled order into one
-// with a balance due.
+// kind='payment' rows count toward "paid", less only the money given back for
+// cancelled lines (balanceReceivedSql_): any other refund or lost dispute is
+// money going back out, recorded separately (parseOrder_'s refundedAmount /
+// netReceived) — it doesn't turn a settled order into one with a balance due.
 // Paid = money received covers the effective total (active items, plus
 // shipping when any item is active, minus discount). An order that owes $0
 // keeps whatever the admin set, since there's nothing for the ledger to show.
@@ -4248,17 +4320,18 @@ export async function setOrderDiscount(db, orderId, amount, note) {
 export async function refreshPaidStatus(db, orderId) {
   const row = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
     SELECT o.paid, o.paidAt, o.paidForWork, ${tm === LEGACY_TAX_MODE_ ? 0 : 1} AS hasPaidForWork, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
-      COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL), 0) AS receivedCents,
+      ${balanceReceivedSql_("o.orderId", tm)} AS receivedCents, ${paymentsSql_("o.orderId")} AS paymentsCents,
       (SELECT MAX(receivedAt) FROM order_payments WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL) AS lastPaymentAt
     FROM orders o WHERE o.orderId = ?`)).bind(orderId).first());
   if (!row) return null;
   const hasWork = row.hasPaidForWork !== 0;   // 0 only on a database from before migrations/0082
   const amounts = orderAmountsOfRow_(row);
   const owed = amounts.owedCents, workOwed = amounts.workOwedCents;
-  const received = Number(row.receivedCents) || 0;
+  // receivedCents: what counts against the balance; paymentsCents: the payments alone (expectReceivedCents compares those).
+  const received = Number(row.receivedCents) || 0, paymentsCents = Number(row.paymentsCents) || 0;
   if (owed === 0) {
     if (hasWork && Number(row.paidForWork) !== Number(row.paid)) await db.prepare("UPDATE orders SET paidForWork = paid WHERE orderId = ?").bind(orderId).run();
-    return { paid: !!row.paid, paidForWork: !!row.paid, owedCents: 0, receivedCents: received };
+    return { paid: !!row.paid, paidForWork: !!row.paid, owedCents: 0, receivedCents: received, paymentsCents };
   }
   const paid = received >= owed ? 1 : 0;
   // Paid for everything but the rush fee (migrations/0082): production doesn't wait for an unpaid rush fee.
@@ -4268,7 +4341,7 @@ export async function refreshPaidStatus(db, orderId) {
     if (hasWork) await db.prepare("UPDATE orders SET paid = ?, paidAt = ?, paidForWork = ? WHERE orderId = ?").bind(paid, paidAt, paidForWork, orderId).run();
     else await db.prepare("UPDATE orders SET paid = ?, paidAt = ? WHERE orderId = ?").bind(paid, paidAt, orderId).run();
   }
-  return { paid: !!paid, paidForWork: !!paidForWork, owedCents: owed, receivedCents: received };
+  return { paid: !!paid, paidForWork: !!paidForWork, owedCents: owed, receivedCents: received, paymentsCents };
 }
 
 // "Mark as paid": records a ledger payment for whatever is still owed (so the
@@ -4294,7 +4367,7 @@ export async function settleOrderBalanceOnce(db, orderId, note, at = null, reque
     const o = await db.prepare("SELECT paymentMethod FROM orders WHERE orderId=?").bind(orderId).first();
     const id = await addOrderPayment(db, orderId, fromCents(balance), note || "Marked paid", "",
       { method: methodFromPaymentMethod(o && o.paymentMethod), ...(at ? { receivedAt: at } : {}),
-        expectReceivedCents: state.receivedCents, ...(requestKey ? { requestKey } : {}) });
+        expectReceivedCents: state.paymentsCents, ...(requestKey ? { requestKey } : {}) });
     return id ? { recorded: fromCents(balance), tookRow: true } : { recorded: 0, tookRow: false };
   }
   if (state.owedCents === 0) {
@@ -7123,6 +7196,7 @@ export async function setBlankCounts(db, rows, { note, at } = {}) {
 // It moves ONE line's manufacturedQty from `fromQty` to `toQty`, consuming (toQty − fromQty)
 // blanks at the current weighted-average cost: a dated `consume` movement, lower stock, and the
 // line's COGS ACCUMULATED (a migration-era 'estimate' cost is overwritten on the first real piece).
+// The batch that claims the line's last piece also uses its transfers (below).
 //
 // ATOMIC + RACE-SAFE: everything is one db.batch() (one transaction), and every statement in it is
 // conditioned on the line's manufacturedQty still being `fromQty` — the value the caller read. The
@@ -7178,6 +7252,30 @@ async function makeItemPieces_(db, item, fromQty, toQty, at = null) {
     stmts.push(db.prepare(`UPDATE blank_sizes SET quantity = quantity - ? WHERE blankId = ? AND color = ? AND size = ? AND ${stillAt}`)
       .bind(pieces, blankId, color, size, id, fromQty));
   }
+  // The line's LAST piece also uses its transfers (migrations/0036): one application per garment of each transfer its
+  // saved options name, at the transfer's average cost, added to the line's cost — in this same batch and on the same
+  // condition, so the line can't end up made with none, or only some, of its transfers used (a retry used to find it
+  // made and stop). The k-th use of a transfer is written only while the line has exactly k live uses of it, so a use
+  // already on file (Use transfers for past orders, before the line was made) isn't taken twice. A transfer that no
+  // longer exists is skipped. The stock is counted from the movements afterwards.
+  const lineQty = Math.max(1, Number(item.qty) || 1), tids = toQty >= lineQty ? lineTransferIds_(item) : [];
+  if (tids.length) {
+    const now = new Date().toISOString(), when = at || now, seen = new Map();
+    const unit = "MAX(0, COALESCE((SELECT purchasePriceCents FROM transfers WHERE id = ?), 0))";
+    const usedSql = "(SELECT COUNT(*) FROM transfer_movements WHERE itemId = ? AND transferId = ? AND kind = 'consume' AND voidedAt IS NULL)";
+    for (const tid of tids) {
+      const k = seen.get(tid) || 0;
+      seen.set(tid, k + 1);
+      const g = `${stillAt} AND EXISTS (SELECT 1 FROM transfers WHERE id = ?) AND ${usedSql} = ?`, gb = [id, fromQty, tid, id, tid, k];
+      stmts.push(db.prepare(`UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ? * ${unit},
+          cogsSource = CASE WHEN ${unit} > 0 THEN 'consumed' ELSE cogsSource END WHERE id = ? AND ${g}`).bind(lineQty, tid, tid, id, ...gb));
+      stmts.push(db.prepare(`INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, orderId, itemId, note, occurredAt, createdAt)
+          SELECT ?, COALESCE((SELECT name FROM transfers WHERE id = ?), ''), ?, ${unit}, 'consume', ?, ?, ?, ?, ? WHERE ${g}`)
+        .bind(tid, tid, -lineQty, tid, item.orderId, id, ("Used for order " + item.orderId).slice(0, 300), when, now, ...gb));
+    }
+    for (const tid of seen.keys()) stmts.push(db.prepare(`UPDATE transfers SET quantity = (SELECT COALESCE(SUM(qtyDelta), 0) FROM transfer_movements WHERE transferId = ? AND voidedAt IS NULL), updatedAt = ?
+        WHERE id = ? AND ${stillAt}`).bind(tid, now, tid, id, fromQty));
+  }
   stmts.push(db.prepare("UPDATE order_items SET manufacturedQty = ? WHERE id = ? AND cancelDate IS NULL AND COALESCE(manufacturedQty,0) = ?")
     .bind(toQty, id, fromQty));
   const res = await db.batch(stmts);
@@ -7211,19 +7309,19 @@ export async function consumeBlanksForOrder(db, orderId, at = null) {
     const qty = Math.max(1, Number(it.qty) || 1);
     const made = Math.max(0, Number(it.manufacturedQty) || 0);
     if (made >= qty) continue;
+    // The line this call finishes also uses its transfers, in the same batch, as its last piece on Run Order does
+    // (makeItemPieces_). A line that was already fully made is skipped above and left as it is ("Use transfers for
+    // past orders" repairs those).
     const r = await makeItemPieces_(db, { ...it, color: itemColor_(it) }, made, qty, at);
     if (r.consumed) consumed++;
-    // The line this call finished also uses its transfers, as its last piece on Run Order does
-    // (markItemPieceManufactured) — once per line, and only asked for a line that names a transfer. A line that
-    // was already fully made is skipped above and left as it is ("Use transfers for past orders" repairs those).
-    if (r.claimed && lineNamesTransfer_(it)) await consumeLineTransfersOnce_(db, orderId, Number(it.id), at);
   }
   return consumed;
 }
-// Whether a line's saved choices put a transfer on it (what consumeLineTransfersOnce_ would use).
-function lineNamesTransfer_(row) {
-  const cfg = tryParse_(row.configJson, null);
-  return !!cfg && (cfg.locations || []).some(l => l && l.kind === "transfer" && Number(l.transferId));
+// The transfers a line's saved choices put on it, one entry per location (what its last piece uses). A line filled
+// from finished stock used none (migrations/0060).
+function lineTransferIds_(row) {
+  const cfg = !Number(row.fromStock) && tryParse_(row.configJson, null);
+  return cfg && Array.isArray(cfg.locations) ? cfg.locations.filter(l => l && l.kind === "transfer" && Number(l.transferId)).map(l => Number(l.transferId)) : [];
 }
 
 // Mark ONE physical piece of a line item manufactured: consume one blank for it and bump its
@@ -7247,9 +7345,8 @@ export async function markItemPieceManufactured(db, orderId, itemId, at = null) 
     if (made >= qty) {
       return { alreadyComplete: true, orderComplete: await maybeCompleteManufacture_(db, orderId, at) };
     }
+    // The last piece also uses the line's transfers, in the same batch (makeItemPieces_).
     if ((await makeItemPieces_(db, item, made, made + 1, at)).claimed) {
-      // When the last piece lands, consume the line's transfer applications once (migrations/0036).
-      if (made + 1 >= qty) await consumeLineTransfersOnce_(db, orderId, Number(itemId), at);
       return { pieceMarked: true, orderComplete: await maybeCompleteManufacture_(db, orderId, at) };
     }
   }
@@ -8026,7 +8123,8 @@ export async function applyBlankCatchUp(db, itemIds) {
 // doesn't name. The copy was taken before the product had them (the order was placed, or the product set up,
 // earlier), so those are offered too, each marked `added`; the window starts them unticked.
 // A line whose use was voided by hand (Transfers → History) is listed again, with the reason, so it can be
-// caught up once its transfer arrives; the window starts it unticked.
+// caught up once its transfer arrives; the window starts it unticked. "Already used" is counted per transfer: a
+// line that used only some of its transfers is listed for the rest (`usedBefore` > 0), also unticked.
 // Each use is dated when the order was made and priced at the transfer's average cost THEN (replaying its
 // history), and, because a use dated in the past changes how many were on hand when later sheets came in,
 // later uses whose cost moves are re-costed too — except in a closed month and made-for-stock uses.
@@ -8038,6 +8136,7 @@ export async function planTransferCatchUp(db, itemIds = null, pick = null) {
     `SELECT i.id AS itemId, i.orderId, i.orgId, i.name, i.size, i.qty, i.configJson, o.customerName, g.name AS orgName,
             p.productId AS hasProduct, p.reorderQr, p.fixedTransfersJson,
             (SELECT m.voidReason FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS voidedUse,
+            (SELECT json_group_array(m.transferId) FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL) AS usedJson,
             COALESCE(o.manufacturedAt, o.shippedAt, o.deliveredAt) AS useDate
      FROM order_items i
      JOIN orders o ON o.orderId = i.orderId
@@ -8046,7 +8145,12 @@ export async function planTransferCatchUp(db, itemIds = null, pick = null) {
      WHERE COALESCE(i.cancelDate, '') = '' AND o.voidedAt IS NULL AND o.isTest = 0
        AND COALESCE(o.manufacturedAt, o.shippedAt, o.deliveredAt) IS NOT NULL
        AND NOT ${fs("i")} AND NOT ${dg("i")}
-       AND NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL)
+       AND (NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL)
+         OR EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NOT NULL)
+         OR CASE WHEN json_valid(i.configJson) THEN EXISTS (SELECT 1 FROM json_each(i.configJson, '$.locations') l
+           WHERE json_extract(l.value, '$.kind') = 'transfer' AND CAST(json_extract(l.value, '$.transferId') AS INTEGER) > 0
+             AND NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.transferId = CAST(json_extract(l.value, '$.transferId') AS INTEGER)
+               AND m.kind = 'consume' AND m.voidedAt IS NULL)) ELSE 0 END)
      ORDER BY useDate, i.id`).all();
   const want = itemIds ? new Set(itemIds.map(Number)) : null;
   const orgQr = new Map();
@@ -8070,9 +8174,20 @@ export async function planTransferCatchUp(db, itemIds = null, pick = null) {
     } else continue;
     const isT = (l) => l && l.kind === "transfer" && Number(l.transferId);
     let uses = [...locs.filter(isT).map(l => ({ tid: Number(l.transferId), added: false })), ...added.filter(isT).map(l => ({ tid: Number(l.transferId), added: true }))];
+    // A line that already used some of its transfers (one use voided by hand, or a line made before its uses were
+    // written with its last piece) is offered the rest, counted per transfer. The product's added prints are offered
+    // only to a line with no use at all, as before.
+    const used = tryParse_(r.usedJson, null) || [], left = new Map();
+    for (const u of used) left.set(Number(u), (left.get(Number(u)) || 0) + 1);
+    if (used.length) uses = uses.filter(u => {
+      if (u.added) return false;
+      const n = left.get(u.tid) || 0;
+      if (n > 0) { left.set(u.tid, n - 1); return false; }
+      return true;
+    });
     const only = pick && pick.get(Number(r.itemId));
     if (only) uses = uses.filter(u => only.has(u.tid));
-    if (uses.length) cands.push({ ...r, uses, tids: uses.map(u => u.tid), source });
+    if (uses.length) cands.push({ ...r, uses, tids: uses.map(u => u.tid), source, usedBefore: used.length });
   }
   const empty = { lines: [], recost: [], totalUnits: 0, totalCents: 0, shortLines: 0, recostLines: 0, recostCents: 0, skippedClosed: 0, skippedFinished: 0, transfers: [] };
   if (!cands.length) return empty;
@@ -8096,7 +8211,7 @@ export async function planTransferCatchUp(db, itemIds = null, pick = null) {
         let unit = avg, note = "";
         if (!unit) { unit = Number(t.purchasePriceCents) || 0; note = unit ? "no sheet before that date — used the transfer's current cost" : "no cost known for this transfer"; }
         const line = lines.get(Number(c.itemId)) || { itemId: Number(c.itemId), orderId: c.orderId, orgId: c.orgId, orgName: c.orgName || c.orgId, customerName: c.customerName || "", name: c.name,
-          size: c.size || "", qty: q, useDate: c.useDate, source: c.source, voidedUse: c.voidedUse == null ? null : String(c.voidedUse), uses: [], costCents: 0, shortBy: 0 };
+          size: c.size || "", qty: q, useDate: c.useDate, source: c.source, voidedUse: c.voidedUse == null ? null : String(c.voidedUse), usedBefore: c.usedBefore, uses: [], costCents: 0, shortBy: 0 };
         const shortBy = Math.max(0, Math.min(q, q - Math.max(0, qty)));
         line.uses.push({ transferId: tid, name: t.name || "", unitCostCents: unit, qty: q, note, added: !!e.added, shortBy });
         line.costCents += unit * q;
@@ -8131,8 +8246,9 @@ export async function planTransferCatchUp(db, itemIds = null, pick = null) {
 // transfer's stock and average set from the replay. Lines already done no longer qualify, so it's idempotent.
 // It is one transaction, and every write in it runs only while what the plan saw still holds, so applying the same
 // plan twice (a double click, two tabs, a retry) changes nothing the second time:
-//   • a line's cost is added only while the line has no live use yet, and its k-th use is written only while it has
-//     exactly k — the first apply writes them all, a second finds them there and writes none;
+//   • a line's cost is added only while the line has the live uses the plan saw (none, or the ones a partly used line
+//     already has), and its k-th new use is written only while it has exactly that many plus k — the first apply
+//     writes them all, a second finds them there and writes none;
 //   • a later use is re-costed (and its line's cost moved by the difference) only while it still has its old cost;
 //   • each transfer's stock is worked out from its history inside the transaction, not set to the figure the plan
 //     computed, so a sheet received or a use recorded between planning and applying isn't wiped out.
@@ -8140,11 +8256,13 @@ export async function applyTransferCatchUp(db, plan) {
   const now = new Date().toISOString(), stmts = [], claims = [];
   const liveUses = "(SELECT COUNT(*) FROM transfer_movements WHERE itemId = ? AND kind = 'consume' AND voidedAt IS NULL)";
   for (const l of plan.lines) {
+    // A partly used line (usedBefore live uses when planned) is guarded on that count the same way.
+    const had = Number(l.usedBefore) || 0;
     claims.push(stmts.length);
-    stmts.push(db.prepare(`UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ?, cogsSource = 'consumed' WHERE id = ? AND ${liveUses} = 0`).bind(l.costCents, l.itemId, l.itemId));
+    stmts.push(db.prepare(`UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ?, cogsSource = 'consumed' WHERE id = ? AND ${liveUses} = ?`).bind(l.costCents, l.itemId, l.itemId, had));
     l.uses.forEach((u, k) => stmts.push(transferMovementStmt_(db, { transferId: u.transferId, transferName: u.name, qtyDelta: -u.qty, unitCostCents: u.unitCostCents,
       kind: "consume", orderId: l.orderId, itemId: l.itemId, note: "Used for order " + l.orderId + " (catch-up)", occurredAt: l.useDate },
-      { sql: `${liveUses} = ?`, binds: [l.itemId, k] })));
+      { sql: `${liveUses} = ?`, binds: [l.itemId, had + k] })));
   }
   for (const c of plan.recost) {
     if (c.kind === "consume" && c.itemId) stmts.push(db.prepare("UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ? WHERE id = ? AND EXISTS (SELECT 1 FROM transfer_movements WHERE id = ? AND unitCostCents = ? AND voidedAt IS NULL)")
@@ -8528,6 +8646,29 @@ function transferMovementStmt_(db, m, guard = null) {
     m.receiptGroup ? String(m.receiptGroup).slice(0, 64) : null, ...(key ? [key] : []), ...(guard ? guard.binds : []));
 }
 
+// Writing a transfer's stock and average cost from its history (a void, a restore, an edited sheet, a voided make).
+// The count is worked out inside the statement from the live movements, never set to a figure read earlier, so a use
+// recorded meanwhile (Run Order finishing a line) can't be overwritten. The average has to be replayed in JS, so the
+// batch that writes it is guarded on the history being as it was read: one value per transfer — how many live
+// movements, the highest id and the sum of ids — leaving out the movements the write itself changes (`skip`, an SQL
+// condition on `m` with its binds, written so a NULL column never counts as a match). Anything added, voided or
+// restored in between changes that value, the whole batch then writes nothing, and the owner is asked to try again.
+const TRANSFER_STALE_ = "Stock changed while you were editing; try again.";
+const transferHistoryKeySql_ = (tidSql, skip) => `(SELECT COUNT(*) || ':' || COALESCE(MAX(m.id), 0) || ':' || COALESCE(SUM(m.id), 0) FROM transfer_movements m
+  WHERE m.transferId = ${tidSql} AND m.voidedAt IS NULL AND NOT (${skip.sql}))`;
+// { transferId: value } for these transfers, in one query.
+async function readTransferHistoryKeys_(db, transferIds, skip) {
+  const { results } = await db.prepare(`SELECT j.value AS tid, ${transferHistoryKeySql_("j.value", skip)} AS k FROM json_each(?) j`)
+    .bind(...skip.binds, JSON.stringify([...new Set(transferIds.map(Number))])).all();
+  return Object.fromEntries(results.map(r => [String(r.tid), String(r.k)]));
+}
+// The guard: every one of those transfers still has the value read ({ sql, binds }, one JSON list however many).
+function transferHistoryGuard_(keys, skip) {
+  return { sql: `NOT EXISTS (SELECT 1 FROM json_each(?) j WHERE ${transferHistoryKeySql_("CAST(j.key AS INTEGER)", skip)} IS NOT j.value)`, binds: [JSON.stringify(keys), ...skip.binds] };
+}
+// A transfer's count from its live movements, leaving out `skip` — the same SUM(qtyDelta) the catch-up writes.
+const transferCountSql_ = (skip) => `(SELECT COALESCE(SUM(m.qtyDelta), 0) FROM transfer_movements m WHERE m.transferId = ? AND m.voidedAt IS NULL AND NOT (${skip.sql}))`;
+
 // How a transfer sheet's cost divides: each row gets its own percentage of the sheet, and the two parts
 // that never become inventory — written off (an expense) and personal use (an owner draw) — get theirs.
 // Whole cents that always add back up to the total exactly (largest remainder). receiveTransferSheet and
@@ -8676,45 +8817,6 @@ export async function setTransferCounts(db, rows, { note, at } = {}) {
   return out;
 }
 
-// Consume one application per garment of each given transfer for one line (customer-chosen options +
-// the reorder QR), at the current average cost, adding to the line's COGS (blank + transfers).
-// Called when a transfer application is marked made. Returns total cents added.
-async function consumeTransfersForItem_(db, item, transferIds, at = null) {
-  const qty = Math.max(1, Number(item.qty) || 1);
-  let added = 0;
-  for (const tid of (transferIds || [])) {
-    if (!tid) continue;
-    const t = await db.prepare("SELECT name, purchasePriceCents FROM transfers WHERE id=?").bind(Number(tid)).first();
-    if (!t) continue;
-    const cost = Number(t.purchasePriceCents) || 0;
-    await db.batch([
-      transferMovementStmt_(db, { transferId: Number(tid), transferName: t.name || "", qtyDelta: -qty, unitCostCents: cost, kind: "consume",
-        orderId: item.orderId, itemId: item.id, note: "Used for order " + item.orderId, occurredAt: at || new Date().toISOString() }),
-      db.prepare("UPDATE transfers SET quantity = quantity - ?, updatedAt=? WHERE id=?").bind(qty, new Date().toISOString(), Number(tid)),
-    ]);
-    added += cost * qty;
-  }
-  if (added > 0) await db.prepare("UPDATE order_items SET cogsCents = COALESCE(cogsCents,0) + ?, cogsSource='consumed' WHERE id=?").bind(added, Number(item.id)).run();
-  return added;
-}
-
-// Consume a fully-made configurable line's transfer applications (customer options + reorder QR)
-// exactly once — whichever screen completed it (embroidery Run Order hoopings OR Run Transfer
-// Sheets). Idempotent (a prior live consume movement for this line = already done; a voided one doesn't count) and a no-op on a
-// pre-0036 schema. Called when a line reaches its full manufacturedQty.
-async function consumeLineTransfersOnce_(db, orderId, itemId, at = null) {
-  try {
-    const item = await db.prepare("SELECT * FROM order_items WHERE id=?").bind(Number(itemId)).first();
-    const cfg = item && !Number(item.fromStock) && tryParse_(item.configJson, null);   // a stock line used no transfers (0060)
-    if (!cfg) return;
-    const transferIds = (cfg.locations || []).filter(l => l.kind === "transfer" && Number(l.transferId)).map(l => Number(l.transferId));
-    if (!transferIds.length) return;
-    const already = await db.prepare("SELECT COUNT(*) n FROM transfer_movements WHERE itemId=? AND kind='consume' AND voidedAt IS NULL").bind(Number(itemId)).first();
-    if (already && Number(already.n) > 0) return;
-    await consumeTransfersForItem_(db, { id: item.id, orderId: item.orderId, qty: Math.max(1, Number(item.qty) || 1) }, transferIds, at);
-  } catch (e) { if (!/no such (table|column)/i.test(String(e && e.message))) throw e; }
-}
-
 export async function getTransferMovements(db, transferId) {
   const { results } = await db.prepare(
     `SELECT m.*, o.orgId AS orderOrgId FROM transfer_movements m LEFT JOIN orders o ON o.orderId = m.orderId
@@ -8726,21 +8828,18 @@ export async function getTransferMovements(db, transferId) {
     occurredAt: r.occurredAt, receiptKey: r.receiptKey || "", receiptName: r.receiptName || "", voidedAt: r.voidedAt || "", voidReason: r.voidReason || "" }));
 }
 
-async function recomputeTransferFromHistory_(db, transferId) {
-  const { results } = await db.prepare(
-    "SELECT qtyDelta, unitCostCents, kind FROM transfer_movements WHERE transferId=? AND voidedAt IS NULL ORDER BY occurredAt, id"
-  ).bind(Number(transferId)).all();
-  let qty = 0, avg = 0;
-  for (const m of results) {
-    const d = Number(m.qtyDelta);
-    if (d > 0 && (m.kind === "purchase" || m.kind === "adjust")) {
-      const onHand = Math.max(0, qty);
-      avg = Math.round((onHand * avg + d * Number(m.unitCostCents)) / (onHand + d));
-    }
-    qty += d;
-  }
-  await db.prepare("UPDATE transfers SET quantity=?, purchasePriceCents=?, updatedAt=? WHERE id=?")
-    .bind(qty, avg, new Date().toISOString(), Number(transferId)).run();
+// A transfer's live movements other than those `skip` names (what its history will be once a void lands), for
+// replayTransferCosts.
+async function transferLiveMovements_(db, transferId, skip) {
+  return (await db.prepare(`SELECT m.id, m.qtyDelta, m.unitCostCents, m.kind, m.reason, m.itemId, m.orderId, m.occurredAt FROM transfer_movements m
+    WHERE m.transferId = ? AND m.voidedAt IS NULL AND NOT (${skip.sql})`).bind(Number(transferId), ...skip.binds).all()).results;
+}
+// A guarded void / restore wrote nothing. Someone else already voided (or restored) the entry: null, as before.
+// Otherwise its transfer's history changed after it was read, and the owner is asked to try again.
+async function transferWriteRefused_(db, id, wantVoided) {
+  const cur = await db.prepare("SELECT voidedAt FROM transfer_movements WHERE id = ?").bind(Number(id)).first();
+  if (!cur || !!cur.voidedAt === wantVoided) return null;
+  throw pricingError_(TRANSFER_STALE_);
 }
 
 // Which transfer movements can be voided by hand: purchases, adjustments and write-offs, and an order's use
@@ -8755,32 +8854,35 @@ export function transferMovementVoidable(row) {
 // Void a mistaken transfer movement; recompute from what's left. Voiding an order's use gives the transfer
 // back to stock and takes its cost off the order line, and — since fewer were then on hand when later sheets
 // came in — re-costs later uses whose average moves (not in a closed month, not made for stock).
+// One batch: every statement runs only while the transfer's history is as it was read and the entry is still live,
+// and the void itself runs last, so its result says whether the rest happened. A use, sheet or void that landed in
+// between makes it write nothing and throw "Stock changed…" (an Error with .userFacing).
 export async function voidTransferMovement(db, id, reason) {
   const row = await db.prepare("SELECT * FROM transfer_movements WHERE id=?").bind(Number(id)).first();
   if (!row || row.voidedAt || !transferMovementVoidable(row)) return null;
-  const now = new Date().toISOString();
-  if (row.kind !== "consume") {
-    await db.prepare("UPDATE transfer_movements SET voidedAt=?, voidReason=? WHERE id=? AND voidedAt IS NULL")
-      .bind(now, String(reason || "").slice(0, 300), Number(id)).run();
-    await recomputeTransferFromHistory_(db, row.transferId);
-    return row;
-  }
-  const live = (await db.prepare("SELECT id, qtyDelta, unitCostCents, kind, reason, itemId, orderId, occurredAt FROM transfer_movements WHERE transferId = ? AND voidedAt IS NULL AND id <> ?")
-    .bind(Number(row.transferId), Number(id)).all()).results;
-  const closed = new Set();
-  for (const m of new Set(live.filter(m => Number(m.qtyDelta) < 0).map(m => monthOf(m.occurredAt)))) if (await isMonthClosed(db, m)) closed.add(m);
+  const now = new Date().toISOString(), tid = Number(row.transferId), mine = { sql: "m.id = ?", binds: [Number(id)] };
+  const keys = await readTransferHistoryKeys_(db, [tid], mine);   // first: a change after it only makes the write refuse
+  const live = await transferLiveMovements_(db, tid, mine);
+  const consume = row.kind === "consume", closed = new Set();
+  if (consume) for (const m of new Set(live.filter(m => Number(m.qtyDelta) < 0).map(m => monthOf(m.occurredAt)))) if (await isMonthClosed(db, m)) closed.add(m);
   const r = replayTransferCosts(live, closed);
-  const stmts = [
-    db.prepare("UPDATE transfer_movements SET voidedAt=?, voidReason=? WHERE id=? AND voidedAt IS NULL").bind(now, String(reason || "").slice(0, 300), Number(id)),
-    db.prepare("UPDATE order_items SET cogsCents = MAX(0, COALESCE(cogsCents, 0) - ?) WHERE id = ?").bind(-Number(row.qtyDelta) * Number(row.unitCostCents), Number(row.itemId)),
-  ];
-  for (const c of r.changes) {
-    stmts.push(db.prepare("UPDATE transfer_movements SET unitCostCents = ? WHERE id = ? AND voidedAt IS NULL").bind(c.newUnit, c.movementId));
-    if (c.kind === "consume" && c.itemId) stmts.push(db.prepare("UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ? WHERE id = ?").bind((c.newUnit - c.oldUnit) * c.qty, c.itemId));
+  const h = transferHistoryGuard_(keys, mine);
+  const g = `${h.sql} AND EXISTS (SELECT 1 FROM transfer_movements WHERE id = ? AND voidedAt IS NULL)`, gb = [...h.binds, Number(id)];
+  const stmts = [];
+  if (consume) {   // an order's use: its cost comes off the line, and later uses whose average moves are re-costed
+    stmts.push(db.prepare(`UPDATE order_items SET cogsCents = MAX(0, COALESCE(cogsCents, 0) - ?) WHERE id = ? AND ${g}`).bind(-Number(row.qtyDelta) * Number(row.unitCostCents), Number(row.itemId), ...gb));
+    for (const c of r.changes) {
+      stmts.push(db.prepare(`UPDATE transfer_movements SET unitCostCents = ? WHERE id = ? AND voidedAt IS NULL AND ${g}`).bind(c.newUnit, c.movementId, ...gb));
+      if (c.kind === "consume" && c.itemId) stmts.push(db.prepare(`UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ? WHERE id = ? AND ${g}`).bind((c.newUnit - c.oldUnit) * c.qty, c.itemId, ...gb));
+    }
   }
-  stmts.push(db.prepare("UPDATE transfers SET quantity = ?, purchasePriceCents = ?, updatedAt = ? WHERE id = ?").bind(r.qty, r.avg, now, Number(row.transferId)));
-  await db.batch(stmts);
-  return { ...row, recosted: r.changes.length };
+  stmts.push(db.prepare(`UPDATE transfers SET quantity = ${transferCountSql_(mine)}, purchasePriceCents = ?, updatedAt = ? WHERE id = ? AND ${g}`)
+    .bind(tid, ...mine.binds, r.avg, now, tid, ...gb));
+  stmts.push(db.prepare(`UPDATE transfer_movements SET voidedAt = ?, voidReason = ? WHERE id = ? AND voidedAt IS NULL AND ${h.sql}`)
+    .bind(now, String(reason || "").slice(0, 300), Number(id), ...h.binds));
+  const res = await db.batch(stmts);
+  if (!tookRow_(res.at(-1))) return transferWriteRefused_(db, id, true);
+  return consume ? { ...row, recosted: r.changes.length } : row;
 }
 
 export async function getTransferMovementById(db, id) {
@@ -8818,14 +8920,23 @@ export async function getTransferRestoreBlocker(db, row) {
 }
 
 // Undo a transfer void: counts toward stock, average cost, valuation and COGS again (recomputed from
-// the whole history, like the void). Returns the row, or null if it can't be restored.
+// the whole history, like the void). Returns the row, or null if it can't be restored. One batch, guarded and
+// refused the same way as the void.
 export async function restoreTransferMovement(db, id) {
   const row = await db.prepare("SELECT * FROM transfer_movements WHERE id=?").bind(Number(id)).first();
+  if (!row) return null;
+  const tid = Number(row.transferId), mine = { sql: "m.id = ?", binds: [Number(id)] };
+  const keys = await readTransferHistoryKeys_(db, [tid], mine);   // before the blocker reads the stock on hand
   if (await getTransferRestoreBlocker(db, row)) return null;
-  const r = await db.prepare("UPDATE transfer_movements SET voidedAt=NULL, voidReason='' WHERE id=? AND voidedAt IS NOT NULL")
-    .bind(Number(id)).run();
-  if (!((r.meta && r.meta.changes) > 0)) return null;
-  await recomputeTransferFromHistory_(db, row.transferId);
+  const avg = replayTransferCosts([...await transferLiveMovements_(db, tid, mine), row]).avg;
+  const h = transferHistoryGuard_(keys, mine);
+  const res = await db.batch([
+    db.prepare(`UPDATE transfers SET quantity = ${transferCountSql_(mine)} + ?, purchasePriceCents = ?, updatedAt = ? WHERE id = ?
+      AND ${h.sql} AND EXISTS (SELECT 1 FROM transfer_movements WHERE id = ? AND voidedAt IS NOT NULL)`)
+      .bind(tid, ...mine.binds, Number(row.qtyDelta), avg, new Date().toISOString(), tid, ...h.binds, Number(id)),
+    db.prepare(`UPDATE transfer_movements SET voidedAt = NULL, voidReason = '' WHERE id = ? AND voidedAt IS NOT NULL AND ${h.sql}`).bind(Number(id), ...h.binds),
+  ]);
+  if (!tookRow_(res.at(-1))) return transferWriteRefused_(db, id, false);
   return row;
 }
 
@@ -9359,7 +9470,7 @@ export async function setTransferReceived(db, itemId, on, at = null) {
 
 // A line that is also embroidered: record that its transfers were pressed (it then leaves Run
 // Transfer Sheets). Doesn't make the piece — finishing the embroidery on Run Order does that, and
-// that's also when the transfers' stock is used (consumeLineTransfersOnce_). `on` false undoes it.
+// that's also when the transfers' stock is used (its last piece, makeItemPieces_). `on` false undoes it.
 export async function setTransfersApplied(db, orderId, itemId, on = true, at = null) {
   const item = await db.prepare("SELECT id, cancelDate FROM order_items WHERE id=? AND orderId=?").bind(Number(itemId), orderId).first();
   if (!item) throw new Error("Line item not found");
@@ -9393,9 +9504,9 @@ export async function getGangSheet(db) {
 }
 
 // Run Transfer Sheets "Mark made": mark the whole line manufactured — which consumes the linked
-// blank per piece AND the line's transfer applications once (consumeLineTransfersOnce_ fires from
-// markItemPieceManufactured when the last piece lands, so embroidery Run Order and Run Transfer
-// Sheets both consume transfers exactly once). Idempotent once the line is fully made.
+// blank per piece AND the line's transfer applications once (makeItemPieces_ uses them in the batch that
+// claims the last piece, so embroidery Run Order and Run Transfer Sheets both consume transfers exactly
+// once). Idempotent once the line is fully made.
 export async function makeTransferLine(db, orderId, itemId, at = null) {
   const item = await db.prepare(
     "SELECT id, orderId, orgId, productId, size, qty, COALESCE(manufacturedQty,0) AS manufacturedQty, configJson, cancelDate FROM order_items WHERE id=? AND orderId=?"
@@ -11071,12 +11182,12 @@ export async function getCustomer(db, id) {
   if (!row) return null;
   const { results } = await db.prepare(
     `SELECT o.orderId, o.orgId, o.placedAt, o.voidedAt, o.isTest, o.completedAt, ${ORDER_AMOUNT_COLS_},
-            COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL), 0) AS receivedCents
+            ${paymentsSql_("o.orderId")} AS receivedCents, ${balanceReceivedSql_("o.orderId", "o.taxMode")} AS balanceReceivedCents
        FROM orders o WHERE o.customerId = ? ORDER BY o.placedAt DESC, o.orderId DESC`).bind(row.id).all();
   let orderCount = 0, spentCents = 0, dueCents = 0;
   const orders = [];
   for (const r of results) {
-    const owed = orderAmountsOfRow_(r).owedCents, received = Number(r.receivedCents) || 0, due = Math.max(0, owed - received);
+    const owed = orderAmountsOfRow_(r).owedCents, received = Number(r.receivedCents) || 0, due = Math.max(0, owed - (Number(r.balanceReceivedCents) || 0));
     if (!r.isTest && !r.voidedAt) { orderCount++; spentCents += owed; dueCents += due; }
     if (orders.length < CUSTOMER_ORDERS_MAX_) orders.push({ orderId: r.orderId, orgId: r.orgId, placedAt: r.placedAt, total: fromCents(owed),
       paidAmount: fromCents(received), balanceDue: fromCents(due), voided: !!r.voidedAt, isTest: !!r.isTest, completed: !!r.completedAt });
@@ -12281,9 +12392,14 @@ export async function cancelLineItemWithReason(db, itemId, reason, at = null) {
   return { lateCancel, changed: true };
 }
 
+// A cancelled line's refund counts against what was received (balanceReceivedSql_), so the paid flag is brought up
+// to date in the same batch.
 export async function setLineItemRefund(db, itemId, refundAmount, at = null) {
-  await db.prepare("UPDATE order_items SET refundDate=?, refundCents=? WHERE id=?")
-    .bind(at || new Date().toISOString(), Math.max(0, toCents(refundAmount)), itemId).run();
+  const item = await db.prepare("SELECT orderId FROM order_items WHERE id=?").bind(itemId).first();
+  const set = db.prepare("UPDATE order_items SET refundDate=?, refundCents=? WHERE id=?")
+    .bind(at || new Date().toISOString(), Math.max(0, toCents(refundAmount)), itemId);
+  if (!item) { await set.run(); return; }
+  await db.batch([set, await paidRefreshStmt_(db, item.orderId)]);
 }
 
 export async function getOrderItemById(db, itemId) {
@@ -12446,15 +12562,14 @@ export async function getOrderForShipping(db, orderId) {
 // What /api/checkout needs before charging: the real total, whether it's
 // already paid, and the org the order actually belongs to.
 // What a card checkout should charge: the BALANCE still due — active items + shipping −
-// discount − payments already received (orderAmounts, as refreshPaidStatus) — not orders.totalCents,
+// discount − payments already received, less refunds for cancelled lines (balanceReceivedSql_, as refreshPaidStatus) — not orders.totalCents,
 // which ignores discounts and anything already paid by Venmo/Zelle/check. Also returns whether
 // the order is voided, and the customer's name/email from the order row (checkout.js uses these
 // rather than trusting the request body).
 export async function getOrderCheckoutState(db, orderId) {
   const row = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
     SELECT o.paid, o.orgId, o.voidedAt, o.customerName, o.contact, o.shippingMethod, o.rushFeePending, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
-      COALESCE((SELECT SUM(amountCents) FROM order_payments
-                WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL), 0) AS receivedCents
+      ${balanceReceivedSql_("o.orderId", tm)} AS receivedCents
     FROM orders o WHERE o.orderId = ?`)).bind(orderId).first());
   if (!row) return null;
   const amounts = orderAmountsOfRow_(row);
@@ -12719,7 +12834,9 @@ async function catalogSiteParts_(db) {
   return {
     globalSettings: { ...baseSettings, salesTax, rushFee },
     business: publicBusinessProfile(business),   // name, contact and payment details shown to visitors
-    locale: { country: locale.country },         // address format the storefront's forms use (Region)
+    // Region: the address format the storefront's forms use, and the saved time zone ("" = none saved), in which a
+    // shop's order deadline ends (functions/api/catalog.js orderClosesAt).
+    locale: { country: locale.country, timeZone: locale.timeZone || "" },
     features,                                    // which optional parts of the site are on (Features)
     // The storefront's sections, in order (migrations/0056): key + heading only.
     categories: categories.map(c => ({ key: c.key, label: c.plural || c.name })),
@@ -14494,7 +14611,8 @@ export async function getTransferSheet(db, seedId) {
 // ("Sheet edited") and the new ones written under the same receiptGroup; the written-off expense and the
 // personal draw are updated, added or removed; and every transfer on the sheet before or after is replayed
 // (replayTransferCosts), so its stock and average cost come out right and each order line that already used
-// it is re-costed by the difference. When the sheet's money is unchanged (same total, parts, date and payer),
+// it is re-costed by the difference. Each count is set from the history inside the save, and the save writes nothing
+// if a transfer on the sheet gained or lost a movement since it was read ("Stock changed…"). When the sheet's money is unchanged (same total, parts, date and payer),
 // its bank-statement match moves to the new movements; when the money changes, a matched or reconciled sheet
 // is refused — unmatch it / reopen the month first. x: {rows, totalCents, writeoffPct, personalPct,
 // writeoff: {description, categoryId, deductionType}, personal: {description}, date, vendor, vendorRef,
@@ -14527,6 +14645,17 @@ export async function editTransferSheet(db, seedId, x, { preview = false, newRec
   const isClosed = async (m) => { if (!closedCache.has(m)) closedCache.set(m, await isMonthClosed(db, m)); return closedCache.get(m); };
   const oldSet = new Set(oldIds);
   const tids = [...new Set([...sheet.rows.map(r => r.transferId), ...specs.map(s => s.transferId)])];
+  // Saving is guarded on each transfer's history being as it's read here (transferHistoryGuard_), leaving out what the
+  // save itself changes: the sheet's old purchases, and the new ones it writes under the sheet's group (the only
+  // movements with that group and an id past the newest one now). Read before the history, so a use or sheet that
+  // lands after it makes the save write nothing.
+  const group = sheet.receiptGroup || String(newReceiptGroup || "").slice(0, 64);
+  let ours = null, keys = null;
+  if (!preview) {
+    const top = await db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM transfer_movements").first();
+    ours = { sql: "m.id IN (SELECT value FROM json_each(?)) OR (m.id > ? AND m.kind = 'purchase' AND COALESCE(m.receiptGroup, '') = ?)", binds: [oldIdsJson, Number(top && top.id) || 0, group] };
+    keys = await readTransferHistoryKeys_(db, tids, ours);
+  }
   const transfers = [];
   for (const tid of tids) {
     const t = await db.prepare("SELECT id, name, quantity, purchasePriceCents FROM transfers WHERE id = ?").bind(tid).first();
@@ -14564,50 +14693,60 @@ export async function editTransferSheet(db, seedId, x, { preview = false, newRec
   };
   if (preview) return summary;
 
-  const now = new Date().toISOString(), group = sheet.receiptGroup || String(newReceiptGroup || "").slice(0, 64);
+  const now = new Date().toISOString();
   if (!group) throw sheetError_("Couldn't group the sheet's records — try again.");
   const receiptKey = x.receiptKey != null && x.receiptKey !== "" ? String(x.receiptKey) : sheet.receiptKey;
   const receiptName = x.receiptKey != null && x.receiptKey !== "" ? String(x.receiptName || "") : sheet.receiptName;
   const label = transferSheetLabel(x.vendor, x.vendorRef);
-  const stmts = [db.prepare("UPDATE transfer_movements SET voidedAt = ?, voidReason = 'Sheet edited' WHERE id IN (SELECT value FROM json_each(?)) AND voidedAt IS NULL").bind(now, oldIdsJson)];
+  // Every statement runs only while the transfers' history is as read above and the sheet's old purchases are all
+  // still live; voiding those runs last, so its result says whether the rest happened.
+  const h = transferHistoryGuard_(keys, ours);
+  const G = `${h.sql} AND (SELECT COUNT(*) FROM transfer_movements WHERE id IN (SELECT value FROM json_each(?)) AND voidedAt IS NULL) = ?`, gb = [...h.binds, oldIdsJson, oldIds.length];
+  const stmts = [];
   for (const s of specs) {
     stmts.push(transferMovementStmt_(db, { transferId: s.transferId, transferName: (transfers.find(t => t.transferId === s.transferId) || {}).name || "", qtyDelta: s.qty, unitCostCents: s.unit,
       kind: "purchase", vendor: x.vendor, vendorRef: x.vendorRef, note: sheet.note || "Received", pctOfSheet: s.pct, occurredAt: x.date,
-      accountId: acct, paidPersonally, receiptKey, receiptName, receiptGroup: group }));
+      accountId: acct, paidPersonally, receiptKey, receiptName, receiptGroup: group }, { sql: G, binds: gb }));
   }
   for (const c of changes) {
-    stmts.push(db.prepare("UPDATE transfer_movements SET unitCostCents = ? WHERE id = ? AND voidedAt IS NULL").bind(c.newUnit, c.movementId));
-    if (c.kind === "consume" && c.itemId) stmts.push(db.prepare("UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ? WHERE id = ?").bind((c.newUnit - c.oldUnit) * c.qty, c.itemId));
+    stmts.push(db.prepare(`UPDATE transfer_movements SET unitCostCents = ? WHERE id = ? AND voidedAt IS NULL AND ${G}`).bind(c.newUnit, c.movementId, ...gb));
+    if (c.kind === "consume" && c.itemId) stmts.push(db.prepare(`UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ? WHERE id = ? AND ${G}`).bind((c.newUnit - c.oldUnit) * c.qty, c.itemId, ...gb));
   }
-  for (const t of transfers) stmts.push(db.prepare("UPDATE transfers SET quantity = ?, purchasePriceCents = ?, updatedAt = ? WHERE id = ?").bind(t.qtyAfter, t.avgCents, now, t.transferId));
+  // The count from the history (the new purchases are in by now; the old ones are left out, as they're about to be voided).
+  const kept = { sql: "m.id IN (SELECT value FROM json_each(?))", binds: [oldIdsJson] };
+  for (const t of transfers) stmts.push(db.prepare(`UPDATE transfers SET quantity = ${transferCountSql_(kept)}, purchasePriceCents = ?, updatedAt = ? WHERE id = ? AND ${G}`)
+    .bind(t.transferId, ...kept.binds, t.avgCents, now, t.transferId, ...gb));
   // The written-off part (an expense) and the personal part (an owner draw).
   const wo = x.writeoff || {}, pe = x.personal || {};
   if (woCents > 0) {
     const dep = wo.deductionType === "depreciation";
     const desc = (SHEET_WO_PREFIX_ + String(wo.description || "").trim() + ` (${label})`).slice(0, 500);
     if (sheet.writeoff) stmts.push(db.prepare(`UPDATE expenses SET expenseDate = ?, description = ?, categoryId = ?, amountCents = ?, vendor = ?, receiptKey = ?, receiptName = ?,
-        placedInService = ?, depMethod = ?, accountId = ?, paidPersonally = ?, receiptGroup = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL`)
+        placedInService = ?, depMethod = ?, accountId = ?, paidPersonally = ?, receiptGroup = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL AND ${G}`)
       .bind(x.date, desc, Number(wo.categoryId), woCents, String(x.vendor || "").trim().slice(0, 100), receiptKey, receiptName, dep ? x.date : null, dep ? "ask_cpa" : null,
-        acct, paidPersonally ? 1 : 0, group, now, sheet.writeoff.expenseId));
+        acct, paidPersonally ? 1 : 0, group, now, sheet.writeoff.expenseId, ...gb));
     else stmts.push(db.prepare(`INSERT INTO expenses (expenseDate, description, categoryId, amountCents, vendor, businessUsePct, receiptKey, receiptName, placedInService, depMethod,
-        vendorChargedTax, accountId, paidPersonally, refundOfId, createdAt, updatedAt, receiptGroup) VALUES (?, ?, ?, ?, ?, 100, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?)`)
+        vendorChargedTax, accountId, paidPersonally, refundOfId, createdAt, updatedAt, receiptGroup) SELECT ?, ?, ?, ?, ?, 100, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ? WHERE ${G}`)
       .bind(x.date, desc, Number(wo.categoryId), woCents, String(x.vendor || "").trim().slice(0, 100), receiptKey, receiptName, dep ? x.date : null, dep ? "ask_cpa" : null,
-        acct, paidPersonally ? 1 : 0, now, now, group));
-  } else if (sheet.writeoff) stmts.push(db.prepare("UPDATE expenses SET deletedAt = ? WHERE id = ? AND deletedAt IS NULL").bind(now, sheet.writeoff.expenseId));
+        acct, paidPersonally ? 1 : 0, now, now, group, ...gb));
+  } else if (sheet.writeoff) stmts.push(db.prepare(`UPDATE expenses SET deletedAt = ? WHERE id = ? AND deletedAt IS NULL AND ${G}`).bind(now, sheet.writeoff.expenseId, ...gb));
   if (peCents > 0) {
     const note = (SHEET_PE_PREFIX_ + String(pe.description || "").trim() + ` (${label})`).slice(0, 500);
-    if (sheet.personal) stmts.push(db.prepare("UPDATE owner_transactions SET txDate = ?, amountCents = ?, accountId = ?, note = ?, receiptGroup = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL")
-      .bind(x.date, peCents, acct, note, group, now, sheet.personal.ownerEntryId));
-    else stmts.push(db.prepare("INSERT INTO owner_transactions (txDate, amountCents, kind, accountId, note, createdAt, updatedAt, receiptGroup) VALUES (?, ?, 'draw', ?, ?, ?, ?, ?)")
-      .bind(x.date, peCents, acct, note, now, now, group));
-  } else if (sheet.personal) stmts.push(db.prepare("UPDATE owner_transactions SET deletedAt = ? WHERE id = ? AND deletedAt IS NULL").bind(now, sheet.personal.ownerEntryId));
+    if (sheet.personal) stmts.push(db.prepare(`UPDATE owner_transactions SET txDate = ?, amountCents = ?, accountId = ?, note = ?, receiptGroup = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL AND ${G}`)
+      .bind(x.date, peCents, acct, note, group, now, sheet.personal.ownerEntryId, ...gb));
+    else stmts.push(db.prepare(`INSERT INTO owner_transactions (txDate, amountCents, kind, accountId, note, createdAt, updatedAt, receiptGroup) SELECT ?, ?, 'draw', ?, ?, ?, ?, ? WHERE ${G}`)
+      .bind(x.date, peCents, acct, note, now, now, group, ...gb));
+  } else if (sheet.personal) stmts.push(db.prepare(`UPDATE owner_transactions SET deletedAt = ? WHERE id = ? AND deletedAt IS NULL AND ${G}`).bind(now, sheet.personal.ownerEntryId, ...gb));
   // The bank-statement match follows the sheet to its new movements (only reached when its money is unchanged).
   if (lines.length === 1) {
-    stmts.push(db.prepare("DELETE FROM statement_matches WHERE src = 'transfer_sheet' AND srcId IN (SELECT value FROM json_each(?))").bind(oldIdsJson));
-    stmts.push(db.prepare("INSERT INTO statement_matches (lineId, src, srcId, matchedAt, auto) SELECT ?, 'transfer_sheet', id, ?, 0 FROM transfer_movements WHERE receiptGroup = ? AND kind = 'purchase' AND voidedAt IS NULL")
-      .bind(lines[0], now, group));
+    stmts.push(db.prepare(`DELETE FROM statement_matches WHERE src = 'transfer_sheet' AND srcId IN (SELECT value FROM json_each(?)) AND ${G}`).bind(oldIdsJson, ...gb));
+    stmts.push(db.prepare(`INSERT INTO statement_matches (lineId, src, srcId, matchedAt, auto) SELECT ?, 'transfer_sheet', id, ?, 0 FROM transfer_movements
+        WHERE receiptGroup = ? AND kind = 'purchase' AND voidedAt IS NULL AND id NOT IN (SELECT value FROM json_each(?)) AND ${G}`)
+      .bind(lines[0], now, group, oldIdsJson, ...gb));
   }
-  await db.batch(stmts);
+  stmts.push(db.prepare(`UPDATE transfer_movements SET voidedAt = ?, voidReason = 'Sheet edited' WHERE id IN (SELECT value FROM json_each(?)) AND voidedAt IS NULL AND ${G}`).bind(now, oldIdsJson, ...gb));
+  const res = await db.batch(stmts);
+  if (!tookRow_(res.at(-1))) throw sheetError_(TRANSFER_STALE_);
   const ids = (await db.prepare("SELECT id FROM transfer_movements WHERE receiptGroup = ? AND kind = 'purchase' AND voidedAt IS NULL ORDER BY id").bind(group).all()).results.map(r => Number(r.id));
   return { ...summary, ids, receiptGroup: group };
 }
@@ -14871,8 +15010,10 @@ export const SYSTEM_ISSUE_LABELS = {
   digest_failed: "Daily roll-ups that did not complete (the scheduled run tries again the next hour, up to 3 times a day)",
   recurring_expense_skipped: "Recurring expenses that couldn't be recorded (fix the rule on Expenses — it's recorded once fixed)",
   cleanup_failed: "Daily clean-ups that did not complete (old log entries stay until one does)",
+  card_fees_failed: "Card fees couldn't be read from Stripe (card payments keep a $0 fee until they can; check the Stripe key)",
   migrations_pending: "Database updates this version needs that haven't been applied (until they are, some pages can show $0 or empty lists; see Global settings → Setup status)",
   api_error: "Requests that failed with an unexpected error (the page showed \"Something went wrong\")",
+  desktop_menu: "Sign-in reset or a backup restored from the desktop program's menu (if that wasn't you or someone you asked, see Reports → Audit log)",
 };
 export async function recordSystemIssue(db, kind, sample) {
   if (!db || typeof db.prepare !== "function") return;
@@ -15173,7 +15314,8 @@ function parseOrder_(row, items, payments, labels) {
   const shippingPaidAmount = fromCents(row.shippingPaidCents);
   const activeItemsTotal = fromCents(activeItemsCents);
   const effectiveTotal = fromCents(effectiveCents);
-  const balanceDue = fromCents(Math.max(0, effectiveCents - receivedCents));
+  // Received less the refunds for cancelled lines (balanceReceivedCents_, the twin of the SQL the paid flag uses).
+  const balanceDue = fromCents(Math.max(0, effectiveCents - balanceReceivedCents_(payments, items, taxMode)));
   return {
     orderId: row.orderId,
     orgId: row.orgId,
@@ -15711,10 +15853,20 @@ export async function voidFinishedGoodsMovement(db, id, reason) {
     }
   }
   if (row.kind === "make") {   // its transfers go back too (migrations/0081)
-    const { results: tm } = await db.prepare("SELECT DISTINCT transferId FROM transfer_movements WHERE finishedMovementId=? AND voidedAt IS NULL").bind(Number(row.id)).all();
-    if (tm.length) {
-      await db.prepare("UPDATE transfer_movements SET voidedAt=?, voidReason=? WHERE finishedMovementId=? AND voidedAt IS NULL").bind(now, ("Finished stock entry voided: " + why).slice(0, 300), Number(row.id)).run();
-      for (const t of tm) await recomputeTransferFromHistory_(db, t.transferId);
+    // The uses are voided and each transfer's stock and average set in one batch, guarded on the transfers' history
+    // being as read (voidTransferMovement); a use or sheet that lands in between makes it write nothing, and it is
+    // worked out again.
+    const made = { sql: "COALESCE(m.finishedMovementId, 0) = ?", binds: [Number(row.id)] };
+    for (let attempt = 0; ; attempt++) {
+      const tids = (await db.prepare("SELECT DISTINCT transferId FROM transfer_movements WHERE finishedMovementId=? AND voidedAt IS NULL").bind(Number(row.id)).all()).results.map(t => Number(t.transferId));
+      if (!tids.length) break;
+      if (attempt === 3) throw pricingError_(TRANSFER_STALE_);
+      const keys = await readTransferHistoryKeys_(db, tids, made), h = transferHistoryGuard_(keys, made), stmts = [];
+      for (const tid of tids) stmts.push(db.prepare(`UPDATE transfers SET quantity = ${transferCountSql_(made)}, purchasePriceCents = ?, updatedAt = ? WHERE id = ? AND ${h.sql}`)
+        .bind(tid, ...made.binds, replayTransferCosts(await transferLiveMovements_(db, tid, made)).avg, now, tid, ...h.binds));
+      stmts.push(db.prepare(`UPDATE transfer_movements SET voidedAt=?, voidReason=? WHERE finishedMovementId=? AND voidedAt IS NULL AND ${h.sql}`)
+        .bind(now, ("Finished stock entry voided: " + why).slice(0, 300), Number(row.id), ...h.binds));
+      if (tookRow_((await db.batch(stmts)).at(-1))) break;
     }
   }
   await recomputeFinishedFromHistory_(db, row.orgId, row.productId, row.size, row.variant || "");

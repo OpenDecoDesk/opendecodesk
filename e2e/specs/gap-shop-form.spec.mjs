@@ -11,6 +11,9 @@
 //   their fees), payment methods and the deadline countdown.
 // - A deadline that has passed, with late orders not allowed: the storefront shows the shop's closed text and no
 //   catalog; allowing late orders again brings the catalog back under a "Deadline was …" note.
+// - A deadline ends at 11:59 pm in the business's time zone (UTC on this install): the form and the banner say so,
+//   and once the day is over the server refuses an order from a page loaded before (it used to wait until the day
+//   ended at UTC-12, noon UTC the next day).
 // - Bad input is refused with a message in the form and nothing saved: a web address with capitals or a dash, a
 //   reserved one, another shop's (known to the page, or made by someone else after the page loaded — the server's
 //   answer), a bad accent colour, an image address that isn't http(s) (the form's check) or has characters the server
@@ -146,9 +149,10 @@ test("Shop settings: edit name, look, delivery options and payments; a draft unt
   await expect(pay.locator("option", { hasText: "Venmo" })).toHaveCount(0);
   await expect(pay.locator("option", { hasText: "Zelle" })).toHaveCount(1);
   await expect(pay.locator("option", { hasText: "Check" })).toHaveCount(1);
-  // 20 days by the calendar here (UTC); the shopper's page counts to the end of that day in its own time zone.
-  await expect(shopper.locator(".deadline-banner")).toContainText(/\b(20|21|22) days left\b/);
-  await expect(shopper.locator(".deadline-banner")).toContainText("Ordering closes " + longDate(deadline) + ".");
+  // 20 days by the business's calendar (UTC here), whatever the shopper's own zone; a run at midnight may see 19 or 21.
+  await expect(shopper.locator(".deadline-banner")).toContainText(/\b(19|20|21) days left\b/);
+  // …and it says when on that day: 11:59 pm in the business's time zone (Global settings → Region, UTC here).
+  await expect(shopper.locator(".deadline-banner")).toContainText("Ordering closes " + longDate(deadline) + " at 11:59 pm UTC.");
 
   // Opened again, the form shows what was saved.
   await editShop(page, { ...shop });
@@ -190,6 +194,49 @@ test("a passed deadline with late orders off shows the closed text and no catalo
   await shopper.reload();
   await expect(banner).toHaveText("Deadline was " + longDate(past) + " Orders for this season have closed. Late orders are still being accepted.");
   await expect(shopper.getByRole("button", { name: "Add to cart" })).toBeVisible();
+});
+
+test("a deadline closes at 11:59 pm business time: the banner says so, and the server refuses an order once the day is over", async ({ page, api, as }) => {
+  const shop = await makeShop(api, { prefix: "tzclose", products: [{ name: uniq("Close Tee"), price: 12 }] });
+  // The business's day (UTC here: no Region zone, no TIMEZONE). A run in the last minute of a UTC day waits for the next.
+  const msToMidnight = 86400000 - (Date.now() % 86400000);
+  if (msToMidnight < 60000) await page.waitForTimeout(msToMidnight + 1000);
+  const today = dayInDays(0), yesterday = dayInDays(-1);
+
+  // The form says when on the day the shop closes, in the business's zone.
+  await editShop(page, shop);
+  await expect(page.locator("#orgFormDeadlineClose")).toHaveText("Orders close at 11:59 pm on that day, UTC time (Global settings → Region).");
+  await page.getByLabel("Order deadline (optional)").fill(today);
+  await field(page, "Text shown when closed (optional)").fill("This order window has closed.");
+  await page.getByLabel("Allow orders to be placed after the deadline").uncheck();
+  await save(page);
+  await expect(page).toHaveURL(/#catalog$/);
+  await publishFromCatalog(page, shop);
+
+  // Closing today: the banner names the time, and the shop is open. The shopper fills in an order.
+  const shopper = await as(null);
+  await shopper.goto(shopUrl(shop.subdomain) + "/");
+  await expect(shopper.locator(".deadline-banner")).toHaveText("Today Ordering closes today at 11:59 pm UTC — submit your order now.");
+  await shopper.getByRole("button", { name: "Add to cart" }).click();
+  await shopper.getByLabel("Your name").fill("Casey Customer");
+  await shopper.getByLabel("Email address").fill("casey@example.test");
+  await shopper.getByLabel("Payment method").selectOption({ label: "Check" });
+
+  // Meanwhile the deadline becomes yesterday — a day that ended at 11:59 pm UTC, though it is still yesterday at
+  // UTC-12 until noon UTC (where the server used to close). The shopper's page, loaded before, still has the form.
+  await editShop(page, shop);
+  await page.getByLabel("Order deadline (optional)").fill(yesterday);
+  await save(page);
+  await expect(page).toHaveURL(/#catalog$/);
+  await publishFromCatalog(page, shop);
+  await shopper.getByRole("button", { name: "Place order" }).click();
+  await expect(shopper.locator("#checkoutMsg")).toContainText("This order window has closed.");
+  await expect(shopper.getByRole("heading", { level: 2, name: /^Order received/ })).toHaveCount(0);
+  expect((await api("getOrders", { org: shop.orgId })).orders).toHaveLength(0);
+  // Reloaded, the page shows the shop closed.
+  await shopper.reload();
+  await expect(shopper.locator(".deadline-banner")).toHaveText("Closed " + longDate(yesterday) + " This order window has closed.");
+  await expect(shopper.getByRole("button", { name: "Add to cart" })).toHaveCount(0);
 });
 
 // ---- Bad input ---------------------------------------------------------------------------------------------

@@ -101,10 +101,13 @@ const ok = (label, cond) => { cond ? passed++ : failed++; console.log(label + ":
 
   console.log("\n=== The code says so ===");
   const src = read("functions/_lib/adminAuth.js");
-  const fn = src.slice(src.indexOf("export async function signInBudgetBlocked("), src.indexOf("export async function countSignInFailure("));
+  const fn = src.slice(src.indexOf("export async function signInBudgetBlocked("), src.indexOf("export async function releaseSignInSlots("));
   ok("signInBudgetBlocked never returns early for a known address", !/rateLimitMarked\([^)]*\)\)\s*return null/.test(fn) && /const known = await rateLimitMarked\(env, ADMIN_KNOWN_BUCKET, request\);/.test(fn));
-  ok("…the mark only stands in for the install-wide check", /const all = known \? \{ blocked: false \} : await rateLimitCheckGlobal\(/.test(fn));
-  ok("…and the account's budget is looked at for every address", /const acct = account \? await rateLimitCheck\(env, ADMIN_AUTH_ACCOUNT_BUCKET/.test(fn) && fn.indexOf("const acct") > fn.indexOf("const known"));
+  // The install-wide slot is taken for every address (a known one's wrong passwords still count); the mark only
+  // stands in for its answer.
+  ok("…the mark only stands in for the install-wide check", /const all = known \? \{ blocked: false \} : everyone;/.test(fn) &&
+    /const everyone = await rateLimitReserve\(env, ADMIN_AUTH_GLOBAL_BUCKET/.test(fn));
+  ok("…and the account's budget is looked at for every address", /const acct = account \? await rateLimitReserve\(env, ADMIN_AUTH_ACCOUNT_BUCKET/.test(fn) && fn.indexOf("const acct") > fn.indexOf("const known"));
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed) process.exitCode = 1;

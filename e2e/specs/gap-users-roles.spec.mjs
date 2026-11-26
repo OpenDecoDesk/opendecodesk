@@ -286,6 +286,66 @@ test.describe("no role beyond your own", () => {
   });
 });
 
+test.describe("your own sign-in email", () => {
+  // Users → Edit on your own row changes the email you sign in with: a session someone else is holding (an unlocked
+  // browser) could move the account to an address of theirs. So it needs your current password, as Change password
+  // does. A new name needs nothing.
+  test("changing your own email needs your current password; a new name doesn't", async ({ api, as }) => {
+    const { desk, junior, D } = await makeDesk(api);
+    let d = null;
+    try {
+      d = await signedIn(D);
+      const newEmail = slug("dnew") + "@example.test";
+      // On the server: without the password refused, nothing changed and still signed in.
+      let r = await d.call("update", { id: D.id, name: D.name, email: newEmail });
+      expect(r.status).toBe(403);
+      expect(r.data.code).toBe("current_password_needed");
+      expect(r.data.message).toBe("Type your current password to change your own sign-in email.");
+      expect((await userByEmail(api, D.email)).id).toBe(D.id);
+      expect((await d.call("me")).status).toBe(200);
+      // A new name on its own is saved with nothing asked.
+      r = await d.call("update", { id: D.id, name: D.name + " B", email: D.email });
+      expect(r.status).toBe(200);
+      expect((await userByEmail(api, D.email)).name).toBe(D.name + " B");
+
+      // In the page: the password field shows only once the email is changed.
+      const page = await deskPage(as, D);
+      const mine = page.locator("#usersTable tr", { hasText: D.email });
+      await mine.getByRole("button", { name: "Edit" }).click();
+      const current = page.locator("#userCurrent");
+      await expect(current).toBeHidden();
+      await page.locator("#userEmail").fill(newEmail);
+      await expect(current).toBeVisible();
+      await expect(page.getByLabel("Your current password (needed to change the email you sign in with)")).toBeVisible();
+      // Saved without it: said by the field, and nothing is sent.
+      let sent = 0;
+      page.on("request", (q) => { if (q.url().endsWith("/api/admin-users") && (q.postDataJSON() || {}).action === "update") sent++; });
+      await page.locator("#userSubmit").click();
+      await expect(page.locator("#userCurrentError")).toHaveText("Type your current password to change the email you sign in with.");
+      expect(sent).toBe(0);
+      // A wrong one: the server's answer by the field, still signed in, nothing changed.
+      await current.fill("not my password at all");
+      await page.locator("#userSubmit").click();
+      await expect(page.locator("#userCurrentError")).toHaveText("The current password is not right.");
+      await expect(menu(page)).toBeVisible();
+      expect((await userByEmail(api, D.email)).id).toBe(D.id);
+      // The right one: saved.
+      await current.fill(D.password);
+      await page.locator("#userSubmit").click();
+      await expect(toast(page)).toContainText("Saved. Sign in with the new email from now on.");
+      await expect(page.locator("#usersTable tr", { hasText: newEmail })).toContainText("(you)");
+      expect(await userByEmail(api, D.email)).toBeNull();
+      expect((await userByEmail(api, newEmail)).id).toBe(D.id);
+      // …and D signs in with it.
+      const again = await signedIn({ ...D, email: newEmail });
+      await again.ctx.dispose();
+    } finally {
+      if (d) await d.ctx.dispose();
+      await cleanUp(api, [D.id], [desk.key, junior.key]);
+    }
+  });
+});
+
 test.describe("roles in the page", () => {
   test("the owner adds a role, changes its rank and deletes it on Roles and permissions", async ({ page, api }) => {
     const roleName = "Rank role " + slug("r").slice(-5);
@@ -329,6 +389,51 @@ test.describe("roles in the page", () => {
       key = null;
     } finally {
       if (key) await api("deleteRole", { roleKey: key }, { ...USERS, allowError: true });
+    }
+  });
+
+  // Money, costs and margins applies on every screen, so it is a row of its own, not the Home item's: hiding Home
+  // (its menu or its item) leaves it as it was, and the role's users keep seeing costs.
+  test("Money, costs and margins is its own row, and hiding Home doesn't turn it off", async ({ page, api }) => {
+    const role = (await api("saveRole", { name: "Costs role " + slug("c").slice(-5), rank: 15,
+      permissions: { fns: { "home.counts": "read", "costs.view": "read", "catalog.products": "read" } } }, USERS)).role;
+    let C = null;
+    try {
+      await openAdmin(page, "users");
+      await page.getByRole("tab", { name: "Roles and permissions" }).click();
+      await page.locator(".role-chip", { hasText: role.name }).click();
+      await expect(page.locator("#roleName")).toHaveValue(role.name);
+      const everywhere = page.locator(".perm-everywhere");
+      await expect(everywhere).toContainText("Everywhere");
+      const costs = everywhere.getByRole("radiogroup", { name: "Money, costs and margins (everywhere)" });
+      await expect(costs.getByRole("radio", { name: "Read" })).toBeChecked();
+      // Home's own menu has only the order counts now.
+      const home = page.locator(".perm-menu", { has: page.locator('input[data-menu="home"]') });
+      await expect(home).toContainText("Order counts by step");
+      await expect(home).not.toContainText("Money, costs and margins");
+      await page.locator('.perm-menu-head input[data-menu="home"]').uncheck();
+      await expect(home).toContainText("hidden");
+      await expect(costs.getByRole("radio", { name: "Read" })).toBeChecked();
+      await page.getByRole("button", { name: "Save role" }).click();
+      await expect(toast(page)).toContainText("Role saved.");
+      const saved = await roleByKey(api, role.key);
+      expect(saved.permissions.menus.home).toBe(false);
+      expect(saved.permissions.fns["home.counts"]).toBe("none");
+      expect(saved.permissions.fns["costs.view"]).toBe("read");
+
+      // Its user: no Home, but Money, costs and margins, and the server lets them read costs.
+      C = await makeUser(api, role.key, "Cory Costs");
+      const c = await signedIn(C);
+      try {
+        const me = await c.call("me");
+        expect(me.data.permissions["home.counts"]).toBe("none");
+        expect(me.data.permissions["costs.view"]).toBe("read");
+        const r = await callApi(c.ctx, "analyzePricing", {}, { allowError: true, withStatus: true });
+        expect(r.status).toBe(200);
+        expect(Array.isArray(r.data.products)).toBe(true);
+      } finally { await c.ctx.dispose(); }
+    } finally {
+      await cleanUp(api, [C && C.id], [role.key]);
     }
   });
 

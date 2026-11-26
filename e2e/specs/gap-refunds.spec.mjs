@@ -349,6 +349,118 @@ test("💰 Payments → Record refund from an account closed meanwhile is refuse
   await expect.poll(async () => (await refundAudits()).length, { timeout: 10_000 }).toBe(1);
 });
 
+// Two refunds saved at the same moment (two admins, two tabs) can't both take the same money: the ceiling is checked
+// in the insert itself (db.js addOrderPayment withinKept), so the one that comes second is refused with 409
+// "Another refund was recorded first; reload the order to see it." and isn't audited. Which of two requests sent
+// together reaches the database first isn't up to the test (on a slow machine one may always win), so the page's
+// Save is raced against another refund of the same $35 for up to 8 rounds: each round exactly one of the two goes
+// in, the other is refused, and the money is paid in again before the next round. The page is then shown the real
+// 409 if a round gave the page's one; otherwise the same answer, so its message is still checked. The refusal
+// itself, with both requests past the first check, is pinned by test342_refund_ceiling_race.js.
+test("💰 Payments → Record refund raced by another refund of the same money is refused (409) and not recorded twice", async ({ page, api }) => {
+  const { shop, order } = await shopWithOrder(api, page);
+  const id = order.orderId;
+  await api("markPaidManual", { org: shop.orgId, orderId: id, requestId: requestId() });
+  const TAKEN = "Another refund was recorded first; reload the order to see it.";
+  const rounds = [];
+  await page.route(/\/api\/orders(\?|$)/, async (route) => {
+    const body = JSON.parse(route.request().postData() || "{}");
+    if (body.action !== "recordRefund") return route.continue();
+    for (let i = 0; i < 8; i++) {
+      if (i > 0) await api("addPayment", { orderId: id, amount: 35, method: "venmo", requestId: requestId() });
+      const [mine, other] = await Promise.all([
+        route.fetch({ postData: JSON.stringify({ ...body, requestId: requestId() }) }),
+        api("recordRefund", { orderId: id, amount: 35, method: "cash", requestId: requestId() }, { allowError: true, withStatus: true }),
+      ]);
+      const mineData = await mine.json();
+      rounds.push([mine.status(), mineData.message || "", other.status, other.data.message || ""]);
+      if (mine.status() === 409) return route.fulfill({ response: mine });
+    }
+    return route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ status: "error", message: TAKEN }) });
+  });
+
+  await ordersPage(page, shop);
+  const { pm } = await openPayments(page, id);
+  await expect(pm).toContainText(/Received\s*\$35\.00/);
+  await pm.locator("#pmRefundAmount").fill("35");
+  await pm.locator("#pmRefundMethod").selectOption("venmo");
+  await pm.locator("#pmSaveRefund").click();
+  await page.locator(".confirm-modal #cmOk").click();
+  await expect(page.locator("#pmError")).toHaveText(TAKEN);
+  await expect(page.getByText("Refund recorded.")).toHaveCount(0);
+  await page.unroute(/\/api\/orders(\?|$)/);
+
+  // Every round: one of the two went in; the other was refused — 409 once both had passed the first check, or the
+  // plain "can't exceed" when one was already in by then.
+  for (const [mine, mineMsg, other, otherMsg] of rounds) {
+    expect([mine, other].filter(s => s === 200)).toHaveLength(1);
+    for (const [s, m] of [[mine, mineMsg], [other, otherMsg]]) if (s !== 200) expect(s === 409 ? m === TAKEN : s === 400 && /can't exceed/.test(m)).toBe(true);
+  }
+  // One refund of $35 per round, the order never below nothing, and each refund audited once.
+  const refunds = await ledgerRefunds(api, shop, id);
+  expect(refunds).toHaveLength(rounds.length);
+  expect(refunds.every(r => r.amount === -35)).toBe(true);
+  const o = await getOrder(api, shop, id);
+  expect(o.netReceived).toBe(0);
+  await expect.poll(async () => (await api("getAuditLog", { orderId: id, filter: "payment.refunded", limit: 50 })).entries
+    .filter(e => e.action === "payment.refunded").length, { timeout: 10_000 }).toBe(rounds.length);
+});
+
+// The balance due counts the money given back for a cancelled line: $35 paid, the $15 Cap cancelled and refunded,
+// then another $15 Cap added — $15 is due again (it used to read Paid, $0 due, so the new Cap was never charged).
+// A goodwill refund with nothing cancelled never reopens a balance.
+test("a cancelled, refunded line replaced by a new one puts its price back on the balance; a goodwill refund doesn't", async ({ page, api }) => {
+  const { shop, order } = await shopWithOrder(api, page);
+  const id = order.orderId;
+  await api("markPaidManual", { org: shop.orgId, orderId: id, requestId: requestId() });
+  await ordersPage(page, shop);
+  await lineRow(page, id, "Sample Cap").getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.locator(".confirm-modal #cmOk").click();
+  await expect(toast(page)).toContainText("Item canceled.");
+  await lineRow(page, id, "Sample Cap").getByRole("button", { name: "Record refund" }).click();
+  const dlg = page.locator(".admin-modal", { has: page.locator("#lrMethod") });
+  await dlg.locator("#lrMethod").selectOption("check");
+  await dlg.locator("#lrAmount").fill("15");
+  await dlg.locator("#lrOk").click();
+  await expect(toast(page)).toContainText("Refund of $15.00 recorded");
+  let { pm } = await openPayments(page, id);
+  await expect(pm).toContainText(/Amount due\s*\$20\.00/);
+  await expect(pm).toContainText(/Balance due\s*Settled ✓/);
+  await closePayments(page);
+
+  // Another Cap in its place (the request Edit items → + Add item → Save sends).
+  await addLines(api, id, productId(shop, "Sample Cap"), 1);
+  await ordersPage(page, shop);
+  ({ pm } = await openPayments(page, id));
+  await expect(pm).toContainText(/Amount due\s*\$35\.00/);
+  await expect(pm).toContainText(/Received\s*\$35\.00/);
+  await expect(pm).toContainText(/Refunded\s*−\$15\.00/);
+  await expect(pm).toContainText(/Net kept\s*\$20\.00/);
+  await expect(pm).toContainText(/Balance due\s*\$15\.00/);
+  await closePayments(page);
+  let o = await getOrder(api, shop, id);
+  expect(o.balanceDue).toBe(15);
+  expect(o.paid).toBe(false);
+
+  // Mark as paid books the $15, and the order is settled.
+  await api("markPaidManual", { org: shop.orgId, orderId: id, requestId: requestId() });
+  o = await getOrder(api, shop, id);
+  expect(o.balanceDue).toBe(0);
+  expect(o.paid).toBe(true);
+  expect(o.amountReceived).toBe(50);
+
+  // A $5 goodwill refund (nothing more cancelled): still settled.
+  await api("recordRefund", { orderId: id, amount: 5, method: "cash", requestId: requestId() });
+  await ordersPage(page, shop);
+  ({ pm } = await openPayments(page, id));
+  await expect(pm).toContainText(/Refunded\s*−\$20\.00/);
+  await expect(pm).toContainText(/Balance due\s*Settled ✓/);
+  await closePayments(page);
+  o = await getOrder(api, shop, id);
+  expect(o.balanceDue).toBe(0);
+  expect(o.paid).toBe(true);
+});
+
 // ---- P20: bulk cancel and bulk tracking -------------------------------------------------------------------
 test("→ Cancel selected: 24 lines over three orders go in groups of at most 20, and the toast counts them", async ({ page, api }) => {
   const { shop, order: a } = await shopWithOrder(api, page);

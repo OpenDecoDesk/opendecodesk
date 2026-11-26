@@ -177,14 +177,21 @@ async function desktopRollUpDue_(env, when) {
 // The daily housekeeping (the tick an hour before the roll-up's — functions/_lib/schedule.js). Each job is
 // on its own: one failing never stops the others. A failed clean-up is recorded, so the roll-up an hour
 // later reports it.
-async function runHousekeeping_(env) {
+async function runHousekeeping_(env, { firstTry = true } = {}) {
   const out = {};
-  // Safety net: fill in Stripe fees the webhook couldn't read yet (see functions/_lib/stripeFees.js).
+  // Safety net: fill in Stripe fees the webhook couldn't read yet (see functions/_lib/stripeFees.js). Stripe refusing
+  // (a revoked or restricted key) is one problem for the roll-up, however many payments it stopped, and only on the
+  // day's first try: a retry an hour later would only meet the same refused key again.
   try {
     const f = await fillMissingCardFees(env);
     out.cardFees = f;
     if (f.filled) console.log("Filled Stripe fees on", f.filled, "of", f.checked, "card payments");
-  } catch (e) { console.error("Filling missing Stripe fees failed:", e); out.cardFees = { error: String(e && e.message) }; }
+    const refused = f.errors || [];
+    if (refused.length) {
+      console.error("Stripe refused card fee lookups:", refused.join(" | "));
+      if (firstTry) await recordSystemIssue(env.DB, "card_fees_failed", refused[0] + (refused.length > 1 ? ` (and ${refused.length - 1} more)` : ""));
+    }
+  } catch (e) { console.error("Filling missing Stripe fees failed:", e); out.cardFees = { error: String(e && e.message) }; await recordSystemIssue(env.DB, "card_fees_failed", "Card fees: " + (e && e.message)); }
   // Vendor web-service logs (vendorLog.js) older than 30 days: their payloads and rows go.
   try {
     const v = await cleanUpVendorApiLog(env);
@@ -280,7 +287,7 @@ export async function handleScheduled(event, env) {
     if (!scheduledJobDue(hkEntry, { hour, jobHour: housekeepingHour(env), day })) return { ran: false, reason: "not the digest hour" };
     const attempt = scheduledAttempt(hkEntry, day);
     await saveScheduledEntry_(env, HOUSEKEEPING_SCHEDULE_KEY, attempt);
-    const housekeeping = await runHousekeeping_(env);
+    const housekeeping = await runHousekeeping_(env, { firstTry: attempt.attempts === 1 });
     const failed = Object.values(housekeeping).some(r => r && (r.error || (Array.isArray(r.errors) && r.errors.length)));
     await saveScheduledEntry_(env, HOUSEKEEPING_SCHEDULE_KEY, { ...attempt, ok: !failed });
     return { ran: true, housekeeping };

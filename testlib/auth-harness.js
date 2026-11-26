@@ -24,7 +24,10 @@ const ORIGIN = "https://admin.example.com";
 const prelude = (realLimits, realDomains) => strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/db.js")) + "\n" + strip(read("functions/_lib/totp.js")) + "\n" +
   (realLimits ? strip(read("functions/_lib/rateLimit.js")) + "\n" :
   "const rateLimitCheck = async () => ({ blocked: false }), rateLimited = async () => ({ blocked: false }), rateLimitResponse = () => null, rateLimitHit = async (env, bucket, request, windowSeconds) => { if (!windowSeconds) __hits.push(bucket); return 0; };\n" +
-  "const rateLimitCheckGlobal = async () => ({ blocked: false }), rateLimitHitGlobal = async () => {}, rateLimitMark = async () => {}, rateLimitMarked = async () => false;\n") +
+  "const rateLimitCheckGlobal = async () => ({ blocked: false }), rateLimitHitGlobal = async () => {}, rateLimitMark = async () => {}, rateLimitMarked = async () => false;\n" +
+  // Slots taken before a credential is checked (adminAuth.js): one in the per-minute bucket is a hit until it is given back.
+  "const rateLimitReserve = async (env, bucket, who, limit, windowSeconds) => { if (!windowSeconds) __hits.push(bucket); return { blocked: false, retryAfter: 0, key: bucket, where: windowSeconds ? 'none' : 'hits' }; };\n" +
+  "const rateLimitRelease = async (env, slot) => { if (slot && slot.where === 'hits') { const i = __hits.lastIndexOf(slot.key); if (i >= 0) __hits.splice(i, 1); } };\n") +
   strip(read("functions/_lib/turnstile.js")) + "\n" +
   "const accessEnabled = () => false, verifyAccess = async () => ({ ok: true }); const getCatalogData = async () => ({ subdomainMap: {}, business: {} });\n" +
   strip(read("functions/_lib/permissions.js")) + "\n" + strip(read("functions/_lib/adminAuth.js")) + "\n" + strip(read("functions/_lib/cloudflareSetup.js")) + "\n" +
@@ -62,7 +65,7 @@ async function makeAuth({ d1, passphrase = "abcd-efgh-jkmn-pqrs-tuvw-xyz2", real
   // a sealed two-step secret back (openTotp).
   const lib = load("", "{ passwordRecordFor_, requireAdmin, adminUser, adminActor, setUserRoleAndStatus, getAuditLog, openTotp, sealTotp, passwordIterations, signTwoStepProof, verifyTwoStepProof }");
   // The real limiter's own functions, when realLimits (to test it directly).
-  const limits = realLimits ? load("", "{ rateLimited, rateLimitCheck, rateLimitHit, rateLimitCheckGlobal, rateLimitHitGlobal, ipv6Prefix64 }") : null;
+  const limits = realLimits ? load("", "{ rateLimited, rateLimitCheck, rateLimitHit, rateLimitCheckGlobal, rateLimitHitGlobal, rateLimitReserve, rateLimitRelease, ipv6Prefix64 }") : null;
   // The orders endpoint — the 207 back-office actions — behind the real gate. Everything it does
   // AFTER the gate may fail here for want of data; tests of the gate only look at who is let past.
   let ordersPost = null;

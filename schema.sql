@@ -1198,10 +1198,11 @@ CREATE INDEX IF NOT EXISTS idx_orders_open ON orders(isTest, voidedAt, placedAt)
 CREATE INDEX IF NOT EXISTS idx_orders_manufactured ON orders(manufacturedAt);
 CREATE INDEX IF NOT EXISTS idx_orders_sale_date ON orders(COALESCE(shippedAt, deliveredAt, completedAt));   -- migrations/0088
 
--- Owner notices queued for the 6 AM daily roll-up (migrations/0011; 'delivered' added in 0016).
+-- Owner notices queued for the 6 AM daily roll-up (migrations/0011; 'delivered' added in 0016, 'invoice' in 0058,
+-- 'picked_up' in 0113).
 CREATE TABLE IF NOT EXISTS owner_notices (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind      TEXT NOT NULL CHECK (kind IN ('payment', 'refund', 'dispute', 'design', 'delivered', 'invoice')),
+  kind      TEXT NOT NULL CHECK (kind IN ('payment', 'refund', 'dispute', 'design', 'delivered', 'invoice', 'picked_up')),
   orderId   TEXT NOT NULL DEFAULT '',
   orgId     TEXT NOT NULL DEFAULT '',
   summary   TEXT NOT NULL,

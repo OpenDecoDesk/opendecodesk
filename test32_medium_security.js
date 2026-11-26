@@ -41,6 +41,7 @@ global.rateLimited = async () => ({ blocked: false, retryAfter: 0 });
 global.rateLimitCheck = async () => ({ blocked: false, retryAfter: 0 });
 global.rateLimitHit = async () => {};
 global.rateLimitCheckGlobal = async () => ({ blocked: false, retryAfter: 0 }); global.rateLimitHitGlobal = async () => {}; global.rateLimitMark = async () => {}; global.rateLimitMarked = async () => false;
+global.rateLimitReserve = async () => ({ blocked: false, retryAfter: 0 }); global.rateLimitRelease = async () => {};
 global.rateLimitResponse = () => new Response("", { status: 429 });
 global.getCatalogData = async () => ({ subdomainMap: { league101: "league-101", rec: "rec" }, orgs: {} });
 

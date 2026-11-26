@@ -296,7 +296,9 @@ async function startServer({ dataDir, port, protect, unprotect, log = () => {}, 
   }
   const db = await mf.getD1Database("DB");
   const result = await migrate(db, src);
+  const written = await recordDesktopEvents(db, cfg, log);   // menu resets, restores
   cfg = { ...cfg, port: used, lastMigration: latest, createdAt: cfg.createdAt || new Date().toISOString() };
+  for (const k of written) delete cfg[k];
   saveConfig(dataDir, cfg, secrets, { protect });
   // The update went through: older copies made before updates can go (the newest few stay).
   pruneUpdateCopies(dataDir, { log });
@@ -356,10 +358,47 @@ async function copyOldR2_(Miniflare, paths, store, dataDir, log) {
 // Locked out: new secrets. Every password stops working (they are keyed with the passphrase,
 // adminAuth.js), so the next start signs in with the new passphrase and asks for a name, email and
 // password again — the desktop version of `npm run setup -- --new-passphrase`. Only while stopped.
+// The time is kept (signInResetAt) for the next start to write in the audit log (recordDesktopEvents).
 function resetSignIn(dataDir, { protect, unprotect } = {}) {
   const { cfg, secrets } = loadConfig(dataDir, { unprotect });
   const next = { ...(secrets || makeSecrets()), PROXY_ADMIN_PASSPHRASE: newSecret() };
-  saveConfig(dataDir, cfg, next, { protect });
+  saveConfig(dataDir, { ...cfg, signInResetAt: new Date().toISOString() }, next, { protect });
+}
+
+// File → Restore a backup… finished (main.js): kept, like a reset, for the next start to write down. Only while
+// stopped; nothing is kept when the saved secrets can't be read (they would be lost saving without them).
+function noteRestored(dataDir, { protect, unprotect } = {}) {
+  const { cfg, secrets } = loadConfig(dataDir, { unprotect });
+  if (!secrets) return;
+  saveConfig(dataDir, { ...cfg, restoredAt: new Date().toISOString() }, secrets, { protect });
+}
+
+// Reset sign-in and Restore a backup from the program's menu (main.js) can make whoever used them the Admin
+// (menu-gate.js), so each is written down at the next start, in the database it started on: an audit log entry
+// (actor "desktop") and a problem for the owner's roll-up and Communications (system_issues, kind desktop_menu).
+// Both in one batch, so a failure writes neither, is logged, and the next start tries again (it never stops the
+// start). Returns the desktop.json keys written (the caller clears them).
+const DESKTOP_EVENTS = [
+  { key: "signInResetAt", action: "security.desktop_signin_reset", say: "Sign-in was reset in the desktop program" },
+  { key: "restoredAt", action: "security.desktop_restore", say: "A backup was restored from the desktop program's menu" },
+];
+async function recordDesktopEvents(db, cfg, log = () => {}) {
+  const due = DESKTOP_EVENTS.filter((e) => cfg && cfg[e.key]);
+  if (!due.length) return [];
+  const now = new Date().toISOString();
+  try {
+    await db.batch(due.flatMap((e) => [
+      db.prepare("INSERT INTO audit_log (createdAt, orgId, orderId, action, detail, actor, ip) VALUES (?, NULL, NULL, ?, ?, 'desktop', NULL)")
+        .bind(now, e.action, JSON.stringify({ at: String(cfg[e.key]) })),
+      db.prepare("INSERT INTO system_issues (kind, n, sample, at) VALUES ('desktop_menu', 1, ?, ?)")
+        .bind((e.say + " at " + String(cfg[e.key])).slice(0, 200), now),
+    ]));
+  } catch (e) {
+    log("Couldn't write the reset or restore in the audit log (tried again at the next start): " + ((e && e.message) || e));
+    return [];
+  }
+  log("Written in the audit log: " + due.map((e) => e.action).join(", "));
+  return due.map((e) => e.key);
 }
 
 // The Shippo key (carrier rates, labels, tracking), kept with the other secrets in desktop.json —
@@ -504,7 +543,7 @@ function restoreState(dataDir, from, { cp = fs.cpSync, rename = renameFolder } =
   return { aside };
 }
 
-module.exports = { startServer, adminHasUsablePassword, withNewSecrets, copyState, restoreState, pruneUpdateCopies, resetSignIn, setShippoKey, setSupplierConnections, setSmtp, setEmailOn, savedSmtpPassword, recordBackup, stamp, statePaths, IMAGES_HOST, IMAGES_BASE, WORKER_OUTBOUND, desktopCsp };
+module.exports = { startServer, adminHasUsablePassword, withNewSecrets, copyState, restoreState, pruneUpdateCopies, resetSignIn, noteRestored, recordDesktopEvents, setShippoKey, setSupplierConnections, setSmtp, setEmailOn, savedSmtpPassword, recordBackup, stamp, statePaths, IMAGES_HOST, IMAGES_BASE, WORKER_OUTBOUND, desktopCsp };
 
 if (require.main === module) {
   const dataDir = path.resolve(process.argv[2] || path.join(process.cwd(), "desktop-data"));

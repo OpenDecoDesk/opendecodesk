@@ -5,8 +5,9 @@
  * PICKUP: buying a label does NOT mean the carrier has the package. Orders with a label
  * or tracking number that aren't marked shipped are looked up first; once tracking shows a carrier
  * scan (anything past PRE_TRANSIT), the order is marked shipped — dated by the carrier's first scan,
- * not the label — the customer gets their one "your order has shipped" email, and it's listed in the
- * roll-up under "Picked up by the carrier". Already delivered by then → marked delivered too.
+ * not the label — the customer gets their one "your order has shipped" email, and it's queued as an owner
+ * notice (kind 'picked_up', migrations/0113; urgent when email is set up and that email couldn't be sent) that the roll-up lists
+ * under "Picked up by the carrier". Already delivered by then → marked delivered too.
  * Still pre-transit → left alone ("label created, not shipped yet") and checked again next run.
  *
  * For every order that's been shipped but not yet marked delivered (and has a
@@ -31,7 +32,7 @@
 import { getShippedAwaitingDelivery, getLabeledAwaitingShipment, markOrderShippedByCarrier, markOrderDelivered, markTrackingChecked,
   addOwnerNotice, insertAuditLog, getOrderById,
   listActiveBlankShipments, recordBlankTrackingEvents, setBlankShipmentStatus, resolveTimeZone, getFeatures } from "./db.js";
-import { sendShippedEmail } from "./email.js";
+import { sendShippedEmail, emailCanSend } from "./email.js";
 import { fetchWithTimeout } from "./http.js";
 
 // Shippo's carrier token for a label's carrier / the order's shipping method
@@ -130,8 +131,9 @@ export async function checkShippedDeliveries(env, { limit = 40 } = {}) {
     }
     const shippedIso = isoOr_(tr.firstScanDate || tr.statusDate, new Date().toISOString());
     if (!(await markOrderShippedByCarrier(env.DB, c.orderId, shippedIso))) continue; // a person got there first
-    let customerEmailed = false;
+    let customerEmailed = false, emailReady = true;
     try {
+      emailReady = await emailCanSend(env);
       const order = await getOrderById(env.DB, c.orderId);
       out.requests++;
       customerEmailed = await sendShippedEmail(env, order, { carrier: label, tracking: c.tracking, shippedAt: shippedIso });
@@ -140,6 +142,17 @@ export async function checkShippedDeliveries(env, { limit = 40 } = {}) {
       await insertAuditLog(env.DB, { orgId: c.orgId, orderId: c.orderId, action: "order.shipped_auto", actor: "delivery-check",
         detail: { carrier, tracking: c.tracking, shippedAt: shippedIso, carrierStatus: tr.status, customerEmailed } });
     } catch (e) { console.error("Pickup check: could not audit", c.orderId, e); }
+    // Queued for the roll-up, as deliveries are: the order is no longer awaiting pickup, so a roll-up email that fails
+    // (or a morning with no email set up) would otherwise lose it, and with it a customer who never got their tracking.
+    try {
+      // Urgent only when email is set up and this one still didn't go: with no email at all (a desktop install with
+      // email off, say) every pickup would otherwise land in Needs attention, and Setup status already says so once.
+      await addOwnerNotice(env.DB, { kind: "picked_up", orderId: c.orderId, orgId: c.orgId, urgent: emailReady && !customerEmailed,
+        summary: `${c.customerName} — ${label} ${c.tracking} picked up ${localDate(shippedIso)}`,
+        detail: customerEmailed ? "Marked shipped; the customer was emailed their tracking."
+          : !emailReady ? "Marked shipped. Email isn't set up, so the customer wasn't emailed their tracking."
+          : "Marked shipped, but the customer's \"your order has shipped\" email couldn't be sent. Send them their tracking yourself." });
+    } catch (e) { console.error("Pickup check: could not queue the notice for", c.orderId, e); }
     out.pickedUp.push({ orderId: c.orderId, orgId: c.orgId, customerName: c.customerName, tracking: c.tracking, carrier: label,
       shippedAt: shippedIso, shippedAtLabel: localDate(shippedIso), customerEmailed });
     if (tr.status === "DELIVERED") {

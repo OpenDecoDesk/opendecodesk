@@ -147,6 +147,7 @@ const ADMIN_ACTIONS_ = {
   usersShowRoles_(event){ event.preventDefault(); usersShowTab_("roles"); },
   usersSave_(event){ usersSave_(event); },
   usersAdd_(){ usersEdit_(null); },
+  usersEmailInput_(){ usersShowCurrent_(); },
   usersSetRequire2fa_(){ usersSetRequire2fa_(this); },
   roleSelect_(){ roleSelect_(this.dataset.key); },
   roleSetLevel_(){ roleSetLevel_(this.dataset.fn, this.value); },
@@ -9775,7 +9776,8 @@ function wizScreen_(step){
       return { title: "Is there an order deadline?", help: "For a one-time order window. Leave it open if the shop takes orders any time.",
         html: radio("wizDl", "none", "No deadline", !d) + radio("wizDl", "date", "Orders close on…", !!d) +
           `<div class="wiz-inline" id="wizDlBox"${d ? "" : " hidden"}><input type="date" id="wizDlDate" class="wiz-input wiz-short" value="${escapeHtml(d)}">
-            ${check("wizLate", "late", "Keep taking late orders after it", o.allowOrdersAfterDeadline !== false)}</div>`,
+            ${check("wizLate", "late", "Keep taking late orders after it", o.allowOrdersAfterDeadline !== false)}
+            <div class="wiz-note">${deadlineCloseNote_()}</div></div>`,
         wire: (root) => root.querySelectorAll('input[name="wizDl"]').forEach(r => r.onchange = () => { root.querySelector("#wizDlBox").hidden = picked("wizDl")[0] !== "date"; }),
         save: async () => {
           const date = picked("wizDl")[0] === "date" ? val("#wizDlDate") : "";
@@ -11802,7 +11804,10 @@ async function loadUsers_(){
       <label for="userName">Name</label>
       <input type="text" id="userName" maxlength="80" required style="width:100%;margin:4px 0 12px;" />
       <label for="userEmail">Email (they sign in with it)</label>
-      <input type="email" id="userEmail" maxlength="200" required style="width:100%;margin:4px 0 12px;" />
+      <input type="email" id="userEmail" maxlength="200" required style="width:100%;margin:4px 0 12px;" data-admin-input="usersEmailInput_" />
+      <div id="userCurrentWrap" style="display:none;"><label for="userCurrent">Your current password (needed to change the email you sign in with)</label>
+        <input type="password" id="userCurrent" autocomplete="current-password" style="width:100%;margin:4px 0 4px;" />
+        <div id="userCurrentError" class="admin-error" style="margin-bottom:8px;"></div></div>
       <div id="userRoleWrap"><label for="userRole">Role</label>
         <select id="userRole" style="display:block;margin:4px 0 12px;">${roleOptions(givable.some(r => r.key === "production") ? "production" : (givable[givable.length - 1] || {}).key)}</select></div>
       <div class="admin-note" id="userFormNote">They get a temporary password, shown to you once, and must choose their own at their first sign-in.</div>
@@ -11869,16 +11874,20 @@ function renderRolesTab_(){
   const chips = (d.roles || []).map(r => { const on = !!(draft && draft.key === r.key);
       return `<button type="button" class="admin-btn role-chip${on ? "" : " admin-btn-secondary"}" aria-pressed="${on}" data-key="${escapeHtml(r.key)}" data-admin-action="roleSelect_">${escapeHtml(r.name)} <span class="perm-count">· ${r.userCount} ${r.userCount === 1 ? "user" : "users"}</span></button>`; }).join("")
     + (draft && !draft.key ? `<button type="button" class="admin-btn role-chip" aria-pressed="true">${escapeHtml(draft.name || "New role")}</button>` : "");
-  const menuHtml = (m) => {
-    const mOn = p.menus[m.key] !== false;
-    const items = m.items.map(it => {
-      const iOn = mOn && p.items[it.hash] !== false && it.fns.some(([fn]) => roleFnOn_(p, fn));
-      const fns = !iOn ? "" : it.fns.map(([fn, label]) => `
+  const fnRow = ([fn, label]) => `
         <div class="perm-fn"><span class="perm-fn-label">${escapeHtml(label)}</span>
           <span class="perm-seg" role="radiogroup" aria-label="${escapeHtml(label)}">${ROLE_LEVELS_.map(([lvl, name]) => {
             const over = ADMIN_LEVEL_RANK_[lvl] > ADMIN_LEVEL_RANK_[myLevel(fn)];
             return `<label class="${lvl === "full" ? "perm-full" : ""}" title="${over ? "More than your own role has" : ""}"><input type="radio" name="perm-${escapeHtml(fn)}" value="${lvl}" ${(p.fns[fn] || "none") === lvl ? "checked" : ""} ${dis || (over ? "disabled" : "")} data-fn="${escapeHtml(fn)}" data-admin-change="roleSetLevel_" /><span>${name}</span></label>`;
-          }).join("")}</span></div>`).join("");
+          }).join("")}</span></div>`;
+  // Functions of no menu item (Money, costs and margins): their own rows, which no menu or item switch turns off.
+  const everywhereHtml = (d.everywhere || []).length ? `<div class="perm-menu perm-everywhere"><div class="perm-menu-head"><span class="perm-switch" style="cursor:default;">Everywhere</span><span class="perm-off">on every screen, whatever is hidden below</span></div>
+    <div class="perm-item">${d.everywhere.map(fnRow).join("")}</div></div>` : "";
+  const menuHtml = (m) => {
+    const mOn = p.menus[m.key] !== false;
+    const items = m.items.map(it => {
+      const iOn = mOn && p.items[it.hash] !== false && it.fns.some(([fn]) => roleFnOn_(p, fn));
+      const fns = !iOn ? "" : it.fns.map(fnRow).join("");
       return `<div class="perm-item"><div class="perm-item-head"><label class="perm-switch"><input type="checkbox" ${iOn ? "checked" : ""} ${dis} data-item="${escapeHtml(it.hash)}" data-admin-change="roleSetItem_" /> ${escapeHtml(it.label)}</label>${iOn ? "" : `<span class="perm-off">hidden</span>`}</div>${fns}</div>`;
     }).join("");
     const anyOn = mOn && m.items.some(it => p.items[it.hash] !== false && it.fns.some(([fn]) => roleFnOn_(p, fn)));
@@ -11901,6 +11910,7 @@ function renderRolesTab_(){
         <label class="role-field" for="roleRank">Rank (1–${Math.max(1, myRank - 1)})<input type="number" id="roleRank" min="1" max="${Math.max(1, myRank - 1)}" step="1" value="${draft.rank}" ${dis} data-admin-input="roleDraftRank_" style="width:90px;" /></label>
         <div class="admin-note" style="flex:1;min-width:220px;">${draft.locked ? "Admin always has everything and can't be changed." : !draft.canEdit ? "This role ranks at or above yours, so you can see it but not change it." : "Only someone whose role ranks above this one can change it, or give it to someone." + (draft.builtIn ? " A built-in role can be changed but not deleted." : "")}</div>
       </div>
+      ${everywhereHtml}
       ${(d.areas || []).map(menuHtml).join("")}
       ${!editable ? "" : `<div class="admin-actions" style="margin-top:12px;">
         <button type="button" class="admin-btn" data-admin-action="roleSave_">${draft.key ? "Save role" : "Add role"}</button>
@@ -11958,13 +11968,47 @@ function usersEdit_(id){
   const title = document.getElementById("userFormTitle"), btn = document.getElementById("userSubmit");
   if(title) title.textContent = u ? "Edit " + (u.name || u.email || "user") : "Add a user";
   if(btn) btn.textContent = u ? "Save" : "Add user";
+  set("userCurrent", ""); usersShowCurrent_();
   const first = document.getElementById("userName");
   if(u && first) first.focus();
+}
+// Your own row: a new sign-in email needs your current password (the server checks it as Change password does).
+// The field shows only while the email typed differs from the one you sign in with now.
+function usersOwnEmailChange_(){
+  const id = Number((document.getElementById("userId") || {}).value || 0);
+  const u = id && id === _usersMe ? _usersList.find(x => x.id === id) : null;
+  const typed = String((document.getElementById("userEmail") || {}).value || "").trim().toLowerCase();
+  return !!u && typed !== String(u.email || "").trim().toLowerCase();
+}
+function usersShowCurrent_(){
+  const wrap = document.getElementById("userCurrentWrap"), err = document.getElementById("userCurrentError");
+  if(wrap) wrap.style.display = usersOwnEmailChange_() ? "" : "none";
+  if(err) err.textContent = "";
 }
 async function usersSave_(ev){
   if(ev) ev.preventDefault();
   const val = (id) => { const e = document.getElementById(id); return e ? e.value.trim() : ""; };
   const id = val("userId"), name = val("userName"), email = val("userEmail");
+  if(id && usersOwnEmailChange_()){
+    // Sent here rather than through usersCall_: a wrong password is answered 401, which there means "signed out".
+    const err = document.getElementById("userCurrentError"), cur = document.getElementById("userCurrent");
+    const say = (m) => { if(err) err.textContent = m; if(cur) cur.focus(); };
+    const current = cur ? cur.value : "";
+    if(!current) return say("Type your current password to change the email you sign in with.");
+    let res, data;
+    try{
+      res = await fetch("/api/admin-users", { method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({key: adminKey, action: "update", id: Number(id), name, email, current}) });
+      data = await res.json();
+    }catch(e){ return say("Could not reach the server."); }
+    if(!res.ok || !data || data.status !== "ok"){
+      if(res.status === 401 && !(data && data.code === "wrong_password")){ adminSignOut(); return; }
+      return say((data && data.message) || "Could not save.");
+    }
+    showToast("Saved. Sign in with the new email from now on.");
+    await loadUsers_();
+    return;
+  }
   if(id){
     if(await usersCall_({action: "update", id: Number(id), name, email})){ showToast("Saved."); await loadUsers_(); }
     return;
@@ -12315,6 +12359,14 @@ function drawOrgDeliveryList_(){
   };
 }
 
+// When an order deadline ends, said by the date in the shop form and the setup wizard: 11:59 pm on that day in the
+// business's time zone (Global settings → Region) — the moment the storefront and the server close the shop
+// (db.js localDayEndInstant). Before the zone is known (an older server), it says whose zone without naming it.
+function deadlineCloseNote_(){
+  const zone = adminTimeZone ? escapeHtml(adminTimeZone.replace(/_/g, " ")) : "";
+  return zone ? `Orders close at 11:59 pm on that day, ${zone} time (Global settings → Region).`
+    : "Orders close at 11:59 pm on that day, in the business's time zone (Global settings → Region).";
+}
 function renderOrgForm(app, org){
   const isEdit = !!org;
   if (isEdit) adminSetHash("catalog/orgs/" + encodeURIComponent(org.orgId) + "/edit");
@@ -12422,6 +12474,7 @@ function renderOrgForm(app, org){
         <label style="margin-top:16px;">Order deadline (optional)
           <input type="date" id="orgFormOrderDeadline" value="${escapeHtml(deadline)}">
         </label>
+        <div class="admin-note" id="orgFormDeadlineClose" style="margin-top:4px;">${deadlineCloseNote_()}</div>
         <label style="margin-top:8px;">Text shown when closed (optional)
           <input type="text" id="orgFormClosedMessage" value="${escapeHtml(closedMessage)}" placeholder="Ordering for this period has closed.">
         </label>
@@ -15823,6 +15876,8 @@ const AUDIT_ACTION_LABELS = {
   "security.account_set_up":       "Account set up",
   "security.first_signin":         "First sign-in (installer passphrase)",
   "security.recovery_signin":      "Recovery sign-in (passphrase replaced)",
+  "security.desktop_signin_reset": "Sign-in reset in the desktop program",
+  "security.desktop_restore":      "Backup restored in the desktop program",
   "security.require_2fa_changed":  "Require two-step changed",
   "security.user_created":         "User added",
   "security.user_updated":         "User edited",
@@ -16675,7 +16730,8 @@ async function showTransferCatchUp_(onDone, filter){
   const td = "padding:5px 8px;border-bottom:1px solid #e5e5e5;font-size:12px;vertical-align:top;";
   const shops = [...new Set(d.lines.map(l => l.orgId))];
   const shopName = (s) => (d.lines.find(l => l.orgId === s) || {}).orgName || s;
-  const ticked = (l, u) => !l.locked && l.voidedUse == null && l.source === "order" && (!u.added || (filter && Number(filter.transferId) === Number(u.transferId)));
+  // A line that already used some of its transfers (usedBefore) starts unticked too: the rest may have been left off on purpose.
+  const ticked = (l, u) => !l.locked && l.voidedUse == null && !l.usedBefore && l.source === "order" && (!u.added || (filter && Number(filter.transferId) === Number(u.transferId)));
   const transfers = [...new Map(d.lines.flatMap(l => l.uses).map(u => [Number(u.transferId), u.name])).entries()];
   const row = (l) => `<tr>
       <td style="${td}"><input type="checkbox" data-tcu="${l.itemId}" data-shop="${escapeHtml(l.orgId)}" title="Tick or untick this line's transfers" ${l.locked ? "disabled" : ""}></td>
@@ -16684,7 +16740,7 @@ async function showTransferCatchUp_(onDone, filter){
       <td style="${td}">${escapeHtml(l.name)}${l.size ? " (" + escapeHtml(l.size) + ")" : ""} × ${l.qty}</td>
       <td style="${td}">${l.uses.map((u, i) => `<label style="display:block;cursor:pointer;white-space:nowrap;"><input type="checkbox" data-tcu-use="${l.itemId}:${i}" data-line="${l.itemId}" data-shop="${escapeHtml(l.orgId)}" data-tid="${Number(u.transferId)}" ${l.locked ? "disabled" : ticked(l, u) ? "checked" : ""}> ${escapeHtml(u.name)} × ${u.qty} @ ${fmt(u.unitCost)}${u.added ? ` <span style="color:#78350f;">(added from the product)</span>` : ""}${u.shortBy > 0 ? ` <span style="color:#b03a2e;">short ${u.shortBy}</span>` : ""}</label>`).join("")}</td>
       <td style="${td}text-align:right;" data-tcu-cost="${l.itemId}"></td>
-      <td style="${td}">${l.voidedUse != null ? `<span style="color:#78350f;">Its use was voided${l.voidedUse ? " (" + escapeHtml(l.voidedUse) + ")" : ""} — tick it once its transfer is here.</span> ` : ""}${l.source === "product" ? `<span style="color:#78350f;">From the product today — the order didn't save its transfers.</span> ` : ""}${l.uses.some(u => u.added) ? `<span style="color:#78350f;">The order saved its transfers before the product printed the ones marked added.</span> ` : ""}<span style="color:#b03a2e;">${l.locked ? "Month closed. " : ""}${escapeHtml([...new Set(l.uses.map(u => u.note).filter(Boolean))].join(" "))}</span></td>
+      <td style="${td}">${l.voidedUse != null ? `<span style="color:#78350f;">Its use was voided${l.voidedUse ? " (" + escapeHtml(l.voidedUse) + ")" : ""} — tick it once its transfer is here.</span> ` : l.usedBefore ? `<span style="color:#78350f;">Its other transfers are already used — tick these if they were used too.</span> ` : ""}${l.source === "product" ? `<span style="color:#78350f;">From the product today — the order didn't save its transfers.</span> ` : ""}${l.uses.some(u => u.added) ? `<span style="color:#78350f;">The order saved its transfers before the product printed the ones marked added.</span> ` : ""}<span style="color:#b03a2e;">${l.locked ? "Month closed. " : ""}${escapeHtml([...new Set(l.uses.map(u => u.note).filter(Boolean))].join(" "))}</span></td>
     </tr>`;
   body.innerHTML = `
     <div style="font-size:13px;color:#333;margin-bottom:10px;">These order lines are made (or shipped/delivered) but never took their transfers out of stock. Applying takes each ticked transfer out dated the day the order was made, at the transfer's average cost <em>on that day</em>, and adds it to the line's cost of goods sold.
@@ -18237,15 +18293,35 @@ async function showPriceImpact_(rules, opts){
     }
     rows.sort((a, b) => a.blank.localeCompare(b.blank) || a.shop.localeCompare(b.shop) || a.product.localeCompare(b.product));
   };
-  try { await load(); } catch (e) { body.textContent = e.message; return; }
   const canApply = adminCan_("catalog.brandApprovals", "edit");
+  // The rule as saved: the server applies only its prices (orders.js applyRulePrices), whatever this window shows.
+  let saved = rules;
+  try { await load(); if (canApply || opts.canEdit) saved =(await hoopApi_({ action: "getBrandRules" })).rules || rules; } catch (e) { body.textContent = e.message; return; }
+  // Two rules the same for applying: the general rule and each brand's, as db.js cleans them (2 decimals, by brand).
+  const k = (b) => String(b == null ? "" : b).toLowerCase().replace(/[®™©]/g, "").replace(/[^a-z0-9]+/g, "");
+  const u = (r) => r && r.add !== "" && r.add != null && Number.isFinite(Number(r.add)) ? [Math.round(Number(r.add) * 100) / 100, r.unit === "pct" ? "pct" : "amount"] : null;
+  const ruleSig_ = (x) => JSON.stringify([u(x && x.priceRule), ((x && x.brandPrices) || []).map(b => [k(b.brand), u(b)]).filter(e => e[0] && e[1]).map(e => JSON.stringify(e)).sort()]);
+  const ruleChanged = () => ruleSig_(edit) !== ruleSig_(saved);
+  // The brands whose own rule differs here from the saved one ("" stands for none), and whether the general rule does.
+  const brandRuleSig_ = (x, b) => JSON.stringify(u(((x && x.brandPrices) || []).find(y => k(y.brand) === b)));
+  const changedBrands_ = () => new Set([...edit.brandPrices, ...((saved && saved.brandPrices) || [])].map(b => k(b.brand)).filter(b => b && brandRuleSig_(edit, b) !== brandRuleSig_(saved, b)));
+  // Saves the price rules changed here (Apply and Save this rule) onto the brand rules as saved NOW (read again), so a
+  // change made elsewhere since the window opened — another brand's rule, a restricted brand — isn't undone.
+  const saveChangedRules_ = async () => {
+    const now = (await hoopApi_({ action: "getBrandRules" })).rules;
+    const mine = changedBrands_(), generalChanged = JSON.stringify(u(edit.priceRule)) !== JSON.stringify(u(saved && saved.priceRule));
+    const brandPrices = (now.brandPrices || []).filter(b => !mine.has(k(b.brand))).concat(edit.brandPrices.filter(b => mine.has(k(b.brand)) && u(b)));
+    return (await hoopApi_({ action: "updateBrandRules", rules: Object.assign({}, now, { priceRule: generalChanged ? edit.priceRule : now.priceRule, brandPrices }) })).rules;
+  };
   let rounding = "none";
   const brands = [...new Set([...rows.map(r => r.brand).filter(Boolean), ...edit.brandPrices.map(b => b.brand)])].sort((a, b) => a.localeCompare(b));
   const money = (v) => adminMoneyOr_(v);
-  // MAP + the rule, rounded up as chosen (rounding only ever goes up, so it never lands under the rule).
+  // MAP + the rule, rounded up as chosen (rounding only ever goes up, so it never lands under the rule). Worked out in
+  // cents exactly as the server checks it (db.js priceRuleMinCents_).
   const after = (r) => {
     const rule = priceRuleFor_(edit, r.brand); if (!rule) return null;
-    let cents = Math.round((rule.unit === "pct" ? r.map * (1 + rule.add / 100) : r.map + Number(rule.add)) * 100);
+    const mapC = Math.round(r.map * 100);
+    let cents = rule.unit === "pct" ? Math.round(mapC * (1 + rule.add / 100)) : mapC + Math.round(Number(rule.add) * 100);
     if (rounding === "whole") cents = Math.ceil(cents / 100) * 100; else if (rounding === "99") cents = Math.ceil((cents + 1) / 100) * 100 - 1;
     return cents / 100;
   };
@@ -18265,7 +18341,11 @@ async function showPriceImpact_(rules, opts){
     }
     body.querySelector("#piSummary").textContent = rows.length ? `${rows.length} price${rows.length === 1 ? "" : "s"} on blanks with a MAP: ${up} would go up, ${down} would go down.` : "";
     const apply = body.querySelector("#piApply");
-    if (apply) { const n = picked().length; apply.disabled = !n; apply.textContent = n ? `Apply ${n} price${n === 1 ? "" : "s"}…` : "Apply these prices"; }
+    if (apply) { const n = picked().length, blocked = ruleChanged() && !opts.canEdit; apply.disabled = !n || blocked; apply.textContent = n ? `Apply ${n} price${n === 1 ? "" : "s"}…` : "Apply these prices";
+      // Only the saved rule's prices can be applied: a rule changed here is saved first, by someone who may save it.
+      const note = body.querySelector("#piRuleNote");
+      if (note) note.textContent = !ruleChanged() ? "" : opts.canEdit ? "The rule as changed here is saved first when you apply these prices."
+        : "Apply sets the saved price rule's prices, and your role can't change the rule: set it back as it was to apply them."; }
     body.querySelector("#piTable").innerHTML = html || `<tr><td colspan="${canApply ? 7 : 6}" class="admin-empty" style="padding:10px;">${rows.length ? "No price would change." : "No product is linked to a blank with a MAP."}</td></tr>`;
   };
   body.style.color = "var(--ink,#111)";
@@ -18286,6 +18366,7 @@ async function showPriceImpact_(rules, opts){
       <tbody id="piTable"></tbody></table></div>
     ${noMap ? `<div style="font-size:11px;color:#888;margin-top:4px;">${noMap} price${noMap === 1 ? "" : "s"} on blanks with no MAP aren't listed — the rule doesn't apply to them.</div>` : ""}
     <div id="piDone" style="font-size:12px;margin-top:8px;"></div>
+    ${canApply ? `<div id="piRuleNote" style="font-size:12px;color:#555;margin-top:6px;"></div>` : ""}
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap;">
       <button type="button" class="admin-btn" id="piClose" style="background:#fff;color:var(--ink,#222);border:1px solid #ccc;">Close</button>
       ${opts.canEdit ? `<button type="button" class="admin-btn" id="piSave" style="background:#fff;color:var(--ink,#222);border:1px solid #ccc;">Save this rule</button>` : ""}
@@ -18307,12 +18388,23 @@ async function showPriceImpact_(rules, opts){
   if (all) all.onchange = () => { rows.filter(changing).forEach(r => all.checked ? unticked.delete(keyOf(r)) : unticked.add(keyOf(r))); drawTable(); };
   const applyBtn = body.querySelector("#piApply");
   if (applyBtn) applyBtn.onclick = async () => {
-    const list = picked();
-    if (!list.length) return;
+    let list = picked();
+    const changed = ruleChanged();
+    if (!list.length || (changed && !opts.canEdit)) return;
     const shops = [...new Set(list.map(r => r.org))];
-    if (!(await askConfirm_(`Apply ${list.length} new price${list.length === 1 ? "" : "s"} in ${shops.length} shop${shops.length === 1 ? "" : "s"}?\n\nEach product's price is set to its After price. Shoppers see the new prices when each shop is published.`, { confirmLabel: "Apply prices" }))) return;
+    if (!(await askConfirm_(`Apply ${list.length} new price${list.length === 1 ? "" : "s"} in ${shops.length} shop${shops.length === 1 ? "" : "s"}?\n\nEach product's price is set to its After price.${changed ? " The price rule as changed here is saved first." : ""} Shoppers see the new prices when each shop is published.`, { confirmLabel: "Apply prices" }))) return;
     applyBtn.disabled = true;
     try {
+      // The server sets only the saved rule's prices, so a rule changed here is saved first, and the ticked prices are
+      // worked out again from the rule as it was saved (only those: a price another change makes differ isn't added).
+      if (changed) {
+        const saved_ = await saveChangedRules_();
+        rules = saved = saved_;
+        edit.priceRule = saved_.priceRule ? { ...saved_.priceRule } : null; edit.brandPrices = (saved_.brandPrices || []).map(b => ({ ...b }));
+        if (opts.onSaved) opts.onSaved(saved_);
+        const keys = new Set(list.map(keyOf));
+        list = picked().filter(r => keys.has(keyOf(r)));
+      }
       const r = await hoopApi_({ action: "applyRulePrices", changes: list.map(x => ({ org: x.org, productId: x.productId, group: x.group, size: x.size, price: after(x) })) });
       unticked.clear();
       await load(); drawTable();
@@ -18333,8 +18425,8 @@ async function showPriceImpact_(rules, opts){
   if (save) save.onclick = async () => {
     save.disabled = true; readRules();
     try {
-      const r = await hoopApi_({ action: "updateBrandRules", rules: Object.assign({}, rules, { priceRule: edit.priceRule, brandPrices: edit.brandPrices }) });
-      showToast("Price rule saved."); close(); if (opts.onSaved) opts.onSaved(r.rules);
+      const savedNow = await saveChangedRules_();
+      showToast("Price rule saved."); close(); if (opts.onSaved) opts.onSaved(savedNow);
     } catch (e) { save.disabled = false; showToast(e.message, true); }
   };
   drawTable();
@@ -20708,12 +20800,15 @@ async function renderCommunications(app, opts){
   const th = "padding:7px 10px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
   const td = "padding:8px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#111;background:#fff;";
   const sub = "color:#666;font-size:12px;";
-  const KIND = { payment: "Payment", refund: "Refund", dispute: "Dispute", design: "Design response", delivered: "Delivered" };
+  const KIND = { payment: "Payment", refund: "Refund", dispute: "Dispute", design: "Design response", delivered: "Delivered", picked_up: "Picked up" };
   const urgent = d.notices.filter(x => x.urgent);
   const delivered = d.notices.filter(x => !x.urgent && x.kind === "delivered");
-  const activity = d.notices.filter(x => !x.urgent && x.kind !== "delivered");
+  // Carrier pickups are queued notices (migrations/0113) until a roll-up reports them; one whose customer couldn't
+  // be emailed is under Needs attention.
+  const pickedUp = d.notices.filter(x => !x.urgent && x.kind === "picked_up");
+  const activity = d.notices.filter(x => !x.urgent && x.kind !== "delivered" && x.kind !== "picked_up");
   const inTransit = d.inTransit || [];
-  const pickedUp = d.pickedUp || [], awaitingPickup = d.awaitingPickup || [];
+  const awaitingPickup = d.awaitingPickup || [];
   const awaitingBlanks = d.awaitingBlanks || [];
   const total = d.orders.reduce((s, o) => s + Math.round(Number(o.total) * 100), 0) / 100;
   const since = d.firstRun ? "No roll-up has been sent yet — the first one covers the last 24 hours."
@@ -20761,16 +20856,16 @@ async function renderCommunications(app, opts){
         </tr>`).join("")}</tbody></table></div>`
     : `<div style="color:#888;">Nothing is waiting on a delivery (shipped orders need a tracking number to be checked).</div>`;
 
-  // Labels the carrier hasn't scanned yet, and any the check just found scanned (marked shipped now).
+  // Labels the carrier hasn't scanned yet.
   const shipRows = (rows, statusCell) => `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
       <thead><tr><th style="${th}">Order</th><th style="${th}">Shop</th><th style="${th}">Customer</th><th style="${th}">Carrier / tracking</th><th style="${th}">Status</th></tr></thead>
       <tbody>${rows.map(x => `<tr>
         <td style="${td}white-space:nowrap;">${escapeHtml(x.orderId)}</td><td style="${td}">${escapeHtml(x.orgName)}</td><td style="${td}">${escapeHtml(x.customerName)}</td>
         <td style="${td}font-family:monospace;font-size:12px;">${escapeHtml(x.carrier)} ${escapeHtml(x.tracking)}</td>
         <td style="${td}">${statusCell(x)}</td></tr>`).join("")}</tbody></table></div>`;
-  const pickedUpHtml = pickedUp.length ? `<h2 style="font-size:17px;margin:22px 0 8px;">📮 Just picked up by the carrier — ${pickedUp.length}</h2>
-    <div style="font-size:13px;color:#555;margin:0 0 8px;">This check found a carrier scan, so these are now marked shipped (dated by the first scan) and each customer was emailed their tracking.</div>
-    ${shipRows(pickedUp, x => `Shipped ${escapeHtml(x.shippedAtLabel || "")}${x.customerEmailed === false ? `<br><span style="color:#b45309;font-size:12px;">customer email not sent</span>` : ""}`)}` : "";
+  const pickedUpHtml = pickedUp.length ? `<h2 style="font-size:17px;margin:22px 0 8px;">📮 Picked up by the carrier — ${pickedUp.length}</h2>
+    <div style="font-size:13px;color:#555;margin:0 0 8px;">The tracking check found a carrier scan, so these are now marked shipped (dated by the first scan) and each customer was emailed their tracking.</div>
+    ${noticeTable(pickedUp)}` : "";
   const awaitingHtml = `<h2 style="font-size:17px;margin:22px 0 8px;">🏷 Label created — not shipped yet${awaitingPickup.length ? ` — ${awaitingPickup.length}` : ""}</h2>
     <div style="font-size:13px;color:#555;margin:0 0 8px;">These have a label, but the carrier hasn't scanned them yet. Each is marked shipped automatically (and the customer emailed) once tracking shows a scan — or mark it shipped yourself on the orders screen.</div>
     ${awaitingPickup.length ? shipRows(awaitingPickup, x => `${escapeHtml(x.status || "Awaiting scan")}${x.labelAtLabel ? `<br><span style="${sub}">label ${escapeHtml(x.labelAtLabel)}</span>` : ""}`)

@@ -22,7 +22,7 @@ const { ADMIN_ORIGIN } = require("./testlib/hosts");
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1");
 const dbSrc = strip(read("functions/_lib/db.js"));
-const names = "createProduct, updateProduct, getPublishState, publishShop, getCatalogSnapshot, liveShopRows_";
+const names = "createProduct, updateProduct, getPublishState, publishShop, getCatalogSnapshot, liveShopRows_, createBlank, setBlankLink, setBrandRules, getBrandRules";
 const lib = new Function(dbSrc + `\nreturn { ${names} };`)();
 // The same code publishing in parts of 600 bytes, so a three-product shop's snapshot is in several parts.
 const smallParts = new Function(dbSrc.replace("const SNAPSHOT_PART_BYTES_ = 1000000;", "const SNAPSHOT_PART_BYTES_ = 600;") + `\nreturn { ${names} };`)();
@@ -168,7 +168,12 @@ async function makeDb() {
   await lib.updateProduct(d1, "s13", product("a", 55));
   r = await call({ action: "discardShopChanges", org: "s13" });
   ok("discard answers with that shop's state (current again)", r.status === 200 && Object.keys(r.body.publishState).join() === "s13" && r.body.publishState.s13.state === "current");
-  r = await call({ action: "applyRulePrices", changes: [{ org: "s14", productId: "a", group: "", size: "", price: 41 }, { org: "s15", productId: "b", group: "", size: "", price: 42 }] });
+  // Apply rule prices sets only the saved price rule's prices: both products on a blank with a $40 MAP, the rule MAP + $1
+  // ($41, or $41.99 rounded up to .99).
+  { const blankId = (await lib.createBlank(d1, { name: "Tee MAP", brand: "", productType: "shirt", colors: [{ color: "Black", images: [], sizes: [{ size: "M", vendorPrice: 5, purchasePrice: 5, quantity: 0, mapPrice: 40 }] }] })).id;
+    await lib.setBlankLink(d1, "s14", "a", "", "", blankId, "Black", "M"); await lib.setBlankLink(d1, "s15", "b", "", "", blankId, "Black", "M");
+    await lib.setBrandRules(d1, Object.assign({}, await lib.getBrandRules(d1), { priceRule: { add: 1, unit: "amount" } })); }
+  r = await call({ action: "applyRulePrices", changes: [{ org: "s14", productId: "a", group: "", size: "", price: 41 }, { org: "s15", productId: "b", group: "", size: "", price: 41.99 }] });
   ok("applying prices answers with the state of the shops whose products changed", r.status === 200 && r.body.prices === 2 && Object.keys(r.body.publishState).join() === "s14,s15" && r.body.publishState.s14.changedProducts.join() === "a");
 
   console.log("\n=== The admin page ===");

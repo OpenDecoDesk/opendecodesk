@@ -144,16 +144,20 @@ const thrown = (fn) => { try { fn(); return null; } catch (e) { return e; } };
   {
     const main = fs.readFileSync(__dirname + "/desktop/main.js", "utf8");
     const fnSrc = (name) => { const i = main.indexOf("async function " + name + "("), j = main.indexOf("\n}\n", i); if (i < 0 || j < 0) throw new Error("main.js has no " + name); return main.slice(i, j + 3); };
-    const build = new Function("d", "let { dialog, restoreState, log, stop, start, showPage, dataDir, win, server } = d; let busy = false;\n" + fnSrc("whileStopped") + fnSrc("restore") + "\nreturn { restore };");
+    // Who may restore, and Touch ID, are test358's (desktop/menu-gate.js): here always yes, and the note for the next
+    // start's audit entry is counted.
+    const build = new Function("d", "let { dialog, restoreState, log, stop, start, showPage, dataDir, win, server, noteRestored } = d; let busy = false;\n" +
+      "const menuActionMayRun = async () => true, confirmWithTouchId = async () => true, crypt = () => ({}), systemPreferences = null;\n" +
+      fnSrc("whileStopped") + fnSrc("restore") + "\nreturn { restore };");
     const s = setUp();
-    const seen = { errors: [], starts: 0, stops: 0 };
+    const seen = { errors: [], starts: 0, stops: 0, notes: 0 };
     const dialog = { showOpenDialog: async () => ({ canceled: false, filePaths: [s.backup] }), showMessageBox: async () => ({ response: 0 }), showErrorBox: (title, text) => seen.errors.push(text) };
     const program = (restoreState) => build({ dialog, restoreState, log: () => {}, stop: async () => { seen.stops++; }, start: async () => { seen.starts++; if (!fs.existsSync(path.join(s.state, "d1"))) throw new Error("started on no database"); },
-      showPage: () => {}, dataDir: s.data, win: {}, server: { url: "http://localhost:1/" } });
+      showPage: () => {}, dataDir: s.data, win: {}, server: { url: "http://localhost:1/" }, noteRestored: () => { seen.notes++; } });
     await program((d, from) => server.restoreState(d, from, { cp: failingCopy(3) })).restore();
-    ok("a restore that fails shows the reason once, and the program starts again on the data it had", seen.errors.length === 1 && /^The backup was not restored, and your data is unchanged/.test(seen.errors[0]) && seen.stops === 1 && seen.starts === 1 && untouched(s));
+    ok("a restore that fails shows the reason once, and the program starts again on the data it had", seen.errors.length === 1 && /^The backup was not restored, and your data is unchanged/.test(seen.errors[0]) && seen.stops === 1 && seen.starts === 1 && untouched(s) && seen.notes === 0);
     await program(server.restoreState).restore();
-    ok("one that works starts again on the backup, with no error", seen.errors.length === 1 && seen.starts === 2 && tree(s.state) === s.saved && asides(s.data).length === 1);
+    ok("one that works starts again on the backup, with no error", seen.errors.length === 1 && seen.starts === 2 && tree(s.state) === s.saved && asides(s.data).length === 1 && seen.notes === 1);
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

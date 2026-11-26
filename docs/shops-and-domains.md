@@ -172,7 +172,9 @@ Manage catalog → the shop → **Edit**:
 - **Payment on delivery** — follows Global settings: a shop can turn it off, or limit it to the
   Local sale window on Orders, but can't turn it on when it's off site-wide.
 - **Order deadline** — a date, a message for afterwards, and whether orders are still accepted
-  after it.
+  after it. The shop closes at 11:59 pm on that date in the business's time zone (Global settings →
+  Region), for every shopper wherever they are; the banner names that time, and the server refuses
+  orders after it unless late orders are allowed.
 - **Sales tax** — tax exemption (see [sales-tax.md](sales-tax.md)).
 - **Rush orders** — use the global rush fee, don't offer rush, or a rule of the shop's own (see
   "Rush orders" below).

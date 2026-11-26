@@ -48,6 +48,7 @@
       "log.js",
       "version.js",
       "network-folder.js",
+      "menu-gate.js",
       "icons/icon.png",
       "package.json",
       "!node_modules/workerd/bin/**",

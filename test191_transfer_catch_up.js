@@ -12,7 +12,7 @@ const strip = (src) => src
   .replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "")
   .replace(/export (async function|function|const)/g, "$1");
 const dbSrc = strip(read("functions/_lib/db.js"));
-const lib = new Function(dbSrc + `\nreturn { createTransfer, createGraphic, transfersInHand_, consumeLineTransfersOnce_ };`)();
+const lib = new Function(dbSrc + `\nreturn { createTransfer, createGraphic, transfersInHand_, consumeBlanksForOrder };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
   // Signed in as the admin: the cost checks in orders.js fail closed without a user (testlib/roles adminAs).
   "const requireAdmin = async () => null; const adminActor = () => 'test';\n" + require("./testlib/roles").adminAs() + "\n" +
@@ -147,7 +147,11 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   ok("stock and the line's cost follow", d1.q("SELECT quantity FROM transfers WHERE id IN (?, ?)", FRONT, BACK).every(x => x.quantity === 7) && cogs(item("O8")) === 1500);
   ok("the audit names the added transfers", /"added":true/.test(d1.q("SELECT detail FROM audit_log WHERE action = 'transfer.catch_up' ORDER BY id DESC LIMIT 1")[0].detail));
   r = await call({ action: "previewTransferCatchUp" });
-  ok("the line is done", !(r.body.lines || []).some(l => l.orderId === "O8"));
+  // "Already used" is counted per transfer (2026-11): the line is offered again for just the QR it was applied without,
+  // and the window starts it unticked; the front and back aren't offered twice.
+  const o8b = (r.body.lines || []).find(l => l.orderId === "O8");
+  ok("the line is offered again for just its unticked QR, as a partly used line", o8b && o8b.uses.length === 1 && o8b.uses[0].transferId === QR && !o8b.uses[0].added && o8b.usedBefore === 2);
+  ok("…which the window starts unticked", /!l\.usedBefore && l\.source === "order"/.test(admin_()));
   r = await call({ action: "applyTransferCatchUp", uses: { [item("O1", 1)]: ["x"] } });
   ok("a pick with no transfer is refused", r.status === 400);
   r = await call({ action: "applyTransferCatchUp", uses: { [item("O1", 1)]: [FRONT] } });
@@ -180,7 +184,8 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   console.log("\n=== Closed month, roles ===");
   d1._raw.run("INSERT INTO closed_periods (month, closedAt, closedBy) VALUES ('2026-10','t','test')");
   r = await call({ action: "previewTransferCatchUp" });
-  ok("a line in a closed month shows locked", r.body.lines.length === 2 && r.body.lines.every(l => l.locked === true));
+  const oct = r.body.lines.filter(l => String(l.useDate).startsWith("2026-10"));
+  ok("a line in a closed month shows locked", oct.length === 2 && oct.every(l => l.locked === true) && r.body.lines.filter(l => l.locked).length === 2);
   r = await call({ action: "applyTransferCatchUp", itemIds: [item("O1", 1)] });
   ok("and can't be applied", r.status === 409 && /closed/.test(r.body.message) && t().quantity === 18);
   const src = read("functions/api/orders.js");
@@ -192,10 +197,10 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   console.log("\n=== A voided use no longer counts as used ===");
   const inHand = await lib.transfersInHand_(d1, [{ r: { itemId: item("O5"), qty: 1 }, transfers: [{ transferId: QR }] }]);
   ok("Run Transfer Sheets doesn't call O5's transfers used — they come from stock again", inHand.get(item("O5")).source === "stock");
-  await lib.consumeLineTransfersOnce_(d1, "O5", item("O5"));
+  await lib.consumeBlanksForOrder(d1, "O5");
   ok("making the line again takes its transfer (the voided use doesn't block it)",
     d1.q("SELECT count(*) n FROM transfer_movements WHERE itemId = ? AND kind = 'consume' AND voidedAt IS NULL", item("O5"))[0].n === 1 && t().quantity === 17);
-  await lib.consumeLineTransfersOnce_(d1, "O5", item("O5"));
+  await lib.consumeBlanksForOrder(d1, "O5");
   ok("and only once", t().quantity === 17);
 
   console.log(failed ? `\n${failed} FAILED` : "\nAll passed");

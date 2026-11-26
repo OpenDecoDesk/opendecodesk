@@ -53,7 +53,7 @@ import {
   getAllOrgs, getOrgById, createOrg, updateOrg, cleanDeliveryOptions, setOrgDeliveryOptions, defaultDeliveryOptions, cleanShippingAddress, stagePrereqError, stageTimeError, shopTime_, ORDER_DATE_FIELDS, orderDatesError, setOrderDates, whyNotCompletable_, getSystemIssues, clearSystemIssues,
   getProductsByOrg, getProductsByIds, priceLookups, productShipWeightOz, createProduct, updateProduct, setProductVisible,
   getGlobalSettings, setGlobalSettings, getMachineSettings, setMachineSettings, getPayOnDeliveryRule, setOrderPayOnDelivery,
-  getShipFromAddress, setShipFromAddress, shipFromMissing, getBusinessProfile, setBusinessProfile, getLocaleSettings, setLocaleSettings, FEATURES, getFeatures, setFeatures, resolveTimeZone, setOrdersCompleted, getShippedAwaitingDelivery,
+  getShipFromAddress, setShipFromAddress, shipFromMissing, getBusinessProfile, setBusinessProfile, getLocaleSettings, setLocaleSettings, FEATURES, getFeatures, setFeatures, resolveTimeZone, localDayEndInstant, setOrdersCompleted, getShippedAwaitingDelivery,
   getBoxPresets, setBoxPresets,
   addShippingPaidAmount, setShippingPaidAmount,
   getAllInventory, createInventoryItem, updateInventoryItem, deleteInventoryItem,
@@ -119,7 +119,7 @@ import {
   writeOffBlanks, getBlankMovements, markBlankPricesChecked, setBlankArchived, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection, receiveBlanksOnce, receiptGroupForKey, receiptEntryId, setBlankCounts,
   getSiteSetting, setSiteDomain,
   getPublishedOrg, setOrgReady, getShopWizard, saveShopWizard, deleteShopWizard, listShopWizards, setProductLinksFromBlank, publishShop, getPublishState, getDraftCatalogShop, signPreviewToken,
-  planDiscardShopChanges, discardShopChanges, applyProductPrices,
+  planDiscardShopChanges, discardShopChanges, applyProductPrices, priceRuleFor_, priceRuleMinCents_,
   getBrandRules, setBrandRules, DEFAULT_BRAND_RULES, brandRuleFor_, listBrandApprovals, addBrandApproval, revokeBrandApproval, getBrandApproval,
   nextSupplierPoNumber, insertSupplierOrder, claimSupplierOrderRetry, setSupplierOrderResult, getSupplierOrder, listSupplierOrders, markItemsBlankOrdered, cancelSupplierOrder, getInventoryValuation, getInventoryValuations, getCogsReport, planBlankCatchUp, applyBlankCatchUp, planTransferCatchUp, applyTransferCatchUp, voidInventoryMovement, getInventoryMovementById, restoreInventoryMovement, getInventoryRestoreBlocker, removeBlankColorImages, analyzePricing, planProductPreview, getPricingSettingsView, pricingBelowTargetForBlanks, setPricingSettings, getShopRate, computeShopRate, setShopRate,
   voidOrder, voidPayment, getClosedPeriods, isMonthClosed, closePeriod, reopenPeriod, monthOf,
@@ -846,9 +846,12 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (!o || typeof o !== "object") return o;
     const { processorFees, ...rest } = o;
     if (Array.isArray(o.items)) rest.items = o.items.map(({ cogs, cogsSource, ...it }) => it);
-    if (Array.isArray(o.payments)) rest.payments = o.payments.map(({ fee, ...p }) => p);
+    if (Array.isArray(o.payments)) rest.payments = paymentsFor_(o.payments);
     return rest;
   });
+  // An order's payments as a payment action sends them back (add, refund, void, a date or account change): the same
+  // rule as orderCostsFor_ — without costs.view, no processor fee on any of them.
+  const paymentsFor_ = (payments) => !Array.isArray(payments) || seesPricing_() ? payments : payments.map(({ fee, ...p }) => p);
   // Blanks for any screen (the Blanks list, Run Order, the blanks step): without costs.view or Edit on Blanks, no average
   // cost, vendor price or MAP — Read on Blanks is stock and details only (owner's decision, 2026-11-23), the same rule as
   // stripCosts_ below. Whoever receives, counts or prices blanks (Edit) still sees them.
@@ -974,20 +977,26 @@ async function handleOrdersPost_(context, listBefore = null) {
   // Record refund would put it (the line's Record refund, and a line taken off in Edit items — review #15), so the
   // balance, Net kept, the revenue and sales-tax reports and Reconcile all see it. Keyed by the line, so the same
   // line's refund can't go into the books twice (a double click, a retry). `kept` is what the order still holds,
-  // in dollars. Null when recorded (or already was); otherwise the reply refusing it.
+  // in dollars. Null when recorded (or already was); otherwise the reply refusing it. The ceiling is checked again
+  // in the insert itself (addOrderPayment's withinKept), so a refund saved at the same moment can't take the same
+  // money: that one is refused with refundTaken_, and the audit entry is written only for a refund that went in.
   const recordLineRefund_ = async (order, itemId, itemName, amount, method, at, kept) => {
     const requestKey = "lineRefund:" + itemId;
     if (await alreadyRecorded(requestKey)) return null;
     if (Math.round(amount * 100) > Math.round(kept * 100)) {
       return jsonResponse({ status: "error", message: `Refund can't exceed the $${Math.max(0, kept).toFixed(2)} kept on this order` }, 400);
     }
-    const auditErr = await auditStrict({ orgId: order.orgId, orderId: order.orderId, action: "payment.refunded",
+    const note = ("Refund — " + (itemName || "cancelled item")).slice(0, 500);
+    const inserted = await addOrderPayment(env.DB, order.orderId, -amount, note, "",
+      { method, kind: "refund", receivedAt: at || undefined, requestKey, withinKept: true });
+    if (!inserted) return await alreadyRecorded(requestKey) ? null : refundTaken_();
+    audit({ orgId: order.orgId, orderId: order.orderId, action: "payment.refunded",
       detail: { amount, method, reference: "", note: "Refund — " + itemName, shipping: 0, itemId } });
-    if (auditErr) return auditErr;
-    await addOrderPayment(env.DB, order.orderId, -amount, ("Refund — " + (itemName || "cancelled item")).slice(0, 500), "",
-      { method, kind: "refund", receivedAt: at || undefined, requestKey });
     return null;
   };
+  // A refund the order no longer holds the money for, because another refund was recorded first (two admins, or two
+  // tabs, saving at once).
+  const refundTaken_ = () => jsonResponse({ status: "error", message: "Another refund was recorded first; reload the order to see it." }, 409);
   // When something happened, as the admin chose it (2026-10): `b.at` — an ISO date-time from the browser's
   // date-and-time box (or a bare YYYY-MM-DD = that day). Not given → null (the action uses now); {error} = refused.
   const actionTime = (b, field = "at") => {
@@ -1914,7 +1923,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (auditErr) return auditErr;
       await setPaymentAccount(env.DB, p.id, acct.id);
       const updated = await getOrderById(env.DB, p.orderId);
-      return jsonResponse({ status: "ok", payments: updated ? updated.payments : [] });
+      return jsonResponse({ status: "ok", payments: updated ? paymentsFor_(updated.payments) : [] });
     }
   }
 
@@ -2189,7 +2198,8 @@ async function handleOrdersPost_(context, listBefore = null) {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const state = await getDigestState(env.DB);
-    // Run delivery check first so newly-delivered notices are included below.
+    // Run delivery check first so newly-delivered and picked-up notices are included below (pickups are 'picked_up'
+    // notices, so they're shown, and later emailed, once — not also from this run's list).
     const deliveries = await checkShippedDeliveries(env).catch(() => ({ inTransit: [], delivered: [], pickedUp: [], awaitingPickup: [] }));
     const [{ orders, more }, notices, orgs, security, issues, awaitingBlanks] = await Promise.all([
       getOrdersForDigest(env.DB, state), getUnsentOwnerNotices(env.DB), getAllOrgs(env.DB), getFailedAdminLogins(env.DB),
@@ -2209,7 +2219,6 @@ async function handleOrdersPost_(context, listBefore = null) {
           persName: it.persName || "", cancelled: !!it.cancelDate })) })),
       notices: notices.map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
       inTransit: (deliveries.inTransit || []).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
-      pickedUp: (deliveries.pickedUp || []).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
       awaitingPickup: (deliveries.awaitingPickup || []).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
       // Machine maintenance that's due (migrations/0071) — the roll-up lists it.
       maintenanceDue: (await getFeatures(env.DB).catch(() => ({ production: true }))).production
@@ -2555,7 +2564,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       return jsonResponse({ status: "ok", orderId, duplicate: true,
         amountReceived: same.amountReceived, balanceDue: same.balanceDue,
         discountAmount: same.discountAmount, discountNote: same.discountNote,
-        effectiveTotal: same.effectiveTotal, salesTax: same.salesTax, payments: same.payments, ...paidState_(same) });
+        effectiveTotal: same.effectiveTotal, salesTax: same.salesTax, payments: paymentsFor_(same.payments), ...paidState_(same) });
     }
 
     // Optionally apply a discount for the remaining balance
@@ -2584,7 +2593,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     return jsonResponse({ status: "ok", orderId,
       amountReceived: updated.amountReceived, balanceDue: updated.balanceDue,
       discountAmount: updated.discountAmount, discountNote: updated.discountNote,
-      effectiveTotal: updated.effectiveTotal, salesTax: updated.salesTax, payments: updated.payments, ...paidState_(updated) });
+      effectiveTotal: updated.effectiveTotal, salesTax: updated.salesTax, payments: paymentsFor_(updated.payments), ...paidState_(updated) });
   }
 
   // ---- recordRefund — money returned outside Stripe (Venmo, check, cash…) ----
@@ -2626,18 +2635,20 @@ async function handleOrdersPost_(context, listBefore = null) {
     // Recorded once per Save (requestKeyOf): the same request again — a double click, a retry — changes nothing,
     // and isn't audited a second time.
     const requestKey = requestKeyOf(body, "refund");
-    if (await alreadyRecorded(requestKey)) {
+    const duplicate_ = async () => {
       const same = await getOrderById(env.DB, orderId);
-      return jsonResponse({ status: "ok", orderId, duplicate: true, payments: same.payments, amountReceived: same.amountReceived,
+      return jsonResponse({ status: "ok", orderId, duplicate: true, payments: paymentsFor_(same.payments), amountReceived: same.amountReceived,
         refundedAmount: same.refundedAmount, netReceived: same.netReceived, balanceDue: same.balanceDue, ...paidState_(same) });
-    }
-    const auditErr = await auditStrict({ orgId: order.orgId, orderId, action: "payment.refunded",
-      detail: { amount, method, reference, note, shipping } });
-    if (auditErr) return auditErr;
-    await addOrderPayment(env.DB, orderId, -amount, note, "", { method, reference, kind: "refund", receivedAt: when ? when.receivedAt : undefined, accountId,
-      shippingCents: Math.round(shipping * 100), ...(requestKey ? { requestKey } : {}) });
+    };
+    if (await alreadyRecorded(requestKey)) return await duplicate_();
+    // Only while the order still holds the refund, checked in the insert itself (withinKept): of two refunds saved at
+    // once, the second finds the money gone and is refused. The audit entry is written once the refund is in.
+    const inserted = await addOrderPayment(env.DB, orderId, -amount, note, "", { method, reference, kind: "refund", receivedAt: when ? when.receivedAt : undefined, accountId,
+      shippingCents: Math.round(shipping * 100), withinKept: true, ...(requestKey ? { requestKey } : {}) });
+    if (!inserted) return await alreadyRecorded(requestKey) ? await duplicate_() : refundTaken_();
+    audit({ orgId: order.orgId, orderId, action: "payment.refunded", detail: { amount, method, reference, note, shipping } });
     const updated = await getOrderById(env.DB, orderId);
-    return jsonResponse({ status: "ok", orderId, payments: updated.payments, amountReceived: updated.amountReceived,
+    return jsonResponse({ status: "ok", orderId, payments: paymentsFor_(updated.payments), amountReceived: updated.amountReceived,
       refundedAmount: updated.refundedAmount, netReceived: updated.netReceived, balanceDue: updated.balanceDue, ...paidState_(updated) });
   }
 
@@ -2658,7 +2669,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     try { await setRefundShipping(env.DB, paymentId, Number(body.shippingAmount) || 0); }
     catch (e) { return jsonResponse({ status: "error", message: e.message }, 400); }
     const updated = await getOrderById(env.DB, before.orderId);
-    return jsonResponse({ status: "ok", orderId: before.orderId, payments: updated.payments, amountReceived: updated.amountReceived,
+    return jsonResponse({ status: "ok", orderId: before.orderId, payments: paymentsFor_(updated.payments), amountReceived: updated.amountReceived,
       refundedAmount: updated.refundedAmount, netReceived: updated.netReceived, balanceDue: updated.balanceDue, ...paidState_(updated) });
   }
 
@@ -2778,7 +2789,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (auditErr) return auditErr;
     await setPaymentDate(env.DB, paymentId, when.receivedAt);
     const updated = await getOrderById(env.DB, payment.orderId);
-    return jsonResponse({ status: "ok", payments: updated ? updated.payments : [],
+    return jsonResponse({ status: "ok", payments: updated ? paymentsFor_(updated.payments) : [],
       amountReceived: updated ? updated.amountReceived : null, balanceDue: updated ? updated.balanceDue : null });
   }
 
@@ -2813,7 +2824,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     return jsonResponse({ status: "ok",
       amountReceived: updated ? updated.amountReceived : null,
       balanceDue: updated ? updated.balanceDue : null,
-      payments: updated ? updated.payments : [], ...paidState_(updated) });
+      payments: updated ? paymentsFor_(updated.payments) : [], ...paidState_(updated) });
   }
 
   // ---- setPayOnDelivery — the order is paid when it's delivered (migrations/0105) ----------------
@@ -4179,7 +4190,7 @@ async function handleOrdersPost_(context, listBefore = null) {
         if (ledgerRefund(removal)) {
           const line = (order.items || []).find(i => Number(i.sheetRow) === itemId);
           const refused = await recordLineRefund_(order, itemId, line ? line.name : "", refund, removal.refundMethod, null, keptForRefunds);
-          if (refused) throw new Error("The refund for " + ((line && line.name) || "a line") + " wasn't recorded");
+          if (refused) throw Object.assign(new Error("The refund for " + ((line && line.name) || "a line") + " wasn't recorded"), { reply: refused });
           keptForRefunds -= refund;
         }
         if (refund > 0) await setLineItemRefund(env.DB, itemId, refund);
@@ -4192,6 +4203,8 @@ async function handleOrdersPost_(context, listBefore = null) {
         audit({ orgId, orderId, action: "order.edited", detail: { removals: removals.length, updates: updates.length, additions: additions.length,
           incomplete: true, error: String((e && e.message) || e).slice(0, 200) } });
       }
+      // A refund refused because another one took the money first (recordLineRefund_): its own answer, not a crash.
+      if (e && e.reply) return e.reply;
       throw e;
     }
 
@@ -4998,7 +5011,8 @@ async function handleOrdersPost_(context, listBefore = null) {
       catch (e) { if (e && e.status === 400) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
       audit({ orgId: null, orderId: null, action: "settings.shop_rate_set", detail: { overheadPerHourCents: r.overheadPerHourCents, ratePerHourCents: r.ratePerHourCents, hours: r.hours, period: r.period.key } });
       const all = await analyzePricing(env.DB);
-      const below = all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems }));
+      // Through belowFor_ as the other pricing saves: Shop rate Edit without Money, costs and margins hears no margins.
+      const below = belowFor_(all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems })));
       return jsonResponse({ status: "ok", shopRate: shopRateView_(r), input: await getShopRate(env.DB), belowTarget: below });
     }
     if (body.action === "updatePricingSettings") {
@@ -5198,7 +5212,8 @@ async function handleOrdersPost_(context, listBefore = null) {
       const changes = {};
       for (const k of Object.keys(locale)) if (locale[k] !== before[k]) changes[k] = { from: before[k], to: locale[k] };
       audit({ orgId: null, orderId: null, action: "settings.locale_set", detail: { changes } });
-      // The storefront reads the country (its address form) from the cached catalog — refresh it.
+      // The storefront reads the country (its address form) and the time zone (when a shop's deadline ends) from the
+      // cached catalog — refresh it.
       try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
       return jsonResponse({ status: "ok", locale, effectiveTimeZone: await resolveTimeZone(env), envTimeZone: env.TIMEZONE ? String(env.TIMEZONE) : "" });
     }
@@ -5303,7 +5318,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       audit({ orgId: null, orderId: null, action: "settings.sales_tax_set",
         detail: { from: { rateBps: before.rateBps, jurisdiction: before.jurisdiction, taxMode: before.taxMode }, to: { rateBps: salesTax.rateBps, jurisdiction, taxMode: salesTax.taxMode } } });
       const all = await analyzePricing(env.DB).catch(() => ({ products: [] }));
-      const belowTarget = all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems }));
+      const belowTarget = belowFor_(all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems })));
       return jsonResponse({ status: "ok", salesTax: { ...salesTax, ratePercent: salesTax.rateBps / 100 }, belowTarget });
     }
 
@@ -6546,7 +6561,9 @@ async function handleOrdersPost_(context, listBefore = null) {
         detail: { movementId, reason, transferName: mv.transferName, occurredAt: mv.occurredAt, unitCost: mv.unitCost, vendor: mv.vendor, vendorRef: mv.vendorRef,
           before: { transferId: mv.transferId, qtyDelta: mv.qtyDelta, kind: mv.kind, orderId: mv.orderId || null, itemId: mv.itemId } } });
       if (auditErr) return auditErr;
-      const row = await voidTransferMovement(env.DB, movementId, reason);
+      let row;   // refused (userFacing) when the transfer's stock changed while this was being worked out
+      try { row = await voidTransferMovement(env.DB, movementId, reason); }
+      catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 409); throw e; }
       if (!row) return jsonResponse({ status: "error", message: "That entry was just changed — reload the history and try again." }, 409);
       return jsonResponse({ status: "ok", recosted: row.recosted || 0 });
     }
@@ -6565,7 +6582,9 @@ async function handleOrdersPost_(context, listBefore = null) {
         detail: { movementId, transferId: mv.transferId, transferName: mv.transferName, qtyDelta: mv.qtyDelta, unitCost: mv.unitCost, kind: mv.kind,
           vendor: mv.vendor, vendorRef: mv.vendorRef, occurredAt: mv.occurredAt, wasVoidedAt: mv.voidedAt, wasVoidReason: mv.voidReason } });
       if (auditErr) return auditErr;
-      const restored = await restoreTransferMovement(env.DB, movementId);
+      let restored;
+      try { restored = await restoreTransferMovement(env.DB, movementId); }
+      catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 409); throw e; }
       if (!restored) return jsonResponse({ status: "error", message: "That entry was just changed — reload the history and try again." }, 409);
       return jsonResponse({ status: "ok", movements: await getTransferMovements(env.DB, mv.transferId), transfers: await listTransfers(env.DB, body.org || null) });
     }
@@ -7490,12 +7509,31 @@ async function handleOrdersPost_(context, listBefore = null) {
     const byProduct = new Map();
     for (const c of list) { const k = String(c.org || "") + "\u0001" + String(c.productId || ""); (byProduct.get(k) || byProduct.set(k, []).get(k)).push(c); }
     // A dry run of every product first (applyProductPrices writes only when its own list is clean), then the real one.
+    // Each price must be the one the SAVED price rule gives (MAP + the brand's rule, else the general one, worked out
+    // here from the product's MAP as the window does), or that rounded up as the window offers: to the next whole
+    // dollar or to .99. Brand approvals Edit applies the rule; it isn't a way to set any price (that's Products Edit).
+    const rules = await getBrandRules(env.DB);
+    const orgsAsked = [...new Set([...byProduct.keys()].map(k => k.split("\u0001")[0]))];
+    const analysis = await analyzePricing(env.DB, orgsAsked.length === 1 ? { orgId: orgsAsked[0] } : {});
+    const productOf = new Map(analysis.products.map(p => [p.orgId + "\u0001" + p.productId, p]));
+    const groupKey = (g) => { const x = String(g || ""); return x === "Standard" ? "" : x; };   // "Standard" = the product's own prices
     const problems = [];
     for (const [k, cs] of byProduct) {
-      const [org, productId] = k.split("\u0001");
-      const row = await env.DB.prepare("SELECT * FROM products WHERE orgId=? AND productId=?").bind(org, productId).first();
-      if (!row) { problems.push(`${productId || "?"}: no such product`); continue; }
-      for (const c of cs) { const n = Number(c.price); if (!Number.isFinite(n) || n < 0 || n > 10000) problems.push(`${row.name || productId}: not a price`); }
+      const productId = k.split("\u0001")[1];
+      const p = productOf.get(k);
+      if (!p) { problems.push(`${productId || "?"}: no such product`); continue; }
+      for (const c of cs) {
+        const n = Number(c.price), group = groupKey(c.group), size = String(c.size || "");
+        const where = `${p.name || productId}${group ? " " + group : ""}${size ? " " + size : ""}`;
+        if (!Number.isFinite(n) || n < 0 || n > 10000) { problems.push(`${where}: not a price`); continue; }
+        const row = p.rows.find(r => groupKey(r.group) === group && String(r.size || "") === size);
+        if (!row) { problems.push(`${where}: ${p.rows.some(r => groupKey(r.group) === group) ? "the product doesn't sell that size" : "no such color price group"}`); continue; }
+        const rule = row.map != null ? priceRuleFor_(rules, row.mapBrand) : null;
+        if (!rule) { problems.push(`${where}: no price rule applies to it (no blank with a MAP, or no rule)`); continue; }
+        const base = priceRuleMinCents_(Math.round(row.map * 100), rule);
+        const allowed = [base, Math.ceil(base / 100) * 100, Math.ceil((base + 1) / 100) * 100 - 1];
+        if (!allowed.includes(Math.round(n * 100))) problems.push(`${where}: $${n.toFixed(2)} isn't the saved price rule's price ($${(base / 100).toFixed(2)}, or that rounded up). Reload the price impact and try again`);
+      }
     }
     if (problems.length) return jsonResponse({ status: "error", message: problems.slice(0, 5).join("; ") }, 400);
     const done = [], skipped = [];
@@ -8064,9 +8102,9 @@ async function handleOrdersPost_(context, listBefore = null) {
     return jsonResponse({ status: "error", message: "This shop is not currently accepting orders." }, 403);
   }
   if (orgRow.orderDeadline && orgRow.allowOrdersAfterDeadline === false) {
-    // End of the deadline day at UTC-12 — the latest "end of day" anywhere,
-    // so the server never closes earlier than the customer's own clock does.
-    const closesAt = Date.parse(String(orgRow.orderDeadline).slice(0, 10) + "T23:59:59-12:00");
+    // The end of the deadline day in the business's time zone (Global settings → Region): 11:59:59 pm there, the
+    // moment the storefront's banner names and its catalog closes (catalog.js orderClosing_), with no grace period.
+    const closesAt = Date.parse(localDayEndInstant(orgRow.orderDeadline, await resolveTimeZone(env)) || "");
     if (Number.isFinite(closesAt) && Date.now() > closesAt) {
       return jsonResponse({ status: "error", message: orgRow.closedMessage || "Ordering for this shop has closed." }, 403);
     }

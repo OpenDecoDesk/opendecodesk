@@ -50,3 +50,37 @@ test("the problems list: Clear asks first, then empties it; Back office sees no 
   expect(JSON.parse(sql(`SELECT COUNT(*) AS n FROM system_issues WHERE sample = '${sample}'`))[0].results[0].n).toBe(0);
   expect(JSON.parse(sql("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'system_issues.cleared'"))[0].results[0].n).toBeGreaterThan(0);
 });
+
+// Two things the roll-up now keeps instead of losing (functions/_lib/stripeFees.js, deliveryCheck.js): Stripe refusing
+// the card-fee lookups (a revoked or restricted key) is a problem with its own label, and a carrier pickup is a queued
+// notice, under "Needs attention" when the customer's shipped email couldn't be sent. Put in the database directly, as
+// above: the test install has no Stripe key and no carrier tracking.
+test("a card-fee refusal and carrier pickups show on Communications", async ({ page }) => {
+  const sample = uniq("Stripe refused the secret key (401)");
+  const fine = uniq("Cust - USPS 9400111 picked up"), failed = uniq("Cust - USPS 9400222 picked up");
+  const at = new Date().toISOString();
+  sql(`INSERT INTO system_issues (kind, n, sample, at) VALUES ('card_fees_failed', 1, '${sample}', '${at}')`);
+  sql(`INSERT INTO owner_notices (kind, orderId, orgId, summary, detail, urgent, createdAt) VALUES
+    ('picked_up', 'E2E-PU1', '', '${fine}', 'Marked shipped; the customer was emailed their tracking.', 0, '${at}'),
+    ('picked_up', 'E2E-PU2', '', '${failed}', 'Marked shipped, but the shipped email could not be sent. Send them their tracking yourself.', 1, '${at}')`);
+  try {
+    await openAdmin(page, "comms");
+    const body = page.locator("#commsBody");
+    await expect(page.locator("#commsIssues")).toContainText("Card fees couldn't be read from Stripe");
+    await expect(page.locator("#commsIssues")).toContainText(sample);
+
+    await expect(body.getByRole("heading", { name: /Picked up by the carrier — \d+/ })).toBeVisible();
+    const row = body.locator("tr", { hasText: fine });
+    await expect(row).toContainText("Picked up");
+    await expect(row).toContainText("E2E-PU1");
+
+    const attention = body.locator("div", { has: page.getByRole("heading", { name: "⚠️ Needs attention" }) });
+    await expect(attention).toContainText(failed);
+    await expect(attention).toContainText("Send them their tracking yourself");
+    await expect(attention).not.toContainText(fine);
+  } finally {
+    // Leave nothing behind for the next roll-up (or another spec's page).
+    sql(`DELETE FROM system_issues WHERE sample = '${sample}'`);
+    sql(`UPDATE owner_notices SET sentAt = '${at}' WHERE summary IN ('${fine}', '${failed}')`);
+  }
+});

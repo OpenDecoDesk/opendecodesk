@@ -14,7 +14,7 @@ const strip = (src) => src
   .replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "")
   .replace(/export (async function|function|const)/g, "$1");
 const dbSrc = strip(read("functions/_lib/db.js"));
-const lib = new Function(dbSrc + `\nreturn { createTransfer, getTransferSheet, consumeTransfersForItem_, listStockPurchases, replayTransferCosts, receiveTransferSheet, getTransferMovements };`)();
+const lib = new Function(dbSrc + `\nreturn { createTransfer, getTransferSheet, listStockPurchases, replayTransferCosts, receiveTransferSheet, getTransferMovements };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
   // Signed in as the admin: the cost checks in orders.js fail closed without a user (testlib/roles adminAs).
   "const requireAdmin = async () => null; const adminActor = () => 'test';\n" + require("./testlib/roles").adminAs() + "\n" +
@@ -51,6 +51,13 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
   const purchases = () => d1.q("SELECT id, transferId, qtyDelta, unitCostCents, pctOfSheet, receiptGroup, voidedAt, voidReason FROM transfer_movements WHERE kind = 'purchase' ORDER BY id");
   const live = () => purchases().filter(m => !m.voidedAt);
   const audits = () => d1.q("SELECT count(*) n FROM audit_log WHERE action = 'transfer.sheet_edited'")[0].n;
+  // An order line using Crest transfers at their average cost, as finishing it does (the use, the stock, the line's cost).
+  const use = (itemId, orderId, qty, at) => {
+    const unit = t(A).purchasePriceCents;
+    d1._raw.run("INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, orderId, itemId, note, occurredAt, createdAt) VALUES (?, 'Crest', ?, ?, 'consume', ?, ?, 'Used', ?, 't')", [A, -qty, unit, orderId, itemId, at]);
+    d1._raw.run("UPDATE transfers SET quantity = quantity - ? WHERE id = ?", [qty, A]);
+    d1._raw.run("UPDATE order_items SET cogsCents = COALESCE(cogsCents, 0) + ?, cogsSource = 'consumed' WHERE id = ?", [unit * qty, itemId]);
+  };
 
   console.log("=== replayTransferCosts on its own ===");
   const rp = lib.replayTransferCosts([
@@ -69,8 +76,8 @@ const ok = (label, cond) => { console.log(label + ": " + !!cond); if (!cond) fai
     rows: [{ transferId: A, count: 10, pctOfSheet: 60 }, { transferId: B, count: 20, pctOfSheet: 40 }] });
   ok("received: Crest $6.00 each, QR $2.00 each", r.status === 200 && t(A).purchasePriceCents === 600 && t(B).purchasePriceCents === 200);
   const seed = r.body.ids[0], group = live()[0].receiptGroup;
-  await lib.consumeTransfersForItem_(d1, { id: item1, orderId: "O1", qty: 4 }, [A], "2026-09-15T12:00:00.000Z");
-  await lib.consumeTransfersForItem_(d1, { id: item2, orderId: "O2", qty: 1 }, [A], "2026-10-05T12:00:00.000Z");
+  use(item1, "O1", 4, "2026-09-15T12:00:00.000Z");
+  use(item2, "O2", 1, "2026-10-05T12:00:00.000Z");
   d1._raw.run("INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt, reason) VALUES (?, 'Crest', -1, 600, 'consume', 'Made for stock', '2026-09-16T12:00:00.000Z', 't', 'finished')", [A]);
   d1._raw.run("INSERT INTO closed_periods (month, closedAt, closedBy) VALUES ('2026-10','t','test')");
   ok("the order lines were costed at $6.00 a transfer", cogs(item1) === 2400 && cogs(item2) === 600);

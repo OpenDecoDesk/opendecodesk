@@ -147,7 +147,7 @@ const wait = async (cond, n = 500) => { for (let i = 0; i < n && !cond(); i++) a
   signIn("admin"); w.renderAdminNav();
   const adminRow = hashes(rowButtons());
   ok("an admin's top buttons have Customers", adminRow.filter(h => h === "customers").length === 1 && rowButtons().find(b => b.dataset.h === "customers").textContent === "Customers");
-  ok("…right after Orders, then Quotes (migrations/0109), before Run Order", before(adminRow, "customers") === "orders" && adminRow[adminRow.indexOf("customers") + 1] === "quotes" && adminRow[adminRow.indexOf("customers") + 2] === "runorder" && adminRow[0] === "home");
+  ok("…right after Orders, then Quotes (migrations/0109) and Discount codes (migrations/0111), before Run Order", before(adminRow, "customers") === "orders" && adminRow[adminRow.indexOf("customers") + 1] === "quotes" && adminRow[adminRow.indexOf("customers") + 2] === "discounts" && adminRow[adminRow.indexOf("customers") + 3] === "runorder" && adminRow[0] === "home");
   ok("…as a button that goes to #customers like the others", rowButtons().find(b => b.dataset.h === "customers").dataset.adminAction === "navGo" && rowButtons().find(b => b.dataset.h === "customers").type === "button");
   ok("the phone's menu sheet has it too, in the same place", hashes(sheetButtons()).filter(h => h === "customers").length === 1 && before(hashes(sheetButtons()), "customers") === "orders" &&
     sheetButtons().find(b => b.dataset.h === "customers").textContent === "Customers" && JSON.stringify(hashes(sheetButtons())) === JSON.stringify(adminRow));

@@ -67,15 +67,15 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   let r;
 
   console.log("=== The setting: everything on unless saved off ===");
-  const KEYS = ["production", "bookkeeping", "shipping", "designVerification", "digital", "quotes"];   // the six with admin pages / actions
+  const KEYS = ["production", "bookkeeping", "shipping", "designVerification", "digital", "quotes", "discounts"];   // the seven with admin pages / actions
   const ALL = ["storefront", ...KEYS];
-  ok("seven features, each with a name and a plain sentence", lib.FEATURES.map(f => f.key).join() === ALL.join() && lib.FEATURES.every(f => f.label && f.description.length > 40));
+  ok("eight features, each with a name and a plain sentence", lib.FEATURES.map(f => f.key).join() === ALL.join() && lib.FEATURES.every(f => f.label && f.description.length > 40));
   ok("there is no inventory switch", !lib.FEATURES.some(f => /inventor|blank|stock/i.test(f.key)));
-  ok("a new install has all seven on", JSON.stringify(await lib.getFeatures(d1)) === JSON.stringify({ storefront: true, production: true, bookkeeping: true, shipping: true, designVerification: true, digital: true, quotes: true }));
+  ok("a new install has all eight on", JSON.stringify(await lib.getFeatures(d1)) === JSON.stringify({ storefront: true, production: true, bookkeeping: true, shipping: true, designVerification: true, digital: true, quotes: true, discounts: true }));
   ok("no database, or one without the settings table, is all on too", (await lib.getFeatures(null)).shipping === true && (await lib.getFeatures({ prepare(){ throw new Error("no such table: global_settings"); } })).production === true);
-  ok("only an explicit false is off (junk and missing keys are on)", JSON.stringify(lib.normalizeFeatures({ production: 0, shipping: "no", bookkeeping: false, other: false })) === JSON.stringify({ storefront: true, production: true, bookkeeping: false, shipping: true, designVerification: true, digital: true, quotes: true }));
+  ok("only an explicit false is off (junk and missing keys are on)", JSON.stringify(lib.normalizeFeatures({ production: 0, shipping: "no", bookkeeping: false, other: false })) === JSON.stringify({ storefront: true, production: true, bookkeeping: false, shipping: true, designVerification: true, digital: true, quotes: true, discounts: true }));
   r = await admin({ action: "getFeatures" });
-  ok("the admin gets the switches and the list to draw them from", r.status === 200 && r.body.features.production === true && r.body.list.length === 7 && r.body.list[0].label === "Storefront" && r.body.list[4].label === "Design approval" && r.body.list[5].label === "Digital products" && r.body.list[6].label === "Quotes");
+  ok("the admin gets the switches and the list to draw them from", r.status === 200 && r.body.features.production === true && r.body.list.length === 8 && r.body.list[0].label === "Storefront" && r.body.list[4].label === "Design approval" && r.body.list[5].label === "Digital products" && r.body.list[6].label === "Quotes" && r.body.list[7].label === "Discount codes");
   r = await admin({ action: "updateFeatures", features: { inventory: false } });
   ok("a feature that doesn't exist is refused (no inventory switch can be invented)", r.status === 400 && /isn't a feature/.test(r.body.message));
   r = await admin({ action: "updateFeatures", features: { shipping: "off" } });
@@ -418,8 +418,9 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     digital: ["getDigitalSettings", "updateDigitalSettings", "listProductFiles", "deleteProductFile", "addProductFileFromDesign",   // Digital products
       "getOrderDownloads", "resendDownloads", "resetDownloads", "revokeDownloads"],
     quotes: ["listEstimates", "getEstimate", "createEstimate", "saveEstimate", "sendEstimate", "convertEstimate", "cancelEstimate"],   // Quotes
+    discounts: ["listDiscountCodes", "getDiscountCode", "saveDiscountCode", "createDiscountCodes", "setDiscountCodeActive", "deleteDiscountCode"],   // Discount codes
   };
-  // The features that own admin actions: the six with pages.
+  // The features that own admin actions: the seven with pages.
   const ACTION_KEYS = Object.keys(EXPECTED);
   // Everything else the dispatcher answers: always available, whatever the switches say.
   const ALWAYS_ON = [
@@ -575,9 +576,9 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   ok("all on: those buttons are back", labels("#bulkBar .admin-btn").some(l => /Send verification/.test(l)) && labels("#bulkBar .admin-btn").some(l => /Design approved/.test(l)) && sent.includes("listDesignVerifications"));
 
   console.log("--- Global settings → Features ---");
-  await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 7);
+  await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 8);
   const boxes = () => [...doc.querySelectorAll("#gFeatures .gFeature")];
-  ok("one checkbox per feature, all ticked, each with its name and sentence", boxes().length === 7 && boxes().every(b => b.checked) && boxes().map(b => b.dataset.feature).join() === ALL.join() &&
+  ok("one checkbox per feature, all ticked, each with its name and sentence", boxes().length === 8 && boxes().every(b => b.checked) && boxes().map(b => b.dataset.feature).join() === ALL.join() &&
     lib.FEATURES.every(f => doc.getElementById("gFeatures").textContent.includes(f.label) && doc.getElementById("gFeatures").textContent.includes(f.description)));
   ok("it says inventory is always on", /Stock of blanks and transfers, and cost of goods, are always on/.test(doc.getElementById("adminPanel").textContent));
   ok("all on: Shipping's and Production's panels are open (ship-from address, Machine Files)", !doc.getElementById("gPanel-shipping").hidden && !!doc.getElementById("gShipFromSection") &&
@@ -596,7 +597,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   ok("…all in one request, without the ship-from address of the feature just switched off (Machine Files, still on, goes with it)", sent.filter(a => /^update|^saveGlobal/.test(a)).join() === "saveGlobalSettingsAll" &&
     allReq.features && allReq.features.shipping === false && !allReq.shipFrom && allReq.machine && allReq.machine.showDeleteButton === false);
   sent.length = 0;
-  await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 7);
+  await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 8);
   ok("the form comes back showing what's saved, without the switched-off feature's section", boxes().filter(b => !b.checked).map(b => b.dataset.feature).join() === "bookkeeping,shipping" &&
     doc.getElementById("gPanel-shipping").hidden && !doc.getElementById("gPanel-production").hidden);
   boxes().forEach(b => { b.checked = true; });
@@ -604,13 +605,13 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   ok("ticking them again turns everything back on", ALL.every(k => w.eval(`featureOn_("${k}")`)) && Object.values(await lib.getFeatures(d1)).every(Boolean) && desktop().includes("Expenses") && mobile().includes("Package sizes"));
   const toast = () => { const t = [...doc.querySelectorAll("#toastRegion > *")].map(e => e.textContent); return t[t.length - 1] || ""; };
   ok("the \"saved\" message doesn't send you to Publish for changes that are already live", /already live/.test(toast()) && !/Click Publish|when you click Publish/.test(toast()));
-  await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 7);
+  await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 8);
   ok("nothing changed on the form: no Publish needed", w.globalSettingsNeedPublish_() === false);
   doc.getElementById("gPayVenmo").checked = !doc.getElementById("gPayVenmo").checked;
   ok("a payment-method box changed: that one does wait for Publish", w.globalSettingsNeedPublish_() === true);
   await w.submitGlobalSettings(); await tick(80);
   ok("…and the message says so, and that everything else is live", /payment-method change reaches the storefront when you click Publish/.test(toast()) && /everything else is already live/.test(toast()));
-  await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 7);
+  await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 8);
   doc.getElementById("gPayVenmo").checked = !doc.getElementById("gPayVenmo").checked;
   await w.submitGlobalSettings(); await tick(80);
   ok("the ship-from address saved before the switch is untouched", (await admin({ action: "getShipFromAddress" })).body.shipFrom.street1 === "2 Elm St");
@@ -642,7 +643,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
 
     // The page: ticking Shipping shows the address; Save checks it before sending anything.
     await setF({ shipping: false });
-    await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 7);
+    await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 8);
     const shipBox = boxes().find(b => b.dataset.feature === "shipping"), section = doc.getElementById("gPanel-shipping");
     ok("Shipping off: its panel is closed", !shipBox.checked && section.hidden);
     shipBox.checked = true; shipBox.dispatchEvent(new w.Event("change"));

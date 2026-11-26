@@ -371,19 +371,20 @@ async function recomputeOrderTax_(db, orderId) {
   const mode = taxMode_(o.taxMode);   // the order's own, never today's setting
   const orderRate = !o.taxExempt && !isOutOfState(stateOf_(o.shippingAddress), settings.jurisdiction) ? Number(o.taxRateBps) || 0 : 0;
   const { results: items } = await db.prepare("SELECT id, lineTotalCents, taxable, cancelDate FROM order_items WHERE orderId=?").bind(orderId).all();
-  const stmts = items.map(it => {
-    const rate = it.taxable ? orderRate : 0;
-    return db.prepare("UPDATE order_items SET taxRateBps=?, taxCents=? WHERE id=?")
-      .bind(rate, taxOn_(Number(it.lineTotalCents), rate, mode), it.id);
-  });
+  const lineTax = items.map(it => taxOn_(Number(it.lineTotalCents), it.taxable ? orderRate : 0, mode));
+  const stmts = items.map((it, n) => db.prepare("UPDATE order_items SET taxRateBps=?, taxCents=? WHERE id=?")
+    .bind(it.taxable ? orderRate : 0, lineTax[n], it.id));
   // A discount reduces tax only in proportion to the taxable goods it's taken off.
   const active = items.filter(it => !it.cancelDate);
   const gross = active.reduce((a, it) => a + Number(it.lineTotalCents), 0);
   const taxableGross = active.filter(it => it.taxable).reduce((a, it) => a + Number(it.lineTotalCents), 0);
   const disc = Math.min(Number(o.discountCents) || 0, gross);
   const taxableDisc = gross > 0 ? Math.round(disc * taxableGross / gross) : 0;
+  // All the goods taken off (a 100% code): all their tax goes with them, so rounding the lines one by one can't
+  // leave a cent of tax owed on nothing.
+  const activeTax = items.reduce((a, it, n) => a + (it.cancelDate ? 0 : lineTax[n]), 0);
   stmts.push(db.prepare("UPDATE orders SET discountTaxCents=? WHERE orderId=?")
-    .bind(taxOn_(taxableDisc, orderRate, mode), orderId));
+    .bind(gross > 0 && disc >= gross ? activeTax : taxOn_(taxableDisc, orderRate, mode), orderId));
   // The rush fee (migrations/0082) carries tax only when it was taxable when the order was placed, like a taxable line.
   if (o.rushFeeCents !== undefined) {
     stmts.push(db.prepare("UPDATE orders SET rushFeeTaxCents=? WHERE orderId=?")
@@ -3758,6 +3759,8 @@ export const FEATURES = [
     description: "Selling files customers download — digitized designs, PDFs: once paid, a download page for the order and an email with the link and the files, within a time and download limit. Off: digital products can't be ordered and their links don't open." },
   { key: "quotes", label: "Quotes",
     description: "Quotes for a customer — products at their quantity-break prices, custom lines and setup or digitizing fees — emailed as a link the customer opens to accept or ask for changes; an accepted quote becomes an order. Off: the Quotes page is hidden and quote links already sent say quotes aren't available. Quantity breaks on products still apply." },
+  { key: "discounts", label: "Discount codes",
+    description: "Codes customers type at checkout for a percent or an amount off: one person's single-use code, or a code anyone can use a set number of times, for every shop or one, with an optional last day. Off: the Discount codes page is hidden, the checkout has no code box and codes already sent don't work. A discount typed on an order by hand still applies." },
 ];
 const FEATURE_KEYS_ = FEATURES.map(f => f.key);
 // { production: true, … } from whatever was saved: only an explicit false turns a feature off.
@@ -10943,7 +10946,7 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
   // so a page waits for one round trip to D1, not one after another. (Brand reviews and catalog changes need the
   // lines, so they follow, together too.)
   const [nb, dg] = await Promise.all([noBlankLine_(db), digitalLine_(db)]);
-  const [missing, { results: itemRows }, { results: paymentRows }, { results: labelRows }, shipmentsByOrder, invoices, estimates] = await Promise.all([
+  const [missing, { results: itemRows }, { results: paymentRows }, { results: labelRows }, shipmentsByOrder, invoices, estimates, discountCodes] = await Promise.all([
     orderDesignsMissingBy_(db, sub, binds),
     db.prepare(`SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId IN (${sub}) ORDER BY oi.id`).bind(...binds).all(),
     db.prepare(`SELECT * FROM order_payments WHERE orderId IN (${sub}) ORDER BY receivedAt ASC`).bind(...binds).all(),
@@ -10954,6 +10957,7 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
     blankShipmentsByOrder_(db, { sub, binds }),
     invoicesByOrder_(db, sub, binds),   // the invoice link emailed for it, if any (0053)
     estimatesByOrder_(db, sub, binds),  // the quote it was made from, if any (0109)
+    discountCodesByOrder_(db, sub, binds),  // the discount code it used, if any (0115)
   ]);
   for (const r of orderRows) r.orderDesignsMissing = missing[r.orderId] || 0;
 
@@ -10986,6 +10990,7 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
     o.blankShipments = shipmentsByOrder[r.orderId] || [];
     o.invoice = invoices[r.orderId] || null;
     o.estimate = estimates[r.orderId] || null;
+    o.discountCode = discountCodes[r.orderId] || "";
     o.brandReview = reviews.get(r.orderId) || [];
     o.catalogDrift = r.manufacturedAt || r.completedAt || r.voidedAt ? [] : drift.get(r.orderId) || [];
     return o;
@@ -10998,18 +11003,20 @@ export async function getOrderById(db, orderId) {
   if (!row) return null;
   // The order's parts, asked for together (as loadOrders_ does).
   const [nb, dg] = await Promise.all([noBlankLine_(db), digitalLine_(db)]);
-  const [missing, { results: itemRows }, { results: paymentRows }, { results: labelRows }, blankShipments, invoices] = await Promise.all([
+  const [missing, { results: itemRows }, { results: paymentRows }, { results: labelRows }, blankShipments, invoices, discountCodes] = await Promise.all([
     orderDesignsMissingBy_(db, "?", [orderId]),
     db.prepare(`SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId=? ORDER BY oi.id`).bind(orderId).all(),
     db.prepare("SELECT * FROM order_payments WHERE orderId=? ORDER BY receivedAt ASC").bind(orderId).all(),
     db.prepare("SELECT * FROM shipping_labels WHERE orderId=? ORDER BY purchasedAt ASC").bind(orderId).all(),
     Promise.resolve().then(() => getBlankShipmentsForOrder(db, orderId)).catch(() => []),
     invoicesByOrder_(db, "?", [orderId]),
+    discountCodesByOrder_(db, "?", [orderId]),
   ]);
   row.orderDesignsMissing = missing[orderId] || 0;
   const order = parseOrder_(row, itemRows.map(parseItem_), paymentRows.map(parsePayment_), labelRows.map(parseLabel_));
   order.blankShipments = blankShipments;
   order.invoice = invoices[orderId] || null;
+  order.discountCode = discountCodes[orderId] || "";   // the discount code it used (migrations/0115), "" = none
   // The quote it was made from (migrations/0109): { id, number } or null.
   order.estimate = await estimateOfOrder_(db, orderId).catch(() => null);
   const settled = row.manufacturedAt || row.completedAt || row.voidedAt;
@@ -11770,6 +11777,416 @@ async function estimateOfOrder_(db, orderId) {
   } catch (e) { if (noEstimatesYet_(e)) return null; throw e; }
 }
 
+// ---- Discount codes (migrations/0115) ----------------------------------------------------------
+// A code a customer types at checkout: a percent or an amount off the order's goods (the lines as priced,
+// personalization included — never shipping or the rush fee), stored on the order exactly as a manual discount is
+// (orders.discountCents / discountNote "Code SAVE10"), so every report, the balance and card checkout treat it the
+// same. Two kinds: one person's single-use code (email set, maxUses 1) and a code anyone can use up to maxUses times
+// in all (optionally once per email). A use is claimed in one conditional INSERT (claimDiscountCode) and given back
+// when the order is voided or deleted (releaseDiscountCodeUse). Dollars in and out; cents only here.
+export const DISCOUNT_CODE_MAX_USES = 100000;
+export const DISCOUNT_CODES_BULK_MAX = 500;
+const DISCOUNT_CODE_RE_ = /^[A-Z0-9_-]{3,32}$/;
+// No 0/O or 1/I: a code is read off a page or an email and typed in by hand.
+const DISCOUNT_CODE_ALPHABET_ = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const noDiscountCodesYet_ = (e) => /no such table: (main\.)?discount_code/i.test(String(e && e.message));
+const DISCOUNT_CODES_NOT_READY_ = "Discount codes need the latest database update. Apply the migrations, then try again.";
+const DISCOUNT_CODE_NOT_FOUND_ = "That discount code wasn't found.";
+// getDiscountCode answers null both for no such code and before migrations/0115. A write that found none asks the
+// table itself, which throws "no such table" before 0115, so the write answers { notReady } rather than "wasn't found".
+const discountCodeAbsent_ = async (db) => { await db.prepare("SELECT 1 AS x FROM discount_codes LIMIT 1").first(); return { error: DISCOUNT_CODE_NOT_FOUND_ }; };
+const DISCOUNT_CODE_INVALID_ = "This code isn't valid.";
+// Said for an unknown code too, so a refusal never tells a stranger that a code for someone else's address exists.
+const DISCOUNT_CODE_INVALID_EMAIL_ = DISCOUNT_CODE_INVALID_ + " If it was sent to you, check the email address is the one it was sent to.";
+const DISCOUNT_CODE_LOCKED_ = "This code has been used — you can change its expiry, uses, note or switch it off.";
+// The uses that count against a code (`c` = discount_codes): a released use (its order voided or deleted) doesn't.
+const DISCOUNT_USED_SQL_ = "(SELECT count(*) FROM discount_code_uses u WHERE u.codeId = c.id AND u.releasedAt IS NULL)";
+
+// "SAVE10" from " save10 ", or "" when it isn't 3–32 letters, digits, '-' or '_'.
+export function normalizeDiscountCode_(s) {
+  const c = String(s == null ? "" : s).trim().toUpperCase();
+  return DISCOUNT_CODE_RE_.test(c) ? c : "";
+}
+// A new random code: the prefix (cleaned, at most 12) and 8 characters no one confuses when reading them out.
+export function generateDiscountCode_(prefix = "") {
+  const p = String(prefix == null ? "" : prefix).trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "").slice(0, 12);
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  // 256 is a multiple of the alphabet's 32, so every character is equally likely.
+  return p + Array.from(bytes, (b) => DISCOUNT_CODE_ALPHABET_[b % DISCOUNT_CODE_ALPHABET_.length]).join("");
+}
+// "10% off" / "12.5% off" / "$5.00 off".
+function discountCodeLabel_(kind, percentBps, amountCents) {
+  if (kind === "percent") return String(Number((Number(percentBps) / 100).toFixed(2))) + "% off";
+  return "$" + fromCents(amountCents).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " off";
+}
+const discountToday_ = (today) => CUSTOMER_DATE_RE_.test(String(today || "")) ? String(today) : dateInTimeZone(new Date(), _shopTimeZone_);
+// A real calendar date YYYY-MM-DD (not 2027-02-30). Month 13 or day 32 is no Date at all: checked before toISOString,
+// which would throw on it.
+const realDate_ = (s) => { if (!CUSTOMER_DATE_RE_.test(s)) return false; const d = new Date(s + "T00:00:00Z"); return !isNaN(d) && d.toISOString().slice(0, 10) === s; };
+
+// The shape every reader answers: a discount_codes row read with `used_` (DISCOUNT_USED_SQL_) and `orgName_`.
+function parseDiscountCode_(row, today) {
+  const used = Number(row.used_) || 0, maxUses = Number(row.maxUses) || 1, active = !!Number(row.active);
+  const expiresOn = row.expiresOn || null;
+  const status = !active ? "off" : expiresOn && expiresOn < discountToday_(today) ? "expired" : used >= maxUses ? "usedUp" : "active";
+  return {
+    id: Number(row.id), code: row.code, kind: row.kind,
+    percent: row.kind === "percent" ? Number(row.percentBps) / 100 : null,
+    amount: row.kind === "amount" ? fromCents(row.amountCents) : null,
+    orgId: row.orgId || null, orgName: row.orgId ? (row.orgName_ || row.orgId) : "",
+    email: row.email || "", maxUses, oncePerEmail: !!Number(row.oncePerEmail), expiresOn, active,
+    note: row.note || "", createdAt: row.createdAt || "", createdBy: row.createdBy || "",
+    used, status, label: discountCodeLabel_(row.kind, row.percentBps, row.amountCents),
+  };
+}
+const DISCOUNT_CODE_SELECT_ = `SELECT c.*, ${DISCOUNT_USED_SQL_} AS used_, o.name AS orgName_ FROM discount_codes c LEFT JOIN orgs o ON o.orgId = c.orgId`;
+
+// Checks what the admin typed for a code. { value } — in cents and basis points, as stored — or { error } for the
+// person. One person's code (an email) is single use; a code for anyone needs its number of uses.
+export function normalizeDiscountCodeInput_(input) {
+  const p = input && typeof input === "object" ? input : {};
+  const rawCode = String(p.code == null ? "" : p.code).trim();
+  const code = rawCode ? normalizeDiscountCode_(rawCode) : "";
+  if (rawCode && !code) return { error: "A code is 3 to 32 letters, digits, - or _ (no spaces)." };
+  const kind = p.kind === "percent" || p.kind === "amount" ? p.kind : "";
+  if (!kind) return { error: "Choose percent off or an amount off." };
+  let percentBps = null, amountCents = null;
+  if (kind === "percent") {
+    const n = Number(p.percent);
+    if (p.percent === "" || p.percent == null || typeof p.percent === "boolean" || !Number.isFinite(n)) return { error: "Enter the percent off." };
+    percentBps = Math.round(n * 100);
+    if (Math.abs(n * 100 - percentBps) > 1e-6) return { error: "The percent off can have at most two decimals." };
+    if (percentBps < 1 || percentBps > 10000) return { error: "The percent off must be from 0.01 to 100." };
+  } else {
+    const n = Number(p.amount);
+    if (p.amount === "" || p.amount == null || typeof p.amount === "boolean" || !Number.isFinite(n)) return { error: "Enter the amount off." };
+    amountCents = toCents(n);
+    if (Math.abs(n * 100 - amountCents) > 1e-6) return { error: "The amount off can't have fractions of a cent." };
+    if (amountCents < 1 || amountCents > 1000000) return { error: "The amount off must be from $0.01 to $10,000." };
+  }
+  const orgId = p.orgId == null || p.orgId === "" ? null : String(p.orgId).slice(0, 100);
+  const rawEmail = String(p.email == null ? "" : p.email).trim();
+  const email = rawEmail ? normalizeCustomerEmail_(rawEmail) : "";
+  if (rawEmail && !email) return { error: "That email address doesn't look right." };
+  let maxUses = 1, oncePerEmail = 0;
+  if (!email) {
+    const n = Number(p.maxUses);
+    if (p.maxUses === "" || p.maxUses == null || typeof p.maxUses === "boolean" || !Number.isInteger(n) || n < 1 || n > DISCOUNT_CODE_MAX_USES) {
+      return { error: `Enter how many times the code can be used in all: a whole number from 1 to ${DISCOUNT_CODE_MAX_USES.toLocaleString("en-US")}.` };
+    }
+    maxUses = n;
+    oncePerEmail = p.oncePerEmail === true || p.oncePerEmail === 1 || p.oncePerEmail === "1" || p.oncePerEmail === "true" ? 1 : 0;
+  }
+  const exp = String(p.expiresOn == null ? "" : p.expiresOn).trim();
+  if (exp && !realDate_(exp)) return { error: "The expiry date isn't a date." };
+  const note = String(p.note == null ? "" : p.note).trim();
+  if (note.length > 200) return { error: "The note can be at most 200 characters." };
+  // Left out = unchanged on an edit, on for a new code.
+  const active = p.active === undefined || p.active === null ? undefined : !(p.active === false || p.active === 0 || p.active === "0" || p.active === "false");
+  return { value: { code, kind, percentBps, amountCents, orgId, email, maxUses, oncePerEmail, expiresOn: exp || null, note, active } };
+}
+
+// The Discount codes page's list, newest first. q matches the code, the email or the note; orgId = the codes that
+// work in that shop (its own and every-shop codes); status "active" | "off" | "expired" | "usedUp" | "all" (as
+// parseDiscountCode_ decides it, `today` the business's day). { codes, total }; empty without migrations/0115.
+export async function listDiscountCodes(db, { q = "", orgId = null, status = "all", today = "", limit = 50, offset = 0 } = {}) {
+  const day = discountToday_(today);
+  const where = [], binds = [];
+  if (orgId) { where.push("(c.orgId = ? OR c.orgId IS NULL)"); binds.push(String(orgId)); }
+  const st = status || "all";
+  const notExpired = "(c.expiresOn IS NULL OR c.expiresOn >= ?)";
+  if (st === "off") where.push("c.active = 0");
+  else if (st === "expired") { where.push("c.active = 1 AND c.expiresOn IS NOT NULL AND c.expiresOn < ?"); binds.push(day); }
+  else if (st === "usedUp") { where.push(`c.active = 1 AND ${notExpired} AND ${DISCOUNT_USED_SQL_} >= c.maxUses`); binds.push(day); }
+  else if (st === "active") { where.push(`c.active = 1 AND ${notExpired} AND ${DISCOUNT_USED_SQL_} < c.maxUses`); binds.push(day); }
+  else if (st !== "all") return { codes: [], total: 0 };
+  const needle = String(q == null ? "" : q).trim().slice(0, 200).trim();
+  if (needle) {
+    // instr on lowered text: what was typed is never a LIKE pattern.
+    const cols = ["c.code", "c.email", "c.note"];
+    where.push("(" + cols.map(col => `instr(lower(${col}), lower(?)) > 0`).join(" OR ") + ")");
+    for (let i = 0; i < cols.length; i++) binds.push(needle);
+  }
+  const lim = Math.min(200, Math.max(1, Math.floor(Number(limit)) || 50)), off = Math.max(0, Math.floor(Number(offset)) || 0);
+  const w = where.length ? " WHERE " + where.join(" AND ") : "";
+  try {
+    const [{ results }, totalRow] = await Promise.all([
+      db.prepare(`${DISCOUNT_CODE_SELECT_}${w} ORDER BY c.createdAt DESC, c.id DESC LIMIT ? OFFSET ?`).bind(...binds, lim, off).all(),
+      db.prepare(`SELECT count(*) AS n FROM discount_codes c${w}`).bind(...binds).first(),
+    ]);
+    return { codes: (results || []).map(r => parseDiscountCode_(r, day)), total: Number(totalRow && totalRow.n) || 0 };
+  } catch (e) { if (noDiscountCodesYet_(e)) return { codes: [], total: 0 }; throw e; }
+}
+
+// The most uses one code's window lists (the newest); usesTotal says how many there are in all.
+const DISCOUNT_USES_SHOWN_ = 500;
+// One code and the orders it was used on, newest first (a released use too — its order was voided or deleted).
+// null when there is no such code, or no migrations/0115 yet.
+export async function getDiscountCode(db, id, today) {
+  const n = Number(id);
+  if (!Number.isSafeInteger(n) || n < 1) return null;
+  try {
+    const row = await db.prepare(`${DISCOUNT_CODE_SELECT_} WHERE c.id = ?`).bind(n).first();
+    if (!row) return null;
+    const [{ results }, countRow] = await Promise.all([
+      db.prepare(`SELECT u.orderId, u.email, u.amountCents, u.usedAt, u.releasedAt, o.customerName, o.orgId
+                    FROM discount_code_uses u LEFT JOIN orders o ON o.orderId = u.orderId
+                   WHERE u.codeId = ? ORDER BY u.usedAt DESC, u.id DESC LIMIT ?`).bind(n, DISCOUNT_USES_SHOWN_).all(),
+      db.prepare("SELECT count(*) AS n FROM discount_code_uses WHERE codeId = ?").bind(n).first(),
+    ]);
+    return { ...parseDiscountCode_(row, today),
+      uses: (results || []).map(u => ({ orderId: u.orderId, email: u.email || "", amount: fromCents(u.amountCents), usedAt: u.usedAt,
+        releasedAt: u.releasedAt || null, customerName: u.customerName || "", orgId: u.orgId || null })),
+      usesTotal: Number(countRow && countRow.n) || 0 };
+  } catch (e) { if (noDiscountCodesYet_(e)) return null; throw e; }
+}
+
+const isUniqueError_ = (e) => /UNIQUE constraint failed/i.test(String(e && e.message));
+const discountCodeTaken_ = (code) => ({ error: `The code ${code} is already taken. Choose another.`, duplicate: true });
+async function discountOrgMissing_(db, orgId) {
+  return !!orgId && !(await db.prepare("SELECT 1 AS x FROM orgs WHERE orgId = ?").bind(orgId).first());
+}
+
+// Creates a code (no input.id; a blank code is made up) or changes one. Once a code has a use that counts, its code,
+// value, shop and who can use it are fixed — the orders that used it say what it was — and its uses in all can't go
+// below the uses it has. { code, before? } | { error } | { error, duplicate: true } | { error, notReady: true }.
+export async function saveDiscountCode(db, input, { actor = "", now = new Date().toISOString(), today = "" } = {}) {
+  const checked = normalizeDiscountCodeInput_(input);
+  if (checked.error) return checked;
+  const v = checked.value;
+  const id = input && input.id != null && input.id !== "" ? Number(input.id) : 0;
+  // NaN (an id that isn't a number) is not a create: it is a code that isn't there.
+  if (id !== 0 && (!Number.isSafeInteger(id) || id < 1)) return { error: DISCOUNT_CODE_NOT_FOUND_ };
+  try {
+    if (await discountOrgMissing_(db, v.orgId)) return { error: "That shop wasn't found." };
+    if (!id) {
+      // A made-up code that happens to be taken is made again; one the owner typed is theirs to change.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const code = v.code || generateDiscountCode_();
+        try {
+          const r = await db.prepare(`INSERT INTO discount_codes (code, kind, percentBps, amountCents, orgId, email, maxUses, oncePerEmail, expiresOn, active, note, createdAt, createdBy)
+                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .bind(code, v.kind, v.percentBps, v.amountCents, v.orgId, v.email, v.maxUses, v.oncePerEmail, v.expiresOn, v.active === false ? 0 : 1, v.note, now, String(actor || "").slice(0, 200)).run();
+          return { code: await getDiscountCode(db, r.meta.last_row_id, today) };
+        } catch (e) {
+          if (!isUniqueError_(e)) throw e;
+          if (v.code) return discountCodeTaken_(code);
+        }
+      }
+      return { error: "Couldn't make a code that isn't taken. Try again." };
+    }
+    const before = await getDiscountCode(db, id, today);
+    if (!before) return await discountCodeAbsent_(db);
+    const code = v.code || before.code;
+    const beforeBps = before.kind === "percent" ? Math.round(before.percent * 100) : null;
+    const beforeCents = before.kind === "amount" ? toCents(before.amount) : null;
+    const fixedChanged = code !== before.code || v.kind !== before.kind || v.percentBps !== beforeBps || v.amountCents !== beforeCents
+      || (v.orgId || null) !== (before.orgId || null) || v.email !== before.email || (!v.email && !!v.oncePerEmail !== before.oncePerEmail);
+    if (fixedChanged && before.used > 0) return { error: DISCOUNT_CODE_LOCKED_ };
+    if (v.maxUses < before.used) return { error: `This code has been used ${before.used} times, so it needs at least ${before.used} uses in all.` };
+    const active = v.active === undefined ? (before.active ? 1 : 0) : (v.active ? 1 : 0);
+    // Guarded by the uses as they are NOW, so a checkout claiming a use meanwhile can't be undercut.
+    let r;
+    try {
+      r = await db.prepare(`UPDATE discount_codes SET code=?, kind=?, percentBps=?, amountCents=?, orgId=?, email=?, maxUses=?, oncePerEmail=?, expiresOn=?, active=?, note=?
+                             WHERE id = ? AND (? = 0 OR NOT EXISTS (SELECT 1 FROM discount_code_uses u WHERE u.codeId = discount_codes.id AND u.releasedAt IS NULL))
+                               AND ? >= (SELECT count(*) FROM discount_code_uses u WHERE u.codeId = discount_codes.id AND u.releasedAt IS NULL)`)
+        .bind(code, v.kind, v.percentBps, v.amountCents, v.orgId, v.email, v.maxUses, v.oncePerEmail, v.expiresOn, active, v.note,
+          id, fixedChanged ? 1 : 0, v.maxUses).run();
+    } catch (e) { if (isUniqueError_(e)) return discountCodeTaken_(code); throw e; }
+    if (!(r && r.meta && Number(r.meta.changes) > 0)) {
+      const again = await getDiscountCode(db, id, today);
+      if (!again) return { error: DISCOUNT_CODE_NOT_FOUND_ };
+      return { error: fixedChanged && again.used > 0 ? DISCOUNT_CODE_LOCKED_ : `This code has been used ${again.used} times, so it needs at least ${again.used} uses in all.` };
+    }
+    return { code: await getDiscountCode(db, id, today), before };
+  } catch (e) { if (noDiscountCodesYet_(e)) return { error: DISCOUNT_CODES_NOT_READY_, notReady: true }; throw e; }
+}
+
+// One single-use code for each email address in a list (an array, or text split on commas, semicolons and white
+// space): the same value, shop, expiry and note for all. At most DISCOUNT_CODES_BULK_MAX addresses; one already in
+// the list, or not an email address, is skipped with the reason. The codes are written in one batch; a made-up code
+// that is taken already is made again for another try.
+// { codes: [{ email, code }], skipped: [{ email, reason }] } | { error } | { error, notReady: true }.
+export async function createDiscountCodesForEmails(db, p, { actor = "", now = new Date().toISOString() } = {}) {
+  p = p && typeof p === "object" ? p : {};
+  const prefix = String(p.prefix == null ? "" : p.prefix).trim().toUpperCase();
+  if (prefix && !/^[A-Z0-9_-]{1,12}$/.test(prefix)) return { error: "A prefix can be up to 12 letters, digits, - or _." };
+  const checked = normalizeDiscountCodeInput_({ kind: p.kind, percent: p.percent, amount: p.amount, orgId: p.orgId, expiresOn: p.expiresOn, note: p.note, maxUses: 1 });
+  if (checked.error) return checked;
+  const v = checked.value;
+  const raw = (Array.isArray(p.emails) ? p.emails.map(e => String(e == null ? "" : e)) : String(p.emails == null ? "" : p.emails).split(/[\s,;]+/))
+    .map(s => s.trim()).filter(Boolean);
+  if (!raw.length) return { error: "Enter at least one email address." };
+  const emails = [], skipped = [], seen = new Set();
+  for (const s of raw.slice(0, DISCOUNT_CODES_BULK_MAX * 4)) {
+    const e = normalizeCustomerEmail_(s);
+    if (!e) skipped.push({ email: s.slice(0, 200), reason: "Not an email address." });
+    else if (seen.has(e)) skipped.push({ email: e, reason: "Already in the list." });
+    else { seen.add(e); emails.push(e); }
+  }
+  if (raw.length > DISCOUNT_CODES_BULK_MAX * 4 || emails.length > DISCOUNT_CODES_BULK_MAX) return { error: `At most ${DISCOUNT_CODES_BULK_MAX} email addresses at a time.` };
+  const by = String(actor || "").slice(0, 200);
+  const made = new Map();
+  try {
+    if (await discountOrgMissing_(db, v.orgId)) return { error: "That shop wasn't found." };
+    let pending = emails.slice();
+    for (let round = 0; round < 4 && pending.length; round++) {
+      const used = new Set(), tries = pending.map(email => {
+        let code; do { code = generateDiscountCode_(prefix); } while (used.has(code));
+        used.add(code);
+        return { email, code };
+      });
+      // OR IGNORE: a code taken already (by another code, or one made meanwhile) inserts nothing — changes 0 — and
+      // that address gets a new code in the next round, rather than the whole list failing.
+      const results = await db.batch(tries.map(t => db.prepare(`INSERT OR IGNORE INTO discount_codes (code, kind, percentBps, amountCents, orgId, email, maxUses, oncePerEmail, expiresOn, active, note, createdAt, createdBy)
+                                                                VALUES (?,?,?,?,?,?,1,0,?,1,?,?,?)`)
+        .bind(t.code, v.kind, v.percentBps, v.amountCents, v.orgId, t.email, v.expiresOn, v.note, now, by)));
+      pending = [];
+      tries.forEach((t, i) => { if (Number(results[i] && results[i].meta && results[i].meta.changes) > 0) made.set(t.email, t.code); else pending.push(t.email); });
+    }
+    for (const email of pending) skipped.push({ email, reason: "Couldn't make a code that isn't taken. Try this address again." });
+  } catch (e) { if (noDiscountCodesYet_(e)) return { error: DISCOUNT_CODES_NOT_READY_, notReady: true }; throw e; }
+  return { codes: emails.filter(e => made.has(e)).map(email => ({ email, code: made.get(email) })), skipped };
+}
+
+// Switches a code off (or on again). { ok, code, wasActive } | { error } | { error, notReady: true }.
+export async function setDiscountCodeActive(db, id, active) {
+  const n = Number(id);
+  if (!Number.isSafeInteger(n) || n < 1) return { error: DISCOUNT_CODE_NOT_FOUND_ };
+  try {
+    const row = await db.prepare("SELECT code, active FROM discount_codes WHERE id = ?").bind(n).first();
+    if (!row) return { error: DISCOUNT_CODE_NOT_FOUND_ };
+    await db.prepare("UPDATE discount_codes SET active = ? WHERE id = ?").bind(active ? 1 : 0, n).run();
+    return { ok: true, code: row.code, wasActive: !!Number(row.active) };
+  } catch (e) { if (noDiscountCodesYet_(e)) return { error: DISCOUNT_CODES_NOT_READY_, notReady: true }; throw e; }
+}
+
+// Deletes a code that has never been used — not even by an order voided since, whose record names it. A used code
+// is switched off instead. { ok, before } | { error } | { error, notReady: true }.
+export async function deleteDiscountCode(db, id) {
+  const n = Number(id);
+  if (!Number.isSafeInteger(n) || n < 1) return { error: DISCOUNT_CODE_NOT_FOUND_ };
+  try {
+    const before = await getDiscountCode(db, n);
+    if (!before) return await discountCodeAbsent_(db);
+    // Guarded in the same statement, so a checkout claiming a use meanwhile can't leave a use without its code.
+    const r = await db.prepare("DELETE FROM discount_codes WHERE id = ? AND NOT EXISTS (SELECT 1 FROM discount_code_uses WHERE codeId = ?)").bind(n, n).run();
+    if (!(r && r.meta && Number(r.meta.changes) > 0)) {
+      return (await db.prepare("SELECT 1 AS x FROM discount_codes WHERE id = ?").bind(n).first())
+        ? { error: "This code has been used on an order, so it can't be deleted. Switch it off instead." } : { error: DISCOUNT_CODE_NOT_FOUND_ };
+    }
+    return { ok: true, before };
+  } catch (e) { if (noDiscountCodesYet_(e)) return { error: DISCOUNT_CODES_NOT_READY_, notReady: true }; throw e; }
+}
+
+// What a code takes off goods of subtotalCents, in cents: a percent rounded to the cent, an amount no more than the
+// goods. `code` is a discount_codes row (percentBps / amountCents) or a parsed code (percent / amount).
+export function discountForCode_(code, subtotalCents) {
+  const sub = Math.max(0, Math.round(Number(subtotalCents) || 0));
+  if (!code) return 0;
+  if (code.kind === "percent") {
+    const bps = code.percentBps != null ? Number(code.percentBps) : Math.round(Number(code.percent) * 100);
+    return Math.min(sub, Math.max(0, Math.round(sub * (Number(bps) || 0) / 10000)));
+  }
+  const cents = code.amountCents != null ? Number(code.amountCents) : toCents(code.amount);
+  return Math.min(sub, Math.max(0, Number(cents) || 0));
+}
+
+// Why a code can't be used, from its row (read with used_ and, with an email, usedByEmail_) — "" when it can.
+function discountRefusal_(row, { orgId, email, today }) {
+  if (!row) return DISCOUNT_CODE_INVALID_EMAIL_;
+  if (row.email) {
+    if (!email) return "Enter your email address first — this code is for one person.";
+    if (email !== row.email) return DISCOUNT_CODE_INVALID_EMAIL_;
+  }
+  if (!Number(row.active)) return DISCOUNT_CODE_INVALID_;
+  if (row.orgId && row.orgId !== String(orgId || "")) return DISCOUNT_CODE_INVALID_;
+  if (row.expiresOn && row.expiresOn < discountToday_(today)) return "This code has expired.";
+  if ((Number(row.used_) || 0) >= Number(row.maxUses)) return Number(row.maxUses) === 1 ? "This code has already been used." : "This code has reached its limit.";
+  if (Number(row.oncePerEmail) && email && Number(row.usedByEmail_) > 0) return "You've already used this code.";
+  return "";
+}
+async function discountCodeRow_(db, { code, id, email }) {
+  return db.prepare(`SELECT c.*, ${DISCOUNT_USED_SQL_} AS used_,
+                            (SELECT count(*) FROM discount_code_uses u WHERE u.codeId = c.id AND u.releasedAt IS NULL AND u.email = ?) AS usedByEmail_
+                       FROM discount_codes c WHERE ${id ? "c.id = ?" : "c.code = ?"}`).bind(email || "", id || code).first();
+}
+
+// Is this code good for this cart, in this shop, for this email (trimmed, lower-case; "" = not typed yet)?
+// subtotal (dollars) = the goods as priced. { ok: true, code: { id, code, label, kind, percent, amount }, discount }
+// or { ok: false, reason } — reasons a customer reads, which never give away a code's email address or its uses.
+export async function checkDiscountCode(db, { code, orgId, email, subtotal, today } = {}) {
+  const c = normalizeDiscountCode_(code);
+  const em = normalizeCustomerEmail_(email);
+  if (!c) return { ok: false, reason: DISCOUNT_CODE_INVALID_EMAIL_ };
+  let row;
+  try { row = await discountCodeRow_(db, { code: c, email: em }); }
+  catch (e) { if (noDiscountCodesYet_(e)) return { ok: false, reason: DISCOUNT_CODE_INVALID_EMAIL_, notReady: true }; throw e; }
+  const reason = discountRefusal_(row, { orgId, email: em, today });
+  if (reason) return { ok: false, reason };
+  const p = parseDiscountCode_(row, today);
+  return { ok: true, code: { id: p.id, code: p.code, label: p.label, kind: p.kind, percent: p.percent, amount: p.amount },
+    discount: fromCents(discountForCode_(row, toCents(subtotal))) };
+}
+
+// Takes one use of a code for an order, just before the order is inserted. ONE conditional statement: the code is
+// on, has a use left, is this email's (one person's code) and — once per email — not used by it yet; so two orders
+// racing for the last use can't both have it. Expiry and the shop are the caller's check (checkDiscountCode).
+// The same order trying again: its released use (the insert failed, the use was given back) is taken back — the
+// unique order index allows one row per order, so the UPDATE is simpler than a second row — and its live use
+// for the same code answers ok again. { ok: true } | { ok: false, reason }.
+export async function claimDiscountCode(db, { codeId, orderId, email, amountCents, now = new Date().toISOString() } = {}) {
+  const id = Number(codeId), oid = String(orderId == null ? "" : orderId);
+  const em = normalizeCustomerEmail_(email);
+  if (!Number.isSafeInteger(id) || id < 1 || !oid) return { ok: false, reason: DISCOUNT_CODE_INVALID_ };
+  const cents = Math.max(0, Math.round(Number(amountCents) || 0));
+  try {
+    const r = await db.prepare(`INSERT INTO discount_code_uses (codeId, orderId, email, amountCents, usedAt)
+        SELECT c.id, ?, ?, ?, ? FROM discount_codes c
+         WHERE c.id = ? AND c.active = 1 AND (c.email = '' OR c.email = ?)
+           AND ${DISCOUNT_USED_SQL_} < c.maxUses
+           AND (c.oncePerEmail = 0 OR NOT EXISTS (SELECT 1 FROM discount_code_uses u WHERE u.codeId = c.id AND u.releasedAt IS NULL AND u.email = ?))
+        ON CONFLICT(orderId) DO UPDATE SET codeId = excluded.codeId, email = excluded.email, amountCents = excluded.amountCents,
+                                           usedAt = excluded.usedAt, releasedAt = NULL
+         WHERE discount_code_uses.releasedAt IS NOT NULL`)
+      .bind(oid, em, cents, now, id, em, em).run();
+    if (r && r.meta && Number(r.meta.changes) > 0) return { ok: true };
+    const mine = await db.prepare("SELECT codeId FROM discount_code_uses WHERE orderId = ? AND releasedAt IS NULL").bind(oid).first();
+    if (mine) return Number(mine.codeId) === id ? { ok: true, already: true } : { ok: false, reason: "This order already has a discount code." };
+    const row = await discountCodeRow_(db, { id, email: em });
+    // Refused: say why as checkDiscountCode would (the shop and expiry aside — they were checked just before).
+    const reason = row ? discountRefusal_(row, { orgId: row.orgId, email: em, today: "0000-00-00" }) : DISCOUNT_CODE_INVALID_;
+    return { ok: false, reason: reason || (Number(row.oncePerEmail) ? "You've already used this code." : "This code has reached its limit.") };
+  } catch (e) { if (noDiscountCodesYet_(e)) return { ok: false, reason: DISCOUNT_CODE_INVALID_, notReady: true }; throw e; }
+}
+
+// Gives an order's use of a code back (its order voided or deleted, or never written): the row is kept, marked
+// released, and no longer counts. { ok, code } — the code given back ("" when there was none, or no 0115 yet).
+export async function releaseDiscountCodeUse(db, orderId, now = new Date().toISOString()) {
+  const oid = String(orderId == null ? "" : orderId);
+  if (!oid) return { ok: true, code: "" };
+  try {
+    const live = await db.prepare(`SELECT u.id, c.code FROM discount_code_uses u JOIN discount_codes c ON c.id = u.codeId
+                                    WHERE u.orderId = ? AND u.releasedAt IS NULL`).bind(oid).first();
+    if (!live) return { ok: true, code: "" };
+    await db.prepare("UPDATE discount_code_uses SET releasedAt = ? WHERE id = ? AND releasedAt IS NULL").bind(now, live.id).run();
+    return { ok: true, code: live.code || "" };
+  } catch (e) { if (noDiscountCodesYet_(e)) return { ok: true, code: "" }; throw e; }
+}
+
+// { orderId: "SAVE10" } for the orders a loader just read that have a live use of a code; {} without 0115.
+async function discountCodesByOrder_(db, sub, binds) {
+  try {
+    const { results } = await db.prepare(`SELECT u.orderId, c.code FROM discount_code_uses u JOIN discount_codes c ON c.id = u.codeId
+                                           WHERE u.orderId IN (${sub}) AND u.releasedAt IS NULL`).bind(...binds).all();
+    const out = byId_();
+    for (const r of results || []) out[r.orderId] = r.code || "";
+    return out;
+  } catch (e) { if (noDiscountCodesYet_(e)) return byId_(); throw e; }
+}
+
 // Atomic insert: order header + all items in one batch.
 // opts.fillFromStock (the storefront and local sales, migrations/0060): a line for a stocked product +
 // size is filled from the shop's finished stock when enough is AVAILABLE (on hand less set aside) — a
@@ -11858,6 +12275,19 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   if (order.source) { extraCols.push("source", "externalOrderId"); extraBinds.push(order.source, order.externalOrderId || null); }
   // Its customer (migrations/0108), named only when there is one, so an older database still takes the order.
   if (customer.id) { extraCols.push("customerId"); extraBinds.push(customer.id); }
+  // order.discount = { cents, note }: a discount code's (migrations/0115), written with the order rather than after it.
+  // Stored as setOrderDiscount stores one, with the tax share recomputeOrderTax_ would give it: the discount, no more
+  // than the goods, reduces tax only in proportion to the taxable goods it's taken off.
+  const discountCents = order.discount ? Math.min(subtotalCents, Math.max(0, Math.round(Number(order.discount.cents) || 0))) : 0;
+  let discountTaxCents = 0;
+  if (discountCents > 0) {
+    const taxableGross = lines.reduce((sum, l, n) => sum + (taxed[n].taxable ? l.lineCents : 0), 0);
+    // All the goods taken off: all their tax, as recomputeOrderTax_ does.
+    discountTaxCents = discountCents >= subtotalCents ? taxed.reduce((sum, t) => sum + t.taxCents, 0)
+      : taxOn_(Math.round(discountCents * taxableGross / subtotalCents), lineRateBps, mode);
+    extraCols.push("discountCents", "discountNote", "discountTaxCents");
+    extraBinds.push(discountCents, String(order.discount.note || "").slice(0, 300), discountTaxCents);
+  }
   // What the customer owes: goods, shipping and the rush fee, plus the tax on the goods and on the fee when tax is
   // added on top. Stored on the order and answered below — one figure, so the two can't differ.
   const totalCents = subtotalCents + shippingCents + rushCents + taxAddedCents + (mode === "exclusive" ? rushTaxCents : 0);
@@ -11922,8 +12352,15 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   // tax in it — the rush fee and its tax counted in both, as getOrderById reads the same order back (the storefront
   // shows this total and asks for it by Venmo or Zelle; a repeated submit is answered from getOrderById).
   const taxCents = taxed.reduce((sum, t) => sum + t.taxCents, 0);
+  if (discountCents > 0) {
+    // With a discount, what's owed is orderAmounts' (the stored totalCents is before any discount, as always).
+    const amounts = orderAmounts({ itemsCents: subtotalCents, itemsTaxCents: taxCents, shippingCents, discountCents, discountTaxCents, taxMode: mode,
+      rushCents, rushTaxCents });
+    return { taxMode: mode, subtotal: fromCents(subtotalCents), shippingCost: fromCents(shippingCents), salesTax: fromCents(amounts.taxCents),
+      discount: fromCents(discountCents), total: fromCents(amounts.owedCents) };
+  }
   return { taxMode: mode, subtotal: fromCents(subtotalCents), shippingCost: fromCents(shippingCents), salesTax: fromCents(taxCents + rushTaxCents),
-    total: fromCents(totalCents) };
+    discount: 0, total: fromCents(totalCents) };
 }
 
 // Kept for callers that mean "this order is paid": records the outstanding
@@ -12516,12 +12953,15 @@ export async function updateOrderShipping(db, orderId, { shippingAddress, totalW
 // Updates customer-facing fields on an order. Only non-null values in `updates`
 // are written. phone/addressLine merge into the existing shippingAddress object.
 // Permanently removes an order and all related rows. Irreversible.
+// A discount code it used is given back (migrations/0115): { discountCode } names it ("" = none).
 export async function deleteOrder(db, orderId) {
   await db.batch([
     db.prepare("DELETE FROM order_items       WHERE orderId=?").bind(orderId),
     db.prepare("DELETE FROM design_verifications WHERE orderId=?").bind(orderId),
     db.prepare("DELETE FROM orders             WHERE orderId=?").bind(orderId),
   ]);
+  const released = await releaseDiscountCodeUse(db, orderId);
+  return { discountCode: released.code || "" };
 }
 
 export async function updateOrderCustomerInfo(db, orderId, updates) {
@@ -13251,6 +13691,9 @@ export async function voidOrder(db, orderId, reason) {
   await db.prepare("UPDATE orders SET voidedAt = ?, voidReason = ? WHERE orderId = ? AND voidedAt IS NULL")
     .bind(new Date().toISOString(), String(reason || "").slice(0, 300), orderId).run();
   await returnFinishedStock_(db, orderId, null);   // pieces already pulled from finished stock go back (0060)
+  // A discount code it used is given back (migrations/0115): the customer who never paid can use it again.
+  const released = await releaseDiscountCodeUse(db, orderId);
+  return { discountCode: released.code || "" };
 }
 
 // Voids a mistaken payment-ledger entry: stays visible, excluded from totals.
@@ -15343,6 +15786,7 @@ function parseOrder_(row, items, payments, labels) {
     payOnDelivery: !!row.payOnDelivery,             // migrations/0105: the steps go on before it's paid
     discountAmount,
     discountNote: row.discountNote || "",
+    discountCode: "",   // the code it used (migrations/0115), filled in by the loaders; "" = none, or given back
     discountTax: fromCents(Number(row.discountTaxCents) || 0),   // the tax inside the discount (inclusive prices)
     taxExempt: !!row.taxExempt,
     voidedAt: row.voidedAt || "",

@@ -683,3 +683,31 @@
     .cust-field input, .cust-field textarea{font-size:16px;}
     .cust-actions .admin-btn, .cust-pager .admin-btn{flex:1 1 auto; min-height:44px;}
   }
+  /* ---- Discount codes (admin.js renderDiscountCodes, migrations/0115): the list and its two windows. Built from the
+     Customers page's pieces (.cust-field, .cust-table, .cust-tag…); the windows sit outside .admin-panel, so every
+     colour has a plain fallback. ---- */
+  .dc-filter{flex:0 1 180px;}
+  .dc-bar-btns{display:flex; flex-wrap:wrap; gap:8px;}
+  .dc-code{font-family:'IBM Plex Mono', ui-monospace, monospace; letter-spacing:.02em;}
+  input.dc-code{text-transform:uppercase;}
+  .dc-code-row{display:flex; gap:8px; align-items:stretch;}
+  .dc-code-row input{flex:1 1 auto;}
+  .dc-hint{font-size:12px; margin:-6px 0 0;}
+  .dc-sub{display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; font-size:13px; color:var(--ink-soft,#666);}
+  .dc-locked{font-size:13px; line-height:1.5; padding:8px 12px; border:1px solid #f3d19c; border-left:4px solid #c77700; border-radius:6px; background:#fffaf0; color:#5c3a00;}
+  .dc-who{display:flex; flex-direction:column; gap:2px;}
+  .dc-indent{margin:0 0 6px 26px;}
+  .dc-uses-field{max-width:180px;}
+  .dc-h{font-size:14px; font-weight:700; margin:18px 0 8px; color:#1a1a1a;}
+  .dc-bulk-list{max-height:280px; overflow-y:auto; margin-bottom:12px;}
+  .dc-form [hidden], .dc-form[hidden], #dcBulkDone[hidden]{display:none;}
+  .dc-delete{margin-right:auto;}
+  .dc-st-active{background:#e3f2e6; color:#1b5e20;}
+  .dc-st-off{background:#f1f1f1; color:#777;}
+  .dc-st-expired, .dc-st-usedUp{background:#fff4e0; color:#8a4b00;}
+  @media(max-width:760px){
+    .dc-filter{flex:1 1 140px;}
+    .dc-bar-btns .admin-btn, .dc-code-row .admin-btn{flex:1 1 auto; min-height:44px;}
+    .dc-indent{margin-left:12px;}
+    .dc-uses-field{max-width:none;}
+  }

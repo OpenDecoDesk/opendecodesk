@@ -756,6 +756,19 @@ it's saved. It is never one of the shop's "unpublished changes", and Discard cha
 still owe it; recording a payout is on the same page. See
 [operations.md](operations.md#fundraising-the-report-and-payouts).
 
+## Discount codes at checkout
+
+A shop's checkout shows a **Discount code** box, above the totals, only while some code can be used
+there: switched on, not used up and not past its last day, made for that shop or for all shops — and the
+Discount codes feature is on. With none, there is no box. This is worked out on every visit, so a new
+code (or one switched off) shows at once, without [Publish](#publish).
+
+The customer types the code and presses **Apply**; the totals show the discount ("Discount (SAVE10)
+−$4.00") and the total less it. A code for one person needs the email typed first. Changing the cart
+checks the code again. The order is checked once more when it is placed, and the confirmation and the
+order-received email show the discount. Making codes is on the Discount codes page
+([operations.md](operations.md#discount-codes)).
+
 ## Rush orders
 
 A customer can ask for an order to be rushed. What it costs is a rule, set in Global settings → **Rush

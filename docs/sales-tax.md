@@ -152,6 +152,15 @@ not a separate charge.
   or whether the group's share changes what you owe in your state, is a question for your
   accountant: the app only records it.
 
+## Discount codes
+
+A discount code ([operations.md](operations.md#discount-codes)) is an **order discount**, exactly like one
+you type on an order: the tax is worked out as for any discount. Its share of the tax comes off with
+it — the part of the discount that falls on taxable goods, in proportion — so with prices that include
+tax the tax collected is less, and with tax added on top the tax added is less. It never comes off
+shipping or the rush fee. The cart's tax estimate at checkout shrinks the same way; the order's real
+figure is the server's.
+
 ## The reports
 
 **Reports → Sales Tax Report**, for any range of months:

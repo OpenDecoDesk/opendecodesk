@@ -741,6 +741,8 @@ async function adminRoute() {
     await renderQuotes(app, qid);
     return;
   }
+  // Discount codes (migrations/0115): one list; a code opens in a window over it.
+  if (raw === "discounts") { await renderDiscountCodes(app); return; }
   if (raw === "packages")  { renderPackageSizes(app); return; }
   if (raw === "orphans")   { renderOrphanImages(app); return; }
   if (raw === "vendors")   { renderVendorIntegrations(app); return; }
@@ -2210,9 +2212,10 @@ const ADMIN_PAGE_FEATURE = {
   expenses: "bookkeeping", money: "bookkeeping", reconcile: "bookkeeping", books: "bookkeeping", accountviewer: "bookkeeping", shoprate: "bookkeeping",
   packages: "shipping",
   quotes: "quotes",
+  discounts: "discounts",
 };
 // Names for the "turned off" page; replaced by the server's own list once Global settings has loaded it.
-let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products", quotes: "Quotes" };
+let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products", quotes: "Quotes", discounts: "Discount codes" };
 function adminFeatureOn_(key){ return typeof featureOn_ !== "function" || featureOn_(key); }
 function adminPageFeature_(hash){ return ADMIN_PAGE_FEATURE[String(hash || "").replace(/^#\/?/, "").split("/")[0]] || ""; }
 function adminPageOn_(hash){ const f = adminPageFeature_(hash); return !adminDesktopHides_(hash) && (!f || adminFeatureOn_(f)); }
@@ -2595,6 +2598,7 @@ function adminCanOpenPage_(hash){
   if (page === "customers") return adminCanCustomers_();
   if (page === "quotes") return adminCanQuotes_();   // the same, for Quotes (migrations/0109)
   if (page === "fundraising") return adminCanFundraising_();   // and for Fundraising (migrations/0110)
+  if (page === "discounts") return adminCanDiscounts_();       // and for Discount codes (migrations/0115)
   return adminItemOn_(adminPageItem_(hash));
 }
 // May this user open Reports → Fundraising (reports.fundraising, read)?
@@ -2603,6 +2607,8 @@ function adminCanFundraising_(){ return adminCan_("reports.fundraising", "read")
 function adminCanCustomers_(){ return adminCan_("customers.records", "read"); }
 // May this user open Quotes and follow an order's "From quote" link (quotes.estimates, read)?
 function adminCanQuotes_(){ return adminCan_("quotes.estimates", "read"); }
+// May this user open Discount codes (discounts.codes, read)? Making and changing codes needs edit (the page's buttons).
+function adminCanDiscounts_(){ return adminCan_("discounts.codes", "read"); }
 // The menu without the pages of switched-off features or the role's hidden items (a group left empty disappears).
 function adminNavGroups_(){
   return ADMIN_NAV_GROUPS.map(g => ({ label: g.label, items: g.items.filter(it => !Array.isArray(it) || (adminPageOn_(it[0]) && adminCanOpenPage_(it[0]))) }))
@@ -2613,7 +2619,7 @@ function adminNavGroups_(){
 function adminCanOpen_(hash){ return adminPageOn_(hash) && adminCanOpenPage_(hash); }
 // Where someone lands when the address points at a page they can't open: the first one they can.
 function adminFirstPage_(){
-  const first = ["home", "orders", "customers", "quotes", "runorder", "runtransfer", "catalog"].find(h => adminCanOpen_(h));
+  const first = ["home", "orders", "customers", "quotes", "discounts", "runorder", "runtransfer", "catalog"].find(h => adminCanOpen_(h));
   if (first) return first;
   const g = adminNavGroups_().map(g => g.items.find(Array.isArray)).find(Boolean);
   return g ? g[0] : "password";
@@ -2686,7 +2692,7 @@ function adminNavActive_(){
   if(raw.startsWith("catalog")) return "catalog";
   // A page with a shop or record in its address belongs to its menu entry (#designs/<shop>/3 → Designs).
   const top = raw.split("/")[0];
-  if(top === "designs" || top === "graphics" || top === "maintenance" || top === "setup" || top === "customers" || top === "quotes") return top;
+  if(top === "designs" || top === "graphics" || top === "maintenance" || top === "setup" || top === "customers" || top === "quotes" || top === "discounts") return top;
   if(top === "wizard") return "setup";
   return raw;
 }
@@ -2794,6 +2800,8 @@ function renderAdminNav(){
   if (adminCanOpen_("customers")) top.splice(Math.max(top.findIndex(it => it[0] === "orders"), top.findIndex(it => it[0] === "home")) + 1, 0, ["customers", "Customers"]);
   // Quotes (migrations/0109) right after Customers — or where Customers would be, for a role without it.
   if (adminCanOpen_("quotes")) top.splice(Math.max(top.findIndex(it => it[0] === "customers"), top.findIndex(it => it[0] === "orders"), top.findIndex(it => it[0] === "home")) + 1, 0, ["quotes", "Quotes"]);
+  // Discount codes (migrations/0115) right after Quotes — or where Quotes would be, for a role without it.
+  if (adminCanOpen_("discounts")) top.splice(Math.max(...["quotes", "customers", "orders", "home"].map(h => top.findIndex(it => it[0] === h))) + 1, 0, ["discounts", "Discount codes"]);
   const current = top.concat(...ADMIN_NAV_GROUPS.map(g => g.items.filter(Array.isArray))).find(it => it[0] === active);
   const currentLabel = current ? current[1] : "";
   const sheetItem = (it) => Array.isArray(it)
@@ -6005,7 +6013,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         ${idx === 0 ? `
           <td rowspan="${o.items.length}">${escapeHtml(o.paymentMethod || "—")}</td>
           <td rowspan="${o.items.length}" data-paid-td>${paidLabel_(o)}</td>
-          <td rowspan="${o.items.length}" data-discount-td style="text-align:right;white-space:nowrap;">${o.discountAmount > 0 ? `<span style="color:#166534;">−$${Number(o.discountAmount).toFixed(2)}</span>${o.discountNote ? `<br><span style="font-size:11px;color:var(--ink-soft);">${escapeHtml(o.discountNote)}</span>` : ""}` : "—"}</td>
+          <td rowspan="${o.items.length}" data-discount-td style="text-align:right;white-space:nowrap;">${o.discountAmount > 0 ? `<span style="color:#166534;">−$${Number(o.discountAmount).toFixed(2)}</span>${orderDiscountNote_(o) ? `<br><span style="font-size:11px;color:var(--ink-soft);">${escapeHtml(orderDiscountNote_(o))}</span>` : ""}` : "—"}</td>
           <td rowspan="${o.items.length}" data-balance-td style="text-align:right;white-space:nowrap;font-weight:600;color:${o.balanceDue > 0.005 ? "#b03a2e" : "var(--ink-soft)"};">${o.balanceDue > 0.005 ? `$${Number(o.balanceDue).toFixed(2)}` : o.amountReceived > 0 ? "Settled" : "—"}</td>
           <td rowspan="${o.items.length}">${emailBadge(o.receivedEmailAt)}</td>
           <td rowspan="${o.items.length}">${emailBadge(o.confirmedEmailAt)}</td>
@@ -6088,7 +6096,7 @@ function orderCardHtml_(o, org, verif, showShop){
     </li>`;
   }).join("");
   const moneyLines = [
-    o.discountAmount > 0 ? `<div>Discount <span class="oc-num" style="color:#166534;">−${money(o.discountAmount)}</span>${o.discountNote ? ` <span class="oc-dim">${escapeHtml(o.discountNote)}</span>` : ""}</div>` : "",
+    o.discountAmount > 0 ? `<div>Discount <span class="oc-num" style="color:#166534;">−${money(o.discountAmount)}</span>${orderDiscountNote_(o) ? ` <span class="oc-dim">${escapeHtml(orderDiscountNote_(o))}</span>` : ""}</div>` : "",
     (o.shippingMethod || o.shippingCost) ? `<div>Shipping: ${shippingMethodCell(o)}</div>` : "",
     o.rushRequested ? `<div>Rush fee <span class="oc-num">${o.rushFeePending ? "to follow" : money(o.rushFee)}</span></div>` : "",
     o.balanceDue > 0.005 ? `<div style="color:#b03a2e;font-weight:600;">Balance due ${money(o.balanceDue)}</div>` : "",
@@ -6692,7 +6700,7 @@ async function showPaymentsModal(orgId, orderId) {
           <tr><td style="padding:3px 0;color:#666;">Subtotal</td><td style="padding:3px 0;text-align:right;">$${Number(o.itemsSubtotal ?? o.subtotal).toFixed(2)}</td></tr>
           ${o.shippingCost > 0 ? `<tr><td style="padding:3px 0;color:#666;">Shipping</td><td style="padding:3px 0;text-align:right;">$${Number(o.shippingCost).toFixed(2)}</td></tr>` : ""}
           ${o.rushRequested ? `<tr><td style="padding:3px 0;color:#666;">Rush fee</td><td style="padding:3px 0;text-align:right;">${o.rushFeePending ? "to follow" : "$" + Number(o.rushFee || 0).toFixed(2)}</td></tr>` : ""}
-          ${discountAmount > 0 ? `<tr><td style="padding:3px 0;color:#166534;">Discount${o.discountNote ? " (" + escapeHtml(o.discountNote) + ")" : ""}</td><td style="padding:3px 0;text-align:right;color:#166534;">−$${discountAmount.toFixed(2)}</td></tr>` : ""}
+          ${discountAmount > 0 ? `<tr><td style="padding:3px 0;color:#166534;">Discount${orderDiscountNote_(o) ? " (" + escapeHtml(orderDiscountNote_(o)) + ")" : ""}</td><td style="padding:3px 0;text-align:right;color:#166534;">−$${discountAmount.toFixed(2)}</td></tr>` : ""}
           ${o.taxMode === "exclusive" && !o.taxExempt ? `<tr><td style="padding:3px 0;color:#666;">Sales tax (${Number(o.taxRate || 0)}%) — added to the prices</td><td style="padding:3px 0;text-align:right;">$${Number(o.salesTax || 0).toFixed(2)}</td></tr>` : ""}
           <tr style="font-weight:600;border-top:1px solid #e5e7eb;"><td style="padding:4px 0;">Amount due</td><td style="padding:4px 0;text-align:right;">$${effectiveTotal.toFixed(2)}</td></tr>
           ${o.taxMode === "exclusive" && !o.taxExempt ? "" : `<tr><td style="padding:2px 0;color:#666;font-size:12px;">${o.taxExempt ? "Tax-exempt order" : "Includes sales tax (" + Number(o.taxRate || 0) + "%)"}</td><td style="padding:2px 0;text-align:right;color:#666;font-size:12px;">${o.taxExempt ? "—" : "$" + Number(o.salesTax || 0).toFixed(2)}</td></tr>`}
@@ -7064,7 +7072,7 @@ function updateOrderTableRow(orgId, orderId, updated) {
   // Update discount cell
   document.querySelectorAll(`tr[data-order="${CSS.escape(orderId)}"] td[data-discount-td]`).forEach(td => {
     td.innerHTML = updated.discountAmount > 0
-      ? `<span style="color:#166534;">−$${Number(updated.discountAmount).toFixed(2)}</span>${updated.discountNote ? `<br><span style="font-size:11px;color:var(--ink-soft);">${escapeHtml(updated.discountNote)}</span>` : ""}`
+      ? `<span style="color:#166534;">−$${Number(updated.discountAmount).toFixed(2)}</span>${orderDiscountNote_(updated) ? `<br><span style="font-size:11px;color:var(--ink-soft);">${escapeHtml(orderDiscountNote_(updated))}</span>` : ""}`
       : "—";
   });
   // The Paid / Unpaid cell, from the server's paid flag (a payment that settles the order shows it at once).
@@ -7313,6 +7321,448 @@ function showEditCustomerModal(orders){
     dialogize_(overlay, { onEscape: () => { finish(null); } });
 
     overlay.querySelector("#ecName").focus();
+  });
+}
+
+// ---- Discount codes (migrations/0115) -------------------------------------------------------------------
+// Codes a customer types at checkout: one person's single-use code (tied to their email), or a code anyone can use a
+// set number of times. The server decides every discount and counts every use (db.js checkDiscountCode /
+// claimDiscountCode); this page lists the codes, makes and changes them, and shows each one's orders. A voided or
+// deleted order gives its use back, so "Used" counts live uses only.
+// Like the Customers and Quotes pages, each screen puts its listeners on its own root (no data-admin-action), so they
+// go away with the screen.
+const DC_FN_ = "discounts.codes";
+const DC_PAGE_SIZE_ = 50;
+const DC_STATUS_ = { active: "Active", off: "Switched off", expired: "Expired", usedUp: "Used up" };
+const DC_BULK_MAX_ = 500;   // createDiscountCodes takes at most this many addresses at once
+// What the list was showing, kept while the admin is open so closing a code returns to the same view.
+const _dcView = { q: "", org: "", status: "all", offset: 0 };
+let _dcSeq = 0;
+
+// "<orderNote>" on an order, with "Code SAVE10" when a discount code made its discount (db.js discountCode, the code
+// of the order's live use). The note normally already says so; an owner's own note on top of a code keeps both.
+function orderDiscountNote_(o){
+  const note = String((o && o.discountNote) || "").trim();
+  const code = o && typeof o.discountCode === "string" ? o.discountCode.trim() : "";
+  if (!code || note.toUpperCase().includes(code.toUpperCase())) return note;
+  return "Code " + code + (note ? " · " + note : "");
+}
+
+function dcShopName_(c){
+  if (!c || !c.orgId) return "All shops";
+  const o = (adminOrgs || []).find(x => x.orgId === c.orgId);
+  return c.orgName || (o && o.name) || c.orgId;
+}
+function dcWho_(c){ return c.email ? c.email : c.oncePerEmail ? "Anyone, once per email" : "Anyone"; }
+function dcStatusTag_(c){
+  const st = DC_STATUS_[c.status] ? c.status : "active";
+  return `<span class="cust-tag dc-st-${st}">${escapeHtml(DC_STATUS_[st])}</span>`;
+}
+function dcPlural_(n, one, many){ return n + " " + (n === 1 ? one : (many || one + "s")); }
+// A code the browser makes for "Make one", from the server's own alphabet (db.js generateDiscountCode_: no 0/O or 1/I,
+// so it can be read out and typed without mix-ups). 32 letters, so each byte picks one evenly. The server still checks
+// it, and says so if it is taken.
+function dcMakeCode_(prefix){
+  const abc = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return String(prefix || "").toUpperCase().replace(/[^A-Z0-9_-]/g, "").slice(0, 12) + Array.from(bytes, b => abc[b % abc.length]).join("");
+}
+// An amount typed into a field: a number with at most two decimals, else NaN.
+function dcNum_(v){ const s = String(v == null ? "" : v).trim(); return /^\d+(\.\d{1,2})?$/.test(s) ? Number(s) : NaN; }
+const dcLooksLikeEmail_ = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+
+async function renderDiscountCodes(app){
+  const hash = "discounts";
+  adminSetHash(hash);
+  document.title = adminTitle_("Discount codes");
+  const shops = (adminOrgs || []).slice().sort((a, b) => String(a.name || a.orgId).localeCompare(String(b.name || b.orgId)));
+  if (_dcView.org && !shops.some(o => o.orgId === _dcView.org)) _dcView.org = "";
+  app.innerHTML = `
+    ${adminPageHead_("Discount codes")}
+    <div class="admin-panel cust-page dc-page" id="dcPage" style="--org-accent:var(--accent);">
+      <div class="cust-bar">
+        <label class="cust-field cust-search"><span>Search</span>
+          <input type="search" id="dcQ" autocomplete="off" maxlength="200" placeholder="Code, email or note" value="${escapeHtml(_dcView.q)}"></label>
+        ${shops.length > 1 ? `<label class="cust-field dc-filter"><span>Shop</span>
+          <select id="dcShop"><option value="">All shops</option>
+            ${shops.map(o => `<option value="${escapeHtml(o.orgId)}"${_dcView.org === o.orgId ? " selected" : ""}>${escapeHtml(o.name || o.orgId)}</option>`).join("")}
+          </select></label>` : ""}
+        <label class="cust-field dc-filter"><span>Status</span>
+          <select id="dcStatus">
+            ${Object.keys(DC_STATUS_).map(k => `<option value="${k}"${_dcView.status === k ? " selected" : ""}>${DC_STATUS_[k]}</option>`).join("")}
+            <option value="all"${_dcView.status === "all" ? " selected" : ""}>All</option>
+          </select></label>
+        <div class="dc-bar-btns">
+          <button type="button" class="admin-btn" id="dcNew" data-need="${DC_FN_}:edit">+ New code</button>
+          <button type="button" class="admin-btn admin-btn-secondary" id="dcBulk" data-need="${DC_FN_}:edit">Codes for a list of emails…</button>
+        </div>
+      </div>
+      <div class="cust-count" id="dcCount" role="status" aria-live="polite"></div>
+      <div id="dcBody"><div class="cust-note">Loading…</div></div>
+      <div class="cust-pager" id="dcPager"></div>
+      <div class="cust-note">A customer types a code at checkout; the discount comes off the goods (not shipping or a rush fee), and an order uses one code at most. A voided or deleted order gives its use back.</div>
+    </div>`;
+  const root = document.getElementById("dcPage");
+  const body = root.querySelector("#dcBody"), count = root.querySelector("#dcCount"), pager = root.querySelector("#dcPager");
+  const stillOn = () => _currentAdminHash === hash && root.isConnected;
+  let codes = [], timer = null;
+
+  function draw(total){
+    if (!codes.length) {
+      count.textContent = ""; pager.innerHTML = "";
+      const filtered = _dcView.q || _dcView.org || _dcView.status !== "all";
+      body.innerHTML = `<div class="cust-note">${filtered ? "No code matches." : "No discount codes yet." + (adminCan_(DC_FN_, "edit") ? " Make one with “+ New code”." : "")}</div>`;
+      return;
+    }
+    const from = _dcView.offset + 1, to = _dcView.offset + codes.length;
+    count.textContent = total > codes.length ? `Showing ${from}–${to} of ${dcPlural_(total, "code")}` : dcPlural_(total, "code");
+    body.innerHTML = `<div class="admin-table-wrap"><table class="stack-mobile cust-table dc-table">
+      <thead><tr><th>Code</th><th>Discount</th><th>Shop</th><th>For</th><th class="cust-num">Used</th><th>Expires</th><th>Status</th></tr></thead>
+      <tbody>${codes.map((c, i) => `<tr class="cust-row${c.status === "active" ? "" : " cust-row-archived"}" data-dc-row="${i}">
+        <td class="stack-title"><a class="cust-link dc-code" href="#discounts" data-dc-open="${i}">${escapeHtml(c.code)}</a></td>
+        <td>${escapeHtml(c.label || "")}</td>
+        <td>${escapeHtml(dcShopName_(c))}</td>
+        <td>${escapeHtml(dcWho_(c))}</td>
+        <td class="cust-num">${Number(c.used) || 0} of ${Number(c.maxUses) || 0}</td>
+        <td>${escapeHtml(c.expiresOn ? adminDate_(c.expiresOn) : "Never")}</td>
+        <td>${dcStatusTag_(c)}</td>
+      </tr>`).join("")}</tbody></table></div>`;
+    pager.innerHTML = total > DC_PAGE_SIZE_ || _dcView.offset > 0 ? `
+      <button type="button" class="admin-btn admin-btn-secondary" data-dc-page="prev" ${_dcView.offset > 0 ? "" : "disabled"}>‹ Previous</button>
+      <button type="button" class="admin-btn admin-btn-secondary" data-dc-page="next" ${to < total ? "" : "disabled"}>Next ›</button>` : "";
+  }
+
+  async function load(){
+    const mine = ++_dcSeq;   // a slower, older answer must not replace a newer one
+    try {
+      const d = await adminApi_({ action: "listDiscountCodes", q: _dcView.q, org: _dcView.org, status: _dcView.status, limit: DC_PAGE_SIZE_, offset: _dcView.offset });
+      if (mine !== _dcSeq || !stillOn()) return;
+      codes = Array.isArray(d.codes) ? d.codes : [];
+      // The page asked for is gone (its last code deleted or filtered away): back to the first.
+      if (!codes.length && _dcView.offset > 0) { _dcView.offset = 0; return load(); }
+      draw(Number(d.total) || codes.length);
+    } catch (e) {
+      if (mine !== _dcSeq || !stillOn()) return;
+      codes = []; count.textContent = ""; pager.innerHTML = "";
+      body.innerHTML = `<div class="cust-err" role="alert">${escapeHtml(e.message)}</div>`;
+    }
+  }
+  const reload = () => { if (stillOn()) load(); };
+
+  root.addEventListener("input", (e) => {
+    if (e.target.id !== "dcQ") return;
+    clearTimeout(timer);
+    timer = setTimeout(() => { _dcView.q = e.target.value.trim(); _dcView.offset = 0; load(); }, 250);
+  });
+  root.addEventListener("change", (e) => {
+    if (e.target.id === "dcShop") { _dcView.org = e.target.value; _dcView.offset = 0; load(); }
+    else if (e.target.id === "dcStatus") { _dcView.status = e.target.value; _dcView.offset = 0; load(); }
+  });
+  root.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (btn && btn.id === "dcNew") { dcShowCode_(null, reload); return; }
+    if (btn && btn.id === "dcBulk") { dcShowBulk_(reload); return; }
+    if (btn && btn.dataset.dcPage) {
+      _dcView.offset = Math.max(0, _dcView.offset + (btn.dataset.dcPage === "next" ? DC_PAGE_SIZE_ : -DC_PAGE_SIZE_));
+      load();
+      return;
+    }
+    // Anywhere on a row opens the code; the code itself is a link, for the keyboard.
+    const link = e.target.closest("a[data-dc-open]");
+    const row = e.target.closest("tr[data-dc-row]");
+    if (!link && (!row || e.target.closest("a, button, input, select"))) return;
+    e.preventDefault();
+    const c = codes[Number(link ? link.dataset.dcOpen : row.dataset.dcRow)];
+    if (c) dcShowCode_(c, reload);
+  });
+  await load();
+}
+
+// The discount part of a form (both windows): Percent off / Amount off and the number.
+function dcValueHtml_(c, locked){
+  const off = locked ? " disabled" : "";
+  const kind = c && c.kind === "amount" ? "amount" : "percent";
+  const val = !c ? "" : kind === "amount" ? (c.amount != null ? Number(c.amount).toFixed(2) : "") : (c.percent != null ? String(c.percent) : "");
+  return `<div class="cust-grid">
+      <label class="cust-field"><span>Discount</span>
+        <select id="dcKind"${off}><option value="percent"${kind === "percent" ? " selected" : ""}>Percent off</option><option value="amount"${kind === "amount" ? " selected" : ""}>Amount off</option></select></label>
+      <label class="cust-field"><span id="dcValueLabel">${kind === "amount" ? "Amount ($)" : "Percent (%)"}</span>
+        <input type="number" id="dcValue" inputmode="decimal" step="0.01" min="0.01" max="${kind === "amount" ? 10000 : 100}" value="${escapeHtml(val)}" autocomplete="off"${off}></label>
+    </div>`;
+}
+function dcShopHtml_(orgId, locked){
+  const shops = (adminOrgs || []).slice().sort((a, b) => String(a.name || a.orgId).localeCompare(String(b.name || b.orgId)));
+  return `<label class="cust-field"><span>Shop</span>
+      <select id="dcOrg"${locked ? " disabled" : ""}><option value="">All shops</option>
+        ${shops.map(o => `<option value="${escapeHtml(o.orgId)}"${orgId === o.orgId ? " selected" : ""}>${escapeHtml(o.name || o.orgId)}</option>`).join("")}
+        ${orgId && !shops.some(o => o.orgId === orgId) ? `<option value="${escapeHtml(orgId)}" selected>${escapeHtml(orgId)}</option>` : ""}
+      </select></label>`;
+}
+// The kind and value as typed: { kind, percent | amount } or { error }.
+function dcReadValue_(ov){
+  const kind = ov.querySelector("#dcKind").value === "amount" ? "amount" : "percent";
+  const n = dcNum_(ov.querySelector("#dcValue").value);
+  if (kind === "percent") {
+    if (!(n >= 0.01 && n <= 100)) return { error: "Enter a percent from 0.01 to 100." };
+    return { kind, percent: n };
+  }
+  if (!(n >= 0.01 && n <= 10000)) return { error: "Enter an amount from $0.01 to $10,000." };
+  return { kind, amount: n };
+}
+function dcWireValue_(ov){
+  const kind = ov.querySelector("#dcKind"), value = ov.querySelector("#dcValue"), label = ov.querySelector("#dcValueLabel");
+  kind.addEventListener("change", () => {
+    label.textContent = kind.value === "amount" ? "Amount ($)" : "Percent (%)";
+    value.max = kind.value === "amount" ? "10000" : "100";
+  });
+}
+
+// One code's window: a new code (c null) or an existing one, with its orders. Delete needs Full (the server's rule);
+// everything else here needs Edit. A read-only role sees the same window with
+// every field locked and no buttons but Close (data-need-form).
+async function dcShowCode_(c, onChanged){
+  const canEdit = adminCan_(DC_FN_, "edit");
+  let code = c, uses = [];
+  if (c && c.id != null) {
+    try {
+      const d = await adminApi_({ action: "getDiscountCode", id: c.id });
+      const got = d && d.code && typeof d.code === "object" ? d.code : null;
+      if (!got) { showToast("That code is gone — it may have been deleted.", true); if (onChanged) onChanged(); return; }
+      code = got;
+      uses = Array.isArray(got.uses) ? got.uses : Array.isArray(d.uses) ? d.uses : [];
+    } catch (e) { showToast(e.message, true); return; }
+  }
+  const isNew = !code;
+  const used = isNew ? 0 : Number(code.used) || 0;
+  const locked = used > 0;   // the server refuses these changes once a code has been used
+  const single = !isNew && !!code.email;
+  const linkOrders = typeof openOrderFromDashboard_ === "function" && adminCanOpen_("orders");
+  const lockAttr = locked ? " disabled" : "";
+  const title = isNew ? "New discount code" : "Discount code " + escapeHtml(code.code);
+  const usesHtml = isNew ? "" : `
+    <h4 class="dc-h">Orders (${uses.length})</h4>
+    ${uses.length ? `<div class="admin-table-wrap"><table class="stack-mobile cust-table dc-uses">
+      <thead><tr><th>Order</th><th>Customer</th><th>Email</th><th class="cust-num">Discount</th><th>Used</th><th></th></tr></thead>
+      <tbody>${uses.map((u, i) => `<tr class="${u.releasedAt ? "cust-row-archived" : ""}">
+        <td class="stack-title">${linkOrders && u.orgId ? `<a class="cust-link" href="#orders/${encodeURIComponent(u.orgId)}" data-dc-order="${i}">${escapeHtml(u.orderId)}</a>` : escapeHtml(u.orderId)}</td>
+        <td>${escapeHtml(u.customerName || "")}</td>
+        <td>${escapeHtml(u.email || "")}</td>
+        <td class="cust-num">${adminMoneyOr_(u.amount)}</td>
+        <td>${escapeHtml(u.usedAt ? adminDate_(u.usedAt) : "")}</td>
+        <td>${u.releasedAt ? `<span class="cust-tag" title="The order was voided or deleted on ${escapeHtml(adminDate_(u.releasedAt))}, so this use no longer counts">Given back</span>` : ""}</td>
+      </tr>`).join("")}</tbody></table></div>` : `<div class="cust-note">Not used yet.</div>`}`;
+  const { ov, close } = inventoryModal_(title, `
+    <form id="dcForm" class="cust-form dc-form" data-need-form="${DC_FN_}:edit" novalidate>
+      ${isNew ? "" : `<div class="dc-sub">${dcStatusTag_(code)} <span>${escapeHtml(code.label || "")} · used ${used} of ${Number(code.maxUses) || 0}${code.createdAt ? " · made " + escapeHtml(adminDate_(code.createdAt)) : ""}${code.createdBy ? " by " + escapeHtml(code.createdBy) : ""}</span></div>`}
+      ${locked ? `<div class="dc-locked">This code has been used, so only its expiry, uses, note and on/off can change. To offer a different discount, make a new code.</div>` : ""}
+      <label class="cust-field"><span>Code</span>
+        <span class="dc-code-row"><input type="text" id="dcCode" class="dc-code" maxlength="32" autocomplete="off" spellcheck="false" value="${escapeHtml(isNew ? "" : code.code)}" placeholder="Blank = make one"${lockAttr}>
+        ${locked ? "" : `<button type="button" class="admin-btn admin-btn-secondary" id="dcMake">Make one</button>`}</span></label>
+      <div class="cust-note dc-hint">3–32 letters, digits, “-” or “_”. Customers can type it in any case.</div>
+      ${dcValueHtml_(code, locked)}
+      ${dcShopHtml_(isNew ? "" : code.orgId || "", locked)}
+      <fieldset class="cust-exempt dc-who"><legend>Who can use it</legend>
+        <label class="cust-check"><input type="radio" name="dcWho" value="one"${single ? " checked" : ""}${lockAttr}> One person (single use)</label>
+        <label class="cust-field dc-indent" data-dc-for="one"><span>Their email address</span>
+          <input type="email" id="dcEmail" maxlength="200" autocomplete="off" placeholder="pat@example.com" value="${escapeHtml(single ? code.email : "")}"${lockAttr}></label>
+        <label class="cust-check"><input type="radio" name="dcWho" value="any"${single ? "" : " checked"}${lockAttr}> Anyone</label>
+        <div class="dc-indent" data-dc-for="any">
+          <label class="cust-field dc-uses-field"><span>Uses in all</span>
+            <input type="number" id="dcMax" min="${Math.max(1, used)}" max="100000" step="1" inputmode="numeric" value="${escapeHtml(isNew || single ? "" : String(code.maxUses || ""))}" placeholder="e.g. 50"></label>
+          <label class="cust-check"><input type="checkbox" id="dcOnce"${!isNew && !single && code.oncePerEmail ? " checked" : ""}${lockAttr}> Once per email address</label>
+        </div>
+      </fieldset>
+      <div class="cust-grid">
+        <label class="cust-field"><span>Expires (blank = never)</span><input type="date" id="dcExpires" value="${escapeHtml(isNew ? "" : code.expiresOn || "")}"></label>
+        <label class="cust-field"><span>Note (only you see it)</span><input type="text" id="dcNote" maxlength="200" autocomplete="off" value="${escapeHtml(isNew ? "" : code.note || "")}"></label>
+      </div>
+      <div class="cust-note dc-hint">It works through the end of its expiry day.</div>
+      ${isNew ? "" : `<label class="cust-check"><input type="checkbox" id="dcActive"${code.active ? " checked" : ""}> Active: customers can use it</label>`}
+      <div class="cust-err" id="dcErr" role="alert"></div>
+      <div class="cust-dialog-actions">
+        ${!isNew && !used && adminCan_(DC_FN_, "full") ? `<button type="button" class="admin-btn admin-btn-danger dc-delete" id="dcDelete" data-need="${DC_FN_}:full">Delete</button>` : ""}
+        <button type="button" class="admin-btn admin-btn-secondary" id="dcCancel" data-perm-keep>${canEdit ? "Cancel" : "Close"}</button>
+        <button type="submit" class="admin-btn" id="dcSave">${isNew ? "Create code" : "Save"}</button>
+      </div>
+    </form>
+    ${usesHtml}`, 620, { guard: canEdit });
+  const $ = (sel) => ov.querySelector(sel);
+  const err = $("#dcErr");
+  $("#dcCancel").onclick = () => $("[data-modal-close]").click();
+  if (!locked) dcWireValue_(ov);
+  // Only the chosen "who" shows its fields.
+  const showWho = () => {
+    const who = (ov.querySelector('input[name="dcWho"]:checked') || {}).value || "any";
+    ov.querySelectorAll("[data-dc-for]").forEach(el => { el.hidden = el.dataset.dcFor !== who; });
+  };
+  ov.querySelectorAll('input[name="dcWho"]').forEach(r => r.addEventListener("change", showWho));
+  showWho();
+  const codeInput = $("#dcCode");
+  codeInput.addEventListener("input", () => {
+    const at = codeInput.selectionStart, up = codeInput.value.toUpperCase();
+    if (up !== codeInput.value) { codeInput.value = up; try { codeInput.setSelectionRange(at, at); } catch (e) {} }
+  });
+  if ($("#dcMake")) $("#dcMake").onclick = () => { codeInput.value = dcMakeCode_(); codeInput.dispatchEvent(new Event("input", { bubbles: true })); };
+
+  ov.addEventListener("click", (e) => {
+    const a = e.target.closest("a[data-dc-order]");
+    if (!a) return;
+    // Opened the way Home opens an order: its shop's Orders list, widened to the day, scrolled to the row. A given-back
+    // use's order was voided, which the list hides until "Include cancelled" is ticked.
+    const u = uses[Number(a.dataset.dcOrder)];
+    if (!u) return;
+    e.preventDefault();
+    close();
+    if (u.releasedAt && window._orderView) window._orderView.includeCancelled = true;
+    openOrderFromDashboard_(u.orgId, u.orderId, u.usedAt);
+  });
+
+  if ($("#dcDelete")) $("#dcDelete").onclick = async function () {
+    if (!await askConfirm_(`Delete ${code.code}?\n\nNobody has used it yet. Once deleted it can't be used or brought back. To stop it for now instead, untick Active.`, { confirmLabel: "Delete", danger: true })) return;
+    this.disabled = true; err.textContent = "";
+    try {
+      await adminApi_({ action: "deleteDiscountCode", id: code.id });
+      close();
+      showToast("Code " + code.code + " deleted.");
+      if (onChanged) onChanged();
+    } catch (ex) { err.textContent = ex.message; this.disabled = false; }
+  };
+
+  $("#dcForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!canEdit) return;
+    const fail = (msg, sel) => { err.textContent = msg; if (sel && $(sel)) try { $(sel).focus(); } catch (x) {} };
+    const who = (ov.querySelector('input[name="dcWho"]:checked') || {}).value || "any";
+    const typedCode = codeInput.value.trim().toUpperCase();
+    if (typedCode && !/^[A-Z0-9_-]{3,32}$/.test(typedCode)) return fail("A code is 3–32 letters, digits, “-” or “_” — or leave it blank to make one.", "#dcCode");
+    const value = locked ? { kind: code.kind, percent: code.percent, amount: code.amount } : dcReadValue_(ov);
+    if (value.error) return fail(value.error, "#dcValue");
+    const email = $("#dcEmail").value.trim().toLowerCase();
+    if (who === "one" && !locked && !dcLooksLikeEmail_(email)) return fail("Enter the email address of the person it's for.", "#dcEmail");
+    const max = Number($("#dcMax").value);
+    if (who === "any" && !(Number.isInteger(max) && max >= 1 && max <= 100000)) return fail("Enter how many times it can be used in all, from 1 to 100,000.", "#dcMax");
+    if (who === "any" && max < used) return fail(`It has been used ${used} times already, so it can't allow fewer.`, "#dcMax");
+    const input = {
+      code: typedCode, kind: value.kind,
+      percent: value.kind === "percent" ? value.percent : null, amount: value.kind === "amount" ? value.amount : null,
+      orgId: $("#dcOrg").value || null,
+      email: who === "one" ? (locked ? code.email : email) : "",
+      maxUses: who === "one" ? 1 : max,
+      oncePerEmail: who === "any" && $("#dcOnce").checked,
+      expiresOn: $("#dcExpires").value || "",
+      note: $("#dcNote").value.trim(),
+    };
+    if (!isNew) { input.id = code.id; input.active = $("#dcActive").checked; }
+    const save = $("#dcSave");
+    save.disabled = true; err.textContent = "";
+    try {
+      // Only the on/off tick changed: the switch action itself (its own audit row), not a save of the whole code.
+      const same = (k, a, b) => String(a == null ? "" : a) === String(b == null ? "" : b);
+      const onlyActive = !isNew && input.active !== !!code.active &&
+        same("code", input.code, code.code) && input.kind === code.kind && same("p", input.percent, code.kind === "percent" ? code.percent : null) &&
+        same("a", input.amount, code.kind === "amount" ? code.amount : null) && same("o", input.orgId, code.orgId) && same("e", input.email, code.email) &&
+        Number(input.maxUses) === Number(code.maxUses) && !!input.oncePerEmail === !!code.oncePerEmail && same("x", input.expiresOn, code.expiresOn) && same("n", input.note, code.note);
+      let saved;
+      if (onlyActive) await adminApi_({ action: "setDiscountCodeActive", id: code.id, active: input.active });
+      else saved = await adminApi_({ action: "saveDiscountCode", code: input });
+      close();
+      const name = (saved && saved.code && saved.code.code) || input.code || (code && code.code) || "";
+      showToast(isNew ? `Code ${name} created.` : onlyActive ? `Code ${name} switched ${input.active ? "on" : "off"}.` : `Code ${name} saved.`);
+      if (onChanged) onChanged();
+    } catch (ex) { err.textContent = ex.message; save.disabled = false; }
+  });
+}
+
+// "Codes for a list of emails…": one single-use code per address, all with the same discount, shop and expiry. The owner
+// sends them (nothing is emailed from here), so the result is a list to copy or download.
+function dcShowBulk_(onChanged){
+  // Kept to switch the "Discard changes?" question off once the codes are made (inventoryModal_ reads it on each close).
+  const modalOpts = { guard: true };
+  const { ov, close } = inventoryModal_("Codes for a list of emails", `
+    <form id="dcBulkForm" class="cust-form dc-form" data-need-form="${DC_FN_}:edit" novalidate>
+      <div class="cust-note">One single-use code for each address: it works once, and only on an order placed with that email. Nothing is sent — copy or download the list afterwards and send the codes yourself.</div>
+      <label class="cust-field"><span>Email addresses (one per line, or separated by commas)</span>
+        <textarea id="dcEmails" rows="6" spellcheck="false" placeholder="pat@example.com&#10;sam@example.com"></textarea></label>
+      <div class="cust-count" id="dcEmailCount" aria-live="polite"></div>
+      <label class="cust-field"><span>Start each code with (optional)</span>
+        <input type="text" id="dcPrefix" class="dc-code" maxlength="12" autocomplete="off" spellcheck="false" placeholder="e.g. SPRING-"></label>
+      ${dcValueHtml_(null)}
+      ${dcShopHtml_("")}
+      <div class="cust-grid">
+        <label class="cust-field"><span>Expires (blank = never)</span><input type="date" id="dcExpires"></label>
+        <label class="cust-field"><span>Note (only you see it)</span><input type="text" id="dcNote" maxlength="200" autocomplete="off"></label>
+      </div>
+      <div class="cust-err" id="dcErr" role="alert"></div>
+      <div class="cust-dialog-actions">
+        <button type="button" class="admin-btn admin-btn-secondary" id="dcCancel" data-perm-keep>Cancel</button>
+        <button type="submit" class="admin-btn" id="dcSave">Make codes</button>
+      </div>
+    </form>
+    <div id="dcBulkDone" hidden></div>`, 620, modalOpts);
+  const $ = (sel) => ov.querySelector(sel);
+  const err = $("#dcErr");
+  $("#dcCancel").onclick = () => $("[data-modal-close]").click();
+  dcWireValue_(ov);
+  const parse = () => {
+    const seen = new Set(), list = [];
+    for (const raw of $("#dcEmails").value.split(/[\s,;]+/)) {
+      const e = raw.trim().toLowerCase();
+      if (e && !seen.has(e)) { seen.add(e); list.push(e); }
+    }
+    return list;
+  };
+  $("#dcEmails").addEventListener("input", () => { const n = parse().length; $("#dcEmailCount").textContent = n ? dcPlural_(n, "address", "addresses") : ""; });
+  const prefix = $("#dcPrefix");
+  prefix.addEventListener("input", () => { const up = prefix.value.toUpperCase(); if (up !== prefix.value) prefix.value = up; });
+
+  $("#dcBulkForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fail = (msg, sel) => { err.textContent = msg; if (sel) try { $(sel).focus(); } catch (x) {} };
+    const emails = parse();
+    if (!emails.length) return fail("Paste at least one email address.", "#dcEmails");
+    if (emails.length > DC_BULK_MAX_) return fail(`That's ${emails.length} addresses; make at most ${DC_BULK_MAX_} at a time.`, "#dcEmails");
+    const p = prefix.value.trim();
+    if (p && !/^[A-Z0-9_-]{1,12}$/.test(p)) return fail("The start of the code can only have letters, digits, “-” or “_”.", "#dcPrefix");
+    const value = dcReadValue_(ov);
+    if (value.error) return fail(value.error, "#dcValue");
+    const save = $("#dcSave");
+    save.disabled = true; err.textContent = "";
+    let d;
+    try {
+      d = await adminApi_({ action: "createDiscountCodes", emails, prefix: p, kind: value.kind,
+        percent: value.kind === "percent" ? value.percent : null, amount: value.kind === "amount" ? value.amount : null,
+        org: $("#dcOrg").value || "", expiresOn: $("#dcExpires").value || "", note: $("#dcNote").value.trim() });
+    } catch (ex) { err.textContent = ex.message; save.disabled = false; return; }
+    if (onChanged) onChanged();
+    modalOpts.guard = false;   // the codes are saved: ✕ and Escape close without asking
+    const made = Array.isArray(d.codes) ? d.codes : [], skipped = Array.isArray(d.skipped) ? d.skipped : [];
+    const csv = () => ["email,code"].concat(made.map(r => csvCell_(r.email) + "," + csvCell_(r.code))).join("\r\n") + "\r\n";
+    $("#dcBulkForm").hidden = true;
+    const done = $("#dcBulkDone");
+    done.hidden = false;
+    done.innerHTML = `
+      <div class="cust-note" tabindex="-1" id="dcBulkSaid"><b>${dcPlural_(made.length, "code")} made.</b>${skipped.length ? ` ${dcPlural_(skipped.length, "address was", "addresses were")} skipped (below).` : ""} Each works once, for its own email address.</div>
+      ${made.length ? `<div class="admin-table-wrap dc-bulk-list"><table class="stack-mobile cust-table">
+        <thead><tr><th>Email</th><th>Code</th></tr></thead>
+        <tbody>${made.map(r => `<tr><td>${escapeHtml(r.email)}</td><td class="dc-code">${escapeHtml(r.code)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+      ${skipped.length ? `<h4 class="dc-h">Skipped</h4><div class="admin-table-wrap dc-bulk-list"><table class="stack-mobile cust-table">
+        <thead><tr><th>Email</th><th>Why</th></tr></thead>
+        <tbody>${skipped.map(r => `<tr class="cust-row-archived"><td>${escapeHtml(r.email)}</td><td>${escapeHtml(r.reason || "")}</td></tr>`).join("")}</tbody></table></div>` : ""}
+      <div class="cust-dialog-actions">
+        ${made.length ? `<button type="button" class="admin-btn admin-btn-secondary" id="dcCopyCsv">Copy as CSV</button>
+        <button type="button" class="admin-btn admin-btn-secondary" id="dcDownloadCsv">Download CSV</button>` : ""}
+        <button type="button" class="admin-btn" id="dcBulkClose">Done</button>
+      </div>`;
+    try { done.querySelector("#dcBulkSaid").focus(); } catch (x) {}
+    done.querySelector("#dcBulkClose").onclick = close;
+    const copy = done.querySelector("#dcCopyCsv");
+    if (copy) copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(csv()); showToast(`Copied ${dcPlural_(made.length, "code")}.`); }
+      catch (x) { showToast("Couldn't copy — use Download CSV instead.", true); }
+    };
+    const dl = done.querySelector("#dcDownloadCsv");
+    if (dl) dl.onclick = () => downloadCsv_(`discount-codes-${localToday_()}.csv`, made.map(r => ({ email: r.email, code: r.code })), [["email", "email"], ["code", "code"]]);
   });
 }
 

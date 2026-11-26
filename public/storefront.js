@@ -516,6 +516,7 @@ function render(){
   // org order page — reset cart and shipping state when switching to a *different* org
   if(currentOrgId !== currentOrg.orgId){
     clearCart_();
+    discountReset_();
     currentOrgId = currentOrg.orgId;
     restoreCart_();
     shippingZip = ""; shippingRates = []; shippingQuote = null; shippingLoading = false; shippingManual = false; deliveryOptId = null; shippingManualPicked = false;
@@ -1968,6 +1969,116 @@ function checkoutError_(msg, focusId){
   const f = focusId && document.getElementById(focusId);
   if(f && f.focus) f.focus();
 }
+// ---- Discount codes (migrations/0115) ----
+// The checkout's "Discount code" box, shown only when the catalog says a code could work at this shop
+// (catalog.discountCodes) and the Discount codes feature is on. Apply asks the server (checkDiscountCode, with the
+// email typed so far and the cart's lines); the SERVER decides the discount — again when the order is placed — so what
+// the cart shows is only its answer for the cart as it was then. A changed cart asks again (debounced).
+let discountApplied_ = null;   // { code, label, discount (dollars), sig (the cart it was worked out for) }
+let discountInput_ = "";       // what's typed in the box, kept across the panel's redraws
+let discountMsg_ = "";         // the server's refusal (or a note), shown under the box
+let discountBusy_ = false, discountTimer_ = null, discountSeq_ = 0;
+function discountBoxOn_(org){ return !!(org && org.discountCodes === true && featureOn_("discounts") && !org.preview); }
+function discountReset_(){
+  discountApplied_ = null; discountInput_ = ""; discountMsg_ = ""; discountBusy_ = false; discountSeq_++;
+  if(discountTimer_){ clearTimeout(discountTimer_); discountTimer_ = null; }
+}
+// The lines as the server prices them: a change to any of these can change the discount (a percent of the subtotal,
+// an amount capped at it).
+function discountCartSig_(){ return JSON.stringify(cart.map(c => [c.productId, c.size || "", c.qty, c.lineTotal])); }
+// The discount the cart shows now: the server's answer, never more than the goods subtotal.
+function discountNow_(subtotal){
+  if(!discountApplied_) return 0;
+  return Math.min(Math.round(Number(discountApplied_.discount || 0) * 100), Math.round(subtotal * 100)) / 100;
+}
+// A refusal that's about the email address (a code for one person): typing another address makes it stale.
+function discountMsgAboutEmail_(m){ return /check the email address|Enter your email address first/i.test(String(m || "")); }
+function discountMsgEl_(text){
+  discountMsg_ = text || "";
+  const el = document.getElementById("discountMsg");
+  if(el){ el.textContent = discountMsg_; el.hidden = !discountMsg_; }
+}
+async function askDiscountCode_(code){
+  const contactEl = document.getElementById("custContact");
+  const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "checkDiscountCode", orgId: currentOrg.orgId, code,
+      email: contactEl ? contactEl.value.trim() : "", items: cart.map(({ cdPreviews, ...line }) => line) }) });
+  const data = await res.json().catch(() => null);
+  if(res.ok && data && data.status === "ok") return { ok: true, data };
+  // A refusal the customer can act on comes back as the server's own sentence; anything else is a passing failure.
+  if(res.status === 429) return { ok: false, message: "Too many tries — please wait a minute and try again." };
+  if(data && data.message && res.status < 500) return { ok: false, message: String(data.message) };
+  return { ok: false, failed: true, message: "We couldn't check that code just now. Please try again." };
+}
+async function applyDiscountCode_(){
+  const code = discountInput_.trim();
+  if(!code){ discountMsgEl_("Enter a discount code."); return; }
+  if(!cart.length) return;
+  const seq = ++discountSeq_, sig = discountCartSig_();
+  discountBusy_ = true; discountMsg_ = "";
+  renderTicket(currentOrg, currentOrgId);
+  let r;
+  try{ r = await askDiscountCode_(code); }
+  catch(_){ r = { ok: false, failed: true, message: "We couldn't check that code — check your connection and try again." }; }
+  if(seq !== discountSeq_) return;   // removed, or asked again, meanwhile
+  discountBusy_ = false;
+  if(r.ok){
+    const d = r.data;
+    discountApplied_ = { code: String(d.code || code.toUpperCase()), label: String(d.label || ""), discount: Number(d.discount) || 0, sig };
+    discountInput_ = discountApplied_.code;
+    discountMsg_ = "";
+  } else discountMsg_ = r.message;
+  renderTicket(currentOrg, currentOrgId);
+  announceStatus(r.ok ? discountApplied_.code + " applied: " + (discountApplied_.label || "discount") + ". " : discountMsg_);
+}
+function removeDiscountCode_(){
+  const code = discountApplied_ ? discountApplied_.code : "";
+  discountReset_();
+  renderTicket(currentOrg, currentOrgId);
+  const box = document.getElementById("discountCodeInput"); if(box) box.focus();
+  if(code) announceStatus("Discount code " + code + " removed.");
+}
+// The cart (or the email, for a code for one person) changed since the code was applied: ask again, after a pause so
+// a run of +/− clicks is one request. Refused now → the code comes off, with the reason.
+function scheduleDiscountRecheck_(){
+  if(!discountApplied_) return;
+  if(discountTimer_) clearTimeout(discountTimer_);
+  discountTimer_ = setTimeout(recheckDiscountCode_, 700);
+}
+async function recheckDiscountCode_(){
+  discountTimer_ = null;
+  if(!discountApplied_ || !currentOrg) return;
+  if(!cart.length){ discountApplied_ = null; renderTicket(currentOrg, currentOrgId); return; }
+  const applied = discountApplied_, seq = ++discountSeq_, sig = discountCartSig_();
+  let r;
+  try{ r = await askDiscountCode_(applied.code); }catch(_){ r = { ok: false, failed: true }; }
+  if(seq !== discountSeq_ || discountApplied_ !== applied) return;
+  if(r.ok) discountApplied_ = Object.assign({}, applied, { label: String(r.data.label || applied.label), discount: Number(r.data.discount) || 0, sig });
+  else if(r.failed) discountApplied_ = Object.assign({}, applied, { sig });   // no answer: keep it — the order is checked anyway
+  else {
+    discountApplied_ = null;
+    discountMsg_ = applied.code + " no longer applies: " + r.message;
+    announceStatus(discountMsg_);
+  }
+  renderTicket(currentOrg, currentOrgId);
+}
+// The box, above the totals: the code field with Apply, or (once applied) the code, its label and Remove.
+function discountSectionHtml_(org){
+  if(!discountBoxOn_(org) || !cart.length) return "";
+  const a = discountApplied_;
+  return `
+    <div class="shipping-section discount-section">
+      <label class="shipping-section-label" for="discountCodeInput">Discount code</label>
+      <div class="discount-row">
+        <input type="text" id="discountCodeInput" class="shipping-zip-input discount-input" maxlength="32" autocomplete="off" autocapitalize="characters" spellcheck="false"
+          value="${escapeHtml(a ? a.code : discountInput_)}"${a ? " readonly" : ""} aria-describedby="discountMsg discountOn">
+        ${a ? `<button type="button" class="discount-btn" data-action="discount-remove">Remove</button>`
+          : `<button type="button" class="discount-btn" data-action="discount-apply"${discountBusy_ ? " disabled" : ""}>${discountBusy_ ? "Checking…" : "Apply"}</button>`}
+      </div>
+      <div class="discount-on" id="discountOn"${a ? "" : " hidden"}>${a ? escapeHtml(a.code + (a.label ? " — " + a.label : "")) : ""}</div>
+      <div class="discount-msg" id="discountMsg" aria-live="polite"${discountMsg_ ? "" : " hidden"}>${escapeHtml(discountMsg_)}</div>
+    </div>`;
+}
 function flashAdded_(pid){
   const b = document.querySelector('.add-btn[data-pid="' + (window.CSS && CSS.escape ? CSS.escape(pid) : pid) + '"]'); if(!b) return;
   b.textContent = "Added ✓"; b.classList.add("added");
@@ -2086,11 +2197,17 @@ document.addEventListener("click", (e)=>{
   else if(a === "retry-card") retryCardPayment_(btn);
   else if(a === "dismiss-unpaid"){ unpaidCardNotice = null; writePendingCard_(currentOrgId, null); const b = document.getElementById("unpaidBar"); if(b) b.remove(); }
   else if(a === "place-order") placeOrder(btn.dataset.org);
+  else if(a === "discount-apply") applyDiscountCode_();
+  else if(a === "discount-remove") removeDiscountCode_();
   else if(a === "go-org") go("org", btn.dataset.org);
   else if(a === "version") versionSwitch_(btn.dataset.vgroup, btn.dataset.vpid);
   else if(a === "color") cfgPickColor_(btn.dataset.pid, btn);
   else if(a === "dv-choose") window.dvSelectAction(btn.dataset.choice);
   else if(a === "dv-submit") window.dvSubmitResponse(btn.dataset.token);
+});
+
+document.addEventListener("keydown", (e)=>{
+  if(e.key === "Enter" && e.target && e.target.id === "discountCodeInput" && !discountApplied_ && !discountBusy_){ e.preventDefault(); applyDiscountCode_(); }
 });
 
 document.addEventListener("change", (e)=>{
@@ -2139,6 +2256,13 @@ document.addEventListener("change", (e)=>{
 });
 
 document.addEventListener("input", (e)=>{
+  if(e.target.id === "discountCodeInput"){ discountInput_ = e.target.value; if(discountMsg_) discountMsgEl_(""); return; }
+  // Another email address: a refusal about the address no longer holds, and a code for one person is asked about again.
+  if(e.target.id === "custContact"){
+    if(discountMsgAboutEmail_(discountMsg_)) discountMsgEl_("");
+    if(discountApplied_) scheduleDiscountRecheck_();
+    return;
+  }
   if(e.target.id === "shippingZipInput"){
     shippingZip = isUS_() ? e.target.value.replace(/\D/g,"").slice(0,5) : e.target.value.slice(0,20);
     e.target.value = shippingZip; // normalize in-place (US: strip non-digits)
@@ -2517,7 +2641,9 @@ function cartSummaryText(){
 // and not at all when the order ships to another state than the shop's (known here from the ZIP
 // typed for shipping rates; pickup and the shop's own delivery options are in state). An estimate
 // for display — the order's real figure is the server's (saveOrder returns it).
-function cartTax_(org, delivery, rushFee){
+// `discount` (dollars, a discount code's): comes off the taxable goods in proportion, as the server takes the
+// discount's tax share (its taxable part, taxed at the rate).
+function cartTax_(org, delivery, rushFee, discount){
   const rate = Number(org && org.salesTaxRate) || 0;
   if(!org || org.salesTaxMode !== "exclusive" || !rate) return { added: false, tax: 0, outOfState: false };
   const home = org.salesTaxJurisdiction || "";
@@ -2525,11 +2651,18 @@ function cartTax_(org, delivery, rushFee){
   const zipSt = shipping && isUS_() ? zipStates_(shippingZip) : [];
   if(home && zipSt.length && !zipSt.includes(home)) return { added: true, tax: 0, outOfState: true };
   const bps = Math.round(rate * 100);
+  let itemsCents = 0, taxableCents = 0;
   const cents = cart.reduce((sum, c) => {
     const p = (org.products || []).find(x => x.id === c.productId);
-    return sum + (p && p.taxable === false ? 0 : Math.round(Math.round(c.lineTotal * 100) * bps / 10000));
+    const line = Math.round(c.lineTotal * 100);
+    itemsCents += line;
+    if(p && p.taxable === false) return sum;
+    taxableCents += line;
+    return sum + Math.round(line * bps / 10000);
   }, 0) + (org.rush && org.rush.taxable && rushFee > 0 ? Math.round(Math.round(rushFee * 100) * bps / 10000) : 0);   // a taxed rush fee
-  return { added: true, tax: cents / 100, outOfState: false };
+  const discountCents = Math.min(Math.round((Number(discount) || 0) * 100), itemsCents);
+  const discountTaxCents = discountCents > 0 && itemsCents > 0 ? Math.round(Math.round(discountCents * taxableCents / itemsCents) * bps / 10000) : 0;
+  return { added: true, tax: Math.max(0, cents - discountTaxCents) / 100, outOfState: false };
 }
 // The rush fee this shop offers (org.rush from /api/catalog: its own rule, else the global one) on
 // `subtotal` dollars of merchandise: {fee, pending, text}. The server works it out the same way.
@@ -2684,8 +2817,12 @@ function renderTicket(org, orgId){
   const rush = rushOn ? rushQuote_(org, cartSubtotal) : null;
   if(rushOn && !rush) rushOn = false;      // the shop stopped offering it
   const rushFee = rush ? rush.fee : 0;
-  const cartTax = cartTax_(org, delivery, rushFee);
-  const grandTotal   = cartSubtotal + shippingCost + rushFee + cartTax.tax;
+  // A discount code: off the goods only (not delivery, not the rush fee). Not shown for a shop without the box.
+  if(!discountBoxOn_(org) || !cart.length){ if(discountApplied_) discountApplied_ = null; }
+  else if(discountApplied_ && discountApplied_.sig !== discountCartSig_()) scheduleDiscountRecheck_();
+  const discount = discountNow_(cartSubtotal);
+  const cartTax = cartTax_(org, delivery, rushFee, discount);
+  const grandTotal   = Math.round((cartSubtotal - discount + shippingCost + rushFee + cartTax.tax) * 100) / 100;
 
   // Check the currently-selected payment method to decide whether to
   // show the discounted total. Reading from the DOM directly here since
@@ -2715,9 +2852,10 @@ function renderTicket(org, orgId){
 
   // When shipping is active, show a breakdown above the total line so the
   // customer can see merchandise vs. shipping separately.
-  const breakdownHtml = (shippingCost > 0 || cartTax.tax > 0 || rush) ? `
+  const breakdownHtml = (shippingCost > 0 || cartTax.tax > 0 || rush || discount > 0) ? `
     <div class="ticket-breakdown">
       <div class="ticket-breakdown-line"><span>Merchandise</span><span>$${cartSubtotal.toFixed(2)}</span></div>
+      ${discount > 0 ? `<div class="ticket-breakdown-line ticket-discount-line"><span>Discount (${escapeHtml(discountApplied_.code)})</span><span>&minus;$${discount.toFixed(2)}</span></div>` : ""}
       ${shippingCost > 0 ? `<div class="ticket-breakdown-line">
         <span>${escapeHtml(delivery.label)}</span>
         <span>$${shippingCost.toFixed(2)}</span>
@@ -2743,6 +2881,7 @@ function renderTicket(org, orgId){
     ${breakSavingsCents > 0 ? `<div class="cart-savings" style="font-size:13px;margin:6px 0;">Quantity savings: $${(breakSavingsCents / 100).toFixed(2)} (already taken off the prices above)</div>` : ""}
     ${renderShippingSection(org)}
     ${rushSectionHtml_(org, cartSubtotal)}
+    ${discountSectionHtml_(org)}
     ${breakdownHtml}
     <div class="ticket-total">
       ${totalHtml}
@@ -2886,6 +3025,13 @@ async function placeOrder(orgId){
     return;
   }
   if(cart.length===0) return;
+  // A code typed but not applied isn't sent unseen: the customer sees what it does (or why not) first.
+  const codeBoxOn = discountBoxOn_(currentOrg);
+  if(codeBoxOn && !discountApplied_ && discountInput_.trim()){
+    checkoutError_(discountBusy_ ? "Checking your discount code — one moment." : "Press Apply to use your discount code, or clear the box to order without it.", "discountCodeInput");
+    return;
+  }
+  const discountCode = codeBoxOn && discountApplied_ ? discountApplied_.code : "";
 
   // When the customer chose carrier shipping OR manual shipping is pending,
   // collect their full address before submission so the admin knows where to ship.
@@ -2914,7 +3060,7 @@ async function placeOrder(orgId){
   // The same order id for the same checkout (same cart, details and delivery) until it's saved: a retry after a
   // lost answer resends THIS order, which the server recognises, instead of placing a second one.
   const _attemptSig = JSON.stringify([orgId, name, contact, paymentMethod, cart.map(({ cdPreviews, ...line }) => line),
-    delivery.kind, delivery.label || "", delivery.kind === "option" ? delivery.option.id : null, shippingAddress, orderShippingCost, !!rush, rushNeededBy || ""]);
+    delivery.kind, delivery.label || "", delivery.kind === "option" ? delivery.option.id : null, shippingAddress, orderShippingCost, !!rush, rushNeededBy || "", discountCode]);
   const order = {
     orderId: orderIdForAttempt_(_orderPrefix, _attemptSig),
     orgId, customerName: name, contact, paymentMethod,
@@ -2935,7 +3081,9 @@ async function placeOrder(orgId){
       return s + ((p && p.weightOz) ? p.weightOz * it.qty : 8 * it.qty);
     }, 0),
     // What the cart showed (the server prices the order itself and ignores this).
-    total: cartSubtotal + orderShippingCost + (rush ? rush.fee : 0) + cartTax_(currentOrg, delivery, rush ? rush.fee : 0).tax,
+    total: Math.round((cartSubtotal - discountNow_(cartSubtotal) + orderShippingCost + (rush ? rush.fee : 0) + cartTax_(currentOrg, delivery, rush ? rush.fee : 0, discountNow_(cartSubtotal)).tax) * 100) / 100,
+    // The discount code (migrations/0115): the server checks it again, works out the discount and records the use.
+    ...(discountCode ? { discountCode, discount: discountNow_(cartSubtotal) } : {}),
     ...(rush ? { rush: true, rushFee: rush.fee, rushFeePending: rush.pending } : {}),
     ...(rush && rushNeededBy ? { neededBy: rushNeededBy } : {}),
     placedAt: new Date().toISOString(),
@@ -2953,6 +3101,9 @@ async function placeOrder(orgId){
     lastShipAddr_ = null;   // and the address box starts empty for it
     // Tax added on top: the confirmation (and the Venmo/Zelle amount) uses the recorded total.
     if(saved && typeof saved.total === "number"){ order.total = saved.total; order.salesTax = saved.salesTax; }
+    // A discount code: what the server took off, and what's still to pay (0 when the code covers it all).
+    if(saved && typeof saved.discount === "number"){ order.discount = saved.discount; order.discountCode = String(saved.discountCode || discountCode); }
+    if(saved && typeof saved.owed === "number") order.owed = saved.owed;
     // No email set up on this install: the confirmation doesn't promise a copy by email.
     if(saved && saved.emailOn === false) order.noEmail = true;
   }catch(err){
@@ -2975,7 +3126,8 @@ async function placeOrder(orgId){
   // No `total` sent here — /api/checkout looks up the real, server-
   // calculated balance from the database itself (the saveOrder()
   // call above just wrote it), never trusting a client-supplied amount.
-  if(paymentMethod === "Card" && enabledPayments.includes("Card") && !manualNow){
+  // Nothing left to pay (a code took it all off): no card step — the confirmation says so.
+  if(paymentMethod === "Card" && enabledPayments.includes("Card") && !manualNow && order.owed !== 0){
     try{
       const res = await fetch("/api/checkout", {
         method: "POST",
@@ -2991,26 +3143,26 @@ async function placeOrder(orgId){
         // The order exists now: remember it (so Cancel on Stripe offers to pay it, not to order again) and
         // empty the cart, then hand off to Stripe's hosted payment page.
         writePendingCard_(orgId, { orderId: order.orderId, token: (saved && saved.checkoutToken) || null, total: order.total });
-        clearCart_(); saveCart_();
+        clearCart_(); saveCart_(); discountReset_();
         window.location.href = data.url;
         return;
       }
       console.error("Stripe checkout session failed:", data);
       // The order is saved; only the card step failed. Show it as placed, with how to pay.
-      clearCart_(); saveCart_();
+      clearCart_(); saveCart_(); discountReset_();
       unpaidCardNotice = (saved && saved.checkoutToken) ? { orderId: order.orderId, token: saved.checkoutToken, total: order.total } : null;
       showConfirmation(orgId, Object.assign({}, order, { cardStartFailed: true }));
       return;
     }catch(err){
       console.error("Stripe checkout error:", err);
-      clearCart_(); saveCart_();
+      clearCart_(); saveCart_(); discountReset_();
       unpaidCardNotice = (saved && saved.checkoutToken) ? { orderId: order.orderId, token: saved.checkoutToken, total: order.total } : null;
       showConfirmation(orgId, Object.assign({}, order, { cardStartFailed: true }));
       return;
     }
   }
 
-  clearCart_(); saveCart_(); checkoutMsg_ = "";
+  clearCart_(); saveCart_(); checkoutMsg_ = ""; discountReset_();
   rushOn = false; rushNeededBy = "";
   showConfirmation(orgId, order);
 }
@@ -3084,6 +3236,7 @@ function confirmationPaymentText_(order){
 function confirmationPaymentBase_(order){
   const m = order.paymentMethod;
   if(order.manualShipping) return "The shipping cost still has to be worked out — we'll email you the total and how to pay.";
+  if(order.owed === 0) return "Your order is in. Your discount covers it — there's nothing to pay.";
   if(m === "Card") return order.cardStartFailed ? "Your order is saved, but the card payment couldn't be started. Try it again below, or contact the shop to pay another way — there's no need to order again." : "Your order is saved.";
   if(m === "Venmo" || m === "Zelle" || m === "Check") return "Your order is in. Please pay using the details below — we'll email you once your payment is received.";
   return "Your order is in. We'll contact you about payment.";
@@ -3095,7 +3248,8 @@ function confirmationSummaryHtml_(order){
   const deliveryLabel = order.manualShipping ? "Shipping — cost to follow" : order.shippingMethod || (opt && opt.label) || (order.shippingAddress ? "Shipping" : "");
   const delivery = deliveryLabel ? `<div class="row"><span>${escapeHtml(deliveryLabel)}</span><span>${order.manualShipping ? "TBD" : Number(order.shippingCost) ? "$" + Number(order.shippingCost).toFixed(2) : "Free"}</span></div>` : "";
   const rush = order.rush ? `<div class="row"><span>Rush fee${order.neededBy ? ` <small>(needed by ${escapeHtml(order.neededBy)})</small>` : ""}</span><span>${order.rushFeePending ? "To follow" : "$" + Number(order.rushFee || 0).toFixed(2)}</span></div>` : "";
-  return `<div class="conf-items">${rows}${delivery}${rush}<div class="row total"><span>Total</span><span>$${Number(order.total || 0).toFixed(2)}${order.manualShipping ? " + shipping" : ""}</span></div></div>`;
+  const discount = Number(order.discount) > 0 ? `<div class="row"><span>Discount${order.discountCode ? " (" + escapeHtml(order.discountCode) + ")" : ""}</span><span>&minus;$${Number(order.discount).toFixed(2)}</span></div>` : "";
+  return `<div class="conf-items">${rows}${discount}${delivery}${rush}<div class="row total"><span>Total</span><span>$${Number(order.total || 0).toFixed(2)}${order.manualShipping ? " + shipping" : ""}</span></div></div>`;
 }
 
 function showConfirmation(orgId, order){
@@ -3103,7 +3257,8 @@ function showConfirmation(orgId, order){
   const app = document.getElementById("app");
 
   let paymentHtml = "";
-  if(order.paymentMethod === "Venmo"){
+  if(order.owed === 0){ /* a discount code covered it all: nothing to pay, so no payment details */ }
+  else if(order.paymentMethod === "Venmo"){
     const link = venmoPayLink(order);
     paymentHtml = link
       ? `<a class="confirmation-back" href="${link}" target="_blank" rel="noopener" style="display:inline-block; margin-top:16px; text-decoration:none;">Pay $${order.total.toFixed(2)} with Venmo &rarr;</a>`

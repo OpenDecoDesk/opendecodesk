@@ -452,6 +452,43 @@ CREATE TABLE IF NOT EXISTS estimate_items (
 );
 CREATE INDEX IF NOT EXISTS idx_estimate_items_estimate ON estimate_items(estimateId, position);
 
+-- Discount codes (migrations/0115): a code a customer types at checkout, a percent (percentBps) or an amount
+-- (amountCents) off the goods, for every shop (orgId NULL) or one. email '' = anyone, up to maxUses times in all
+-- (oncePerEmail: once per address); else that one address (lower-case), once. expiresOn = the last day it works.
+-- The discount itself is stored on the order like a manual one (discountNote "Code SAVE10").
+CREATE TABLE IF NOT EXISTS discount_codes (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  code         TEXT NOT NULL,
+  kind         TEXT NOT NULL CHECK (kind IN ('percent','amount')),
+  percentBps   INTEGER,
+  amountCents  INTEGER,
+  orgId        TEXT REFERENCES orgs(orgId),
+  email        TEXT NOT NULL DEFAULT '',
+  maxUses      INTEGER NOT NULL CHECK (maxUses >= 1),
+  oncePerEmail INTEGER NOT NULL DEFAULT 0,
+  expiresOn    TEXT,
+  active       INTEGER NOT NULL DEFAULT 1,
+  note         TEXT NOT NULL DEFAULT '',
+  createdAt    TEXT NOT NULL,
+  createdBy    TEXT NOT NULL DEFAULT '',
+  CHECK ((kind = 'percent' AND percentBps IS NOT NULL AND percentBps BETWEEN 1 AND 10000 AND amountCents IS NULL)
+      OR (kind = 'amount' AND amountCents IS NOT NULL AND amountCents BETWEEN 1 AND 1000000 AND percentBps IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_discount_codes_code ON discount_codes(code);
+-- One row per order that used a code, claimed just before the order is inserted (so no FK to orders) by one
+-- conditional INSERT that counts the live uses. A voided or deleted order gives the use back: releasedAt is set.
+CREATE TABLE IF NOT EXISTS discount_code_uses (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  codeId       INTEGER NOT NULL REFERENCES discount_codes(id),
+  orderId      TEXT NOT NULL,
+  email        TEXT NOT NULL DEFAULT '',
+  amountCents  INTEGER NOT NULL DEFAULT 0,
+  usedAt       TEXT NOT NULL,
+  releasedAt   TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_discount_uses_order ON discount_code_uses(orderId);
+CREATE INDEX IF NOT EXISTS idx_discount_uses_code ON discount_code_uses(codeId) WHERE releasedAt IS NULL;
+
 -- Legacy inventory table (superseded by blanks/blank_sizes — kept for existing data)
 CREATE TABLE IF NOT EXISTS inventory (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,

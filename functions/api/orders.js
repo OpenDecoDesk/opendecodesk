@@ -93,6 +93,8 @@ import {
   listCustomers, getCustomer, saveCustomer, setCustomerArchived, mergeCustomers, setOrderCustomer,
   normalizeQtyBreaks_, orderBreakQty_,
   createEstimate, getEstimate, listEstimates, saveEstimateItems, setEstimateFields, markEstimateSent, setEstimateConverted, cancelEstimate,
+  listDiscountCodes, getDiscountCode, saveDiscountCode, createDiscountCodesForEmails, setDiscountCodeActive, deleteDiscountCode,
+  checkDiscountCode, claimDiscountCode, releaseDiscountCodeUse,
   priceItem, CUSTOM_DESIGN_KINDS, CUSTOM_PLAIN_LOCATION, customFromConfig,
   createDesignVerification, approvePendingDesignVerifications,
   getLatestVerificationsByOrg,
@@ -561,6 +563,8 @@ const NO_MONTH_ACTIONS = new Set([
   // Quotes (migrations/0109): a quote is no sale. Converting one makes an order today, so convertEstimate is in
   // periodGuard's rules instead, as a Local sale is.
   "createEstimate", "saveEstimate", "sendEstimate", "cancelEstimate",
+  // Discount codes (migrations/0115): a code is no sale. What one takes off is booked on the order it was used on.
+  "saveDiscountCode", "createDiscountCodes", "setDiscountCodeActive", "deleteDiscountCode",
   // Run Order and transfer sheets
   "startRun", "completeRun", "abortRun", "markManufacturedOnMachine", "setTransferReceived", "setTransfersApplied",
   // Catalog and shops
@@ -685,6 +689,11 @@ const FEATURE_ACTIONS = {
   // Quotes (migrations/0109). The customer's side (functions/api/estimate.js) checks the same switch itself.
   quotes: [
     "listEstimates", "getEstimate", "createEstimate", "saveEstimate", "sendEstimate", "convertEstimate", "cancelEstimate",
+  ],
+  // Discount codes (migrations/0115). The storefront's checkDiscountCode and an order sending a code check the same
+  // switch themselves (they are the customer's side, not admin actions).
+  discounts: [
+    "listDiscountCodes", "getDiscountCode", "saveDiscountCode", "createDiscountCodes", "setDiscountCodeActive", "deleteDiscountCode",
   ],
 };
 const ACTION_FEATURE = {};
@@ -2965,7 +2974,9 @@ async function handleOrdersPost_(context, listBefore = null) {
       total: existing.total, subtotal: existing.subtotal, shippingCost: existing.shippingCost,
       discountAmount: existing.discountAmount, paymentMethod: existing.paymentMethod,
       placedAt: existing.placedAt, paid: existing.paid, paidAt: existing.paidAt, reason,
-      items: existing.items, payments: existing.payments };
+      items: existing.items, payments: existing.payments,
+      // A discount code's use is given back with the void (db.js voidOrder), so the customer can use it again.
+      ...(existing.discountCode ? { discountCode: existing.discountCode } : {}) };
     const auditErr = await auditStrict({ orgId, orderId, action: "order.voided", detail: snapshot });
     if (auditErr) return auditErr;
     await voidOrder(env.DB, orderId, reason);
@@ -3652,6 +3663,148 @@ async function handleOrdersPost_(context, listBefore = null) {
       }
       return jsonResponse({ status: "ok" });
     });
+  }
+
+  // ---- Discount codes (migrations/0115): the Discount codes page ----
+  // Codes a customer types at checkout (checkDiscountCode and the order submission below). db.js does the work and
+  // the checks of a code's fields; here are who may, the shop, the audit log and the business's own day for expiry.
+  // Until 0115 has run there are no tables: db.js answers { notReady } (or, reading, no codes) and these actions say so
+  // (503). db.js catches the missing table itself, so nothing here has to.
+  const discountsNotReady_ = (r) => jsonResponse({ status: "error", message: r.error }, 503);
+  const discountCodeNotFound_ = () => jsonResponse({ status: "error", message: "Discount code not found" }, 404);
+  // A code's id: a whole number from 1, else 0.
+  const discountIdOf_ = (v) => (typeof v === "number" || (typeof v === "string" && /^\d+$/.test(v))) && Number.isSafeInteger(Number(v)) && Number(v) >= 1 ? Number(v) : 0;
+  // The shop a code is for: "" / null = every shop. { orgId } or { error } (the reply).
+  const discountOrg_ = async (raw) => {
+    if (raw === undefined || raw === null || raw === "") return { orgId: null };
+    if (typeof raw !== "string" || raw.length > 100) return { error: jsonResponse({ status: "error", message: "That shop isn't valid." }, 400) };
+    return (await getOrgById(env.DB, raw)) ? { orgId: raw } : { error: jsonResponse({ status: "error", message: "Unknown shop" }, 404) };
+  };
+  // What the audit log keeps of a code (its value, who and when; never its uses).
+  const discountAuditOf_ = (c) => c ? { code: c.code, kind: c.kind, percent: c.percent, amount: c.amount, orgId: c.orgId || null, email: c.email || "",
+    maxUses: c.maxUses, oncePerEmail: !!c.oncePerEmail, expiresOn: c.expiresOn || null, active: !!c.active, note: c.note || "" } : null;
+
+  // ---- listDiscountCodes — the page's list: search, shop, status, paging ----
+  if (body.action === "listDiscountCodes") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const whole = (v, min, dflt) => Number.isInteger(Number(v)) && Number(v) >= min && v !== "" && v != null && typeof v !== "boolean" ? Number(v) : dflt;
+    const STATUSES = ["active", "off", "expired", "usedUp", "all"];
+    if (body.status != null && body.status !== "" && !STATUSES.includes(body.status)) return jsonResponse({ status: "error", message: "That status isn't one a code has." }, 400);
+    const args = { limit: Math.min(200, whole(body.limit, 1, 50)), offset: whole(body.offset, 0, 0), status: body.status || "all", today: await localToday(env) };
+    if (typeof body.org === "string" && body.org) args.orgId = body.org.slice(0, 100);
+    if (typeof body.q === "string" && body.q.trim()) args.q = body.q.trim().slice(0, 200);
+    // Before 0115 the list is simply empty.
+    const got = await listDiscountCodes(env.DB, args);
+    return jsonResponse({ status: "ok", codes: (got && got.codes) || [], total: (got && got.total) || 0 });
+  }
+
+  // ---- getDiscountCode — one code and the orders it was used on ----
+  if (body.action === "getDiscountCode") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const id = discountIdOf_(body.id);
+    if (!id) return jsonResponse({ status: "error", message: "That code isn't valid." }, 400);
+    const today = await localToday(env);
+    // Before 0115 there is no such code (null).
+    const got = await getDiscountCode(env.DB, id, today);
+    return got ? jsonResponse({ status: "ok", code: got }) : discountCodeNotFound_();
+  }
+
+  // ---- saveDiscountCode — a new code (no id; a blank code is made up), or a change to one ----
+  // Once a code has been used only its expiry, uses, note and on/off can change: db.js refuses the rest.
+  if (body.action === "saveDiscountCode") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const input = body.code;
+    if (!input || typeof input !== "object" || Array.isArray(input)) return jsonResponse({ status: "error", message: "That code isn't valid." }, 400);
+    const id = input.id === undefined || input.id === null || input.id === "" ? 0 : discountIdOf_(input.id);
+    if (!id && input.id !== undefined && input.id !== null && input.id !== "") return jsonResponse({ status: "error", message: "That code isn't valid." }, 400);
+    const shop = await discountOrg_(input.orgId);
+    if (shop.error) return shop.error;
+    const today = await localToday(env);
+    let before = null;
+    if (id) {
+      before = await getDiscountCode(env.DB, id, today);
+      if (!before) return discountCodeNotFound_();
+    }
+    // An edit that leaves the shop out keeps the code's own (null would mean every shop).
+    const orgId = before && input.orgId === undefined ? (before.orgId || null) : shop.orgId;
+    const r = await saveDiscountCode(env.DB, { ...input, ...(id ? { id } : {}), orgId },
+      { actor: String(adminActor(request) || "").slice(0, 200), now: new Date().toISOString() });
+    if (r && r.notReady) return discountsNotReady_(r);
+    if (!r || r.error) return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't save the code. Try again.", ...(r && r.duplicate ? { duplicate: true } : {}) }, r && r.duplicate ? 409 : 400);
+    const saved = r.code;
+    if (!before) audit({ orgId: (saved && saved.orgId) || null, orderId: null, action: "discount_code.created", detail: { id: saved && saved.id, ...discountAuditOf_(saved) } });
+    else {
+      const from = discountAuditOf_(before), to = discountAuditOf_(saved);
+      const changed = Object.keys(to || {}).filter(k => JSON.stringify(from[k]) !== JSON.stringify(to[k]));
+      if (changed.length) audit({ orgId: (saved && saved.orgId) || before.orgId || null, orderId: null, action: "discount_code.updated",
+        detail: { id, code: saved ? saved.code : before.code, from: Object.fromEntries(changed.map(k => [k, from[k]])), to: Object.fromEntries(changed.map(k => [k, to[k]])) } });
+    }
+    return jsonResponse({ status: "ok", code: saved });
+  }
+
+  // ---- createDiscountCodes — one single-use code for each of a list of email addresses (at most 500) ----
+  // The audit log keeps how many, never the list: the addresses are the customers'.
+  if (body.action === "createDiscountCodes") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    // A list, or the textarea's text as typed (one per line, or separated by commas).
+    const emails = Array.isArray(body.emails) ? body.emails.map(e => String(e == null ? "" : e))
+      : typeof body.emails === "string" ? body.emails.split(/[\s,;]+/) : null;
+    if (!emails) return jsonResponse({ status: "error", message: "Enter the email addresses, one per line." }, 400);
+    const list = emails.map(e => e.trim()).filter(Boolean);
+    if (!list.length) return jsonResponse({ status: "error", message: "Enter the email addresses, one per line." }, 400);
+    if (list.length > 500) return jsonResponse({ status: "error", message: "That's more than 500 email addresses — make the codes in smaller batches." }, 400);
+    const shop = await discountOrg_(body.org);
+    if (shop.error) return shop.error;
+    const args = { emails: list, prefix: typeof body.prefix === "string" ? body.prefix : "", kind: body.kind, percent: body.percent, amount: body.amount,
+      orgId: shop.orgId, expiresOn: body.expiresOn, note: body.note };
+    const r = await createDiscountCodesForEmails(env.DB, args, { actor: String(adminActor(request) || "").slice(0, 200), now: new Date().toISOString() });
+    if (r && r.notReady) return discountsNotReady_(r);
+    if (!r || r.error) return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't make the codes. Try again." }, 400);
+    const codes = r.codes || [], skipped = r.skipped || [];
+    if (codes.length) audit({ orgId: shop.orgId, orderId: null, action: "discount_code.bulk_created", detail: { count: codes.length, skipped: skipped.length,
+      kind: body.kind, percent: body.kind === "percent" ? body.percent : null, amount: body.kind === "amount" ? body.amount : null,
+      orgId: shop.orgId, expiresOn: body.expiresOn || null, prefix: args.prefix } });
+    return jsonResponse({ status: "ok", codes, skipped });
+  }
+
+  // ---- setDiscountCodeActive — switch a code off (or on again) ----
+  if (body.action === "setDiscountCodeActive") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const id = discountIdOf_(body.id);
+    if (!id) return jsonResponse({ status: "error", message: "That code isn't valid." }, 400);
+    if (typeof body.active !== "boolean") return jsonResponse({ status: "error", message: "Say whether the code is on or off." }, 400);
+    const today = await localToday(env);
+    const before = await getDiscountCode(env.DB, id, today);
+    if (!before) return discountCodeNotFound_();
+    const r = await setDiscountCodeActive(env.DB, id, body.active);
+    if (!r || r.error) return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't change the code. Try again." }, 400);
+    if (!!before.active !== body.active) audit({ orgId: before.orgId || null, orderId: null, action: body.active ? "discount_code.switched_on" : "discount_code.switched_off",
+      detail: { id, code: before.code } });
+    return jsonResponse({ status: "ok", active: body.active });
+  }
+
+  // ---- deleteDiscountCode — only a code never used (one that was keeps its orders' record: switch it off instead) ----
+  if (body.action === "deleteDiscountCode") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const id = discountIdOf_(body.id);
+    if (!id) return jsonResponse({ status: "error", message: "That code isn't valid." }, 400);
+    const today = await localToday(env);
+    const before = await getDiscountCode(env.DB, id, today);
+    if (!before) return discountCodeNotFound_();
+    // Any use at all, given back or not, is an order's record of the code.
+    if (Number(before.used) > 0 || (Array.isArray(before.uses) && before.uses.length)) {
+      return jsonResponse({ status: "error", message: "This code has been used, so it can't be deleted — switch it off instead." }, 409);
+    }
+    const r = await deleteDiscountCode(env.DB, id);
+    if (!r || r.error) return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't delete the code. Try again." }, 409);
+    audit({ orgId: before.orgId || null, orderId: null, action: "discount_code.deleted", detail: { id, ...discountAuditOf_(before) } });
+    return jsonResponse({ status: "ok" });
   }
 
   // ---- importOrders — Orders → Import orders (migrations/0087) ----------------
@@ -8046,6 +8199,85 @@ async function handleOrdersPost_(context, listBefore = null) {
   if (host.kind === "admin") {
     return jsonResponse({ status: "error", message: "Not available here." }, 403);
   }
+  // A storefront cart priced on the server, as the order is: the published shop's prices, quantity breaks
+  // (migrations/0109) counting the pieces of each product across the whole cart. → { pricedItems, subtotal } (dollars);
+  // throws (a userFacing error for the customer's own mistakes).
+  const priceCart_ = async (cartOrgId, cartItems, customByLine, lookups) => {
+    let subtotal = 0;
+    const cartBreakQty = orderBreakQty_(cartItems);
+    const pricedItems = await Promise.all(
+      cartItems.map(async (it, n) => {
+        const qty = lineQty(it.qty);
+        const priced = await priceItem(
+          env.DB, cartOrgId, it.productId, it.size, qty, !!it.personalized, it.config, { custom: customByLine[n], lookups, breakQty: cartBreakQty.get(it.productId) || qty }
+        );
+        if (priced.needsCustomUpload) throw Object.assign(new Error(`Upload your design to order ${priced.name || "this item"}.`), { userFacing: true });
+        const { unitPrice, personalizationFee, name, type } = priced;
+        const lineTotal = (unitPrice + personalizationFee) * qty;
+        subtotal += lineTotal;
+        return {
+          productId: it.productId,
+          // name/type from the catalog row, never from the request.
+          name: name || String(it.productId), type: type || "",
+          size: String(it.size || "").slice(0, 40),
+          qty, unitPrice, personalized: !!it.personalized,
+          persName: String(it.persName || "").slice(0, 200), personalizationFee, lineTotal,
+          // Configurable line snapshot (built + validated server-side); stored in order_items.configJson.
+          ...(priced.config ? { config: priced.config } : {}),
+          // The customer's files, recorded on the line (order_item_files, uploadedBy 'customer').
+          customFiles: customFilesOf_(priced.config),
+        };
+      })
+    );
+    return { pricedItems, subtotal };
+  };
+  // A database without 0115 (deploys and migrations aren't atomic): no codes to check yet — db.js answers { notReady }.
+  const DISCOUNTS_OFF_MSG = "Discount codes aren't available right now.";
+
+  // ---- checkDiscountCode — the storefront's Apply: is this code good for this cart (and email)? ----
+  // The customer's side, not a back-office action: no ACTION_PERM or FEATURE_ACTIONS entry (it checks the storefront
+  // and discounts switches itself), and named by a constant so the back-office action lists (tests 106, 115) leave it out.
+  const STOREFRONT_CHECK_DISCOUNT_ = "checkDiscountCode";
+  // No sign-in: anyone at the shop's checkout. The cart is priced here as the order will be, so the discount shown is
+  // the one the order gets (the order checks the code again and the server decides). The answer never says who a
+  // code is for, how many uses it has or who used it.
+  if (body.action === STOREFRONT_CHECK_DISCOUNT_) {
+    if (!featureOn("storefront") || !featureOn("discounts")) return jsonResponse({ status: "error", message: DISCOUNTS_OFF_MSG }, 400);
+    let checkOrgId = body.orgId;
+    if (host.kind === "locked") checkOrgId = host.orgId;
+    else {
+      // The shop is the one whose address this is, as for an order (localhost keeps the request's, for development).
+      const h = new URL(request.url).hostname;
+      if (h !== "localhost" && h !== "127.0.0.1") return jsonResponse({ status: "error", message: "Orders are placed from a shop's own page." }, 403);
+    }
+    const rl = await rateLimited(env, "discount_check", request, 30);
+    if (rl.blocked) return rateLimitResponse(rl.retryAfter);
+    const bad = (message) => jsonResponse({ status: "error", message }, 400);
+    if (typeof checkOrgId !== "string" || !checkOrgId) return bad("Unknown org");
+    const code = typeof body.code === "string" ? body.code.trim() : "";
+    if (!code) return bad("Enter a discount code.");
+    if (code.length > 64) return bad("This code isn't valid.");
+    const email = typeof body.email === "string" ? body.email.trim().slice(0, 254) : "";
+    const cart = body.items;
+    if (!Array.isArray(cart) || cart.length === 0 || cart.length > 20) return bad("Add something to your cart first.");
+    if (cart.some((it) => !it || typeof it !== "object" || Array.isArray(it) || lineQty(it.qty) === null)) return bad(QTY_MESSAGE);
+    if (cart.some((it) => typeof it.productId !== "string" || !it.productId)) return bad("Invalid items");
+    const lookups = priceLookups();
+    const orgRow = await getPublishedOrg(env.DB, checkOrgId, lookups);
+    if (!orgRow || !orgRow.ready) return jsonResponse({ status: "error", message: "This shop is not currently accepting orders." }, 403);
+    let subtotal;
+    try {
+      const customByLine = await customDesignsForCart_(env.DB, checkOrgId, cart);
+      ({ subtotal } = await priceCart_(checkOrgId, cart, customByLine, lookups));
+    } catch (e) {
+      if (!e || !e.userFacing) console.error("Pricing a cart for a discount code failed:", e);
+      return bad(e && e.userFacing ? e.message : "We couldn't price your cart — please refresh the page and try again.");
+    }
+    const r = await checkDiscountCode(env.DB, { code, orgId: checkOrgId, email, subtotal, today: await localToday(env) });
+    if (!r || r.notReady) return bad(DISCOUNTS_OFF_MSG);
+    if (!r.ok) return bad(r.reason || "This code isn't valid.");
+    return jsonResponse({ status: "ok", code: r.code.code, label: r.code.label, discount: r.discount });
+  }
   if (body.action) {
     return jsonResponse({ status: "error", message: "Unknown action" }, 400);
   }
@@ -8140,9 +8372,11 @@ async function handleOrdersPost_(context, listBefore = null) {
       && lines(prior.items) === lines(items) && Date.now() - Date.parse(prior.placedAt) < 24 * 3600e3;
     if (!same) return jsonResponse({ status: "error", message: "This order has already been received." }, 409);
     const checkoutToken = await signOrderToken(env, orderId);
+    // A code used on it: the same discount, total and what's still owed the first answer gave.
+    const withCode = prior.discountCode ? { discount: prior.discountAmount, discountCode: prior.discountCode, total: prior.effectiveTotal, owed: prior.balanceDue } : {};
     return jsonResponse(prior.taxMode === "exclusive"
-      ? { status: "ok", duplicate: true, taxMode: "exclusive", salesTax: prior.salesTax, total: prior.total, checkoutToken }
-      : { status: "ok", duplicate: true, checkoutToken });
+      ? { status: "ok", duplicate: true, taxMode: "exclusive", salesTax: prior.salesTax, total: prior.total, checkoutToken, ...withCode }
+      : { status: "ok", duplicate: true, checkoutToken, ...withCode });
   };
   { const again = await answerRepeatOrder(); if (again) return again; }
   // …and its product is named by a string, as the catalog has it. (A number such as 101 would be
@@ -8161,35 +8395,11 @@ async function handleOrdersPost_(context, listBefore = null) {
     return jsonResponse({ status: "error", message: e && e.userFacing ? e.message : "We couldn't find your uploaded design — please upload it again." }, 400);
   }
 
-  // Server-side pricing. Quantity breaks (migrations/0109) count the pieces of each product across the whole cart.
+  // Server-side pricing (priceCart_ above: the same pricing a discount code's check uses).
   let pricedItems;
   let subtotal = 0;
-  const cartBreakQty = orderBreakQty_(items);
   try {
-    pricedItems = await Promise.all(
-      items.map(async (it, n) => {
-        const qty = lineQty(it.qty);
-        const priced = await priceItem(
-          env.DB, orgId, it.productId, it.size, qty, !!it.personalized, it.config, { custom: customByLine[n], lookups, breakQty: cartBreakQty.get(it.productId) || qty }
-        );
-        if (priced.needsCustomUpload) throw Object.assign(new Error(`Upload your design to order ${priced.name || "this item"}.`), { userFacing: true });
-        const { unitPrice, personalizationFee, name, type } = priced;
-        const lineTotal = (unitPrice + personalizationFee) * qty;
-        subtotal += lineTotal;
-        return {
-          productId: it.productId,
-          // name/type from the catalog row, never from the request.
-          name: name || String(it.productId), type: type || "",
-          size: String(it.size || "").slice(0, 40),
-          qty, unitPrice, personalized: !!it.personalized,
-          persName: String(it.persName || "").slice(0, 200), personalizationFee, lineTotal,
-          // Configurable line snapshot (built + validated server-side); stored in order_items.configJson.
-          ...(priced.config ? { config: priced.config } : {}),
-          // The customer's files, recorded on the line (order_item_files, uploadedBy 'customer').
-          customFiles: customFilesOf_(priced.config),
-        };
-      })
-    );
+    ({ pricedItems, subtotal } = await priceCart_(orgId, items, customByLine, lookups));
   } catch (e) {
     // Only deliberate pricing messages ("Size XL not available…") reach the
     // customer; an internal error's text is logged, never echoed back.
@@ -8370,6 +8580,34 @@ async function handleOrdersPost_(context, listBefore = null) {
     ...(rushPayBy ? { rushPayBy } : {}),
   };
 
+  // A discount code (migrations/0115): checked again here with this order's email and the goods as priced above (the
+  // storefront's Apply only showed it), then one use claimed for this order id — one conditional insert, so two orders
+  // racing for a code's last use can't both have it. The discount is booked like a manual one (order.discount).
+  let discountUse = null;
+  if (body.discountCode != null && body.discountCode !== "") {
+    if (typeof body.discountCode !== "string" || body.discountCode.length > 64) return jsonResponse({ status: "error", message: "This code isn't valid." }, 400);
+    const wanted = body.discountCode.trim();
+    if (wanted) {
+      if (!featureOn("discounts")) return jsonResponse({ status: "error", message: DISCOUNTS_OFF_MSG }, 400);
+      const chk = await checkDiscountCode(env.DB, { code: wanted, orgId, email: contact.trim(), subtotal, today: await localToday(env) });
+      if (!chk || chk.notReady) return jsonResponse({ status: "error", message: DISCOUNTS_OFF_MSG }, 400);
+      if (!chk.ok) return jsonResponse({ status: "error", message: chk.reason || "This code isn't valid." }, 400);
+      discountUse = { codeId: chk.code.id, code: chk.code.code, cents: Math.max(0, Math.round(Number(chk.discount) * 100) || 0) };
+    }
+  }
+  if (discountUse) {
+    const claim = await claimDiscountCode(env.DB, { codeId: discountUse.codeId, orderId, email: contact.trim().toLowerCase(), amountCents: discountUse.cents, now: new Date().toISOString() });
+    if (!claim || !claim.ok) {
+      // The same order sent twice at once: the first try holds this order id's use, so this is its repeat.
+      { const again = await answerRepeatOrder(); if (again) return again; }
+      return jsonResponse({ status: "error", message: (claim && claim.reason) || "This code has reached its limit." }, 400);
+    }
+    // `already`: this order id held a live use of this code before this request (the same order sent twice at once),
+    // so that use is the other try's, not ours to give back if the insert fails.
+    discountUse.claimedHere = !claim.already;
+    order.discount = { cents: discountUse.cents, note: "Code " + discountUse.code };
+  }
+
   // What the order comes to, as recorded (insertOrder works the tax out per line; with tax added
   // on top it's part of the total). The storefront shows these figures, never its own estimate.
   let placed;
@@ -8377,6 +8615,18 @@ async function handleOrdersPost_(context, listBefore = null) {
     // A line for a product + size in the shop's finished stock is filled from it (migrations/0060).
     placed = (await insertOrder(env.DB, order, pricedItems, { fillFromStock: true })) || {};
   } catch (e) {
+    // No order, so the use claimed above for it is given back (only one this request took) — unless another copy of
+    // this order (sent twice at once) has just written it with the discount: the use is keyed by the order id, so it
+    // is that order's now.
+    let keepUse = false;
+    if (discountUse && discountUse.claimedHere && /UNIQUE constraint failed: orders\.orderId/i.test(String(e && e.message))) {
+      try { keepUse = Number(((await env.DB.prepare("SELECT discountCents FROM orders WHERE orderId = ?").bind(orderId).first()) || {}).discountCents) > 0; }
+      catch (_) { keepUse = false; }
+    }
+    if (discountUse && discountUse.claimedHere && !keepUse) {
+      try { await releaseDiscountCodeUse(env.DB, orderId, new Date().toISOString()); }
+      catch (re) { console.error("Giving back a discount code's use failed for", orderId, re); }
+    }
     // The same order id twice (a double click, a retry after a lost answer): the order is already
     // there, so say so plainly instead of failing with an error page.
     if (/UNIQUE constraint failed: orders\.orderId/i.test(String(e && e.message))) {
@@ -8413,9 +8663,17 @@ async function handleOrdersPost_(context, listBefore = null) {
   // emailOn: whether this install can email at all, so the confirmation promises a copy only when one can go.
   let emailOn = true;
   try { if (typeof emailCanSend === "function") emailOn = await emailCanSend(env); } catch (_) {}
+  // With a code: the discount, the total after it and what's still to pay (all of it: nothing is paid yet), whatever
+  // the tax mode, so the confirmation and the card step use the server's figures.
+  let withCode = {};
+  if (discountUse) {
+    const discount = placed.discount != null ? Number(placed.discount) : discountUse.cents / 100;
+    const owed = placed.total != null ? Number(placed.total) : Math.max(0, Math.round(total * 100) - discountUse.cents) / 100;
+    withCode = { discount, discountCode: discountUse.code, total: owed, owed };
+  }
   return jsonResponse(placed.taxMode === "exclusive"
-    ? { status: "ok", taxMode: "exclusive", salesTax: placed.salesTax, total: placed.total, checkoutToken, emailOn }
-    : { status: "ok", checkoutToken, emailOn });
+    ? { status: "ok", taxMode: "exclusive", salesTax: placed.salesTax, total: placed.total, checkoutToken, emailOn, ...withCode }
+    : { status: "ok", checkoutToken, emailOn, ...withCode });
 }
 
 export async function onRequestGet() {

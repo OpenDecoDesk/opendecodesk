@@ -8,7 +8,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.E2E_PORT || 8897);
 // Specs that change a setting for the whole install (the sales tax, a feature switch): each runs alone, one after
 // another, once every other spec has finished, so no other test reads that setting while it is changed.
-const ALONE = ["gap-customers-tax-merge", "gap-quotes-tax", "gap-quotes-switch"];
+const ALONE = ["gap-customers-tax-merge", "gap-quotes-tax", "gap-quotes-switch", "gap-discounts-switch"];
 const ALONE_RE = (name) => new RegExp("specs[\\\\/]" + name + "\\.spec\\.mjs$");
 const AFTER_SPECS = ALONE.map(ALONE_RE);
 

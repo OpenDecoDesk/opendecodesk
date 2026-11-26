@@ -74,8 +74,9 @@ const ok = (label, cond) => { cond ? passed++ : failed++; console.log(label + ":
 
   console.log("\n=== Every payments reply goes through the filter ===");
   const raw = ordersSrc.match(/payments: (updated|same|existing|order|o)(\s*\?\s*\1)?\.payments\b/g) || [];
-  // The one left is the void-order audit snapshot (not a reply), kept whole for the audit log.
-  ok("no reply sends an order's payments unfiltered", raw.length === 1 && /items: existing\.items, payments: existing\.payments \};\n\s*const auditErr = await auditStrict\(\{ orgId, orderId, action: "order\.voided"/.test(ordersSrc));
+  // The one left is the void-order audit snapshot (not a reply), kept whole for the audit log (with the discount code
+  // given back, when the order used one — migrations/0115).
+  ok("no reply sends an order's payments unfiltered", raw.length === 1 && /items: existing\.items, payments: existing\.payments(?: \}|,[^;]*?discountCode[^;]*?\});\n\s*const auditErr = await auditStrict\(\{ orgId, orderId, action: "order\.voided"/.test(ordersSrc));
   ok("paymentsFor_ drops the fee unless the role has costs.view, as orderCostsFor_ does", /const paymentsFor_ = \(payments\) => !Array\.isArray\(payments\) \|\| seesPricing_\(\) \? payments : payments\.map\(\(\{ fee, \.\.\.p \}\) => p\);/.test(ordersSrc) &&
     /rest\.payments = paymentsFor_\(o\.payments\);/.test(ordersSrc));
 

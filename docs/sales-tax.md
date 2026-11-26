@@ -65,7 +65,9 @@ Also:
 - **A discount** reduces the tax in proportion to the taxable goods it was taken off.
 - **Cancelled lines** carry no tax.
 - **A refund** takes back its share of the tax, in the month it was refunded. You can say how much
-  of a refund was shipping (which carried no tax).
+  of a refund was shipping (which carried no tax). Money refunded for a cancelled line takes no tax
+  back, because that line's tax is already gone: an order's refunds cover its cancelled lines first,
+  and only what is refunded beyond them takes tax back.
 - If you change an order — add or edit a line, change the discount, change the address — its tax is
   worked out again from **that order's own** rate and mode.
 

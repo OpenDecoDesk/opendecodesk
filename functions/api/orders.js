@@ -68,7 +68,7 @@ import {
   listProductGraphicImages, setProductGraphicImage, deleteProductGraphicImage, getProductLocationBaseImages,
   listGraphics, getGraphic, createGraphic, updateGraphic, graphicGlobalProblem, setProductGraphicColorBlocked, deleteGraphic,
   getTierPrices, setTierPrices, setOrgReorderQr, setOrgReorderQrTransfer,
-  listTransfers, createTransfer, updateTransfer, deleteTransfer, receiveTransferSheet, transferSheetShares, SHEET_PCT_TOLERANCE,
+  listTransfers, createTransfer, updateTransfer, deleteTransfer, receiveTransferSheetOnce, transferSheetShares, SHEET_PCT_TOLERANCE,
   getTransferSheet, editTransferSheet, transferSheetLabel,
   writeOffTransfers, setTransferCount, getTransferMovements, voidTransferMovement, transferMovementVoidable, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferValuations, getTransferCogs,
   getTransferQueue, setTransferReceived, getGangSheet, makeTransferLine, setTransfersApplied, lineHasEmbroidery, refreshOrderLinesFromCatalog,
@@ -112,7 +112,7 @@ import {
   RECURRING_FREQUENCIES, recurringDueDates, recurringIndexAfter, listRecurringExpenses, getRecurringExpense, saveRecurringExpense, stopRecurringExpense,
   deleteRecurringExpense, recordDueRecurringExpenses, getRecurringExpensesRecorded,
   getRefundedCents, getDepositPayments, linkPaymentsToCashout, cashoutNetCents_,
-  receiveBlanks, writeOffBlanks, setBlankCount, getBlankMovements, markBlankPricesChecked, setBlankArchived, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection,
+  receiveBlanksOnce, receiptGroupForKey, receiptEntryId, writeOffBlanks, setBlankCount, getBlankMovements, markBlankPricesChecked, setBlankArchived, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection,
   getSiteSetting, setSiteDomain,
   getPublishedOrg, setOrgReady, getShopWizard, saveShopWizard, deleteShopWizard, listShopWizards, setProductLinksFromBlank, publishShop, getPublishState, getDraftCatalogShop, signPreviewToken,
   planDiscardShopChanges, discardShopChanges, applyProductPrices,
@@ -917,36 +917,53 @@ async function handleOrdersPost_(context, listBefore = null) {
   // Records a planned blank order; returns the money-movement keys it created
   // (for statement matching). Paid with personal funds, the personal part is
   // simply not a business transaction, so nothing is recorded for it.
-  const commitBlankOrder_ = async (plan, { date, accountId, paidPersonally, fallbackName, source }) => {
+  // `requestKey` (requestKeyOf — migrations/0107): the Record order form's key for this Save. Each blank is then
+  // recorded once under "<key>:<its place in the order>" (receiveBlanksOnce), and the R&D expense and the personal
+  // draw once under the receipt group worked out from the key (receiptGroupFor_), so the same request again — a
+  // retry after a lost answer, or after a failure part-way — writes only what is missing and answers as the first
+  // one would have. `wrote` says whether this call recorded anything itself.
+  const commitBlankOrder_ = async (plan, { date, accountId, paidPersonally, fallbackName, source, requestKey = null }) => {
     const { vendor, vendorRef } = plan;
     const what = (vendor || String(fallbackName || "Blank order")).slice(0, 200) + (vendorRef ? ` #${vendorRef}` : "");
     const keys = [], parts = {};
-    const receiptGroup = newReceiptGroup_();
-    for (const g of plan.groups) {
-      const ids = await receiveBlanks(env.DB, { blankId: g.blankId, lines: g.lines, vendor, vendorRef,
+    const receiptGroup = await receiptGroupFor_(requestKey);
+    let wrote = false;
+    for (const [n, g] of plan.groups.entries()) {
+      const { ids, written } = await receiveBlanksOnce(env.DB, { blankId: g.blankId, lines: g.lines, vendor, vendorRef,
         receivedAt: date + "T12:00:00.000Z", vendorChargedTax: plan.vendorChargedTax, accountId: paidPersonally ? null : accountId, paidPersonally,
         note: g.ship ? `Received (landed cost incl. $${(g.ship / 100).toFixed(2)} shipping & other costs)` : "Received",
-        receiptKey: plan.receiptKey, receiptName: plan.receiptName, receiptGroup });
-      audit({ orgId: null, orderId: null, action: "inventory.received", detail: { blankId: g.blankId, lines: g.lines, extraCost: g.ship / 100, vendor, vendorRef, ...source } });
+        receiptKey: plan.receiptKey, receiptName: plan.receiptName, receiptGroup, requestKey: requestKey ? `${requestKey}:${n}` : null });
+      if (written) { wrote = true; audit({ orgId: null, orderId: null, action: "inventory.received", detail: { blankId: g.blankId, lines: g.lines, extraCost: g.ship / 100, vendor, vendorRef, ...source } }); }
       ids.forEach(id => keys.push(`blanks:${id}`));
     }
     if (plan.groups.length) parts.inventory = plan.invCents / 100;
     if (plan.rdTotal) {
       const cat = plan.rdCat;
-      const id = await saveExpense(env.DB, 0, { date, description: `R&D / testing — ${what}`, categoryId: cat.id, amount: plan.rdTotal / 100, vendor,
-        businessUsePct: 100, receiptKey: plan.receiptKey || "", receiptName: plan.receiptName || "", placedInService: cat.deductionType === "depreciation" ? date : null,
-        depMethod: cat.deductionType === "depreciation" ? "ask_cpa" : null, vendorChargedTax: true, accountId: paidPersonally ? null : accountId, paidPersonally, receiptGroup });
+      let id = requestKey ? await receiptEntryId(env.DB, "expenses", receiptGroup) : 0;
+      if (!id) {
+        id = await saveExpense(env.DB, 0, { date, description: `R&D / testing — ${what}`, categoryId: cat.id, amount: plan.rdTotal / 100, vendor,
+          businessUsePct: 100, receiptKey: plan.receiptKey || "", receiptName: plan.receiptName || "", placedInService: cat.deductionType === "depreciation" ? date : null,
+          depMethod: cat.deductionType === "depreciation" ? "ask_cpa" : null, vendorChargedTax: true, accountId: paidPersonally ? null : accountId, paidPersonally, receiptGroup });
+        wrote = true;
+      }
       keys.push(`expense:${id}`); parts.rd = plan.rdTotal / 100;
     }
     if (plan.personalTotal && !paidPersonally) {
-      const id = await saveMoneyEntry(env.DB, "owner", 0, { date, amount: plan.personalTotal / 100, kind: "draw", accountId, note: `Personal items — ${what}`, receiptGroup });
+      let id = requestKey ? await receiptEntryId(env.DB, "owner_transactions", receiptGroup) : 0;
+      if (!id) {
+        id = await saveMoneyEntry(env.DB, "owner", 0, { date, amount: plan.personalTotal / 100, kind: "draw", accountId, note: `Personal items — ${what}`, receiptGroup });
+        wrote = true;
+      }
       keys.push(`owner:${id}`); parts.personal = plan.personalTotal / 100;
     }
-    return { keys, parts };
+    return { keys, parts, wrote };
   };
   // One id for everything a single receive writes (stock rows, R&D / written-off expense, personal draw), so the
   // whole receipt can be corrected together later (migrations/0061).
   const newReceiptGroup_ = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, "0")).join("");
+  // …and for a receive that came with its form's key (migrations/0107) the id is worked out from the key, so a
+  // retry of the same Save lands in the group its first try used (db.js receiptGroupForKey).
+  const receiptGroupFor_ = async (requestKey) => requestKey ? receiptGroupForKey(requestKey) : newReceiptGroup_();
   const auditStrict = async (args) => {
     try { await insertAuditLog(env.DB, auditEntry(args)); return null; }
     catch (e) {
@@ -5481,30 +5498,43 @@ async function handleOrdersPost_(context, listBefore = null) {
       const chk = await checkTransferSheet_(body); if (chk.error) return chk.error;
       const { date, rows, totalCents, pcts, woPct, pePct, woWhat, peWhat, woCat } = chk;
       const { writeoffCents, personalCents } = transferSheetShares(pcts, woPct, pePct, totalCents);
-      const receiptGroup = newReceiptGroup_();
-      const ids = await receiveTransferSheet(env.DB, { rows, totalCents, writeoffPct: woPct, personalPct: pePct, receiptGroup,
+      // Recorded once per Save of the form (requestKeyOf — migrations/0107): the same request again — a retry after
+      // a dropped answer, or after a failure part-way — writes only what is missing (the rows by their own keys,
+      // the written-off expense and the personal draw by the receipt group worked out from the key).
+      const requestKey = requestKeyOf(body, "transferSheet");
+      const receiptGroup = await receiptGroupFor_(requestKey);
+      const { ids, written } = await receiveTransferSheetOnce(env.DB, { rows, totalCents, writeoffPct: woPct, personalPct: pePct, receiptGroup, requestKey,
         vendor: body.vendor, vendorRef: body.vendorRef, receivedAt: date,
         accountId: body.accountId, paidPersonally: !!body.paidPersonally, note: body.note, receiptKey: body.receiptKey, receiptName: body.receiptName });
+      let wrote = written > 0;
       const sheet = transferSheetLabel(body.vendor, body.vendorRef);
       const accountId = body.paidPersonally ? null : Number(body.accountId);
       let woRecorded = null, peRecorded = null;
       if (woPct > 0) {
         woRecorded = { pct: Math.round(woPct * 100) / 100, amount: writeoffCents / 100, description: woWhat };
         if (writeoffCents > 0) {
-          woRecorded.expenseId = await saveExpense(env.DB, 0, { date, description: `Transfer sheet written off — ${woWhat} (${sheet})`, categoryId: woCat.id, amount: writeoffCents / 100,
-            vendor: String(body.vendor || "").trim().slice(0, 100), businessUsePct: 100, receiptKey: String(body.receiptKey || ""), receiptName: String(body.receiptName || "").slice(0, 200),
-            placedInService: woCat.deductionType === "depreciation" ? date : null, depMethod: woCat.deductionType === "depreciation" ? "ask_cpa" : null,
-            vendorChargedTax: true, accountId, paidPersonally: !!body.paidPersonally, receiptGroup });
+          woRecorded.expenseId = requestKey ? await receiptEntryId(env.DB, "expenses", receiptGroup) : 0;
+          if (!woRecorded.expenseId) {
+            woRecorded.expenseId = await saveExpense(env.DB, 0, { date, description: `Transfer sheet written off — ${woWhat} (${sheet})`, categoryId: woCat.id, amount: writeoffCents / 100,
+              vendor: String(body.vendor || "").trim().slice(0, 100), businessUsePct: 100, receiptKey: String(body.receiptKey || ""), receiptName: String(body.receiptName || "").slice(0, 200),
+              placedInService: woCat.deductionType === "depreciation" ? date : null, depMethod: woCat.deductionType === "depreciation" ? "ask_cpa" : null,
+              vendorChargedTax: true, accountId, paidPersonally: !!body.paidPersonally, receiptGroup });
+            wrote = true;
+          }
         }
       }
       if (pePct > 0) {
         peRecorded = { pct: Math.round(pePct * 100) / 100, amount: personalCents / 100, description: peWhat };
         if (body.paidPersonally) peRecorded.notRecorded = true; // paid with personal funds: not a business transaction at all
         else if (personalCents > 0) {
-          peRecorded.ownerEntryId = await saveMoneyEntry(env.DB, "owner", 0, { date, amount: personalCents / 100, kind: "draw", accountId, note: `Personal items — ${peWhat} (${sheet})`, receiptGroup });
+          peRecorded.ownerEntryId = requestKey ? await receiptEntryId(env.DB, "owner_transactions", receiptGroup) : 0;
+          if (!peRecorded.ownerEntryId) {
+            peRecorded.ownerEntryId = await saveMoneyEntry(env.DB, "owner", 0, { date, amount: personalCents / 100, kind: "draw", accountId, note: `Personal items — ${peWhat} (${sheet})`, receiptGroup });
+            wrote = true;
+          }
         }
       }
-      audit({ orgId: null, orderId: null, action: "transfer.received", detail: { rows, total: Number(body.total) || 0, vendorRef: body.vendorRef || "",
+      if (wrote) audit({ orgId: null, orderId: null, action: "transfer.received", detail: { rows, total: Number(body.total) || 0, vendorRef: body.vendorRef || "",
         ...(woRecorded ? { writeoff: woRecorded } : {}), ...(peRecorded ? { personal: peRecorded } : {}) } });
       return jsonResponse({ status: "ok", ids, writeoff: woRecorded, personal: peRecorded, transfers: await listTransfers(env.DB, body.org || null) });
     }
@@ -6112,8 +6142,11 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (body.orderTotal != null && body.orderTotal !== "" && Math.round(Number(body.orderTotal) * 100) !== plan.totalCents) {
         return bad(`The parts add up to $${(plan.totalCents / 100).toFixed(2)}, but the order total is $${Number(body.orderTotal).toFixed(2)}`);
       }
-      const { keys, parts } = await commitBlankOrder_(plan, { date, accountId, paidPersonally, fallbackName: "Blank order", source: { blankOrder: true } });
-      audit({ orgId: null, orderId: null, action: "inventory.order_received", detail: { date, accountId, paidPersonally, keys, parts, total: plan.totalCents / 100 } });
+      // Recorded once per Save of the form (requestKeyOf): the same request again — a retry after a dropped answer,
+      // or after a failure part-way — writes only what is missing, and is answered like the first.
+      const { keys, parts, wrote } = await commitBlankOrder_(plan, { date, accountId, paidPersonally, fallbackName: "Blank order", source: { blankOrder: true },
+        requestKey: requestKeyOf(body, "blankOrder") });
+      if (wrote) audit({ orgId: null, orderId: null, action: "inventory.order_received", detail: { date, accountId, paidPersonally, keys, parts, total: plan.totalCents / 100 } });
       // The received blanks' average cost moved: products using them that are now below a pricing target.
       const belowTarget = await belowForBlanks_(plan.groups.map(g => g.blankId));
       return withList_({ status: "ok", parts, total: plan.totalCents / 100, belowTarget }, "blanks", "blanks", blankCostsFor_);
@@ -6142,9 +6175,12 @@ async function handleOrdersPost_(context, listBefore = null) {
       const landed = extraCost > 0
         ? landedCostLines(lines.map(l => ({ color: l.color || "", size: l.size, qty: Number(l.qty), cents: Number(l.qty) * Math.round(Number(l.unitCost) * 100) })), Math.round(extraCost * 100))
         : lines;
-      await receiveBlanks(env.DB, { blankId, lines: landed, vendor, vendorRef, receivedAt, vendorChargedTax, accountId, paidPersonally, receiptGroup: newReceiptGroup_(),
+      // Recorded once per Save of the form (requestKeyOf — migrations/0107): the same request again writes nothing more.
+      const requestKey = requestKeyOf(body, "receiveBlanks");
+      const { written } = await receiveBlanksOnce(env.DB, { blankId, lines: landed, vendor, vendorRef, receivedAt, vendorChargedTax, accountId, paidPersonally,
+        receiptGroup: await receiptGroupFor_(requestKey), requestKey,
         note: extraCost ? `Received (landed cost incl. $${extraCost.toFixed(2)} shipping & other costs)` : "Received" });
-      audit({ orgId: null, orderId: null, action: "inventory.received", detail: { blankId, lines, extraCost, vendor, vendorRef, receivedAt: receivedAt || null, vendorChargedTax } });
+      if (written) audit({ orgId: null, orderId: null, action: "inventory.received", detail: { blankId, lines, extraCost, vendor, vendorRef, receivedAt: receivedAt || null, vendorChargedTax } });
       return withList_({ status: "ok" }, "blanks", "blanks", blankCostsFor_);
     }
     if (body.action === "writeOffBlanks") {

@@ -16430,6 +16430,9 @@ async function showReceiveOrderModal(onDone, prefill){
     </div>`, 680, { guard: true });
   ov.querySelector("#roCancel").onclick = close;
   const save = ov.querySelector("#roSave");
+  // One key for this form's Save, made as it opens (migrations/0107): if the answer is lost and Record order is
+  // pressed again, the server records only what the first try didn't, so nothing is received twice.
+  const requestId = newRequestId_();
   const totalEl = ov.querySelector("#roTotal");
   const form = blankOrderForm_(ov.querySelector("#roForm"), { blanks, cats,
     target: () => totalEl.value === "" ? null : Math.round((parseFloat(totalEl.value) || 0) * 100),
@@ -16451,7 +16454,7 @@ async function showReceiveOrderModal(onDone, prefill){
   save.onclick = async () => {
     const err = ov.querySelector("#roError"), paid = ov.querySelector("#roPaidFrom").value;
     if (!paid && books) { err.textContent = "Choose what it was paid from."; return; }
-    const body = { action: "receiveBlankOrder", receivedAt: ov.querySelector("#roDate").value, ...form.collect(),
+    const body = { action: "receiveBlankOrder", requestId, receivedAt: ov.querySelector("#roDate").value, ...form.collect(),
       ...(paid === "personal" ? { paidPersonally: true } : paid ? { accountId: Number(paid) } : {}),
       ...(totalEl.value !== "" ? { orderTotal: parseFloat(totalEl.value) || 0 } : {}) };
     if (body.groups.some(g => !g.blankId)) { err.textContent = "Choose a blank for every box with quantities."; return; }
@@ -23770,6 +23773,9 @@ function showTransferSheetModal_(transfers, onDone, existing){
   };
   ov.querySelector("#trCancel").onclick = close;
   // One save at a time: a second click while the first is still on its way would receive the sheet twice.
+  // And one key for receiving this sheet, made as the form opens (migrations/0107): pressing Receive again after a
+  // lost answer records only what the first try didn't.
+  const requestId = newRequestId_();
   let busy = false;
   ov.querySelector("#trSave").onclick = async () => {
     if (busy) return;
@@ -23785,7 +23791,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
     if (!rows.length) { err.textContent = "Add at least one row with a count."; return; }
     const why = problem(); if (why) { err.textContent = why; return; }
     const woPct = Math.max(0, parseFloat(ov.querySelector("#trWoPct").value) || 0), pePct = Math.max(0, parseFloat(ov.querySelector("#trPePct").value) || 0);
-    const body = { ...(ed ? { action: "editTransferSheet", movementId: ed.seedId } : { action: "receiveTransferSheet" }), rows, total: parseFloat(ov.querySelector("#trTotal").value) || 0,
+    const body = { ...(ed ? { action: "editTransferSheet", movementId: ed.seedId } : { action: "receiveTransferSheet", requestId }), rows, total: parseFloat(ov.querySelector("#trTotal").value) || 0,
       receivedAt: ov.querySelector("#trDate").value, vendor: ov.querySelector("#trVendor").value, vendorRef: ov.querySelector("#trRef").value.trim(),
       ...(paid === "personal" ? { paidPersonally: true } : paid ? { accountId: Number(paid) } : {}),
       ...(woPct > 0 ? { writeoff: { pct: woPct, description: ov.querySelector("#trWoDesc").value.trim(), categoryId: Number(ov.querySelector("#trWoCat").value) || 0 } } : {}),

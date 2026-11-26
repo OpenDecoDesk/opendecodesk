@@ -1082,7 +1082,8 @@ CREATE TABLE IF NOT EXISTS inventory_movements (
   voidedAt      TEXT,                                                              -- 0020
   voidReason    TEXT NOT NULL DEFAULT '',                                          -- 0020
   color         TEXT NOT NULL DEFAULT '',                                          -- 0037 (stock dimension)
-  reason        TEXT NOT NULL DEFAULT ''                                           -- 0060: writeoff testing|damaged|lost|other; consume ''|finished
+  reason        TEXT NOT NULL DEFAULT '',                                          -- 0060: writeoff testing|damaged|lost|other; consume ''|finished
+  requestKey    TEXT                                                               -- 0107: the Receive form's key for this row, so a retry can't record it twice
 );
 CREATE INDEX IF NOT EXISTS idx_movements_blank    ON inventory_movements(blankId, size, occurredAt);
 CREATE INDEX IF NOT EXISTS idx_movements_blank_color ON inventory_movements(blankId, color, size, occurredAt);
@@ -1416,7 +1417,8 @@ CREATE TABLE IF NOT EXISTS transfer_movements (
   voidedAt      TEXT,
   voidReason    TEXT NOT NULL DEFAULT '',
   reason        TEXT NOT NULL DEFAULT '',   -- 0080: 'finished' = used making finished stock (not cost of goods)
-  finishedMovementId INTEGER                -- 0080: the finished_goods_movements make it went into
+  finishedMovementId INTEGER,               -- 0080: the finished_goods_movements make it went into
+  requestKey    TEXT                        -- 0107: the Receive form's key for this row, so a retry can't record it twice
 );
 CREATE INDEX IF NOT EXISTS idx_transfer_mv_finished ON transfer_movements (finishedMovementId) WHERE finishedMovementId IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_item     ON transfer_movements(transferId, occurredAt);
@@ -1460,6 +1462,9 @@ CREATE INDEX IF NOT EXISTS idx_graphics_org ON graphics(orgId);
 -- Receipt links (migrations/0061): the records one receive wrote share a receiptGroup.
 CREATE INDEX IF NOT EXISTS idx_inventory_movements_receiptGroup ON inventory_movements(receiptGroup) WHERE receiptGroup IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_receiptGroup  ON transfer_movements(receiptGroup)  WHERE receiptGroup IS NOT NULL;
+-- Received stock is recorded once per Save of its form (migrations/0107).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_movements_request_key          ON inventory_movements(requestKey) WHERE requestKey IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_movements_request_key ON transfer_movements(requestKey)  WHERE requestKey IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_expenses_receiptGroup            ON expenses(receiptGroup)            WHERE receiptGroup IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_owner_transactions_receiptGroup  ON owner_transactions(receiptGroup)  WHERE receiptGroup IS NOT NULL;
 

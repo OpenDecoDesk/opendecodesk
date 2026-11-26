@@ -420,11 +420,17 @@ function reqSignedIn(ip, extra){
       }),
       url: "https://league101.example.com/api/orders"
     });
-    let last;
-    for(let i = 0; i < 20; i++){ last = await ordersHandler({ request: mkReq(), env }); }
-    const lastData = JSON.parse(await last.text());
-    console.log("20th order submission (at the limit) still succeeds:", lastData.status === "ok");
-    const res21 = await ordersHandler({ request: mkReq(), env });
-    console.log("21st order submission from the same IP -> 429:", res21.status === 429);
+    // The limiter counts in one-minute windows (rateLimit.js windowInfo): the 21 submissions are made at one moment,
+    // so a run that happens to cross a minute's edge doesn't split the count over two windows.
+    const realNow = Date.now, pinned = Math.floor(realNow() / 60000) * 60000 + 1000;
+    Date.now = () => pinned;
+    try {
+      let last;
+      for(let i = 0; i < 20; i++){ last = await ordersHandler({ request: mkReq(), env }); }
+      const lastData = JSON.parse(await last.text());
+      console.log("20th order submission (at the limit) still succeeds:", lastData.status === "ok");
+      const res21 = await ordersHandler({ request: mkReq(), env });
+      console.log("21st order submission from the same IP -> 429:", res21.status === 429);
+    } finally { Date.now = realNow; }
   }
 })();

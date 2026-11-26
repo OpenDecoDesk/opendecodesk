@@ -7283,6 +7283,13 @@ async function createLocalSaleOnce_(orgId){
     return;
   }
 
+  // A product where the customer picks a garment color and a graphic at each location (migrations/0036) needs the
+  // shop's graphics and their add-on prices, as on its page and in Edit items (the server checks and prices them again).
+  let graphics = [], tiersCents = {};
+  if(products.some(p => p.configurable)){
+    try{ const g = await hoopApi_({ action: "listGraphics", org: orgId }); graphics = g.graphics || []; tiersCents = g.tiersCents || {}; }
+    catch(e){ showToast("Could not load the shop's graphics: " + ((e && e.message) || "unknown error"), true); }
+  }
   // Pay on delivery (migrations/0105): offered where the shop allows it (limited to local sales or not) to a role that may set it.
   const pod = podRule_(orgId);
   // This sale's key: the server makes one order (and books one payment) per key, so the retries below (a dropped
@@ -7292,7 +7299,7 @@ async function createLocalSaleOnce_(orgId){
   // The window stays open, with everything typed in it, until the server has answered: a session that ended asks
   // to sign in and sends the same sale again, and any other problem is shown in the window.
   let data = null;
-  const result = await showLocalSaleModal(products, blanks, { payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"), submit: async (typed) => {
+  const result = await showLocalSaleModal(products, blanks, { payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"), graphics, tiersCents, submit: async (typed) => {
     const { sendInvoice: _later, ...sale } = typed;
     const send = () => adminSave_({action:"createLocalSale", org:orgId, requestId, ...sale});
     let r;
@@ -7376,6 +7383,14 @@ function showLocalSaleModal(products, blanks, opts = {}){
           </label>
         </div>
 
+        <div data-f="cfgWrap" style="display:none;">
+          <div data-f="colorWrap">
+            ${LS("Garment color", false, fid("lsColor", n))}
+            <select id="${fid("lsColor", n)}" data-f="color" style="${IS()}"></select>
+          </div>
+          <div data-f="cfgLocs"></div>
+        </div>
+
         <div id="${fid("lsSizeWrap", n)}" data-f="sizeWrap" style="display:none;">
           ${LS("Size", false, fid("lsSize", n))}
           <select id="${fid("lsSize", n)}" data-f="size" style="${IS()}"></select>
@@ -7383,6 +7398,13 @@ function showLocalSaleModal(products, blanks, opts = {}){
 
         ${LS("Qty", false, fid("lsQty", n))}
         <input type="number" id="${fid("lsQty", n)}" data-f="qty" min="1" max="50" value="1" style="${IS()}">
+
+        <div data-f="customDesignWrap" style="display:none;margin-bottom:10px;">
+          <label style="font-size:14px;font-weight:500;display:flex;align-items:flex-start;gap:8px;">
+            <input type="checkbox" id="${fid("lsCustomDesign", n)}" data-f="customDesign" style="width:auto;margin:3px 0 0;">
+            <span>Customer's own design <span data-f="customDesignNote" style="font-weight:400;color:var(--ink-soft,#888);font-size:13px;"></span></span>
+          </label>
+        </div>
 
         <div id="${fid("lsPersWrap", n)}" data-f="persWrap" style="display:none;">
           <label style="font-size:14px;font-weight:500;display:flex;align-items:center;gap:8px;margin-bottom:8px;">
@@ -7517,6 +7539,109 @@ function showLocalSaleModal(products, blanks, opts = {}){
     const f = (line, name) => line.querySelector(`[data-f="${name}"]`);
     const isSized_ = (p) => !!p && p.pricingMode !== "flat" && p.sizePricing && Object.keys(p.sizePricing).length > 0;
 
+    // ---- The shop page's choices (public/storefront.js renderConfigurableProduct / cfgRefresh_ / addToCart) ----
+    // A product with choices (migrations/0036): a garment color and, at each location, a graphic (with its thread
+    // color when it has several) or the customer's own design; the price follows the color's price group
+    // (migrations/0064) plus each graphic's add-on. A plain product may take the customer's own design
+    // (migrations/0054). The server checks and prices all of it again (createLocalSale → priceItem).
+    const gById = {}; (opts.graphics || []).forEach(g => { gById[g.id] = g; });
+    const addOnCents_ = (g) => (g && g.tier ? Number((opts.tiersCents || {})[g.tier]) || 0 : 0);
+    const isCfg_ = (p) => !!(p && p.configurable);
+    // A location's graphics for this color, filtered as the shop's page filters them (cfgOptionsForLocation_).
+    const cfgOpts_ = (p, loc, color) => (loc.graphicIds || []).map(id => gById[id]).filter(Boolean)
+      .filter(g => g.visible !== false)
+      .filter(g => !(g.allowedLocations && g.allowedLocations.length) || g.allowedLocations.includes(loc.key))
+      .filter(g => !(g.allowedGarmentColors && g.allowedGarmentColors.length) || !color || g.allowedGarmentColors.includes(color))
+      .filter(g => !(color && (p.blockedGraphicColors || []).some(b => Number(b.graphicId) === Number(g.id) && b.color === color)));
+    // The price before add-ons: the color's price group, else the product's own (cfgBasePrice_).
+    const basePrice_ = (p, color, size) => {
+      const grp = color ? (p.colorGroups || []).find(x => (x.colors || []).includes(color)) : null;
+      if(isSized_(p)){ const v = grp && grp.sizePricing ? grp.sizePricing[size] : undefined; return typeof v === "number" ? v : Number((p.sizePricing || {})[size] || 0); }
+      return grp && typeof grp.flatPrice === "number" ? grp.flatPrice : Number(p.flatPrice || 0);
+    };
+    // The customer's own design: a location's own add-on, else the product's.
+    const customDesignPrice_ = (p, loc) => loc && loc.customDesignPriceCents != null && loc.customDesignPriceCents !== "" && Number.isFinite(Number(loc.customDesignPriceCents))
+      ? Number(loc.customDesignPriceCents) / 100 : Number(p.customDesignPrice) || 0;
+    const plus_ = (v) => v > 0 ? ` (+$${v.toFixed(2)})` : "";
+    // A plain product with no design of its own is made from the customer's (db.js customDesignRequired).
+    const customDesignRequired_ = (p) => !!(p && p.customDesign && !p.configurable && p.designId == null && !p.noDesignNeeded);
+    const cfgColor_ = (line, p) => (p.garmentColors || []).length ? f(line, "color").value : "";
+    const locSel_ = (line, key) => [...line.querySelectorAll('select[data-f="loc"]')].find(s => s.dataset.loc === key);
+    const inkSel_ = (line, key) => [...line.querySelectorAll('select[data-f="ink"]')].find(s => s.dataset.loc === key);
+
+    // Draws a product's color and per-location lists; `keep` keeps the picks that are still offered (after a color
+    // or graphic change).
+    function drawCfg(line, keep){
+      const p = productMap[f(line, "product").value];
+      const wrap = f(line, "cfgWrap");
+      if(!isCfg_(p)){ wrap.style.display = "none"; f(line, "cfgLocs").innerHTML = ""; return; }
+      wrap.style.display = "";
+      const colors = p.garmentColors || [];
+      const colorSel = f(line, "color");
+      f(line, "colorWrap").style.display = colors.length ? "" : "none";
+      if(!keep){ colorSel.innerHTML = colors.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join(""); }
+      const color = cfgColor_(line, p);
+      const prev = {}, prevInk = {};
+      if(keep) for(const loc of (p.locations || [])){ const s = locSel_(line, loc.key), k = inkSel_(line, loc.key); if(s) prev[loc.key] = s.value; if(k) prevInk[loc.key] = k.value; }
+      const n = Number(line.dataset.line) || 0;
+      const locs = p.locations || [];
+      const fixed = (p.fixedTransfers || []).length > 0;
+      f(line, "cfgLocs").innerHTML = locs.map((loc, i) => {
+        const options = cfgOpts_(p, loc, color);
+        const custom = !!p.customDesign;
+        // One location and nothing fixed: there's nothing to leave blank, so no None and the first is picked.
+        const onlyLoc = locs.length === 1 && (options.length > 0 || custom) && !fixed;
+        const ids = [...options.map(g => String(g.id)), ...(custom ? ["custom"] : [])];
+        const value = keep && prev[loc.key] != null && (prev[loc.key] === "" ? !onlyLoc : ids.includes(prev[loc.key])) ? prev[loc.key] : (onlyLoc ? (ids[0] || "") : "");
+        const id = fid("lsLoc", n) + "_" + i, inkId = fid("lsInk", n) + "_" + i;
+        const g = value && value !== "custom" ? gById[value] : null;
+        const inks = g && Array.isArray(g.inkColors) && g.inkColors.length > 1 ? g.inkColors : [];
+        const ink = inks.includes(prevInk[loc.key]) ? prevInk[loc.key] : (inks[0] || "");
+        return `${LS(escapeHtml(loc.label || loc.key), false, id)}
+          <select id="${id}" data-f="loc" data-loc="${escapeHtml(loc.key)}" style="${IS()}">
+            ${onlyLoc ? "" : `<option value="" ${value === "" ? "selected" : ""}>None</option>`}
+            ${options.map(o => `<option value="${o.id}" ${String(o.id) === value ? "selected" : ""}>${escapeHtml(o.name)}${plus_(addOnCents_(o) / 100)}</option>`).join("")}
+            ${custom ? `<option value="custom" ${value === "custom" ? "selected" : ""}>Customer's own design${plus_(customDesignPrice_(p, loc))}</option>` : ""}
+          </select>
+          <select id="${inkId}" data-f="ink" data-loc="${escapeHtml(loc.key)}" aria-label="Thread color for ${escapeHtml(loc.label || loc.key)}" style="${IS()}${inks.length ? "" : "display:none;"}margin-top:-6px;">
+            ${inks.map(c => `<option value="${escapeHtml(c)}" ${c === ink ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}
+          </select>`;
+      }).join("");
+    }
+    // The line's choices as the shop's page sends them: { garmentColor, locations: [{location, graphicId, ink} | {location, custom: true}] }.
+    function cfgConfig_(line, p){
+      const locations = [];
+      for(const loc of (p.locations || [])){
+        const v = (locSel_(line, loc.key) || {}).value || "";
+        if(!v) continue;
+        if(v === "custom"){ locations.push({ location: loc.key, custom: true }); continue; }
+        const g = gById[v], k = inkSel_(line, loc.key);
+        const ink = k && k.style.display !== "none" ? k.value : (g && Array.isArray(g.inkColors) && g.inkColors.length === 1 ? g.inkColors[0] : "");
+        locations.push({ location: loc.key, graphicId: Number(v), ink });
+      }
+      return { garmentColor: cfgColor_(line, p), locations };
+    }
+    // What one of the product costs before personalization: the color's price (or the size's) plus the add-ons.
+    function catalogUnit_(line, p){
+      const size = isSized_(p) ? f(line, "size").value : "";
+      if(isCfg_(p)){
+        const c = cfgConfig_(line, p);
+        let u = basePrice_(p, c.garmentColor, size);
+        for(const l of c.locations) u += l.custom ? customDesignPrice_(p, (p.locations || []).find(x => x.key === l.location)) : addOnCents_(gById[l.graphicId]) / 100;
+        return u;
+      }
+      const u = isSized_(p) ? Number((p.sizePricing || {})[size] || 0) : Number(p.flatPrice || 0);
+      return u + (p.customDesign && f(line, "customDesign").checked ? Number(p.customDesignPrice) || 0 : 0);
+    }
+    // The size list, priced for the color chosen; the size picked stays picked.
+    function drawSizes(line, p){
+      const sel = f(line, "size"), was = sel.value;
+      const color = isCfg_(p) ? cfgColor_(line, p) : "";
+      sel.innerHTML = productSizes_(p.sizePricing)
+        .map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)} — $${basePrice_(p, color, s).toFixed(2)}</option>`).join("");
+      if(was && [...sel.options].some(o => o.value === was)) sel.value = was;
+    }
+
     function updateForProduct(line){
       const pid = f(line, "product").value;
       const custom = pid === "__custom__";
@@ -7527,6 +7652,9 @@ function showLocalSaleModal(products, blanks, opts = {}){
       if(custom){
         f(line, "sizeWrap").style.display = "none";
         f(line, "persWrap").style.display = "none";
+        f(line, "cfgWrap").style.display = "none";
+        f(line, "cfgLocs").innerHTML = "";
+        f(line, "customDesignWrap").style.display = "none";
         f(line, "override").checked = false;
         f(line, "overridePriceWrap").style.display = "none";
         updatePricePreview();
@@ -7539,12 +7667,20 @@ function showLocalSaleModal(products, blanks, opts = {}){
       const isSized = isSized_(p);
       const hasPers = p.personalizationPrice != null;
 
+      drawCfg(line, false);
       f(line, "sizeWrap").style.display = isSized ? "" : "none";
-      if(isSized){
-        f(line, "size").innerHTML = productSizes_(p.sizePricing)
-          .map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)} — $${Number(p.sizePricing[s]).toFixed(2)}</option>`)
-          .join("");
-      }
+      f(line, "size").innerHTML = "";
+      if(isSized) drawSizes(line, p);
+
+      // The customer's own design on a plain product: a choice, or (no design of its own) what it's made from.
+      const takesOwn = !!p.customDesign && !isCfg_(p);
+      const needsOwn = customDesignRequired_(p);
+      f(line, "customDesignWrap").style.display = takesOwn ? "" : "none";
+      f(line, "customDesign").checked = needsOwn;
+      f(line, "customDesign").disabled = needsOwn;
+      f(line, "customDesignNote").textContent = takesOwn
+        ? plus_(Number(p.customDesignPrice) || 0).trim() + (needsOwn ? " — this product is made from it." : "") + " Attach the file with Files on the order once it's recorded."
+        : "";
 
       f(line, "persWrap").style.display = hasPers ? "" : "none";
       if(hasPers){
@@ -7581,9 +7717,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
       const p = productMap[pid];
       if(!p) return { total: 0, text: "" };
 
-      const isSized = isSized_(p);
-      const size = isSized ? f(line, "size").value : "OSFA";
-      const catalogUnitPrice = isSized ? Number((p.sizePricing || {})[size] || 0) : Number(p.flatPrice || 0);
+      const catalogUnitPrice = catalogUnit_(line, p);
       const personalized = p.personalizationPrice != null && f(line, "pers").checked;
       const persFee = personalized ? Number(p.personalizationPrice) : 0;
 
@@ -7649,6 +7783,18 @@ function showLocalSaleModal(products, blanks, opts = {}){
         updatePricePreview();
       });
       f(line, "customPrice").addEventListener("input", updatePricePreview);
+      f(line, "customDesign").addEventListener("change", updatePricePreview);
+      // A product's choices: a new color or graphic redraws the lists (what's offered for that color, the graphic's
+      // thread colors) and the size prices; a thread color only changes what's sent.
+      f(line, "cfgWrap").addEventListener("change", (e) => {
+        const p = productMap[f(line, "product").value];
+        if(!isCfg_(p)) return;
+        if(e.target.matches('[data-f="color"], [data-f="loc"]')){
+          drawCfg(line, true);
+          if(isSized_(p)) drawSizes(line, p);
+        }
+        updatePricePreview();
+      });
       const rm = f(line, "remove");
       if(rm) rm.addEventListener("click", () => {
         const all = lines(), at = all.indexOf(line);
@@ -7701,6 +7847,16 @@ function showLocalSaleModal(products, blanks, opts = {}){
         const optVal = f(line, "persOptionWrap").style.display !== "none" ? f(line, "persOption").value.trim() : "";
         persName = f(line, "persName").value.trim() || optVal;
       }
+      // A product with choices: what the customer picked, as the shop's page sends it — a graphic somewhere unless
+      // the product is decorated already (its printed transfers) or has no locations.
+      let config = null;
+      if(isCfg_(p)){
+        config = cfgConfig_(line, p);
+        if(!config.locations.length && !(p.fixedTransfers || []).length && (p.locations || []).length){
+          return { error: "Choose a graphic for at least one location.", focus: line.querySelector('select[data-f="loc"]') || f(line, "product") };
+        }
+      }
+      const customDesign = !!p.customDesign && !isCfg_(p) && f(line, "customDesign").checked;
       let customUnitPrice = null;
       if(f(line, "override").checked){
         customUnitPrice = parseFloat(f(line, "customPrice").value);
@@ -7708,6 +7864,8 @@ function showLocalSaleModal(products, blanks, opts = {}){
       }
       return { item: { productId: p.productId, name: p.name, type: p.type,
                size, qty, personalized, persName,
+               ...(config ? { config } : {}),
+               ...(customDesign ? { customDesign: true } : {}),
                ...(customUnitPrice !== null ? { customUnitPrice } : {}) } };
     }
 
@@ -26904,14 +27062,42 @@ function showEditOrderModal(order, products, ctx){
     .filter(g => !(g.allowedLocations && g.allowedLocations.length) || g.allowedLocations.includes(loc.key))
     .filter(g => !(g.allowedGarmentColors && g.allowedGarmentColors.length) || !color || g.allowedGarmentColors.includes(color))
     .filter(g => !(color && (prod.blockedGraphicColors || []).some(b => Number(b.graphicId) === g.id && b.color === color)));
-  const cfgBase_ = (prod, size) => prod.pricingMode === "flat" ? (prod.flatPrice || 0) : ((prod.sizePricing || {})[size] || 0);
+  // The price before add-ons: the garment color's price group (migrations/0064), else the product's own.
+  const cfgBase_ = (prod, size, color) => {
+    const grp = color ? (prod.colorGroups || []).find(x => (x.colors || []).includes(color)) : null;
+    if (prod.pricingMode === "flat") return grp && typeof grp.flatPrice === "number" ? grp.flatPrice : (prod.flatPrice || 0);
+    const v = grp && grp.sizePricing ? grp.sizePricing[size] : undefined;
+    return typeof v === "number" ? v : ((prod.sizePricing || {})[size] || 0);
+  };
+  // The customer's own design on a new line: a location's own add-on, else the product's (db.js customDesignEntry_).
+  const customDesignCents_ = (prod, locKey) => {
+    const loc = (prod.locations || []).find(x => x.key === locKey);
+    const own = loc && loc.customDesignPriceCents != null && loc.customDesignPriceCents !== "" && Number.isFinite(Number(loc.customDesignPriceCents)) ? Number(loc.customDesignPriceCents) : null;
+    return own != null ? own : Math.round((Number(prod.customDesignPrice) || 0) * 100);
+  };
   const cfgUnitPrice_ = (row, prod) => {
-    let u = cfgBase_(prod, row.size);
+    let u = cfgBase_(prod, row.size, row.config && row.config.garmentColor);
     for (const l of ((row.config && row.config.locations) || [])) {
-      if (l.custom) { u += ((row._customCents || {})[l.location] || 0) / 100; continue; }   // the customer's own design, at what it was ordered for
+      // The customer's own design: at what it was ordered for, or (a new pick) at the product's add-on.
+      if (l.custom) { const was = (row._customCents || {})[l.location]; u += (was != null ? was : customDesignCents_(prod, l.location)) / 100; continue; }
       const g = gById_[l.graphicId]; if (g) u += addOnCents_(g) / 100;
     }
     return u;
+  };
+  // A plain product with no design of its own is made from the customer's (db.js customDesignRequired).
+  const customDesignRequired_ = (p) => !!(p && p.customDesign && !p.configurable && p.designId == null && !p.noDesignNeeded);
+  // A line's product changed (or a line was added): a product with choices starts at its first garment color, with
+  // its only location's first graphic picked (as on the shop's page) and nothing picked where it has several.
+  const setRowProduct_ = (row, prod) => {
+    row.configurable = !!(prod && prod.configurable);
+    row._customLocs = [];
+    row.customDesign = customDesignRequired_(prod);
+    if (!row.configurable) { row.config = null; return; }
+    const color = (prod.garmentColors || [])[0] || "";
+    const locs = prod.locations || [];
+    const onlyLoc = locs.length === 1 && !(prod.fixedTransfers || []).length;
+    const first = onlyLoc ? cfgOptsForLoc_(prod, locs[0], color)[0] : null;
+    row.config = { garmentColor: color, locations: first ? [{ location: locs[0].key, graphicId: first.id, ink: first.inkColors && first.inkColors.length === 1 ? first.inkColors[0] : "" }] : [] };
   };
   return new Promise((resolve) => {
     const visibleProducts = products.filter(p => p.visible);
@@ -26948,6 +27134,7 @@ function showEditOrderModal(order, products, ctx){
           personalized: it.personalized,
           persName: it.persName || "",
           configurable,
+          _origConfigurable: configurable,   // a line ordered with choices keeps its product; another line can change it
           config,
           _hasCustom: customLocs.length > 0,
           // The order designs this line takes (Files → Order design): one per stitched custom spot,
@@ -27000,7 +27187,10 @@ function showEditOrderModal(order, products, ctx){
     function calcRowTotal(row){
       if(row.configurable){ const prod = getProductById(row.productId); return row.qty * (prod ? cfgUnitPrice_(row, prod) : row.unitPrice); }
       const custom = row._plainCustomCents && row.productId === row._origProductId ? row._plainCustomCents / 100 : 0;
-      return row.qty * (row.unitPrice + row.personalizationFee + custom);
+      // A new line made from the customer's own design adds its add-on.
+      const prod = row.itemId == null && row.customDesign ? getProductById(row.productId) : null;
+      const newCustom = prod ? Number(prod.customDesignPrice) || 0 : 0;
+      return row.qty * (row.unitPrice + row.personalizationFee + custom + newCustom);
     }
 
     // Per-location picker + colour + ink for a configurable line, shown in place of the
@@ -27010,19 +27200,22 @@ function showEditOrderModal(order, products, ctx){
       const ss = "font-size:12px;padding:2px 4px;border:1px solid var(--border,#ccc);border-radius:3px;background:var(--surface,#fff);color:var(--ink,#111);";
       const colors = prod.garmentColors || [];
       const colorSel = colors.length
-        ? `<div style="margin-bottom:3px;"><span style="font-size:11px;color:var(--ink-soft);">Color</span> <select data-rowidx="${idx}" data-cfgfield="color" style="${ss}">${colors.map(c => `<option ${c === (row.config.garmentColor || "") ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}</select></div>`
+        ? `<div style="margin-bottom:3px;"><span style="font-size:11px;color:var(--ink-soft);" aria-hidden="true">Color</span> <select data-rowidx="${idx}" data-cfgfield="color" aria-label="Garment color" style="${ss}">${colors.map(c => `<option ${c === (row.config.garmentColor || "") ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}</select></div>`
         : "";
       const locHtml = (prod.locations || []).map(loc => {
         const cur = ((row.config.locations || []).find(l => l.location === loc.key)) || {};
         const opts = cfgOptsForLoc_(prod, loc, row.config.garmentColor);
-        // "Customer design" only where this line was ordered with one — adding one here isn't offered (Files is).
+        // "Customer design": where this line was ordered with one; on a new line, wherever the product takes one (the
+        // file is attached with Files once it's saved). Adding one to a line already ordered isn't offered (Files is).
         const customOpt = (row._customLocs || []).includes(loc.key) ? `<option value="custom" ${cur.custom ? "selected" : ""}>Customer design</option>` : "";
-        const optHtml = `<option value="">None</option>` + customOpt + opts.map(g => `<option value="${g.id}" ${!cur.custom && String(cur.graphicId) === String(g.id) ? "selected" : ""}>${escapeHtml(g.name)}${addOnCents_(g) ? ` (+$${(addOnCents_(g) / 100).toFixed(2)})` : ""}</option>`).join("");
+        const newCustomOpt = !customOpt && row.itemId == null && prod.customDesign
+          ? `<option value="custom" ${cur.custom ? "selected" : ""}>Customer's own design${customDesignCents_(prod, loc.key) ? ` (+$${(customDesignCents_(prod, loc.key) / 100).toFixed(2)})` : ""}</option>` : "";
+        const optHtml = `<option value="">None</option>` + customOpt + opts.map(g => `<option value="${g.id}" ${!cur.custom && String(cur.graphicId) === String(g.id) ? "selected" : ""}>${escapeHtml(g.name)}${addOnCents_(g) ? ` (+$${(addOnCents_(g) / 100).toFixed(2)})` : ""}</option>`).join("") + newCustomOpt;
         const g = gById_[cur.graphicId];
         const inkHtml = g && g.inkColors && g.inkColors.length > 1
-          ? ` <select data-rowidx="${idx}" data-cfgfield="ink" data-loc="${escapeHtml(loc.key)}" style="${ss}">${g.inkColors.map(ic => `<option ${ic === (cur.ink || "") ? "selected" : ""}>${escapeHtml(ic)}</option>`).join("")}</select>`
+          ? ` <select data-rowidx="${idx}" data-cfgfield="ink" data-loc="${escapeHtml(loc.key)}" aria-label="Thread color for ${escapeHtml(loc.label || loc.key)}" style="${ss}">${g.inkColors.map(ic => `<option ${ic === (cur.ink || "") ? "selected" : ""}>${escapeHtml(ic)}</option>`).join("")}</select>`
           : "";
-        return `<div style="margin-bottom:2px;"><span style="font-size:11px;color:var(--ink-soft);">${escapeHtml(loc.label || loc.key)}</span> <select data-rowidx="${idx}" data-cfgfield="graphic" data-loc="${escapeHtml(loc.key)}" style="${ss}">${optHtml}</select>${inkHtml}</div>`;
+        return `<div style="margin-bottom:2px;"><span style="font-size:11px;color:var(--ink-soft);" aria-hidden="true">${escapeHtml(loc.label || loc.key)}</span> <select data-rowidx="${idx}" data-cfgfield="graphic" data-loc="${escapeHtml(loc.key)}" aria-label="${escapeHtml(loc.label || loc.key)}" style="${ss}">${optHtml}</select>${inkHtml}</div>`;
       }).join("");
       return `<div style="min-width:180px;">${colorSel}${locHtml}</div>`;
     }
@@ -27056,7 +27249,7 @@ function showEditOrderModal(order, products, ctx){
 
         tr.innerHTML = `
           <td style="padding:6px 4px;vertical-align:top;">
-            ${row._removed || row.configurable
+            ${row._removed || row._origConfigurable
               ? `<span style="font-size:12px;${row.configurable && !row._removed ? "" : "color:var(--ink-soft);"}">${escapeHtml(row.name)}</span>`
               : `<select data-rowidx="${idx}" data-field="productId" style="font-size:12px;width:140px;padding:3px 4px;border:1px solid var(--border,#ccc);border-radius:3px;background:var(--surface,#fff);color:var(--ink,#111);">
                   ${extraOpt}${prodOpts}
@@ -27084,10 +27277,15 @@ function showEditOrderModal(order, products, ctx){
                   : cfgEditorHtml_(row, idx, curProd) + (row._staleDesignWarning ? `<div style="font-size:12px;font-weight:600;color:#92400e;background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;padding:4px 7px;margin-top:5px;">⚠ ${escapeHtml(row._staleDesignWarning)}</div>` : ""))
               : row._removed
                 ? (row.personalized ? `<span style="font-size:12px;color:var(--ink-soft);">"${escapeHtml(row.persName || "")}"</span>` : `<span style="font-size:12px;color:var(--ink-soft);">—</span>`)
-                : curProd && curProd.personalizationPrice != null
+                : (curProd && curProd.personalizationPrice != null
                   ? `<label style="display:flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap;"><input type="checkbox" data-rowidx="${idx}" data-field="personalized" ${row.personalized ? "checked" : ""}> Personalized${Number(curProd.personalizationPrice) ? ` (+$${Number(curProd.personalizationPrice).toFixed(2)})` : ""}</label>
                      ${row.personalized ? `<input type="text" placeholder="Name / text" value="${escapeHtml(row.persName || "")}" data-rowidx="${idx}" data-field="persName" style="font-size:12px;width:100px;padding:3px 4px;margin-top:3px;border:1px solid var(--border,#ccc);border-radius:3px;background:var(--surface,#fff);color:var(--ink,#111);">` : ""}`
-                  : `<span style="font-size:12px;color:var(--ink-soft);">—</span>`
+                  : (row.itemId == null && curProd && curProd.customDesign ? "" : `<span style="font-size:12px;color:var(--ink-soft);">—</span>`))
+                  // A new line of a product that takes the customer's own design: ticked to use it (fixed when the
+                  // product has no design of its own); the file is attached with Files once the edit is saved.
+                  + (row.itemId == null && curProd && curProd.customDesign
+                    ? `<label style="display:flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap;margin-top:3px;" title="Attach the file with Files once the edit is saved"><input type="checkbox" data-rowidx="${idx}" data-field="customDesign" ${row.customDesign ? "checked" : ""} ${customDesignRequired_(curProd) ? "disabled" : ""}> Customer's own design${Number(curProd.customDesignPrice) ? ` (+$${Number(curProd.customDesignPrice).toFixed(2)})` : ""}</label>`
+                    : "")
             }
           </td>
           <td style="padding:6px 4px;vertical-align:top;">
@@ -27176,6 +27374,7 @@ function showEditOrderModal(order, products, ctx){
           <label for="editOrderEmailBody" style="display:block;font-weight:600;margin-bottom:4px;">Message in the payment email <span style="font-weight:400;color:var(--ink-soft,#666);">(optional — leave blank for a standard note about the balance for the changes)</span></label>
           <textarea id="editOrderEmailBody" rows="3" maxlength="3000" style="width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--border,#ccc);border-radius:4px;"></textarea>
         </div>
+        <div id="editOrderErr" role="alert" style="display:none;color:#b03a2e;font-size:13px;margin-bottom:10px;"></div>
         ${(order.catalogDrift || []).length ? `<div class="edit-order-drift" style="font-size:13px;color:#92400e;background:#fef3c7;border:1px solid #f59e0b;border-radius:5px;padding:8px 10px;margin-bottom:12px;">⚠ ${order.catalogDrift.map(x => `<strong>${escapeHtml(x.name || "A line")}</strong>: ${x.problems.map(escapeHtml).join("; ")}`).join("<br>⚠ ")}<br>Pick the graphic on the line, or use <strong>Update from catalog…</strong> below.</div>` : ""}
         <div class="admin-pass-actions" style="flex-wrap:wrap;gap:8px;">
           <button type="button" id="editOrderRefresh" title="Re-read this order's graphics, Printed transfers and reorder QR from the catalog, choosing which changes to take (prices don't change)" style="padding:8px 12px;font-size:13px;border-radius:5px;border:1px solid var(--border,#ccc);cursor:pointer;background:var(--surface,#fff);color:var(--ink,#111);margin-right:auto;">Update from catalog…</button>
@@ -27235,6 +27434,10 @@ function showEditOrderModal(order, products, ctx){
         const pricing = getPriceForProduct(prod, row.size, row.personalized);
         row.unitPrice = pricing.unitPrice;
         row.personalizationFee = pricing.personalizationFee;
+        setRowProduct_(row, prod);   // a product with choices gets its color and graphic lists
+        renderRows(tbody);
+      } else if(field === "customDesign"){
+        row.customDesign = el.checked;
         renderRows(tbody);
       } else if(field === "size"){
         row.size = el.value;
@@ -27319,11 +27522,25 @@ function showEditOrderModal(order, products, ctx){
         _refundAmount: "0.00",
         _refundReason: "",
       });
+      setRowProduct_(state.rows[state.rows.length - 1], firstProd);
       renderRows(tbody);
       updateSummary(overlay);
     });
 
     function finish(requestPayment){
+      // A line of a product with choices needs a graphic somewhere, as on the shop's page — unless the product is
+      // decorated already (its printed transfers) or has no locations. Said here, before anything is sent.
+      const errEl = overlay.querySelector("#editOrderErr");
+      for(const [i, row] of state.rows.entries()){
+        if(row._removed || !row.configurable) continue;
+        const prod = getProductById(row.productId);
+        if(prod && !((row.config && row.config.locations) || []).length && !(prod.fixedTransfers || []).length && (prod.locations || []).length){
+          errEl.textContent = `Item ${i + 1} (${row.name}): Choose a graphic for at least one location.`;
+          errEl.style.display = "";
+          return;
+        }
+      }
+      errEl.style.display = "none";
       // Build diff arrays
       const removals = [];
       const updates = [];
@@ -27362,6 +27579,8 @@ function showEditOrderModal(order, products, ctx){
             qty: row.qty,
             personalized: row.personalized,
             persName: row.persName,
+            ...(row.configurable ? { config: row.config } : {}),
+            ...(!row.configurable && row.customDesign ? { customDesign: true } : {}),
           });
         }
       }

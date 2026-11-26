@@ -536,6 +536,27 @@ async function adminApiOnce_(body){
     return d;
   }
 }
+// A Save whose caller needs the server's whole answer (the form's own error wording, or what else the answer
+// carries, such as the section a save was refused for). Sent like adminApi_: sign in first when needed, and when
+// the session has ended ask to sign in and send the SAME body once more — a requestId in it still stands for one
+// save, and nothing on the page is touched meanwhile. Returns { ok, data }, with signedOut: true when it wasn't
+// saved because nobody signed in (the caller leaves its form or window as it is and says so). Throws only when
+// the server can't be reached.
+const SAVE_SIGNED_OUT_ = "Your session ended — save again and sign in.";
+async function adminSave_(body){
+  const signedOut = { ok: false, signedOut: true, data: { status: "error", message: SAVE_SIGNED_OUT_ } };
+  for(let attempt = 0; ; attempt++){
+    if(!adminKey) adminKey = (await adminLogin()) || "";
+    if(!adminKey) return signedOut;
+    const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, key: adminKey }) });
+    const data = await r.json().catch(() => ({ status: "error", message: "Server error (" + r.status + ")" }));
+    if(r.status === 401 && adminSessionEnded_(r)){
+      if(attempt === 0){ if(!_adminLoginInFlight) showToast(SESSION_ENDED_, true); continue; }
+      return signedOut;
+    }
+    return { ok: r.ok && !!data && data.status !== "error", data: data || {} };
+  }
+}
 
 // Ends every session of the signed-in user on every device (a lost laptop, a browser left open
 // somewhere), this one included; the next visit asks them to sign in again.
@@ -4443,36 +4464,29 @@ function refreshLineRows_(orgId, sheetRow){
 // by getOrders); it identifies the exact line to cancel without
 // ambiguity even when an order has multiple line items of the same product.
 async function cancelLineItem(orgId, sheetRow, itemName, lineTotal){
+  // The window stays open, with the reason and time typed in it, until the server has answered: a session that
+  // ended asks to sign in and sends the same cancel again, and any other problem is shown in the window.
+  let data = null;
   const ans = await confirmModal_({ title: "Cancel this item?", text: itemName + " ($" + Number(lineTotal).toFixed(2) + "). This can't be undone.",
     reason: "optional", reasonLabel: "Reason (optional, e.g. “duplicate order — same as ORD-XXXXXXX”)", confirmLabel: "Cancel item", cancelLabel: "Keep it", danger: true,
-    when: { label: "When was it cancelled?" } });
-  if(!ans.ok) return;
-  const reason = ans.reason;
-  if(!adminKey) adminKey = (await adminLogin()) || "";
-  if(!adminKey) return;
-  try{
-    const res = await fetch("/api/orders", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({action:"cancelLineItem", org:orgId, sheetRow:Number(sheetRow), reason: reason || "", at: ans.at, key:adminKey})
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      adminSessionEnded_(data);
-      showToast("Cancel failed: " + ((data && data.message) || "unknown error"), true);
-      return;
-    }
-    if(data.alreadyCancelled){
-      showToast("This item was already canceled — nothing changed and no email was sent.");
-    } else if(data.lateCancel){
-      showToast("Item canceled. ⚠ Blank was already ordered — manual reconciliation needed (inventory + refund decision).", true);
-    } else {
-      showToast("Item canceled." + (data.emailSent ? " Customer notified by email." : ""));
-    }
-    refreshLineRows_(orgId, sheetRow);
-  }catch(e){
-    showToast("Could not reach the server.", true);
+    when: { label: "When was it cancelled?" },
+    submit: async (a) => {
+      let r;
+      try{ r = await adminSave_({action:"cancelLineItem", org:orgId, sheetRow:Number(sheetRow), reason: a.reason || "", at: a.at}); }
+      catch(e){ return "Could not reach the server."; }
+      if(!r.ok) return r.signedOut ? "Nothing was cancelled: your session ended. Press Cancel item again and sign in." : "Cancel failed: " + (r.data.message || "unknown error");
+      data = r.data;
+      return "";
+    } });
+  if(!ans.ok || !data) return;
+  if(data.alreadyCancelled){
+    showToast("This item was already canceled — nothing changed and no email was sent.");
+  } else if(data.lateCancel){
+    showToast("Item canceled. ⚠ Blank was already ordered — manual reconciliation needed (inventory + refund decision).", true);
+  } else {
+    showToast("Item canceled." + (data.emailSent ? " Customer notified by email." : ""));
   }
+  refreshLineRows_(orgId, sheetRow);
 }
 
 // Record a refund for a canceled line item, once the money has gone back. Money returned by Venmo, Zelle,
@@ -6378,33 +6392,27 @@ async function markOrderPaid(orgId, orderId){
   finally{ markPaidInFlight_.delete(orderId); }
 }
 async function markOrderPaidOnce_(orgId, orderId){
-  const at = await askWhen_("Mark order " + orderId + " as paid? This will email the customer confirming their order.", { whenLabel: "When was it paid?" });
-  if(!at) return;
-  if(!adminKey){
-    adminKey = (await adminLogin()) || "";
-  }
-  if(!adminKey) return;
-  try{
-    const res = await fetch("/api/orders", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      // requestId: the server books the balance once for it (migrations/0095), even if this is sent again.
-      body: JSON.stringify({action: "markPaidManual", org: orgId, orderId: orderId, at, key: adminKey, requestId: newRequestId_()})
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      adminSessionEnded_(res);
-      showToast("Could not mark as paid: " + ((data && data.message) || "unknown error"), true);
-      return;
-    }
-    // Nothing booked: it was already paid (another admin, or the card payment came in first) — or a payment
-    // came in at that moment and changed the balance, so look again before marking it.
-    if(data.alreadyPaid) showToast("This order was already paid — nothing more was recorded and no email was sent.");
-    else if(data.amountRecorded === 0) showToast("A payment came in on this order just now — check its balance before marking it paid.", true);
-    refreshOrderRows_(orgId, [orderId]);
-  }catch(e){
-    showToast("Could not reach the server.", true);
-  }
+  // requestId: the server books the balance once for it (migrations/0095), even if this is sent again — after a
+  // sign-in, or by pressing the button again in the same window.
+  const mark = {action: "markPaidManual", org: orgId, orderId: orderId, requestId: newRequestId_()};
+  // The window stays open until the server has answered: a session that ended asks to sign in and sends the
+  // same request again, and any other problem is shown in the window.
+  let data = null;
+  const at = await askWhen_("Mark order " + orderId + " as paid? This will email the customer confirming their order.", { whenLabel: "When was it paid?",
+    modal: { submit: async (a) => {
+      let r;
+      try{ r = await adminSave_({ ...mark, at: a.at }); }
+      catch(e){ return "Could not reach the server."; }
+      if(!r.ok) return r.signedOut ? "Nothing was recorded: your session ended. Press Mark again and sign in." : "Could not mark as paid: " + (r.data.message || "unknown error");
+      data = r.data;
+      return "";
+    } } });
+  if(!at || !data) return;
+  // Nothing booked: it was already paid (another admin, or the card payment came in first) — or a payment
+  // came in at that moment and changed the balance, so look again before marking it.
+  if(data.alreadyPaid) showToast("This order was already paid — nothing more was recorded and no email was sent.");
+  else if(data.amountRecorded === 0) showToast("A payment came in on this order just now — check its balance before marking it paid.", true);
+  refreshOrderRows_(orgId, [orderId]);
 }
 
 // Advances an order to the next fulfillment stage. Strict progression is
@@ -7234,27 +7242,28 @@ async function createLocalSaleOnce_(orgId){
 
   // Pay on delivery (migrations/0105): offered where the shop allows it (limited to local sales or not) to a role that may set it.
   const pod = podRule_(orgId);
-  const result = await showLocalSaleModal(products, blanks, { payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit") });
-  if(!result) return;
-  const { sendInvoice: wantsInvoice, ...sale } = result;
-  // This sale's key: the server makes one order (and books one payment) per key, so the retry below, or a
-  // second tab, finds the first one's order instead of recording the sale again.
+  // This sale's key: the server makes one order (and books one payment) per key, so the retries below (a dropped
+  // connection, a sign-in, Record sale pressed again in the same window), or a second tab, find the first one's
+  // order instead of recording the sale again.
   const requestId = newRequestId_();
-  const send = () => fetch("/api/orders", {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({action:"createLocalSale", key:adminKey, org:orgId, requestId, ...sale})
-  });
+  // The window stays open, with everything typed in it, until the server has answered: a session that ended asks
+  // to sign in and sends the same sale again, and any other problem is shown in the window.
+  let data = null;
+  const result = await showLocalSaleModal(products, blanks, { payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"), submit: async (typed) => {
+    const { sendInvoice: _later, ...sale } = typed;
+    const send = () => adminSave_({action:"createLocalSale", org:orgId, requestId, ...sale});
+    let r;
+    // A dropped connection is tried once more with the same key: the sale may have been recorded already.
+    try { try { r = await send(); } catch (_) { r = await send(); } }
+    catch (e) { return "Could not reach the server."; }
+    if(!r.ok) return r.signedOut ? "Nothing was recorded: your session ended. Press Record sale again and sign in." : "Could not record local sale: " + (r.data.message || "unknown error");
+    data = r.data;
+    return "";
+  } });
+  if(!result || !data) return;
+  const { sendInvoice: wantsInvoice, ...sale } = result;
 
   try{
-    // A dropped connection is tried once more with the same key: the sale may have been recorded already.
-    let res;
-    try { res = await send(); } catch (_) { res = await send(); }
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      adminSessionEnded_(res);
-      showToast("Could not record local sale: " + ((data && data.message) || "unknown error"), true);
-      return;
-    }
     // "Email the customer an invoice": the sale is recorded first, then its invoice goes out — so a
     // failed send still leaves the order there, with Send invoice… on its row to try again.
     let invoiceNote = "";
@@ -7271,7 +7280,11 @@ async function createLocalSaleOnce_(orgId){
   }
 }
 
+// opts.payOnDelivery: offer "Pay on delivery". opts.submit(sale): when given, Record sale sends the sale while the
+// window stays open. It resolves "" once the sale is recorded (the window closes and the sale is resolved as before),
+// or the problem to show in the window, which stays open with everything typed. Nothing closes the window while it is running.
 function showLocalSaleModal(products, blanks, opts = {}){
+  const submit = opts.submit;
   return new Promise((resolve) => {
     const IS = (s) => `width:100%;padding:8px 10px;border:1px solid var(--border,#ccc);border-radius:5px;font-size:14px;box-sizing:border-box;background:var(--surface,#fff);color:var(--ink,#111);margin-bottom:10px;`;
     const LS = (t, opt, forId) => `<label${forId ? ` for="${forId}"` : ""} style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">${t}${opt ? ` <span style="font-weight:400;color:var(--ink-soft,#888)">(optional)</span>` : ""}</label>`;
@@ -7619,7 +7632,8 @@ function showLocalSaleModal(products, blanks, opts = {}){
     wireLine(lines()[0]);
     renumber();
 
-    const finish = (result) => { document.body.removeChild(overlay); resolve(result); };
+    let sending = false;
+    const finish = (result) => { if(sending && !result) return; document.body.removeChild(overlay); resolve(result); };
 
     // One item read from its block: { item } or { error, focus }.
     function readLine(line){
@@ -7654,8 +7668,9 @@ function showLocalSaleModal(products, blanks, opts = {}){
                ...(customUnitPrice !== null ? { customUnitPrice } : {}) } };
     }
 
-    overlay.querySelector("#localSaleForm").addEventListener("submit", (e) => {
+    overlay.querySelector("#localSaleForm").addEventListener("submit", async (e) => {
       e.preventDefault();
+      if(sending) return;
       const errEl = overlay.querySelector("#lsErr");
       errEl.style.display = "none";
 
@@ -7728,7 +7743,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
         items.push(r.item);
       }
 
-      finish({
+      const sale = {
         items,
         paymentMethod,
         customerName: overlay.querySelector("#lsName").value.trim() || "",
@@ -7741,7 +7756,21 @@ function showLocalSaleModal(products, blanks, opts = {}){
         ...(podBox && podBox.checked ? { payOnDelivery: true } : {}),
         placedAt:  (readWhen_(overlay.querySelector("#lsDate")).at) || null,   // when the sale happened — also when it was paid / handed over
         sendInvoice: wantsInvoice,
-      });
+      };
+      if(submit){
+        const btns = [overlay.querySelector(".admin-pass-submit"), overlay.querySelector(".admin-pass-cancel")];
+        sending = true; btns.forEach(b => { b.disabled = true; });
+        let problem;
+        try { problem = await submit(sale); } catch (err) { problem = (err && err.message) || "Something went wrong."; }
+        if(problem){
+          // Still open, with everything typed: the problem is said here, and Record sale can be pressed again.
+          sending = false; btns.forEach(b => { b.disabled = false; });
+          errEl.textContent = problem;
+          errEl.style.display = "";
+          return;
+        }
+      }
+      finish(sale);
     });
 
     overlay.querySelector(".admin-pass-cancel").addEventListener("click", () => finish(null));
@@ -10390,11 +10419,12 @@ async function submitGlobalSettings(){
   const outlinePass = () => { const pass = document.getElementById("gEmailPass"); if(pass){ pass.style.outline = "2px solid #b03a2e"; if(pass.scrollIntoView) pass.scrollIntoView({ block: "center" }); } };
   if(mailboxChange && mailboxChange.via === "mailbox"){
     let tried = null;
-    try{ tried = await hoopApi_({ action: "checkMailbox", mailbox: mailboxChange }); }catch(e){ tried = { ok: false, message: e.message }; }
+    // (!adminKey after a failure: the session had ended and nobody signed in — that isn't the mailbox's doing.)
+    try{ tried = await hoopApi_({ action: "checkMailbox", mailbox: mailboxChange }); }catch(e){ tried = { ok: false, message: e.message, signedOut: !adminKey }; }
     if(!tried || !tried.ok){
-      const m = "Nothing was saved. The mailbox didn't sign in: " + ((tried && tried.message) || "no answer");
+      const m = tried && tried.signedOut ? "Nothing was saved. " + SAVE_SIGNED_OUT_ : "Nothing was saved. The mailbox didn't sign in: " + ((tried && tried.message) || "no answer");
       if(errEl) errEl.textContent = m; showToast(m, true);
-      outlinePass();
+      if(!(tried && tried.signedOut)) outlinePass();
       return;
     }
   }
@@ -10464,14 +10494,14 @@ async function submitGlobalSettings(){
     }
     const { settings, error } = collect();
     if(error){ say((programSaved ? "The program's settings are saved; nothing else was. " : "Nothing was saved. ") + error); return; }
-    const res = await fetch("/api/orders", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ action: "saveGlobalSettingsAll", key: adminKey, settings })
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      const why = ((data && data.section) ? data.section + ": " : "") + String((data && data.message) || "Could not save.").replace(/\.$/, "");
-      say((programSaved ? "The program's settings are saved; nothing else was. " : "Nothing was saved. ") + why + ". Fix it and save again.");
+    // A session that ended asks to sign in and sends this same save again; the page is left as it is meanwhile,
+    // and if nobody signs in.
+    const { ok, signedOut, data } = await adminSave_({ action: "saveGlobalSettingsAll", settings });
+    if(!ok){
+      const nothing = programSaved ? "The program's settings are saved; nothing else was. " : "Nothing was saved. ";
+      if(signedOut){ say(nothing + data.message); return; }
+      const why = (data.section ? data.section + ": " : "") + String(data.message || "Could not save.").replace(/\.$/, "");
+      say(nothing + why + ". Fix it and save again.");
       return;
     }
     const saved = data.settings || {};
@@ -11832,13 +11862,11 @@ async function submitOrgForm(isEdit){
     }
   }
   try{
-    const res = await fetch("/api/orders", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(body)
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      errEl.textContent = (data && data.message) || "Something went wrong.";
+    // A session that ended asks to sign in and sends this same save again; the form is left as it is meanwhile,
+    // and if nobody signs in.
+    const { ok, signedOut, data } = await adminSave_(body);
+    if(!ok){
+      errEl.textContent = signedOut ? "Nothing was saved. " + data.message : (data.message || "Something went wrong.");
       return;
     }
     window._prodFormDirty = false;   // saved: leaving no longer asks
@@ -11852,22 +11880,15 @@ async function submitOrgForm(isEdit){
       if(cloneSrc){
         errEl.textContent = "Copying products…";
         try{
-          const pRes = await fetch("/api/orders", {
-            method: "POST", headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({action: "listProducts", key: adminKey, org: cloneSrc})
-          });
-          const pData = await pRes.json();
+          // (Both through adminSave_, like the shop's own save: a session that ends here asks to sign in too.)
+          const pData = (await adminSave_({action: "listProducts", org: cloneSrc})).data;
           if(pData.status === "ok" && pData.products && pData.products.length){
             // The same copy as Products → Copy from another shop: everything, photos included, each
             // product keeping its id (made lowercase where an old one isn't), name and visibility.
             const used = new Set();
             const products = pData.products.map(p => Object.assign({ fromProductId: p.productId, productId: copyProductIdFor_(p.productId, used),
               name: p.name || p.productId, sub: p.sub || "", type: p.type, visible: !!p.visible }, p.versionGroup ? { versionLabel: p.versionLabel || "" } : {}));
-            const cRes = await fetch("/api/orders", {
-              method: "POST", headers: {"Content-Type": "application/json"},
-              body: JSON.stringify({ action: "copyProductsFromOrg", key: adminKey, org: body.orgId, fromOrg: cloneSrc, copyImages: true, products })
-            });
-            const cData = await cRes.json();
+            const cData = (await adminSave_({ action: "copyProductsFromOrg", org: body.orgId, fromOrg: cloneSrc, copyImages: true, products })).data;
             if(cData.status !== "ok") throw new Error(cData.message || "Copy failed");
             const copied = cData.copied || [];
             location.hash = goProducts;
@@ -13246,13 +13267,11 @@ async function submitProductForm(orgId, isEdit){
     body.sizePricing = sizePricing;
   }
   try{
-    const res = await fetch("/api/orders", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(body)
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      errEl.textContent = (data && data.message) || "Something went wrong.";
+    // A session that ended (24 hours, or signed out elsewhere) asks to sign in and sends this same save again;
+    // the form is left exactly as it is meanwhile, and if nobody signs in.
+    const { ok, signedOut, data } = await adminSave_(body);
+    if(!ok){
+      errEl.textContent = signedOut ? "Nothing was saved. " + data.message : (data.message || "Something went wrong.");
       return;
     }
     window._prodFormDirty = false;   // saved: leaving no longer asks
@@ -14493,9 +14512,9 @@ async function loadBlankLinksSection(orgId, product) {
         });
         if (!canUnlink) remove.length = 0;
         if (!set.length && !remove.length) return "";
-        const r = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: adminKey, action: "saveBlankLinks", org: orgId, productId: product.productId, set, remove }) });
-        const d = await r.json().catch(() => ({ status: "error", message: "Network error" }));
-        if (d.status === "error") return "Blank links: " + (d.message || "the save failed.");
+        // Like the product's own save: a session that ended asks to sign in and sends the same links again.
+        const { ok, data: d } = await adminSave_({ action: "saveBlankLinks", org: orgId, productId: product.productId, set, remove });
+        if (!ok) return "Blank links: " + (d.message || "the save failed.");
         // Saved: this is what's on file now (a second Save sends nothing new).
         remove.forEach(x => { delete linkMap[x.productColor + "|" + x.productSize]; });
         set.forEach(x => { linkMap[x.productColor + "|" + x.productSize] = { blankId: x.blankId, blankColor: x.blankColor, blankSize: x.blankSize }; });
@@ -15134,7 +15153,7 @@ function inventoryModal_(title, bodyHtml, width, opts){
   let release = null, dirty = false, asking = false;
   const close = () => { ov.remove(); if (release) release(); };
   const dismiss = async () => {
-    if (asking || !ov.isConnected) return;
+    if (asking || !ov.isConnected || (opts.canClose && !opts.canClose())) return;
     if (opts.guard && dirty) {
       asking = true;
       const leave = await askConfirm_("Discard changes?\n\nWhat you typed in this window hasn't been saved.", { confirmLabel: "Discard", cancelLabel: "Keep editing", danger: true });
@@ -15353,6 +15372,9 @@ function whenFrom_(root, id){
   return w.error ? null : w.at;
 }
 
+// o.submit(answer): for a question whose Yes sends something. The window stays open, with what was typed, until
+// it is done: submit resolves "" when it went through (the window closes and the answer is resolved as usual), or
+// the problem to show in the window, which then stays open to try again. Nothing closes it while submit is running.
 function confirmModal_(o){
   o = o || {};
   return new Promise(resolve => {
@@ -15366,14 +15388,15 @@ function confirmModal_(o){
     const box = whenBox + inputBox + (o.reason ? `<label for="cmReason" style="display:block;font-size:13px;font-weight:600;margin:12px 0 4px;">${escapeHtml(o.reasonLabel || (o.reason === "required" ? "Reason" : "Reason (optional)"))}</label>
       <textarea id="cmReason" rows="3" style="width:100%;box-sizing:border-box;font:inherit;font-size:14px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;">${escapeHtml(o.defaultReason || "")}</textarea>` : "");
     const { ov, close } = inventoryModal_(escapeHtml(o.title || "Are you sure?"), `<div class="cm-text" style="font-size:14px;line-height:1.5;white-space:pre-line;">${escapeHtml(o.text || "")}</div>${box}
+      ${o.submit ? `<div id="cmSubmitErr" role="alert" style="color:#b03a2e;font-size:13px;margin-top:12px;display:none;"></div>` : ""}
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
         <button type="button" class="admin-btn admin-btn-secondary" id="cmCancel">${escapeHtml(o.cancelLabel || "Back")}</button>
         <button type="button" class="admin-btn${o.danger ? " admin-btn-danger admin-btn-danger-solid" : ""}" id="cmOk">${escapeHtml(o.confirmLabel || "OK")}</button>
-      </div>`, 480, { onClose: () => finish({ ok: false, reason: "" }) });
+      </div>`, 480, { onClose: () => finish({ ok: false, reason: "" }), canClose: () => !sending });
     ov.classList.add("confirm-modal");
     if (o.message != null) ov.dataset.message = String(o.message);
-    let done = false;
-    const finish = (v) => { if (done) return; done = true; close(); resolve(v); };
+    let done = false, sending = false;
+    const finish = (v) => { if (done || (sending && !v.ok)) return; done = true; close(); resolve(v); };
     const ok = ov.querySelector("#cmOk"), ta = ov.querySelector("#cmReason"), ti = ov.querySelector("#cmInput");
     const sync = () => { if (o.reason === "required") ok.disabled = !(ta && ta.value.trim()); };
     // Focus starts on the answer, not on the button behind the window (Enter there would open a second window):
@@ -15385,7 +15408,8 @@ function confirmModal_(o){
       ti.addEventListener("input", () => { ov.querySelector("#cmInputErr").textContent = ""; });
     }
     sync();
-    ok.onclick = () => {
+    ok.onclick = async () => {
+      if (sending) return;
       let at, value;
       if (ti) {
         const raw = ti.value.trim();
@@ -15395,7 +15419,21 @@ function confirmModal_(o){
         value = r && typeof r === "object" && "value" in r ? r.value : raw;
       }
       if (o.when) { at = whenFrom_(ov, "cmWhen"); if (!at) return; }
-      finish({ ok: true, reason: ta ? ta.value.trim() : "", ...(o.when ? { at } : {}), ...(ti ? { value } : {}) });
+      const answer = { ok: true, reason: ta ? ta.value.trim() : "", ...(o.when ? { at } : {}), ...(ti ? { value } : {}) };
+      if (o.submit) {
+        const errEl = ov.querySelector("#cmSubmitErr"), cancel = ov.querySelector("#cmCancel");
+        errEl.style.display = "none";
+        sending = true; ok.disabled = cancel.disabled = true;
+        let problem;
+        try { problem = await o.submit(answer); } catch (e) { problem = (e && e.message) || "Something went wrong."; }
+        if (problem) {
+          // Still open, with what was typed: the problem is said here, and Yes can be pressed again.
+          sending = false; ok.disabled = cancel.disabled = false; sync();
+          errEl.textContent = problem; errEl.style.display = "";
+          return;
+        }
+      }
+      finish(answer);
     };
     ov.querySelector("#cmCancel").onclick = () => finish({ ok: false, reason: "" });
     ov.querySelector("[data-modal-close]").onclick = () => finish({ ok: false, reason: "" });

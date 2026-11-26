@@ -195,7 +195,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const evil = d.querySelector('#cpGrid tr[data-from="evil"]');
   ok("another shop's product names are shown escaped in the grid", !d.getElementById("cpGrid").querySelector("img, b") && evil.querySelector(".cpName").value === "<img src=x onerror=alert(1)>" && evil.querySelector(".cpSub").value === '"><b>x</b>');
   d.getElementById("cpCancel").click();
-  ok("creating a shop with “copy products from” uses the same copy", /action: "copyProductsFromOrg", key: adminKey, org: body\.orgId, fromOrg: cloneSrc, copyImages: true, products/.test(adminJs));
+  ok("creating a shop with “copy products from” uses the same copy", /action: "copyProductsFromOrg", org: body\.orgId, fromOrg: cloneSrc, copyImages: true, products/.test(adminJs));
 
   console.log("\n=== Every column of a product is copied, or left out on purpose ===");
   // A product with every setting away from its default — the customer's own design and its price per

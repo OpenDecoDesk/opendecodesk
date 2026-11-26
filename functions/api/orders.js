@@ -103,7 +103,7 @@ import {
   getSalesTaxSettings, setSalesTaxSettings, setOrgTaxExemption, getSalesTaxReport,
   getSalesTaxRefunds, PAYMENT_METHODS, methodFromPaymentMethod, getCardPaymentsMissingFees, setPaymentFee, getSalesTaxReturn, getTaxedResalePurchases, getStripeLinkedPayments, setPaymentDate, countStripePaymentsToCheck, markStripeChecked, stripeRefsTaken,
   getDigestState, getDigestRun, getOrdersForDigest, getUnsentOwnerNotices, getFailedAdminLogins,
-  ACCOUNT_TYPES, OTHER_INCOME_TYPES, listAccounts, saveAccount, getAccount, getMoneyDefaults, setMoneyDefaults,
+  ACCOUNT_TYPES, OTHER_INCOME_TYPES, listAccounts, listAccountNames, saveAccount, getAccount, getMoneyDefaults, setMoneyDefaults,
   listMoneyEntries, getMoneyEntry, saveMoneyEntry, deleteMoneyEntry, moneyEntryMonth, getMoneySummary, setPaymentAccount,
   importStatementLines, autoMatchStatement, getStatementLine, matchStatementLine, unmatchStatementLine, setStatementLineIgnored,
   getReconciliationData, setReconciled, clearReconciled, isReconciled, saveCsvMapping, previewExpenseRows, landedCostLines, spreadCents,
@@ -415,8 +415,9 @@ const NO_MONTH_ACTIONS = new Set([
   "saveBlankLinks", "deleteBlankLink", "applyBlankCatchUp", "importBlanks", "applyVendorBlanks", "copyVendorImage", "removeBlankImages", "deleteInventoryItem",
   "deleteBlank", "mergeBlanks", "recomputeBlankAverageCosts", "recordRestockOrder", "cancelRestockOrder", "saveVendor", "deleteVendor", "previewSupplierOrder",
   "placeSupplierOrder", "cancelSupplierOrder", "saveTransfer", "applyTransferCatchUp", "deleteTransfer",
-  // Finance set-up, statements, and the periods themselves
-  "listExpenseCategories", "saveRecurringExpense", "stopRecurringExpense", "saveExpenseCategory", "deleteRecurringExpense", "deleteExpenseCategory",
+  // Finance set-up, statements, and the periods themselves (listAccounts and listExpenseCategories only read: they
+  // are here because the Receive forms' pickers ask for them at Edit)
+  "listAccounts", "listExpenseCategories", "saveRecurringExpense", "stopRecurringExpense", "saveExpenseCategory", "deleteRecurringExpense", "deleteExpenseCategory",
   "saveAccount", "saveMoneyDefaults", "setRecordReceipt", "importStatement", "autoMatchStatement", "matchStatementLine", "unmatchStatementLine",
   "ignoreStatementLine", "reconcileMonth", "unreconcileMonth", "saveShopRate", "closePeriod", "reopenPeriod",
   // Settings
@@ -1526,6 +1527,15 @@ async function handleOrdersPost_(context, listBefore = null) {
     const meta = async () => ({ accountTypes: ACCOUNT_TYPES, otherIncomeTypes: OTHER_INCOME_TYPES, defaults: await getMoneyDefaults(env.DB) });
 
     if (body.action === "listAccounts") {
+      // What each account holds is for a role with Accounts and money (as Home keeps the business's money from a
+      // role without costs.view). Everyone else let in is here for an account picker — a payment, an expense, the
+      // Account viewer, Reconcile, receiving blanks or transfers (permissions.js) — and gets the names only: no
+      // balances, no opening balance, no statement-file settings, no money defaults, and the sums aren't run.
+      // Fails closed like the checks at the top. (saveAccount's reply below carries balances too: it needs
+      // Accounts and money at Edit.)
+      if (!can_("finance.money", "read")) {
+        return jsonResponse({ status: "ok", accounts: await listAccountNames(env.DB), accountTypes: ACCOUNT_TYPES, otherIncomeTypes: OTHER_INCOME_TYPES, defaults: {} });
+      }
       return jsonResponse({ status: "ok", accounts: await listAccounts(env.DB, ymd(body.asOf) ? body.asOf : undefined), ...(await meta()) });
     }
     if (body.action === "saveAccount") {

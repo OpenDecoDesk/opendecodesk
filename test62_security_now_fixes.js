@@ -157,6 +157,9 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
       "const getCatalogData = async () => ({ subdomainMap: {} }); const classifyHost = () => ({ kind: 'admin' });\n" +
       "const requireAdmin = async () => null; const adminActor = () => 'owner@myshop.com'; const adminUser = () => ({ id: 1, role: 'admin' });\n" +
       "const require2fa = async () => false; const refreshPending = async () => null;\n" +
+      // The password asked for again when two-step is turned on, and the proof that the secret is the server's
+      // own, are test286's; here the password is always right and the proof is made with the real signer.
+      "const checkCurrentPassword = async () => null;\n" +
       "const rateLimitCheck = async () => ({ blocked: false }), rateLimitHit = async () => {}, rateLimitResponse = () => null, deleteUserSessions = async () => {};\n" +
       "const generateRecoveryCodes = () => ['aaaaa-bbbbb']; const saveRecoveryCodes = async () => {}; const recoveryCodesLeft = () => 0;\n" +
       "const looksLikeRecoveryCode = () => false; const spendRecoveryCode = async () => false;\n" +
@@ -167,27 +170,30 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
       // Sealing the secret at rest is test258's; here it is stored as given.
       "const sealTotp = async (env, s) => s, openTotp = async (env, s) => s || '', totpIsSealed = () => true;\n" +
       "const insertAuditLog = async (db, row) => __s.audit(row);\n" +
-      strip(read("functions/api/admin-2fa.js")) + "\nreturn onRequestPost;");
-    const tfaPost = tfa.call(null);
+      strip(read("functions/api/admin-2fa.js")) + "\nreturn { post: onRequestPost, signTwoStepProof };");
+    const { post: tfaPost, signTwoStepProof } = tfa.call(null);
+    const tfaEnv = { DB: {}, SIGNING_SECRET: "a-signing-secret-for-tests-only" };
+    const OWNERSECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP", ATTACKERSECRET = "KRSXG5CTMVRXEZLUKRSXG5CTMVRXEZLU";
+    const enrolWith = async (secret) => ({ proposedSecret: secret, proof: await signTwoStepProof(tfaEnv, 1, secret), current: "the owner's password" });
     global.__s = { activeSecret: () => activeSecret, save: (v) => { activeSecret = v; }, clear: () => { activeSecret = null; }, audit: (row) => { if (auditFails) throw new Error("D1 down"); audits.push(row); } };
     const tcall = async (body) => {
-      const res = await tfaPost({ env: { DB: {} }, request: { url: "https://admin.example.com/api/admin-2fa",
+      const res = await tfaPost({ env: tfaEnv, request: { url: "https://admin.example.com/api/admin-2fa",
         json: async () => Object.assign({ key: "cookie" }, body), headers: { get: (h) => h === "CF-Connecting-IP" ? "203.0.113.9" : null } } });
       return { status: res.status, body: JSON.parse(await res.text()) };
     };
-    r = await tcall({ action: "activate", proposedSecret: "OWNERSECRET", code: "123456" });
-    console.log("first activation works:", r.status === 200 && activeSecret === "OWNERSECRET");
+    r = await tcall({ action: "activate", ...(await enrolWith(OWNERSECRET)), code: "123456" });
+    console.log("first activation works:", r.status === 200 && activeSecret === OWNERSECRET);
     console.log("…and is audited with who and from where:",
       audits.length === 1 && audits[0].action === "security.2fa_enabled" && audits[0].actor === "owner@myshop.com" && audits[0].actorUserId === 1 && audits[0].ip === "203.0.113.9");
     console.log("…and recovery codes are handed over once, at that moment:", Array.isArray(r.body.recoveryCodes) && r.body.recoveryCodes.length === 1);
-    r = await tcall({ action: "activate", proposedSecret: "ATTACKERSECRET", code: "123456" });
-    console.log("activating a NEW secret while 2FA is on is refused (409), secret unchanged:", r.status === 409 && activeSecret === "OWNERSECRET");
+    r = await tcall({ action: "activate", ...(await enrolWith(ATTACKERSECRET)), code: "123456" });
+    console.log("activating a NEW secret while 2FA is on is refused (409), secret unchanged:", r.status === 409 && activeSecret === OWNERSECRET);
     console.log("…and nothing is audited for the refusal:", audits.length === 1);
     r = await tcall({ action: "disable", code: "000000" });
-    console.log("disable with a wrong current code is refused:", r.status === 400 && activeSecret === "OWNERSECRET");
+    console.log("disable with a wrong current code is refused:", r.status === 400 && activeSecret === OWNERSECRET);
     auditFails = true;
     r = await tcall({ action: "disable", code: "123456" });
-    console.log("if the audit row can't be written, 2FA is NOT disabled (503):", r.status === 503 && activeSecret === "OWNERSECRET");
+    console.log("if the audit row can't be written, 2FA is NOT disabled (503):", r.status === 503 && activeSecret === OWNERSECRET);
     auditFails = false;
     r = await tcall({ action: "disable", code: "123456" });
     console.log("disable with the current code works and is audited:",

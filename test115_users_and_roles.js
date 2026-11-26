@@ -12,7 +12,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 const names = (text) => [...text.matchAll(/"(\w+)"/g)].map(m => m[1]);
 const forbidden = (r) => r.status === 403 && r.body && r.body.code === "forbidden";
 const pendingRefusal = (r) => r.status === 403 && r.body && r.body.code === "setup_required";
-const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU", SECRET3 = "MFRGGZDFMZTWQ2LK";
+const SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLUKRSXG5CTMVRXEZLU", SECRET3 = "MFRGGZDFMZTWQ2LKMFRGGZDFMZTWQ2LK";
 const P = new Function(read("functions/_lib/permissions.js").replace(/export (async function|function|const)/g, "$1") +
   "\nreturn { ACTION_PERM, DEFAULT_ROLES, roleAllows, PERM_FUNCTIONS, PERMISSION_AREAS, effectivePermissions };")();
 
@@ -194,7 +194,7 @@ const P = new Function(read("functions/_lib/permissions.js").replace(/export (as
     (await A.signIn("samantha@myshop.com", "a password of their own")).status === 401 && (r = await A.signIn("samantha@myshop.com", TEMP)).body.pending === "password");
   await A.password({ action: "change", current: TEMP, next: "samantha's second password" }, r.cookie);
   samCookie = (await A.signIn("samantha@myshop.com", "samantha's second password")).cookie;
-  r = await A.twoFactor({ action: "activate", proposedSecret: SECRET, code: totpNow(SECRET) }, samCookie);
+  r = await A.twoFactor({ action: "activate", ...(await A.enrolWith("samantha@myshop.com", SECRET, "samantha's second password")), code: totpNow(SECRET) }, samCookie);
   const codes = r.body.recoveryCodes;
   ok("turning on two-step shows ten recovery codes, once", r.status === 200 && Array.isArray(codes) && codes.length === 10 && new Set(codes).size === 10 && codes.every(c => /^[a-z2-9]{5}-[a-z2-9]{5}$/.test(c)) &&
     !A.user("samantha@myshop.com").recoveryCodes.includes(codes[0]) && (await A.twoFactor({ action: "status" }, samCookie)).body.recoveryCodesLeft === 10);
@@ -202,7 +202,7 @@ const P = new Function(read("functions/_lib/permissions.js").replace(/export (as
   r = await A.signIn("samantha@myshop.com", "samantha's second password", codes[3].toUpperCase());
   ok("a recovery code stands in for the authenticator — once, and it is noted in the audit log", r.status === 200 && (await A.signIn("samantha@myshop.com", "samantha's second password", codes[3])).status === 401 &&
     (await A.twoFactor({ action: "status" }, r.cookie)).body.recoveryCodesLeft === 9 && A.audit("security.recovery_code_used").length === 1);
-  ok("a second authenticator can't be swapped in while one is on", (await A.twoFactor({ action: "activate", proposedSecret: SECRET2, code: totpNow(SECRET2) }, r.cookie)).status === 409);
+  ok("a second authenticator can't be swapped in while one is on", (await A.twoFactor({ action: "activate", ...(await A.enrolWith("samantha@myshop.com", SECRET2, "samantha's second password")), code: totpNow(SECRET2) }, r.cookie)).status === 409);
   const lost = r.cookie;
   r = await A.users({ action: "reset2fa", id: sam }, boss);
   ok("an admin resets a lost phone: two-step and its recovery codes are gone and the user is signed out", r.status === 200 && r.body.user.has2fa === false && A.user("samantha@myshop.com").totpSecret === null && A.user("samantha@myshop.com").recoveryCodes === null &&
@@ -217,7 +217,7 @@ const P = new Function(read("functions/_lib/permissions.js").replace(/export (as
   console.log("\n=== Require two-step sign-in ===");
   samCookie = (await A.signIn("samantha@myshop.com", "samantha's second password")).cookie;
   ok("it is off until an admin turns it on", (await A.users({ action: "me" }, samCookie)).body.require2fa === false && (await A.users({ action: "list" }, boss)).body.require2fa === false);
-  await A.twoFactor({ action: "activate", proposedSecret: SECRET3, code: totpNow(SECRET3) }, boss);   // the admin enrols first
+  await A.twoFactor({ action: "activate", ...(await A.enrolWith("olive@myshop.com", SECRET3, "correct horse battery")), code: totpNow(SECRET3) }, boss);   // the admin enrols first
   r = await A.users({ action: "setRequire2fa", on: true }, boss);
   ok("turning it on is recorded, and signs nobody out: sessions from before keep working", r.status === 200 && A.audit("security.require_2fa_changed").length === 1 && /"on":true/.test(A.audit("security.require_2fa_changed")[0].detail) &&
     (await A.orders({ action: "getOrdersAllShops" }, samCookie)).status === 200 && (await A.users({ action: "me" }, samCookie)).body.pending === null);
@@ -230,8 +230,8 @@ const P = new Function(read("functions/_lib/permissions.js").replace(/export (as
   if (!pendingRefusal(await A.users({ action: "list" }, enrol))) open.push("admin-users list");
   ok("until they have, no page's API answers them — 403 with the reason", open.length === 0);
   ok("…only who-am-I and the enrolment itself", (await A.users({ action: "me" }, enrol)).body.pending === "2fa" && (r = await A.twoFactor({ action: "status" }, enrol)).status === 200 && r.body.required === true && r.body.enabled === false && (await A.twoFactor({ action: "generate" }, enrol)).status === 200);
-  ok("a wrong code doesn't enrol them", (await A.twoFactor({ action: "activate", proposedSecret: SECRET2, code: "000000" }, enrol)).status === 400 && pendingRefusal(await A.orders({ action: "getOrdersAllShops" }, enrol)));
-  r = await A.twoFactor({ action: "activate", proposedSecret: SECRET2, code: totpNow(SECRET2) }, enrol);
+  ok("a wrong code doesn't enrol them", (await A.twoFactor({ action: "activate", ...(await A.enrolWith("samantha@myshop.com", SECRET2)), code: "000000" }, enrol)).status === 400 && pendingRefusal(await A.orders({ action: "getOrdersAllShops" }, enrol)));
+  r = await A.twoFactor({ action: "activate", ...(await A.enrolWith("samantha@myshop.com", SECRET2)), code: totpNow(SECRET2) }, enrol);
   ok("once enrolled — recovery codes in hand — the same session is let through", r.status === 200 && r.body.pending === null && r.body.recoveryCodes.length === 10 && (await A.orders({ action: "getOrdersAllShops" }, enrol)).status === 200);
   ok("someone already enrolled is unaffected: password, code, in", (r = await A.signIn("olive@myshop.com", "correct horse battery", totpNow(SECRET3, 1))).status === 200 && r.body.pending === null);
   ok("while it is required nobody can switch their own two-step off", (r = await A.twoFactor({ action: "disable", code: totpNow(SECRET2) }, enrol)).status === 409 && /required/.test(r.body.message) && !!A.user("samantha@myshop.com").totpSecret);
@@ -246,7 +246,7 @@ const P = new Function(read("functions/_lib/permissions.js").replace(/export (as
   await A.users({ action: "setRequire2fa", on: false }, boss);
   r = await A.signIn("samantha@myshop.com", "samantha's second password");
   ok("switched off again, sign-in asks for nothing extra, and two-step is each user's own choice", r.body.pending === null && A.audit("security.require_2fa_changed").length === 2);
-  await A.twoFactor({ action: "activate", proposedSecret: SECRET, code: totpNow(SECRET) }, r.cookie);
+  await A.twoFactor({ action: "activate", ...(await A.enrolWith("samantha@myshop.com", SECRET, "samantha's second password")), code: totpNow(SECRET) }, r.cookie);
   ok("…which they can switch off themselves with a code", (await A.twoFactor({ action: "disable", code: "000000" }, r.cookie)).status === 400 && (await A.twoFactor({ action: "disable", code: totpNow(SECRET, 1) }, r.cookie)).status === 200 && A.user("samantha@myshop.com").totpSecret === null);
 
   console.log("\n=== The admin page ===");

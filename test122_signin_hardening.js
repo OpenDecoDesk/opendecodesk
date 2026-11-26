@@ -68,12 +68,14 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const me = (await signInFrom("203.0.113.9", "olive@myshop.com", "correct horse battery")).cookie;
   const other = (await signInFrom("203.0.113.10", "olive@myshop.com", "correct horse battery")).cookie;
   const SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+  // What turning two-step on sends besides the code: the secret with the server's proof for it, and the password.
+  const enrol = await A.enrolWith("olive@myshop.com", SECRET, "correct horse battery");
   let wrong = [];
-  for (let i = 0; i < 5; i++) wrong.push((await A.twoFactor({ action: "activate", proposedSecret: SECRET, code: "000000" }, me)).status);
+  for (let i = 0; i < 5; i++) wrong.push((await A.twoFactor({ action: "activate", ...enrol, code: "000000" }, me)).status);
   ok("wrong codes are refused…", wrong.every(s => s === 400));
-  ok("…five a minute, then not even checked", (await A.twoFactor({ action: "activate", proposedSecret: SECRET, code: totpNow(SECRET) }, me)).status === 429);
+  ok("…five a minute, then not even checked", (await A.twoFactor({ action: "activate", ...enrol, code: totpNow(SECRET) }, me)).status === 429);
   const elsewhere = { headers: { "cf-connecting-ip": "203.0.113.30" } };   // that address's budget is spent for this minute
-  r = await A.twoFactor({ action: "activate", proposedSecret: SECRET, code: totpNow(SECRET) }, me, elsewhere);
+  r = await A.twoFactor({ action: "activate", ...enrol, code: totpNow(SECRET) }, me, elsewhere);
   const recovery = (r.body.recoveryCodes || [])[0];
   ok("turning two-step on ends the user's other sessions, not this one", r.status === 200 && (await gate(me)) === null && (await gate(other)) !== null);
   r = await A.twoFactor({ action: "disable", code: totpNow(SECRET) }, me, elsewhere);

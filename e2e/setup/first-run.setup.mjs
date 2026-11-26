@@ -181,6 +181,8 @@ test("one user turns on two-step sign-in with an authenticator code", async ({ b
   await expect(secretEl).toBeVisible();
   const secret = (await secretEl.textContent()).replace(/\s/g, "");
   expect(secret).toMatch(/^[A-Z2-7]{16,}$/);
+  // Turning it on asks for the password again (specs/ff-signin-roles.spec.mjs checks a wrong one).
+  await page.getByLabel("Current password").fill(readCredentials().users.twostep.password);
   // A wrong code is refused.
   await page.locator("#tfa-verify-code").fill("000000");
   await page.getByRole("button", { name: "Activate 2FA" }).click();

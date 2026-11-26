@@ -60,7 +60,7 @@ async function makeAuth({ d1, passphrase = "abcd-efgh-jkmn-pqrs-tuvw-xyz2", real
   const twoFactor = load("functions/api/admin-2fa.js", "onRequestPost");
   // Internals a test needs to stage an older install (a password record as the old code stored it), and to read
   // a sealed two-step secret back (openTotp).
-  const lib = load("", "{ passwordRecordFor_, requireAdmin, adminUser, adminActor, setUserRoleAndStatus, getAuditLog, openTotp, sealTotp, passwordIterations }");
+  const lib = load("", "{ passwordRecordFor_, requireAdmin, adminUser, adminActor, setUserRoleAndStatus, getAuditLog, openTotp, sealTotp, passwordIterations, signTwoStepProof, verifyTwoStepProof }");
   // The real limiter's own functions, when realLimits (to test it directly).
   const limits = realLimits ? load("", "{ rateLimited, rateLimitCheck, rateLimitHit, rateLimitCheckGlobal, rateLimitHitGlobal, ipv6Prefix64 }") : null;
   // The orders endpoint — the 207 back-office actions — behind the real gate. Everything it does
@@ -74,7 +74,7 @@ async function makeAuth({ d1, passphrase = "abcd-efgh-jkmn-pqrs-tuvw-xyz2", real
     try { return await answer(await ordersPost({ request: request("/api/orders", body, Object.assign({ cookie }, opts)), env, waitUntil: (p) => Promise.resolve(p).catch(() => {}) })); }
     catch (e) { return { status: 0, body: { threw: String(e && e.message) }, cookie: undefined }; }   // got past the gate, then lacked data
   };
-  const env = { DB: d1, PROXY_ADMIN_PASSPHRASE: passphrase, ROOT_DOMAIN: "example.com" };
+  const env = { DB: d1, PROXY_ADMIN_PASSPHRASE: passphrase, ROOT_DOMAIN: "example.com", SIGNING_SECRET: "a-signing-secret-for-tests-only" };
   const call = (fn, path) => async (body, cookie, opts) => answer(await fn({ request: request(path, body, Object.assign({ cookie }, opts)), env, waitUntil: () => {} }));
   // The endpoints themselves, by path and method, for a caller that has its own request objects
   // (scripts/admin-local.js --sign-in serves them over real HTTP).
@@ -85,6 +85,13 @@ async function makeAuth({ d1, passphrase = "abcd-efgh-jkmn-pqrs-tuvw-xyz2", real
     signIn: async (email, key, code) => answer(await session.post({ request: request("/api/admin-session", Object.assign({ email, key }, code ? { totpCode: code } : {})), env })),
     signOut: async (cookie) => answer(await session.del({ request: request("/api/admin-session", null, { cookie }), env })),
     password: call(password, "/api/admin-password"), users: call(users, "/api/admin-users"), twoFactor: call(twoFactor, "/api/admin-2fa"), orders,
+    // What a test sends with "activate" to turn two-step on with a secret of its own (so it can make the codes):
+    // the proof "generate" would have issued to that user for it, and the user's current password (left out for a
+    // session pending "2fa", which isn't asked for one).
+    //   A.twoFactor({ action: "activate", ...(await A.enrolWith(email, SECRET, password)), code: totpNow(SECRET) }, cookie)
+    enrolWith: async function (email, secret, current) {
+      return Object.assign({ proposedSecret: secret, proof: await lib.signTwoStepProof(env, this.user(email).id, secret) }, current ? { current } : {});
+    },
     sessions: () => d1.q("SELECT count(*) n FROM admin_sessions")[0].n,
     user: (email) => d1.q("SELECT * FROM users").find(u => u.email === email) || null,
     audit: (action) => d1.q("SELECT * FROM audit_log ORDER BY id").filter(r => r.action === action),

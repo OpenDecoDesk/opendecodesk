@@ -8,13 +8,22 @@
  * Each user has their own secret (users.totpSecret).
  *   status   — { enabled, required, recoveryCodesLeft }. `required`: the install requires
  *              two-step sign-in (Users → Require two-step sign-in).
- *   generate — returns { secret, otpauthUri } for a new random secret (NOT saved); the client
- *              must verify with "activate" before it takes effect.
- *   activate — { proposedSecret, code }: verifies the code against the proposed secret, saves it,
- *              and — when the user has no recovery codes — makes ten and returns them ONCE
- *              ({ recoveryCodes }). Refused while two-step is already on: otherwise a hijacked
- *              session could swap in its own secret and lock the user out. To change devices,
- *              disable first (which needs a code), then set up.
+ *   generate — returns { secret, proof, otpauthUri } for a new random secret (NOT saved); the
+ *              client must verify with "activate" before it takes effect. `proof` says this
+ *              server made that secret for this user, and is good for 15 minutes (http.js
+ *              signTwoStepProof).
+ *   activate — { proposedSecret, proof, current, code }: takes only a secret "generate" issued
+ *              (its proof, and the full length), asks for the user's password again (`current`,
+ *              within the budgets "change password" keeps — adminAuth.js checkCurrentPassword),
+ *              verifies the code against the secret, saves it, and — when the user has no
+ *              recovery codes — makes ten and returns them ONCE ({ recoveryCodes }). Without the
+ *              password, someone at a signed-in computer left alone could enrol their own phone
+ *              and lock the user out; without the proof, a "required" two-step could be met with
+ *              a secret anyone knows. The one session that isn't asked for the password is the
+ *              one pending "2fa": it exists only because the password was just typed, and can do
+ *              nothing else. Refused while two-step is already on: otherwise a hijacked session
+ *              could swap in its own secret and lock the user out. To change devices, disable
+ *              first (which needs a code), then set up.
  *   disable  — { code }: a code from the authenticator (or a recovery code), then removes the
  *              secret and the recovery codes. Refused while two-step is required.
  *   newRecoveryCodes — { code }: replaces the recovery codes and returns the new ones once.
@@ -26,10 +35,10 @@
 
 import { classifyHost }         from "../_lib/hostConfig.js";
 import { getCatalogData }       from "../_lib/catalogCache.js";
-import { jsonResponse }         from "../_lib/http.js";
+import { jsonResponse, signTwoStepProof, verifyTwoStepProof } from "../_lib/http.js";
 import {
   requireAdmin, adminActor, adminUser, require2fa, refreshPending, generateRecoveryCodes, saveRecoveryCodes, recoveryCodesLeft,
-  looksLikeRecoveryCode, spendRecoveryCode,
+  looksLikeRecoveryCode, spendRecoveryCode, checkCurrentPassword,
 } from "../_lib/adminAuth.js";
 import { insertAuditLog, getUserById, updateUser, claimUserTotpCounter, deleteUserSessions } from "../_lib/db.js";
 import { rateLimitCheck, rateLimitHit, rateLimitResponse } from "../_lib/rateLimit.js";
@@ -54,6 +63,8 @@ function generateBase32Secret(){
   if(bits > 0) out += ALPHABET[(value << (5 - bits)) & 0x1f];
   return out;
 }
+// What generateBase32Secret makes: 20 bytes, so 32 characters. "activate" takes nothing shorter or longer.
+const NEW_SECRET_SHAPE = /^[A-Z2-7]{32}$/;
 
 // `issuer` is what the authenticator app shows: the business name (Global settings → Business profile).
 function buildOtpauthUri(secret, businessName, email){
@@ -140,8 +151,13 @@ export async function onRequestPost(context){
 
   if(action === "generate"){
     const secret      = generateBase32Secret();
+    // …with the proof "activate" will ask for (signed for this user, 15 minutes).
+    const proof       = await signTwoStepProof(env, user.id, secret);
+    if(!proof) return jsonResponse({status:"error", message:"Two-step sign-in can't be set up yet: this site has no signing secret (SIGNING_SECRET). Run `npm run setup`, then try again."}, 503);
     const otpauthUri  = buildOtpauthUri(secret, catalogData.business && catalogData.business.name, user.email);
-    return jsonResponse({status:"ok", secret, otpauthUri});
+    const res = jsonResponse({status:"ok", secret, proof, otpauthUri});
+    res.headers.set("Cache-Control", "no-store");
+    return res;
   }
 
   if(action === "activate"){
@@ -150,6 +166,21 @@ export async function onRequestPost(context){
     if(!proposedSecret) return jsonResponse({status:"error", message:"No secret provided."}, 400);
     if(user.totpSecret){
       return jsonResponse({status:"error", message:"Two-factor authentication is already on. To move it to a new device, disable it first with a code from your current app, then set it up again."}, 409);
+    }
+    // Only a secret this server made for this user in the last 15 minutes, whole: never one the browser chose.
+    let issuedHere = false;
+    try{ issuedHere = NEW_SECRET_SHAPE.test(proposedSecret) && await verifyTwoStepProof(env, user.id, proposedSecret, body.proof); }
+    catch(e){ issuedHere = false; }
+    if(!issuedHere){
+      return jsonResponse({status:"error", code:"setup_key_expired", message:"That setup key isn't one this site just made for you, or it is more than 15 minutes old. Click \"Set up 2FA\" again for a new key."}, 400);
+    }
+    // The password again, as changing it asks — except in the step owed at sign-in (pending "2fa"), where it
+    // was typed a moment ago and the session can do nothing but this.
+    if(me.pending !== "2fa"){
+      const current = typeof body.current === "string" ? body.current : "";
+      if(!current) return jsonResponse({status:"error", code:"password_required", message:"Enter your current password to turn two-step sign-in on."}, 400);
+      const refused = await checkCurrentPassword(env, request, user, current);
+      if(refused) return refused;
     }
     const limited = await codeBudget(); if(limited) return limited;
     const result = await verifyTOTP(proposedSecret, code);

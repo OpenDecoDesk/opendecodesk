@@ -91,7 +91,8 @@ export async function onRequestPost(context){
   if(!body || typeof body !== "object") return jsonResponse({status:"error", message:"Bad request"}, 400);
 
   // …this address's share of the install-wide budget of FAILED sign-ins, that budget and this account's
-  // (adminAuth.js): past them, a Turnstile check — unless this address signed in here lately.
+  // (adminAuth.js): past them, a Turnstile check. An address that signed in here lately skips the install-wide
+  // budget, never the account's.
   const spent = await signInBudgetBlocked(env, request, { email: body.email, turnstileToken: body.turnstileToken });
   if(spent) return spent;
   if(accessEnabled(env)){

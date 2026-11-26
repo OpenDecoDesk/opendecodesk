@@ -11,7 +11,7 @@ const { makeAuth, totpNow, read } = require("./testlib/auth-harness");
 // two-step secret. Real SQL (sql.js) under the real adminAuth.js and the account endpoints.
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
-const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU";
+const SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU";
 
 (async () => {
   console.log("=== A new install: the printed passphrase, once ===");
@@ -67,7 +67,7 @@ const SECRET = "JBSWY3DPEHPK3PXP", SECRET2 = "KRSXG5CTMVRXEZLU";
   ok("nobody can take an email that is in use", (await A.users({ action: "create", name: "Other", email: "SAM@myshop.com", role: "staff" }, admin)).status === 409);
 
   console.log("\n=== Locked out: replacing the secret ===");
-  await A.twoFactor({ action: "activate", proposedSecret: SECRET, code: totpNow(SECRET) }, admin);   // the admin has two-step, and has lost the phone
+  await A.twoFactor({ action: "activate", ...(await A.enrolWith("olive@myshop.com", SECRET, NEW)), code: totpNow(SECRET) }, admin);   // the admin has two-step, and has lost the phone
   const REPRINTED = "2222-3333-4444-5555-6666-7777";
   A.env.PROXY_ADMIN_PASSPHRASE = REPRINTED;   // what `npm run setup -- --new-passphrase` does
   ok("every stored password stops working", (await A.signIn("olive@myshop.com", NEW)).status === 401 && (await A.signIn("sam@myshop.com", "sam picks this one")).status === 401 && (await A.signIn("", A.PRINTED)).status === 401);

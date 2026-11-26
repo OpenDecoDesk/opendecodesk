@@ -12630,6 +12630,12 @@ export async function listAccounts(db, asOf = new Date().toISOString().slice(0, 
   return accts.map(a => ({ id: Number(a.id), name: a.name, type: a.type, openingBalance: fromCents(a.openingBalanceCents),
     openingDate: a.openingDate, active: !!a.active, csvMapping: a.csvMapping || "", balance: fromCents(Number(a.openingBalanceCents) + (moved[a.id] || 0)), moves: moves[a.id] || 0 }));
 }
+// The accounts by name only, for an account picker shown to a role kept from the business's money (orders.js
+// listAccounts): no opening balance, no balance, and none of the sums above are run.
+export async function listAccountNames(db) {
+  const { results } = await db.prepare("SELECT id, name, type, active FROM accounts ORDER BY id").all();
+  return results.map(a => ({ id: Number(a.id), name: a.name, type: a.type, active: !!a.active }));
+}
 export async function saveAccount(db, id, { name, type, openingBalance, openingDate, active }) {
   const now = new Date().toISOString();
   if (id) {

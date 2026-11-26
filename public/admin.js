@@ -10932,6 +10932,9 @@ async function start2FASetup(){
 
   const secret = data.secret;
   const uri    = data.otpauthUri;
+  // The server takes back only a key it made (data.proof goes with it), and asks for the password again —
+  // except in the step owed at sign-in, where it was typed a moment ago.
+  const askPassword = !_tfa.forced;
 
   if(area) area.innerHTML = `
     <hr style="margin:0 0 18px;border:none;border-top:1px solid #e0e0e0;">
@@ -10949,6 +10952,14 @@ async function start2FASetup(){
       <button class="admin-btn" style="font-size:13px;padding:6px 12px;" data-admin-action="copy2FAKey">Copy key</button>
     </div>
     <input type="hidden" id="tfa-proposed-secret" value="${escapeHtml(secret)}" />
+    <input type="hidden" id="tfa-proof" value="${escapeHtml(data.proof || "")}" />
+    ${askPassword ? `
+    <div style="margin-top:18px;">
+      <label for="tfa-current-password" style="font-size:14px;font-weight:600;">Current password</label>
+      <div class="admin-note" style="margin-top:2px;">Asked again so nobody else at this computer can turn two-step sign-in on for you.</div>
+      <input type="password" id="tfa-current-password" autocomplete="current-password" required aria-describedby="tfa-password-error" style="display:block;width:260px;margin-top:6px;" />
+      <div id="tfa-password-error" class="admin-error" role="alert" style="margin-top:6px;"></div>
+    </div>` : ""}
     <div style="margin-top:18px;">
       <label for="tfa-verify-code" style="font-size:14px;font-weight:600;">Enter the 6-digit code from the app to activate</label>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap;">
@@ -10957,7 +10968,7 @@ async function start2FASetup(){
         <button class="admin-btn" data-admin-action="submit2FAActivate">Activate 2FA</button>
       </div>
     </div>
-    <div id="tfa-error" class="admin-error" style="margin-top:8px;"></div>
+    <div id="tfa-error" class="admin-error" role="alert" style="margin-top:8px;"></div>
     <div class="admin-note" style="margin-top:14px;color:#888;">The key is only shown once — if you close this page before activating, click "Set up 2FA" again to get a new one.</div>
   `;
 
@@ -10991,23 +11002,34 @@ function copy2FAKey(){
 async function submit2FAActivate(){
   const errEl    = document.getElementById("tfa-error");
   const secretEl = document.getElementById("tfa-proposed-secret");
+  const proofEl  = document.getElementById("tfa-proof");
   const codeEl   = document.getElementById("tfa-verify-code");
+  // The password box is there unless this is the step owed at sign-in; what is wrong with it is said beside it.
+  const pwEl     = document.getElementById("tfa-current-password");
+  const pwErrEl  = document.getElementById("tfa-password-error");
+  const pwWrong  = (m) => { if(pwErrEl) pwErrEl.textContent = m; if(pwEl){ pwEl.setAttribute("aria-invalid", "true"); pwEl.focus(); } };
   if(errEl) errEl.textContent = "";
+  if(pwErrEl) pwErrEl.textContent = "";
+  if(pwEl) pwEl.removeAttribute("aria-invalid");
 
   const code   = (codeEl   && codeEl.value.trim())   || "";
   const secret = (secretEl && secretEl.value.trim())  || "";
+  const current = pwEl ? pwEl.value : "";
 
+  if(pwEl && !current){ pwWrong("Enter your current password."); return; }
   if(!code){ if(errEl) errEl.textContent = "Enter the 6-digit code from the app."; return; }
 
   let data;
   try{
     const res = await fetch("/api/admin-2fa", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({action:"activate", key:adminKey, proposedSecret:secret, code})
+      body: JSON.stringify(Object.assign({action:"activate", key:adminKey, proposedSecret:secret, proof:(proofEl && proofEl.value) || "", code}, pwEl ? {current} : {}))
     });
     data = await res.json();
     if(!res.ok || data.status === "error"){
-      if(errEl) errEl.textContent = (data && data.message) || "Activation failed.";
+      const message = (data && data.message) || "Activation failed.";
+      if(pwEl && data && (data.code === "wrong_password" || data.code === "password_required")) pwWrong(message);
+      else if(errEl) errEl.textContent = message;
       return;
     }
   }catch(e){

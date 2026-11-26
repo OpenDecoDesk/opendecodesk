@@ -2776,22 +2776,39 @@ function shopBarHash_(page, orgId){
   return { setup: "wizard/" + o, products: "catalog/orgs/" + o + "/products", edit: "catalog/orgs/" + o + "/edit",
     designs: "designs/" + o, graphics: "graphics/" + o }[page] || ("catalog/orgs/" + o + "/products");
 }
-window._shopBarData = window._shopBarData || { at: 0, wizards: null, publish: null };
-async function loadShopBarData_(force){
+window._shopBarData = window._shopBarData || { at: 0, wizards: null, publish: null, pubAt: {} };
+// Publish states the server sent — for one shop, a few, or (all = true) every shop — kept for the catalog pages'
+// slots (window._publishState) and the shop bar, with when each shop's was read. An answer for some shops is added
+// to what's held: the server now sends only the shops asked for or changed, not every shop every time.
+function takePublishState_(st, all){
+  if (!st) return;
+  window._publishState = all ? st : Object.assign({}, window._publishState, st);
   const d = window._shopBarData;
-  if (!force && d.loading) return d.loading;
-  if (!force && Date.now() - d.at < 15000) return;
-  d.loading = (async () => {
+  if (!d) return;
+  d.publish = all ? st : Object.assign({}, d.publish, st);
+  if (all || !d.pubAt) d.pubAt = {};
+  for (const id of Object.keys(st)) d.pubAt[id] = Date.now();
+}
+// The bar's data: setup progress, each shop's Live / Coming soon, and the publish state of `shop` — the one the bar
+// shows (it used to ask for every shop's, which the server rebuilt shop by shop on every page).
+async function loadShopBarData_(force, shop){
+  const d = window._shopBarData;
+  shop = shop || (window._shopBarCtx && window._shopBarCtx.shop) || null;
+  const recent = (t) => Date.now() - (t || 0) < 15000;
+  if (!force && d.loading && d.loadingFor === shop) return d.loading;
+  if (!force && recent(d.at) && (!shop || recent((d.pubAt || {})[shop]))) return;
+  const run = (async () => {
     const [w, p, o] = await Promise.all([
       hoopApi_({ action: "listShopWizards" }).catch(() => null),
-      hoopApi_({ action: "getPublishState" }).catch(() => null),
+      shop ? hoopApi_({ action: "getPublishState", orgs: [shop] }).catch(() => null) : null,
       hoopApi_({ action: "listOrgsAdmin" }).catch(() => null)]);
     if (w && w.wizards) d.wizards = w.wizards;
     if (o && o.orgs) window._adminOrgRegistry = o.orgs;   // each shop's open / coming-soon state for the toggle
-    if (p && p.publishState) { d.publish = p.publishState; window._publishState = p.publishState; }
+    if (p && p.publishState) { takePublishState_(p.publishState); d.pubAt[shop] = Date.now(); }
     d.at = Date.now();
   })();
-  try { await d.loading; } finally { d.loading = null; }
+  d.loading = run; d.loadingFor = shop;
+  try { await run; } finally { if (d.loading === run) d.loading = null; }
 }
 // Each link is drawn for whoever may open that page (its role and feature switch): in OpenDecoDesk a worker manages
 // products, designs and graphics; Shop setup and Publish are a manager's.
@@ -2860,7 +2877,7 @@ function drawShopBar_(){
   if (!bar) return;
   window._shopBarCtx = ctx;
   bar.innerHTML = shopBarHtml_(ctx);
-  if (ctx.shop && adminCan_("catalog.shops", "read")) loadShopBarData_().then(() => {
+  if (ctx.shop && adminCan_("catalog.shops", "read")) loadShopBarData_(false, ctx.shop).then(() => {
     const now = document.getElementById("shopBar");
     if (now && window._shopBarCtx === ctx) now.innerHTML = shopBarHtml_(ctx);
   });
@@ -2877,12 +2894,11 @@ async function shopBarPublish_(orgId){
   if (!(await askConfirm_(`Publish ${name}?\n\nShoppers see the shop's current products and settings, and new orders are priced from them.`, { confirmLabel: "Publish" }))) return;
   try {
     const r = await hoopApi_({ action: "publish", org: orgId });
-    window._publishState = r.publishState || window._publishState;
-    if (r.publishState) window._shopBarData.publish = r.publishState;
+    takePublishState_(r.publishState);
     showToast(`Published — shoppers see ${name} as it is now.`);
     if (typeof drawPublishStates_ === "function") drawPublishStates_();
   } catch (e) { showToast(e.message || "Could not publish.", true); }
-  await loadShopBarData_(true);
+  await loadShopBarData_(true, orgId);
   drawShopBar_();
 }
 
@@ -2917,7 +2933,7 @@ async function shopBarDiscard_(orgId){
     try {
       const r = await hoopApi_({ action: "discardShopChanges", org: orgId });
       close();
-      if (r.publishState) { window._publishState = r.publishState; window._shopBarData.publish = r.publishState; }
+      takePublishState_(r.publishState);
       showToast(`${name} is back to its published version` + (r.deleted.length ? ` — ${r.deleted.length} new product${r.deleted.length === 1 ? "" : "s"} deleted` : "") + (r.hidden.length ? `, ${r.hidden.length} hidden` : "") + ".");
       window._prodFormDirty = false;
       const gone = r.deleted.find(d => location.hash.includes("/products/" + encodeURIComponent(d.productId)));
@@ -3650,6 +3666,8 @@ async function showVendorStyleLookup_(onDone){
 // Files in the public image store nothing in the database points to (orphanImages.js decides). Download the ticked
 // ones as one .zip (built here, read back through the same-origin image proxy) and / or remove them from storage —
 // the server re-checks each before deleting. Admin only.
+// The scan runs in steps (one request may run only so many database queries): each answer says how far it got and
+// carries a scanId to ask again with, until it says done; the orphans it finds along the way are added up here.
 const crc32Table_ = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
 function crc32_(bytes){ let c = 0xFFFFFFFF; for (let i = 0; i < bytes.length; i++) c = crc32Table_[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
 // A plain (stored, uncompressed) .zip of [{name, bytes: Uint8Array}] — photos are already compressed.
@@ -3680,12 +3698,32 @@ async function renderOrphanImages(app){
     </div>`;
   const body = document.getElementById("orBody");
   const kb = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
-  let list = [];
+  let list = [], scanId = "";
+  // Asks step after step until the server says done; `say(text)` shows how far it is. Returns the last answer.
+  const steps = async (first, say) => {
+    let d = await hoopApi_({ action: "findOrphanImages", ...first });
+    for (;;) {
+      for (const o of d.orphans || []) list.push(o);
+      if (d.done) return d;
+      say(d.phase === "files" ? `${Number(d.scanned || 0).toLocaleString("en-US")} file${d.scanned === 1 ? "" : "s"} checked` : `table ${Math.min(d.table + 1, d.tables)} of ${d.tables}`);
+      d = await hoopApi_({ action: "findOrphanImages", scanId: d.scanId });
+    }
+  };
+  let scanning = false;
   const scan = async () => {
-    body.innerHTML = `<div style="color:#888;">Scanning the image store and the database…</div>`;
+    if (scanning) return;   // a second click while the steps are still going
+    scanning = true;
+    try { await scanNow(); } finally { scanning = false; }
+  };
+  const scanNow = async () => {
+    const wait = (text) => { body.innerHTML = `<div style="color:#888;" id="orProgress">Scanning the image store and the database…${text ? ` (${escapeHtml(text)})` : ""}</div>`; };
+    wait("");
     let d;
-    try { d = await hoopApi_({ action: "findOrphanImages" }); } catch (e) { body.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
-    list = d.orphans || [];
+    const last = scanId;   // the scan this page is done with: the server clears what it kept of it
+    list = []; scanId = "";
+    try { d = await steps(last ? { replaces: last } : {}, wait); } catch (e) { body.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
+    scanId = d.scanId;
+    list.sort((a, b) => String(a.key).localeCompare(String(b.key)));
     // A "-thumb" copy rides with its main image (shown as its own row only when the main is gone).
     const keys = new Set(list.map(o => o.key));
     const rows = list.filter(o => !o.thumbOf || !keys.has(o.thumbOf));
@@ -3728,9 +3766,14 @@ async function renderOrphanImages(app){
       if (!sel.length) { status.textContent = "Tick at least one."; return; }
       if (!await askConfirm_(`Remove ${sel.length} image${sel.length === 1 ? "" : "s"} from storage? This can't be undone — download them first if you want a copy.`)) return;
       const keys = sel.flatMap(cb => [cb.dataset.key, cb.dataset.thumb].filter(Boolean));
-      status.textContent = "Removing…";
+      status.textContent = "Checking again that nothing uses them…";
       try {
-        const r = await hoopApi_({ action: "deleteOrphanImages", keys });
+        // The database is read again first (in steps, as the scan was), so a file put back in use since the list
+        // was drawn is kept; then the ticked files this scan listed are removed.
+        const kept = list; list = [];
+        try { await steps({ scanId, recheck: true }, (text) => { status.textContent = `Checking again that nothing uses them… (${text})`; }); } finally { list = kept; }
+        status.textContent = "Removing…";
+        const r = await hoopApi_({ action: "deleteOrphanImages", keys, scanId });
         showToast(`Removed ${r.deleted.length} file${r.deleted.length === 1 ? "" : "s"} from storage.${r.kept.length ? ` ${r.kept.length} kept (${[...new Set(r.kept.map(k => k.why))].join(", ")}).` : ""}`);
         await scan();
       } catch (e) { status.textContent = e.message; }
@@ -8670,24 +8713,38 @@ function renderAdminOrgListTable(orgs){
 // Publish (migrations/0076): one shop (orgId) or every shop (no orgId). The shop's current products and settings
 // become what shoppers see and what orders are priced from; until then edits are a draft (Preview shows it).
 // A shop never published since this is still served live.
+// Every shop goes in groups of 10, one request after another (the server takes at most that many a request —
+// PUBLISH_SHOPS_MAX in functions/api/orders.js — because one request may run only so many database queries). A group
+// that fails stops the rest; the message says how many shops were published before it.
+const PUBLISH_SHOPS_GROUP_ = 10;
 async function publishCatalog(orgId){
   const statusEl = document.getElementById("publishStatus");
   if(statusEl) statusEl.textContent = "Publishing…";
+  const ids = orgId ? [orgId] : (adminOrgs || []).map(o => o.orgId);
+  let done = 0;
+  const stopped = (why) => why + (done ? ` ${done} of ${ids.length} shops were published before that; the others were not.` : "");
   try{
-    const res = await fetch("/api/orders", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({action: "publish", key: adminKey, ...(orgId ? { org: orgId } : {})})
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      if(statusEl) statusEl.textContent = "Could not publish: " + ((data && data.message) || "unknown error");
-      return;
+    for(let i = 0; i < ids.length; i += PUBLISH_SHOPS_GROUP_){
+      const group = ids.slice(i, i + PUBLISH_SHOPS_GROUP_);
+      if(statusEl && ids.length > PUBLISH_SHOPS_GROUP_) statusEl.textContent = `Publishing… ${done} of ${ids.length} shops done`;
+      const res = await fetch("/api/orders", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({action: "publish", key: adminKey, ...(orgId ? { org: orgId } : { orgs: group })})
+      });
+      const data = await res.json();
+      if(!res.ok || data.status === "error"){
+        if(statusEl) statusEl.textContent = stopped("Could not publish: " + ((data && data.message) || "unknown error") + ".");
+        drawPublishStates_();
+        return;
+      }
+      done += (data.published || []).length;
+      takePublishState_(data.publishState);
     }
-    if(statusEl) statusEl.textContent = orgId ? "Published — shoppers see these changes now." : `Published all ${data.published.length} shops — shoppers see the changes now.`;
-    window._publishState = data.publishState || null;
+    if(statusEl) statusEl.textContent = orgId ? "Published — shoppers see these changes now." : `Published all ${done} shops — shoppers see the changes now.`;
     drawPublishStates_();
   }catch(e){
-    if(statusEl) statusEl.textContent = "Could not reach the server.";
+    if(statusEl) statusEl.textContent = stopped("Could not reach the server.");
+    drawPublishStates_();
   }
 }
 // Each shop's publish state, wherever a [data-publish-state="<orgId>"] slot is on the page.
@@ -8703,14 +8760,17 @@ function drawPublishStates_(){
   const all = window._publishState || {};
   document.querySelectorAll("[data-publish-state]").forEach(el => { el.innerHTML = publishStateHtml_(all[el.dataset.publishState]); });
 }
+// A page with one shop's slot (a shop's Products) asks for that shop; Manage catalog, with a slot a shop, for all.
 async function loadPublishStates_(){
   try {
-    const st = (await hoopApi_({ action: "getPublishState" })).publishState || {};
-    window._publishState = st; drawPublishStates_();
+    const slots = [...new Set([...document.querySelectorAll("[data-publish-state]")].map(el => el.dataset.publishState))];
+    const one = slots.length === 1;
+    const st = (await hoopApi_({ action: "getPublishState", ...(one ? { orgs: slots } : {}) })).publishState || {};
+    takePublishState_(st, !one); drawPublishStates_();
     // The shop bar's Publish button reads the same state: it follows at once (on its own it re-reads only every 15 s,
     // so after a save it said "✓ Published" while this page said "Unpublished changes").
     const d = window._shopBarData;
-    if (d) { d.publish = st; d.at = Date.now(); }
+    if (d) { d.at = Date.now(); for (const id of slots) d.pubAt[id] = Date.now(); }
     const bar = document.getElementById("shopBar");
     if (bar && window._shopBarCtx) bar.innerHTML = shopBarHtml_(window._shopBarCtx);
   } catch (e) {}
@@ -9005,7 +9065,7 @@ async function wizSaveState_(){
   catch (e) { showToast("Couldn't save the setup: " + e.message, true); }
   // The header's shop bar follows: Resume / Shop setup, Live / Coming soon and Publish / ✓ Published can all change
   // with a step (a product built, the shop opened and published at Go live).
-  if (adminCan_("catalog.shops", "read")) { try { await loadShopBarData_(true); } catch (e) {} drawShopBar_(); }
+  if (adminCan_("catalog.shops", "read")) { try { await loadShopBarData_(true, _wiz.orgId); } catch (e) {} drawShopBar_(); }
 }
 const wizBlank_ = (id) => ((_wiz && _wiz.data.blanks) || []).find(b => b.id === Number(id)) || null;
 async function wizLoad_(...what){
@@ -15877,22 +15937,38 @@ function showStockCount_(kind, onDone){
 
   // Corrections for the given rows (one, or every row still off). Rows the server refuses — their stock changed
   // since this window read it — are marked and the rest still apply.
+  // A big count goes in groups of 100 rows, one request after another (the server takes at most that many a request —
+  // COUNT_ROWS_MAX in functions/api/orders.js — because one request may run only so many database queries), with how
+  // far it is shown meanwhile. A group that fails outright stops the rest, and the message says how far it got.
+  const COUNT_ROWS_GROUP_ = 100;
+  let correcting = false;
   async function correct(list){
     const at = when(); if (!at) return;
+    if (correcting) return;   // a second click while the groups are still going
+    correcting = true;
     err.textContent = "";
-    const payload = list.map(r => isB ? { blankId: r.blankId, color: r.color, size: r.size, counted: counted(r), onHand: r.onHand }
-      : { transferId: r.transferId, counted: counted(r), onHand: r.onHand });
+    const asRow = (r) => isB ? { blankId: r.blankId, color: r.color, size: r.size, counted: counted(r), onHand: r.onHand }
+      : { transferId: r.transferId, counted: counted(r), onHand: r.onHand };
+    let n = 0, bad = 0, sent = 0, stopped = "";
     try {
-      const d = await hoopApi_({ action: isB ? "countBlankStock" : "countTransferStock", rows: payload, at });
-      for (const f of (d.failed || [])) {
-        const r = list.find(x => isB ? x.blankId === f.blankId && x.color === f.color && x.size === f.size : x.transferId === f.transferId);
-        if (r) failedMsg.set(r.key, f.error);
+      for (let i = 0; i < list.length; i += COUNT_ROWS_GROUP_) {
+        const part = list.slice(i, i + COUNT_ROWS_GROUP_);
+        if (list.length > COUNT_ROWS_GROUP_) ov.querySelector("#scSum").textContent = `Correcting… ${sent} of ${list.length} rows done`;
+        let d;
+        try { d = await hoopApi_({ action: isB ? "countBlankStock" : "countTransferStock", rows: part.map(asRow), at }); }
+        catch (e) { stopped = e.message || "unknown error"; break; }
+        for (const f of (d.failed || [])) {
+          const r = part.find(x => isB ? x.blankId === f.blankId && x.color === f.color && x.size === f.size : x.transferId === f.transferId);
+          if (r) failedMsg.set(r.key, f.error);
+        }
+        n += (d.corrected || []).length; bad += (d.failed || []).length; sent += part.length;
       }
-      const n = (d.corrected || []).length, bad = (d.failed || []).length;
+      if (stopped && !sent) { err.textContent = stopped; summary(); return; }
       showToast(bad ? `${n} corrected; ${bad} couldn't be — see the rows marked in red.` : `${n} ${n === 1 ? "count" : "counts"} corrected.`, !!bad);
+      if (stopped) err.textContent = `It stopped after ${sent} of ${list.length} rows (${stopped}) — the other ${list.length - sent} were not corrected. Choose Correct all remaining differences again.`;
       await load();
-      flashRows_(list.filter(r => !failedMsg.has(r.key)).map(r => `#scTable tr[data-sc="${attrSel_(r.key)}"]`));
-    } catch (e) { err.textContent = e.message; }
+      flashRows_(list.slice(0, sent).filter(r => !failedMsg.has(r.key)).map(r => `#scTable tr[data-sc="${attrSel_(r.key)}"]`));
+    } finally { correcting = false; }
   }
 
   async function writeOff(r){
@@ -17252,7 +17328,7 @@ async function showPriceImpact_(rules, opts){
         ${r.skipped.length ? `<div style="color:#b03a2e;">Not applied: ${r.skipped.map(escapeHtml).join("; ")}</div>` : ""}`;
       body.querySelectorAll(".pi-publish").forEach(b => b.onclick = async () => {
         b.disabled = true;
-        try { const pr = await hoopApi_({ action: "publish", org: b.dataset.org }); if (pr.publishState && window._shopBarData) window._shopBarData.publish = pr.publishState; b.textContent = `✓ ${shopName(b.dataset.org)} published`; }
+        try { const pr = await hoopApi_({ action: "publish", org: b.dataset.org }); takePublishState_(pr.publishState); b.textContent = `✓ ${shopName(b.dataset.org)} published`; }
         catch (e) { b.disabled = false; showToast(e.message, true); }
       });
       if (typeof drawPublishStates_ === "function") try { drawPublishStates_(); } catch (e) {}

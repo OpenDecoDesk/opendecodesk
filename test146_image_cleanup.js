@@ -14,13 +14,24 @@ const { createD1 } = require("./testlib/d1-shim.js");
 // Settings → Orphaned images: files in the image store nothing in the database points to (any text column of any table;
 // a "-thumb" copy goes with its main image; uploads under 24 hours old never count), downloadable as one .zip and
 // removable from storage after a server-side re-check. Real db.js / orders.js / orphanImages.js on sql.js with a
-// mock R2 bucket; the windows in jsdom.
+// mock R2 bucket; the windows in jsdom. The scan runs in steps (test280 has its query counts): fullScan below asks
+// until it's done, as the page does, and recheck reads the references again, as Remove selected does first.
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
 const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?\n?/g, "").replace(/export (async function|function|const)/g, "$1");
 const dbSrc = strip(read("functions/_lib/db.js"));
 const lib = new Function(dbSrc + `\nreturn { createBlank, createProduct, insertOrder, removeBlankColorImages, getAllBlanks };`)();
 const orphanSrc = strip(read("functions/_lib/orphanImages.js"));
-const orphan = new Function(orphanSrc + "\nreturn { findOrphanImages, deleteOrphanImages };")();
+const orphan = new Function(orphanSrc + "\nreturn { scanOrphanImages, deleteOrphanImages };")();
+async function fullScan(mod, env, db, now) {
+  const out = { orphans: [] };
+  for (let d = await mod.scanOrphanImages(env, db, { now }); ; d = await mod.scanOrphanImages(env, db, { scanId: d.scanId, now })) {
+    out.orphans.push(...d.orphans);
+    if (d.done) return Object.assign(out, { scanId: d.scanId, scanned: d.scanned, recent: d.recent, totalBytes: d.totalBytes });
+  }
+}
+async function recheck(mod, env, db, scanId, now) {
+  for (let d = await mod.scanOrphanImages(env, db, { scanId, recheck: true, now }); !d.done; d = await mod.scanOrphanImages(env, db, { scanId, now }));
+}
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + strip(read("functions/_lib/fileUpload.js")) + "\n" + strip(read("functions/_lib/vendorImages.js")) + "\n" + orphanSrc + "\n" +
   "const requireAdmin = async () => null; const adminActor = () => 'owner@test'; const adminUser = () => null;\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
@@ -80,7 +91,7 @@ function bucket(objects){
   const obj = (key, uploaded = old, size = 1000) => ({ key, uploaded: new Date(uploaded), size });
   const env = { IMAGES: bucket([obj("uploads/acme/prod1.jpg"), obj("uploads/acme/prod1-thumb.jpg"), obj("uploads/blanks/a.jpg"), obj("uploads/acme/gfx.png"),
     obj("uploads/acme/gone.jpg", old, 4000), obj("uploads/acme/gone-thumb.jpg", old, 500), obj("uploads/acme/new.jpg", fresh), obj("verify/abc.png", old, 2000)]), R2_PUBLIC_BASE: BASE };
-  const found = await orphan.findOrphanImages(env, d1, { now });
+  const found = await fullScan(orphan, env, d1, now);
   const keys = found.orphans.map(o => o.key);
   ok("files nothing points to are orphaned — including a verify upload whose record is gone", keys.includes("uploads/acme/gone.jpg") && keys.includes("verify/abc.png"));
   ok("…a -thumb copy goes with its main image", keys.includes("uploads/acme/gone-thumb.jpg") && found.orphans.find(o => o.key === "uploads/acme/gone-thumb.jpg").thumbOf === "uploads/acme/gone.jpg" && !keys.includes("uploads/acme/prod1-thumb.jpg"));
@@ -89,25 +100,41 @@ function bucket(objects){
   ok("…it reads every page of the bucket listing, and gives each file's public address and size", found.scanned === 8 && found.orphans.find(o => o.key === "verify/abc.png").url === `${BASE}/verify/abc.png` && found.totalBytes === 6500);
   // Deleting: re-checked on the server.
   d1._raw.run("UPDATE products SET imagesJson=? WHERE productId='tee'", [JSON.stringify([`${BASE}/uploads/acme/prod1.jpg`, `${BASE}/uploads/acme/gone.jpg`])]);
-  const del = await orphan.deleteOrphanImages(env, d1, ["uploads/acme/gone.jpg", "verify/abc.png", "uploads/acme/new.jpg", "uploads/acme/nothere.jpg", "../etc/passwd"], { now });
+  const wanted = ["uploads/acme/gone.jpg", "verify/abc.png", "uploads/acme/new.jpg", "uploads/acme/nothere.jpg", "../etc/passwd"];
+  let stale = null;
+  try { await orphan.deleteOrphanImages(env, d1, wanted, { now: now + 11 * 60 * 1000, scanId: found.scanId }); } catch (e) { stale = e; }
+  ok("deleting needs the references read in the last few minutes: an older list is refused, nothing deleted", !!stale && stale.userFacing && /out of date/.test(stale.message) && env.IMAGES._store.has("verify/abc.png"));
+  await recheck(orphan, env, d1, found.scanId, now);
+  const del = await orphan.deleteOrphanImages(env, d1, wanted, { now, scanId: found.scanId });
   ok("deleting re-checks each file: one back in use is kept", del.kept.some(k => k.key === "uploads/acme/gone.jpg" && k.why === "in use again") && env.IMAGES._store.has("uploads/acme/gone.jpg"));
-  ok("…a recent upload and a missing file are kept, a path trick is ignored", del.kept.some(k => k.key === "uploads/acme/new.jpg") && del.kept.some(k => k.key === "uploads/acme/nothere.jpg" && k.why === "already gone") && !del.kept.some(k => k.key.includes("..")));
+  ok("…a recent upload and a file the scan never listed are kept, a path trick is ignored", del.kept.some(k => k.key === "uploads/acme/new.jpg") && env.IMAGES._store.has("uploads/acme/new.jpg") && del.kept.some(k => k.key === "uploads/acme/nothere.jpg" && k.why === "not on the scan's list") && !del.kept.some(k => k.key.includes("..")));
   ok("…and the orphan is gone from storage", del.deleted.join() === "verify/abc.png" && !env.IMAGES._store.has("verify/abc.png"));
-  r = await call({ action: "findOrphanImages" }, env);
-  ok("the admin actions work", r.status === 200 && Array.isArray(r.body.orphans));
+  const again = await orphan.deleteOrphanImages(env, d1, ["verify/abc.png"], { now, scanId: found.scanId });
+  ok("…once only: asked again, it's no longer on the scan's list", again.deleted.length === 0 && again.kept.length === 1);
+  // Through the admin actions, as the page asks: step after step until done, the references again, then the delete.
   env.IMAGES._store.set("uploads/acme/old2.jpg", obj("uploads/acme/old2.jpg"));
-  r = await call({ action: "deleteOrphanImages", keys: ["uploads/acme/old2.jpg"] }, env);
-  ok("…and a delete is audited", r.status === 200 && d1.q("SELECT count(*) n FROM audit_log WHERE action='images.orphans_deleted'")[0].n === 1);
+  const apiScan = async (first) => { let x = await call({ action: "findOrphanImages", ...first }, env); const all = [...(x.body.orphans || [])];
+    while (x.status === 200 && !x.body.done) { x = await call({ action: "findOrphanImages", scanId: x.body.scanId }, env); all.push(...(x.body.orphans || [])); }
+    return { status: x.status, scanId: x.body.scanId, orphans: all }; };
+  r = await apiScan({});
+  ok("the admin actions work", r.status === 200 && r.orphans.some(o => o.key === "uploads/acme/old2.jpg"));
+  const refused = await call({ action: "deleteOrphanImages", keys: ["uploads/acme/old2.jpg"] }, env);
+  ok("…a delete that names no scan is refused", refused.status === 400 && /out of date/.test(refused.body.message) && env.IMAGES._store.has("uploads/acme/old2.jpg"));
+  await apiScan({ scanId: r.scanId, recheck: true });
+  r = await call({ action: "deleteOrphanImages", keys: ["uploads/acme/old2.jpg"], scanId: r.scanId }, env);
+  ok("…and a delete is audited", r.status === 200 && r.body.deleted.join() === "uploads/acme/old2.jpg" && d1.q("SELECT count(*) n FROM audit_log WHERE action='images.orphans_deleted'")[0].n === 1);
   r = await call({ action: "findOrphanImages" }, {});
   ok("no image store → it says so", r.status === 400 && /isn't set up/.test(r.body.message));
 
   console.log("\n=== A set of referenced keys gives the same answer as the old whole-text search ===");
   {
     // The previous way (2026-10): every matching text value joined into one string, then searched once per file.
+    // (Without the tables that only hold history, which stopped counting in 2026-11 — test280.)
     const oldOrphans = async (env, db, now) => {
       const { results: tables } = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'd1_%' AND name NOT LIKE '_cf_%'").all();
       const parts = [];
       for (const t of tables) {
+        if (["audit_log", "vendor_api_log", "stripe_events", "owner_notices", "orphan_scans", "orphan_scan_keys"].includes(t.name)) continue;
         const { results: cols } = await db.prepare(`SELECT name, type FROM pragma_table_info('${t.name}')`).all();
         for (const c of cols.filter(c => !c.type || /TEXT|CHAR|CLOB|JSON/i.test(String(c.type))).map(c => c.name)) {
           const { results } = await db.prepare(`SELECT "${c}" AS v FROM "${t.name}" WHERE "${c}" LIKE '%uploads/%' OR "${c}" LIKE '%verify/%' OR "${c}" LIKE '%images.%'`).all();
@@ -122,9 +149,9 @@ function bucket(objects){
       return out.sort();
     };
     // References written every way the database holds them: a public address with a query string, a bare key, JSON,
-    // stored HTML with escaped quotes, a sentence ending in the address, an audit entry, a thumb's own address.
+    // stored HTML with escaped quotes, a sentence ending in the address, a setting's JSON, a thumb's own address.
     d1._raw.run("UPDATE products SET imagesJson=? WHERE productId='tee'", [JSON.stringify([`${BASE}/uploads/acme/prod1.jpg?v=3`])]);
-    d1._raw.run("INSERT INTO audit_log (createdAt, action, detail) VALUES ('2026-10-01T00:00:00Z', 'x', ?)", [JSON.stringify({ was: "uploads/acme/audit1.png" })]);
+    d1._raw.run("INSERT INTO global_settings (key, value) VALUES ('note0', ?)", [JSON.stringify({ was: "uploads/acme/audit1.png" })]);
     d1._raw.run("INSERT INTO global_settings (key, value) VALUES ('note1', ?)", [`<img src=&quot;${BASE}/uploads/acme/html1.jpg&quot;> and see ${BASE}/verify/sentence1.png.`]);
     d1._raw.run("INSERT INTO global_settings (key, value) VALUES ('note2', ?)", [`thumb only: ${BASE}/uploads/acme/thumbonly-thumb.jpg, bare uploads/blanks/bare1.webp`]);
     const keys2 = ["uploads/acme/prod1.jpg", "uploads/acme/prod1-thumb.jpg", "uploads/acme/audit1.png", "uploads/acme/html1.jpg", "verify/sentence1.png",
@@ -132,19 +159,20 @@ function bucket(objects){
       "uploads/acme/prod1.jpg.bak", "uploads/acme/new2.jpg"];
     const env2 = { IMAGES: bucket(keys2.map(k => obj(k, k === "uploads/acme/new2.jpg" ? fresh : old))), R2_PUBLIC_BASE: BASE };
     const before = await oldOrphans(env2, d1, now);
-    const after = (await orphan.findOrphanImages(env2, d1, { now })).orphans.map(o => o.key).sort();
+    const after = (await fullScan(orphan, env2, d1, now)).orphans.map(o => o.key).sort();
     ok("the same orphans as before on references of every shape", JSON.stringify(after) === JSON.stringify(before) &&
       after.includes("uploads/acme/lonely.jpg") && after.includes("verify/lonely2.png") && !after.includes("uploads/acme/html1.jpg") && !after.includes("verify/sentence1.png") && !after.includes("uploads/blanks/bare1.webp"));
     // Read a page of rows at a time: the same answer with 2 rows a read.
-    const small = new Function(orphanSrc.replace("const ROWS_PER_READ = 2000;", "const ROWS_PER_READ = 2;") + "\nreturn { findOrphanImages, deleteOrphanImages };")();
-    for (let i = 0; i < 7; i++) d1._raw.run("INSERT INTO audit_log (createdAt, action, detail) VALUES ('2026-10-02T00:00:00Z', 'x', ?)", [`{"img":"${BASE}/uploads/acme/paged${i}.jpg"}`]);
+    const small = new Function(orphanSrc.replace("const ROWS_PER_READ = 2000;", "const ROWS_PER_READ = 2;") + "\nreturn { scanOrphanImages, deleteOrphanImages };")();
+    for (let i = 0; i < 7; i++) d1._raw.run("INSERT INTO global_settings (key, value) VALUES (?, ?)", ["paged" + i, `{"img":"${BASE}/uploads/acme/paged${i}.jpg"}`]);
     env2.IMAGES._store.set("uploads/acme/paged6.jpg", obj("uploads/acme/paged6.jpg"));
-    const paged = (await small.findOrphanImages(env2, d1, { now })).orphans.map(o => o.key).sort();
+    const pagedScan = await fullScan(small, env2, d1, now);
+    const paged = pagedScan.orphans.map(o => o.key).sort();
     ok("…read a page of rows at a time, the last page's reference still counts", JSON.stringify(paged) === JSON.stringify(await oldOrphans(env2, d1, now)) && !paged.includes("uploads/acme/paged6.jpg"));
     const many = Array.from({ length: 1003 }, (_, i) => "uploads/acme/many" + i + ".jpg");
-    const delMany = await orphan.deleteOrphanImages(env2, d1, many, { now });
+    const delMany = await orphan.deleteOrphanImages(env2, d1, many, { now, scanId: pagedScan.scanId });
     ok("deleting more than 1,000 at once: the rest are listed as kept, not silently dropped", delMany.kept.filter(k => /delete the rest next/.test(k.why)).length === 3 && delMany.kept.length === 1003);
-    await orphan.deleteOrphanImages(env2, d1, ["uploads/acme/lonely.jpg", "uploads/acme/lonely-thumb.jpg", "uploads/acme/html1.jpg"], { now });
+    await orphan.deleteOrphanImages(env2, d1, ["uploads/acme/lonely.jpg", "uploads/acme/lonely-thumb.jpg", "uploads/acme/html1.jpg"], { now, scanId: pagedScan.scanId });
     ok("…and the orphans are deleted together, the one in use kept", !env2.IMAGES._store.has("uploads/acme/lonely.jpg") && !env2.IMAGES._store.has("uploads/acme/lonely-thumb.jpg") && env2.IMAGES._store.has("uploads/acme/html1.jpg"));
     ok("no single string of every reference any more", !/parts\.join/.test(orphanSrc) && /new Set\(\)/.test(orphanSrc));
   }
@@ -208,6 +236,8 @@ function bucket(objects){
   d.getElementById("orDelete").click();
   await wait(() => d.querySelectorAll(".orPick").length === 1 || /No orphaned/.test(d.getElementById("orBody").textContent));
   ok("Remove selected deletes the ticked image and its thumbnail from storage, then re-scans", !pageEnv.IMAGES._store.has("uploads/acme/x1.jpg") && !pageEnv.IMAGES._store.has("uploads/acme/x1-thumb.jpg") && pageEnv.IMAGES._store.has("uploads/acme/x2.jpg") && d.querySelectorAll(".orPick").length === 1);
+  ok("…having had the references read again first, and naming its scan — then the next scan says which one it replaces", sent.some(b => b.action === "findOrphanImages" && b.recheck === true && /^[0-9a-f]{24}$/.test(b.scanId)) &&
+    sent.some(b => b.action === "deleteOrphanImages" && /^[0-9a-f]{24}$/.test(b.scanId)) && sent.some(b => b.action === "findOrphanImages" && /^[0-9a-f]{24}$/.test(b.replaces || "")));
   // The .zip is a real one: Python's zipfile reads it back.
   const zip = w.makeZip_([{ name: "uploads/acme/one.jpg", bytes: new w.Uint8Array([1, 2, 3, 4]) }, { name: "verify/two.png", bytes: new w.Uint8Array([9, 8, 7]) }]);
   const buf = Buffer.from(await new Response(zip).arrayBuffer());

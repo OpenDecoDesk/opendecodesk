@@ -56,7 +56,8 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   console.log("\n=== Publishing one shop ===");
   r = await call({ action: "publish", org: "acme" });
   ok("Publish for one shop publishes that shop only, and is audited", r.status === 200 && r.body.published.join() === "acme" && r.body.publishState.acme.state === "current" &&
-    r.body.publishState.northside.state === "never" && d1.q("SELECT 1 FROM audit_log WHERE action='catalog.published'").length === 1);
+    (await call({ action: "getPublishState" })).body.publishState.northside.state === "never" && d1.q("SELECT 1 FROM audit_log WHERE action='catalog.published'").length === 1);
+  ok("…its answer carries the publish state of the shop it published, not every shop's (test282)", Object.keys(r.body.publishState).join() === "acme");
   await call(prod("tee", 30));
   ok("after Publish, an edit is a draft: shoppers still see and pay the published price", await shownPrice() === 22 && await chargedPrice() === 22);
   ok("…even when the catalog is rebuilt from the database (no cache)", (await shopPage("acme")).catalog.products.find(p => p.id === "tee").flatPrice === 22);

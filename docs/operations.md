@@ -368,7 +368,9 @@ Times report shows stitches per run. It's part of the Production feature.
 - **Settings → Orphaned images** (admins) lists files in the image store that nothing points to any more —
   a photo replaced or removed, an upload whose form was never saved. **Scan the image store**, then
   **Download selected (.zip)** to keep a copy and **Remove selected from storage**. Anything uploaded in
-  the last day is left alone, and each file is checked again just before it's removed.
+  the last day is left alone, and each file is checked again just before it's removed. The scan works
+  through the database in steps and shows how far it is. A mention in the audit log (or another record of
+  the past) doesn't count as a use, so a photo you replaced is listed; a picture on an order still counts.
 
 Admin screens keep your place after a change: the scroll position, open sections, ticked boxes and
 search stay as they were, and what changed is briefly highlighted.

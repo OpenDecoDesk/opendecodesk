@@ -18,7 +18,7 @@ import { requireAdmin, adminActor, adminUser, adminCan } from "../_lib/adminAuth
 import { ACTION_PERM, stageFn } from "../_lib/permissions.js";
 import { copyVendorImage } from "../_lib/vendorImages.js";
 import { countStitches } from "../_lib/stitchCount.js";
-import { findOrphanImages, deleteOrphanImages } from "../_lib/orphanImages.js";
+import { scanOrphanImages, deleteOrphanImages } from "../_lib/orphanImages.js";
 import { searchPsCompanies, getPsEndpoints, fetchVendorProduct, PS_OVERRIDES, psSendPO } from "../_lib/promostandards.js";
 import { vendorLogFetch, listVendorApiLog, getVendorApiLogEntry } from "../_lib/vendorLog.js";
 import { supplierConnection, supplierShipMethods, supplierShipTo, planSupplierOrder, checkSupplierShipments, supplierOrderApprovalCheck } from "../_lib/supplierOrders.js";
@@ -70,7 +70,7 @@ import {
   getTierPrices, setTierPrices, setOrgReorderQr, setOrgReorderQrTransfer,
   listTransfers, createTransfer, updateTransfer, deleteTransfer, receiveTransferSheetOnce, transferSheetShares, SHEET_PCT_TOLERANCE,
   getTransferSheet, editTransferSheet, transferSheetLabel,
-  writeOffTransfers, setTransferCount, getTransferMovements, voidTransferMovement, transferMovementVoidable, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferValuations, getTransferCogs,
+  writeOffTransfers, setTransferCounts, getTransferMovements, voidTransferMovement, transferMovementVoidable, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferValuations, getTransferCogs,
   getTransferQueue, setTransferReceived, getGangSheet, makeTransferLine, setTransfersApplied, lineHasEmbroidery, refreshOrderLinesFromCatalog,
   listDesigns, getDesign, saveDesign, deleteDesign, listDesignVersions, addDesignVersion, updateDesignVersionThreads, setProductDesign,
   listProductDesigns, setProductDesigns, listOrderItemDesigns, addOrderItemDesign, getCatalogIssues, getBlankReadyByOrg,
@@ -112,7 +112,7 @@ import {
   RECURRING_FREQUENCIES, recurringDueDates, recurringIndexAfter, listRecurringExpenses, getRecurringExpense, saveRecurringExpense, stopRecurringExpense,
   deleteRecurringExpense, recordDueRecurringExpenses, getRecurringExpensesRecorded,
   getRefundedCents, getDepositPayments, linkPaymentsToCashout, cashoutNetCents_,
-  receiveBlanksOnce, receiptGroupForKey, receiptEntryId, writeOffBlanks, setBlankCount, getBlankMovements, markBlankPricesChecked, setBlankArchived, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection,
+  writeOffBlanks, getBlankMovements, markBlankPricesChecked, setBlankArchived, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection, receiveBlanksOnce, receiptGroupForKey, receiptEntryId, setBlankCounts,
   getSiteSetting, setSiteDomain,
   getPublishedOrg, setOrgReady, getShopWizard, saveShopWizard, deleteShopWizard, listShopWizards, setProductLinksFromBlank, publishShop, getPublishState, getDraftCatalogShop, signPreviewToken,
   planDiscardShopChanges, discardShopChanges, applyProductPrices,
@@ -162,6 +162,11 @@ const ORDERS_BY_IDS_MAX = 100;
 const BULK_STAGE_MAX = 20;
 // The same for the lighter bulk changes — complete, due date, customer info — a query or two per order.
 const BULK_ORDERS_MAX = 100;
+// Shops one publish request takes ("Publish all shops" sends more in groups — admin.js publishCatalog).
+const PUBLISH_SHOPS_MAX = 10;
+// Rows one stock count correction takes (countBlankStock / countTransferStock): the group is read in two queries and
+// written in one batch (db.js setBlankCounts), and the count window sends a bigger count in groups of this size.
+const COUNT_ROWS_MAX = 100;
 // Lines one bulk cancel takes (review #9): each runs several queries (the line, the cancel, the stock it gave back,
 // the paid state) plus its order's email, so the admin page sends a bigger selection in groups of whole orders.
 const BULK_CANCEL_LINES_MAX = 20;
@@ -4662,11 +4667,15 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (r.removed) audit({ orgId: null, orderId: null, action: "inventory.blank_images_removed", detail: { blankId, removed: r.removed, removals: body.removals.slice(0, 200) } });
       return jsonResponse({ status: "ok", ...r });
     }
-    // Settings → Orphaned images: files in the image store nothing points to; delete re-checks each one first.
+    // Settings → Orphaned images: files in the image store nothing points to. The scan runs in steps the page drives
+    // (one request does a bounded share and answers with a scanId to carry on with — orphanImages.js); delete takes
+    // only files that scan listed, checked again against references the page has just had read again.
     if (body.action === "findOrphanImages" || body.action === "deleteOrphanImages") {
+      const idOf = (v) => /^[0-9a-f]{8,64}$/.test(String(v || "")) ? String(v) : "";
+      const scanId = idOf(body.scanId);
       try {
-        if (body.action === "findOrphanImages") return jsonResponse({ status: "ok", ...(await findOrphanImages(env, env.DB)) });
-        const r = await deleteOrphanImages(env, env.DB, body.keys);
+        if (body.action === "findOrphanImages") return jsonResponse({ status: "ok", ...(await scanOrphanImages(env, env.DB, { scanId, recheck: !!scanId && body.recheck === true, replaces: idOf(body.replaces) })) });
+        const r = await deleteOrphanImages(env, env.DB, body.keys, { scanId });
         if (r.deleted.length) audit({ orgId: null, orderId: null, action: "images.orphans_deleted", detail: { count: r.deleted.length, keys: r.deleted.slice(0, 500) } });
         return jsonResponse({ status: "ok", ...r });
       } catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
@@ -4911,7 +4920,8 @@ async function handleOrdersPost_(context, listBefore = null) {
     }
 
     // ---- Publish per shop (migrations/0076): what's unpublished, and a signed link to preview a shop's draft ----
-    if (body.action === "getPublishState") return jsonResponse({ status: "ok", publishState: await getPublishState(env.DB) });
+    // { orgs: [ids] } asks for those shops only (the shop bar: the one it shows); none = every shop (Manage catalog).
+    if (body.action === "getPublishState") return jsonResponse({ status: "ok", publishState: await getPublishState(env.DB, Array.isArray(body.orgs) ? body.orgs.slice(0, 1000).map(String) : null) });
     if (body.action === "getPreviewLink") {
       const org = await getOrgById(env.DB, String(body.org || ""));
       if (!org) return jsonResponse({ status: "error", message: "Shop not found" }, 404);
@@ -5586,21 +5596,21 @@ async function handleOrdersPost_(context, listBefore = null) {
       audit({ orgId: null, orderId: null, action: "transfer.writeoff", detail: { transferId: Number(body.transferId), qty: Number(body.qty), note: body.note || "" } });
       return jsonResponse({ status: "ok", transfers: await listTransfers(env.DB, body.org || null) });
     }
-    // Count stock (transfers): the same as countBlankStock (setTransferCount). rows: [{transferId, counted, onHand}].
+    // Count stock (transfers): the same as countBlankStock (setTransferCounts). rows: [{transferId, counted, onHand}].
     if (body.action === "countTransferStock") {
-      const rows = Array.isArray(body.rows) ? body.rows.slice(0, 2000) : [];
+      const rows = Array.isArray(body.rows) ? body.rows : [];
       if (!rows.length) return jsonResponse({ status: "error", message: "Nothing to correct" }, 400);
+      if (rows.length > COUNT_ROWS_MAX) return jsonResponse({ status: "error", message: `Too many rows at once (max ${COUNT_ROWS_MAX})` }, 400);
       if (rows.some(r => !r || !Number(r.transferId) || !Number.isInteger(Number(r.counted)) || Number(r.counted) < 0))
         return jsonResponse({ status: "error", message: "Enter a whole count of 0 or more on every row" }, 400);
       const when = actionTime(body);
       if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
       { const locked = await periodGuard(body); if (locked) return locked; }
       const note = String(body.note || "").trim().slice(0, 200), done = [], failed = [];
-      for (const r of rows) {
-        const row = { transferId: Number(r.transferId), counted: Number(r.counted), onHand: Number(r.onHand) };
-        try { const x = await setTransferCount(env.DB, { ...row, note, at: when ? when.at : null }); if (x.delta) done.push({ ...row, delta: x.delta }); }
-        catch (e) { if (!e.userFacing) throw e; failed.push({ ...row, error: e.message }); }
-      }
+      const list = rows.map(r => ({ transferId: Number(r.transferId), counted: Number(r.counted), onHand: Number(r.onHand) }));
+      (await setTransferCounts(env.DB, list, { note, at: when ? when.at : null })).forEach((x, i) => {
+        if (x.error) failed.push({ ...list[i], error: x.error }); else if (x.delta) done.push({ ...list[i], delta: x.delta });
+      });
       if (done.length) audit({ orgId: null, orderId: null, action: "transfer.counted", detail: { rows: done, ...(note ? { note } : {}), occurredAt: when ? when.at : null } });
       return jsonResponse({ status: "ok", corrected: done, failed, transfers: await listTransfers(env.DB, body.org || null) });
     }
@@ -6209,23 +6219,24 @@ async function handleOrdersPost_(context, listBefore = null) {
       return withList_({ status: "ok" }, "blanks", "blanks", blankCostsFor_);
     }
     // Count stock (blanks): each row's counted number, recorded as a correction for the difference
-    // (setBlankCount). rows: [{blankId, color, size, counted, onHand}] — one row from a row's Correct count,
-    // many from Correct all remaining differences. A row that fails (its stock changed since the window
-    // read it) comes back in `failed`; the rest still apply.
+    // (setBlankCounts). rows: [{blankId, color, size, counted, onHand}] — one row from a row's Correct count,
+    // many from Correct all remaining differences, at most COUNT_ROWS_MAX a request (the window sends more in
+    // groups). A row that fails (its stock changed since the window read it) comes back in `failed`; the rest
+    // still apply, in one batch, with one audit entry for the group.
     if (body.action === "countBlankStock") {
-      const rows = Array.isArray(body.rows) ? body.rows.slice(0, 2000) : [];
+      const rows = Array.isArray(body.rows) ? body.rows : [];
       if (!rows.length) return jsonResponse({ status: "error", message: "Nothing to correct" }, 400);
+      if (rows.length > COUNT_ROWS_MAX) return jsonResponse({ status: "error", message: `Too many rows at once (max ${COUNT_ROWS_MAX})` }, 400);
       if (rows.some(r => !r || !Number(r.blankId) || !Number.isInteger(Number(r.counted)) || Number(r.counted) < 0))
         return jsonResponse({ status: "error", message: "Enter a whole count of 0 or more on every row" }, 400);
       const when = actionTime(body);
       if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
       { const locked = await periodGuard(body); if (locked) return locked; }
       const note = String(body.note || "").trim().slice(0, 200), done = [], failed = [];
-      for (const r of rows) {
-        const row = { blankId: Number(r.blankId), color: String(r.color ?? ""), size: String(r.size ?? ""), counted: Number(r.counted), onHand: Number(r.onHand) };
-        try { const x = await setBlankCount(env.DB, { ...row, note, at: when ? when.at : null }); if (x.delta) done.push({ ...row, delta: x.delta }); }
-        catch (e) { if (!e.userFacing) throw e; failed.push({ ...row, error: e.message }); }
-      }
+      const list = rows.map(r => ({ blankId: Number(r.blankId), color: String(r.color ?? ""), size: String(r.size ?? ""), counted: Number(r.counted), onHand: Number(r.onHand) }));
+      (await setBlankCounts(env.DB, list, { note, at: when ? when.at : null })).forEach((x, i) => {
+        if (x.error) failed.push({ ...list[i], error: x.error }); else if (x.delta) done.push({ ...list[i], delta: x.delta });
+      });
       if (done.length) audit({ orgId: null, orderId: null, action: "inventory.counted", detail: { rows: done, ...(note ? { note } : {}), occurredAt: when ? when.at : null } });
       return withList_({ status: "ok", corrected: done, failed }, "blanks", "blanks", blankCostsFor_);
     }
@@ -6535,19 +6546,24 @@ async function handleOrdersPost_(context, listBefore = null) {
   }
 
   // ---- publish — bump the catalog version to invalidate the edge cache -------
-  // Publish (migrations/0076): one shop ({org}) or every shop (no org). Its current rows become what shoppers see
-  // and orders are priced from; the cache version is bumped so the change shows at once.
+  // Publish (migrations/0076): one shop ({org}), some ({orgs: [ids]}) or every shop (neither). Its current rows
+  // become what shoppers see and orders are priced from; the cache version is bumped so the change shows at once.
+  // At most PUBLISH_SHOPS_MAX shops a request — each takes a few queries, and one request may run only so many — so
+  // "Publish all shops" sends them in groups (admin.js publishCatalog). The answer's publishState covers the shops
+  // this request published; the page keeps the others' as it had them.
   if (body.action === "publish") {
     const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_PERM_[body.action]);
     if (denied) return denied;
-    const orgIds = body.org ? [String(body.org)] : (await getAllOrgs(env.DB)).map(o => o.orgId);
+    const named = body.org ? [String(body.org)] : Array.isArray(body.orgs) ? [...new Set(body.orgs.map(String))] : null;
+    const orgIds = named || (await getAllOrgs(env.DB)).map(o => o.orgId);
+    if (orgIds.length > PUBLISH_SHOPS_MAX) return jsonResponse({ status: "error", message: `Too many shops at once (max ${PUBLISH_SHOPS_MAX})` }, 400);
     const published = [];
     for (const id of orgIds) { const r = await publishShop(env.DB, id, adminActor(request)); if (r) published.push(id); }
-    if (body.org && !published.length) return jsonResponse({ status: "error", message: "Shop not found" }, 404);
+    if (named && !published.length) return jsonResponse({ status: "error", message: "Shop not found" }, 404);
     const next = await bumpCatalogVersion(env.DB);
     invalidateCatalogVersionCache();
     audit({ orgId: body.org || null, orderId: null, action: "catalog.published", detail: { shops: published } });
-    return jsonResponse({ status: "ok", version: next, published, publishState: await getPublishState(env.DB) });
+    return jsonResponse({ status: "ok", version: next, published, publishState: await getPublishState(env.DB, published) });
   }
 
   // ---- Apply these prices (Brand rules → Show price impact): changes [{org, productId, group, size, price}] ----
@@ -6578,7 +6594,7 @@ async function handleOrdersPost_(context, listBefore = null) {
         audit({ orgId: org, orderId: null, action: "product.prices_applied", detail: { productId, source: "price rule", changed: r.changed } });
       }
     }
-    return jsonResponse({ status: "ok", products: done, prices: done.reduce((n, p) => n + p.changed.length, 0), skipped, publishState: await getPublishState(env.DB) });
+    return jsonResponse({ status: "ok", products: done, prices: done.reduce((n, p) => n + p.changed.length, 0), skipped, publishState: await getPublishState(env.DB, [...new Set(done.map(p => p.org))]) });
   }
 
   // ---- Discard a shop's unpublished changes: back to what was last published (planDiscardShopChanges) ----
@@ -6596,7 +6612,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (!r) return jsonResponse({ status: "error", message: "This shop hasn't been published yet, so there's nothing to go back to." }, 409);
     const { removedRows, ...res } = r;
     audit({ orgId: org, orderId: null, action: "catalog.changes_discarded", detail: { ...res, removedProducts: removedRows } });
-    return jsonResponse({ status: "ok", ...res, publishState: await getPublishState(env.DB) });
+    return jsonResponse({ status: "ok", ...res, publishState: await getPublishState(env.DB, [org]) });
   }
 
   // ---- sendDesignVerification — batch email design proofs to customers ---------

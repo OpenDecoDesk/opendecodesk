@@ -1422,6 +1422,8 @@ CREATE TABLE IF NOT EXISTS transfer_movements (
 );
 CREATE INDEX IF NOT EXISTS idx_transfer_mv_finished ON transfer_movements (finishedMovementId) WHERE finishedMovementId IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_item     ON transfer_movements(transferId, occurredAt);
+-- migrations/0106: by order line (despite its name, the index above is by transfer) — the transfers a line used.
+CREATE INDEX IF NOT EXISTS idx_transfer_movements_itemId   ON transfer_movements(itemId) WHERE itemId IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_occurred ON transfer_movements(occurredAt);
 CREATE INDEX IF NOT EXISTS idx_transfer_movements_order    ON transfer_movements(orderId);
 
@@ -1802,3 +1804,20 @@ CREATE TRIGGER IF NOT EXISTS ips_finished_goods_movements_upd AFTER UPDATE ON fi
 BEGIN DELETE FROM inventory_period_snapshots WHERE month >= substr(NEW.occurredAt, 1, 7) OR month >= substr(OLD.occurredAt, 1, 7); END;
 CREATE TRIGGER IF NOT EXISTS ips_finished_goods_movements_del AFTER DELETE ON finished_goods_movements
 BEGIN DELETE FROM inventory_period_snapshots WHERE month >= substr(OLD.occurredAt, 1, 7); END;
+
+-- Settings → Orphaned images (migrations/0106): the scan runs in steps the screen drives, so one request never runs
+-- more queries than Cloudflare allows. Between steps it keeps where it is (orphan_scans.state) and what it found
+-- (orphan_scan_keys: 'ref' = an image key the database points to, 'orphan' = a file the scan called orphaned). A
+-- scan's rows go when it ends with nothing orphaned, when its page starts the next scan, and once they're a day old
+-- (functions/_lib/orphanImages.js); never searched for image addresses themselves.
+CREATE TABLE IF NOT EXISTS orphan_scans (
+  scanId    TEXT PRIMARY KEY,
+  startedAt TEXT NOT NULL,
+  state     TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(state))
+);
+CREATE TABLE IF NOT EXISTS orphan_scan_keys (
+  scanId TEXT NOT NULL,
+  kind   TEXT NOT NULL CHECK (kind IN ('ref', 'orphan')),
+  key    TEXT NOT NULL,
+  PRIMARY KEY (scanId, kind, key)
+) WITHOUT ROWID;

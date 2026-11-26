@@ -634,21 +634,41 @@ export async function publishedProductRow_(db, orgId, productId, lk) {
 }
 // Per shop: never published, published and current, or with unpublished changes (which products / shop settings).
 // A row "changed" when any stored value differs — updatedAt included, so saving with no change also counts.
-export async function getPublishState(db) {
-  const { results: orgs } = await db.prepare("SELECT orgId FROM orgs ORDER BY orgId").all();
+// `orgIds`: only these shops (the shop bar asks for the one it shows); none given = every shop.
+// Read in a fixed number of queries however many shops (review round 2: it was four queries a shop, one after
+// another, and D1 caps the queries one request may run): the snapshots, their parts, the shops' rows and their
+// products, each in one query, then compared here shop by shop exactly as before.
+export async function getPublishState(db, orgIds = null) {
+  const only = Array.isArray(orgIds) ? JSON.stringify([...new Set(orgIds.map(String))]) : null;
+  const where = (col) => only === null ? "" : ` WHERE ${col} IN (SELECT value FROM json_each(?))`;
+  const all = (sql) => (only === null ? db.prepare(sql) : db.prepare(sql).bind(only)).all();
+  const { results: orgs } = await all(`SELECT * FROM orgs${where("orgId")} ORDER BY orgId`);
+  let heads = [];
+  try { heads = (await all(`SELECT orgId, json, publishedAt, publishedBy FROM catalog_snapshots${where("orgId")}`)).results || []; } catch (e) {}   // before 0076: none published
+  const headBy = new Map(heads.map(h => [h.orgId, h]));
+  // Parts and live products only for the shops that have a snapshot: a shop never published is compared with nothing.
+  const partsBy = new Map(), liveBy = new Map();
+  if (heads.length) {
+    let parts = [];
+    try { parts = (await all(`SELECT orgId, part, json FROM catalog_snapshot_parts${where("orgId")} ORDER BY orgId, part`)).results || []; }
+    catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }   // before 0101: every snapshot holds its own products
+    for (const p of parts) (partsBy.get(p.orgId) || partsBy.set(p.orgId, []).get(p.orgId)).push(p);
+    const { results: products } = await db.prepare("SELECT * FROM products WHERE orgId IN (SELECT value FROM json_each(?)) ORDER BY orgId, productId").bind(JSON.stringify(heads.map(h => h.orgId))).all();
+    for (const p of products || []) (liveBy.get(p.orgId) || liveBy.set(p.orgId, []).get(p.orgId)).push(p);
+  }
+  const key = (r) => JSON.stringify(Object.keys(r).sort().map(k => [k, r[k]]));
   const out = {};
-  for (const { orgId } of orgs) {
-    const snap = await getCatalogSnapshot(db, orgId);
-    if (!snap) { out[orgId] = { state: "never" }; continue; }
-    const live = await liveShopRows_(db, orgId);
-    const key = (r) => JSON.stringify(Object.keys(r).sort().map(k => [k, r[k]]));
-    const pubBy = new Map(snap.products.map(p => [p.productId, key(p)]));
-    const liveBy = new Map(live.products.map(p => [p.productId, key(p)]));
+  for (const org of orgs || []) {
+    const orgId = org.orgId, head = headBy.get(orgId);
+    const rows = head ? await snapshotRows_(db, orgId, head.json, partsBy.get(orgId) || []) : null;
+    if (!rows) { out[orgId] = { state: "never" }; continue; }
+    const pubBy = new Map(rows.products.map(p => [p.productId, key(p)]));
+    const nowBy = new Map((liveBy.get(orgId) || []).map(p => [p.productId, key(p)]));
     const changed = [];
-    for (const [id, k] of liveBy) if (pubBy.get(id) !== k) changed.push(id);
-    for (const id of pubBy.keys()) if (!liveBy.has(id)) changed.push(id);
-    const shopChanged = key(snap.org) !== key(live.org);
-    out[orgId] = { state: changed.length || shopChanged ? "changed" : "current", publishedAt: snap.publishedAt, publishedBy: snap.publishedBy, changedProducts: changed, shopChanged };
+    for (const [id, k] of nowBy) if (pubBy.get(id) !== k) changed.push(id);
+    for (const id of pubBy.keys()) if (!nowBy.has(id)) changed.push(id);
+    const shopChanged = key(rows.org) !== key(org);
+    out[orgId] = { state: changed.length || shopChanged ? "changed" : "current", publishedAt: head.publishedAt, publishedBy: head.publishedBy || "", changedProducts: changed, shopChanged };
   }
   return out;
 }
@@ -6773,28 +6793,61 @@ export async function writeOffBlanks(db, { blankId, color, size, qty, note, occu
 // refused if the stock changed since (both statements are guarded on it, in one batch), so a use or
 // receipt recorded while counting is never overwritten. Returns { delta }.
 export async function setBlankCount(db, { blankId, color, size, counted, onHand, note, at }) {
-  const want = Math.floor(Number(counted)), shown = Math.trunc(Number(onHand));
-  if (!Number.isFinite(want) || want < 0) throw pricingError_("Enter a count of 0 or more.");
-  if (!Number.isFinite(shown)) throw pricingError_("Reload the count window and try again.");
-  const clr = color == null ? await blankScalarColor_(db, blankId) : String(color), sz = String(size || "");
-  const cur = await db.prepare("SELECT quantity, purchasePriceCents, vendorPriceCents FROM blank_sizes WHERE blankId=? AND color=? AND size=?").bind(Number(blankId), clr, sz).first();
-  if (!cur) throw pricingError_("That size isn't on file for this blank.");
-  if (Number(cur.quantity) !== shown) throw pricingError_(`The stock changed while you were counting (it's ${Number(cur.quantity)} now) — count that row again.`);
-  const delta = want - shown;
-  if (!delta) return { delta: 0 };
-  const unit = Number(cur.purchasePriceCents) || (delta > 0 ? Number(cur.vendorPriceCents) || 0 : 0);
-  const now = new Date().toISOString();
-  const G = "(SELECT quantity FROM blank_sizes WHERE blankId=? AND color=? AND size=?) = ?", gb = [Number(blankId), clr, sz, shown];
-  const res = await db.batch([
-    db.prepare(`INSERT INTO inventory_movements (blankId, blankName, color, size, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
+  const [r] = await setBlankCounts(db, [{ blankId, color, size, counted, onHand }], { note, at });
+  if (r.error) throw pricingError_(r.error);
+  return { delta: r.delta };
+}
+// The same for a group of rows (review round 2) — [{blankId, color, size, counted, onHand}] — in a fixed number of
+// queries however many rows: D1 caps the queries one request may run, and a row at a time took three or four each
+// (a physical count with a few hundred differences never finished). The blanks and the sizes' current rows are read
+// in two queries; every row that's still as the window showed it is written in ONE batch, each pair of statements
+// guarded on its own row's quantity exactly as before, so a row whose stock changed in between is refused and the
+// rest still apply. Returns one answer per row, in order: { delta } (0 = nothing to correct) or { error }.
+export async function setBlankCounts(db, rows, { note, at } = {}) {
+  const out = rows.map(() => null), todo = [];
+  rows.forEach((r, i) => {
+    const want = Math.floor(Number(r.counted)), shown = Math.trunc(Number(r.onHand));
+    if (!Number.isFinite(want) || want < 0) out[i] = { error: "Enter a count of 0 or more." };
+    else if (!Number.isFinite(shown)) out[i] = { error: "Reload the count window and try again." };
+    else todo.push({ i, blankId: Number(r.blankId), color: r.color == null ? null : String(r.color), size: String(r.size || ""), want, shown });
+  });
+  if (!todo.length) return out;
+  const { results: blanks } = await db.prepare("SELECT id, name, brand, color FROM blanks WHERE id IN (SELECT value FROM json_each(?))")
+    .bind(JSON.stringify([...new Set(todo.map(t => t.blankId))])).all();
+  const blankBy = new Map((blanks || []).map(b => [Number(b.id), b]));
+  // A row sent without a color means the blank's own (blankScalarColor_).
+  for (const t of todo) if (t.color == null) { const b = blankBy.get(t.blankId); t.color = b ? (b.color || "") : ""; }
+  const { results: sizes } = await db.prepare(`SELECT s.blankId, s.color, s.size, s.quantity, s.purchasePriceCents, s.vendorPriceCents FROM json_each(?) k
+      JOIN blank_sizes s ON s.blankId = json_extract(k.value, '$[0]') AND s.color = json_extract(k.value, '$[1]') AND s.size = json_extract(k.value, '$[2]')`)
+    .bind(JSON.stringify(todo.map(t => [t.blankId, t.color, t.size]))).all();
+  const keyOf = (blankId, color, size) => blankId + "\u0001" + color + "\u0001" + size;
+  const curBy = new Map((sizes || []).map(z => [keyOf(Number(z.blankId), z.color, z.size), z]));
+  const now = new Date().toISOString(), text = String(note ? "Stock count: " + note : "Stock count").slice(0, 300);
+  const G = "(SELECT quantity FROM blank_sizes WHERE blankId=? AND color=? AND size=?) = ?";
+  const stmts = [], wrote = [];
+  for (const t of todo) {
+    const cur = curBy.get(keyOf(t.blankId, t.color, t.size));
+    if (!cur) { out[t.i] = { error: "That size isn't on file for this blank." }; continue; }
+    if (Number(cur.quantity) !== t.shown) { out[t.i] = { error: `The stock changed while you were counting (it's ${Number(cur.quantity)} now) — count that row again.` }; continue; }
+    const delta = t.want - t.shown;
+    if (!delta) { out[t.i] = { delta: 0 }; continue; }
+    const unit = Number(cur.purchasePriceCents) || (delta > 0 ? Number(cur.vendorPriceCents) || 0 : 0);
+    const b = blankBy.get(t.blankId), gb = [t.blankId, t.color, t.size, t.shown];
+    wrote.push({ i: t.i, delta, at: stmts.length });
+    stmts.push(db.prepare(`INSERT INTO inventory_movements (blankId, blankName, color, size, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
       SELECT ?, ?, ?, ?, ?, ?, 'adjust', ?, ?, ? WHERE ${G}`)
-      .bind(Number(blankId), await blankName_(db, blankId), clr, sz, delta, Math.max(0, Math.round(unit)),
-        String(note ? "Stock count: " + note : "Stock count").slice(0, 300), at || now, now, ...gb),
-    db.prepare(`UPDATE blank_sizes SET quantity = ? WHERE blankId=? AND color=? AND size=? AND quantity = ?`).bind(want, Number(blankId), clr, sz, shown),
-  ]);
-  if (!tookRow_(res[0])) throw pricingError_("The stock changed while you were counting — count that row again.");
-  if (!Number(cur.purchasePriceCents) && delta > 0 && unit) await db.prepare("UPDATE blank_sizes SET purchasePriceCents = ? WHERE blankId=? AND color=? AND size=? AND purchasePriceCents = 0").bind(unit, Number(blankId), clr, sz).run();
-  return { delta };
+      .bind(t.blankId, b ? (b.name || [b.brand, b.color].filter(Boolean).join(" ")) : "", t.color, t.size, delta, Math.max(0, Math.round(unit)), text, at || now, now, ...gb));
+    // A size with no cost yet that gains stock takes its vendor price as its first cost — in the same guarded
+    // statement, so only when the correction itself is written.
+    stmts.push(!Number(cur.purchasePriceCents) && delta > 0 && unit
+      ? db.prepare("UPDATE blank_sizes SET quantity = ?, purchasePriceCents = CASE WHEN purchasePriceCents = 0 THEN ? ELSE purchasePriceCents END WHERE blankId=? AND color=? AND size=? AND quantity = ?").bind(t.want, unit, ...gb)
+      : db.prepare("UPDATE blank_sizes SET quantity = ? WHERE blankId=? AND color=? AND size=? AND quantity = ?").bind(t.want, ...gb));
+  }
+  if (stmts.length) {
+    const res = await db.batch(stmts);
+    for (const w of wrote) out[w.i] = tookRow_(res[w.at]) ? { delta: w.delta } : { error: "The stock changed while you were counting — count that row again." };
+  }
+  return out;
 }
 
 // Called when an order is marked "manufactured": each active line whose
@@ -8286,25 +8339,44 @@ export async function writeOffTransfers(db, { transferId, qty, note, occurredAt 
 // difference at the transfer's current average cost, refused if its stock changed since the count
 // window read it. Returns { delta }.
 export async function setTransferCount(db, { transferId, counted, onHand, note, at }) {
-  const want = Math.floor(Number(counted)), shown = Math.trunc(Number(onHand));
-  if (!Number.isFinite(want) || want < 0) throw pricingError_("Enter a count of 0 or more.");
-  if (!Number.isFinite(shown)) throw pricingError_("Reload the count window and try again.");
-  const cur = await db.prepare("SELECT name, quantity, purchasePriceCents FROM transfers WHERE id=?").bind(Number(transferId)).first();
-  if (!cur) throw pricingError_("That transfer isn't on file.");
-  if (Number(cur.quantity) !== shown) throw pricingError_(`The stock changed while you were counting (it's ${Number(cur.quantity)} now) — count that row again.`);
-  const delta = want - shown;
-  if (!delta) return { delta: 0 };
-  const now = new Date().toISOString();
-  const G = "(SELECT quantity FROM transfers WHERE id=?) = ?", gb = [Number(transferId), shown];
-  const res = await db.batch([
-    db.prepare(`INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
-      SELECT ?, ?, ?, ?, 'adjust', ?, ?, ? WHERE ${G}`)
-      .bind(Number(transferId), cur.name || "", delta, Math.max(0, Number(cur.purchasePriceCents) || 0),
-        String(note ? "Stock count: " + note : "Stock count").slice(0, 300), at || now, now, ...gb),
-    db.prepare("UPDATE transfers SET quantity = ?, updatedAt = ? WHERE id = ? AND quantity = ?").bind(want, now, Number(transferId), shown),
-  ]);
-  if (!tookRow_(res[0])) throw pricingError_("The stock changed while you were counting — count that row again.");
-  return { delta };
+  const [r] = await setTransferCounts(db, [{ transferId, counted, onHand }], { note, at });
+  if (r.error) throw pricingError_(r.error);
+  return { delta: r.delta };
+}
+// The same for a group of rows — [{transferId, counted, onHand}] — as setBlankCounts: the transfers read in one
+// query, every row still as the window showed it written in ONE batch of guarded statements. One answer per row,
+// in order: { delta } or { error }.
+export async function setTransferCounts(db, rows, { note, at } = {}) {
+  const out = rows.map(() => null), todo = [];
+  rows.forEach((r, i) => {
+    const want = Math.floor(Number(r.counted)), shown = Math.trunc(Number(r.onHand));
+    if (!Number.isFinite(want) || want < 0) out[i] = { error: "Enter a count of 0 or more." };
+    else if (!Number.isFinite(shown)) out[i] = { error: "Reload the count window and try again." };
+    else todo.push({ i, transferId: Number(r.transferId), want, shown });
+  });
+  if (!todo.length) return out;
+  const { results: transfers } = await db.prepare("SELECT id, name, quantity, purchasePriceCents FROM transfers WHERE id IN (SELECT value FROM json_each(?))")
+    .bind(JSON.stringify([...new Set(todo.map(t => t.transferId))])).all();
+  const curBy = new Map((transfers || []).map(t => [Number(t.id), t]));
+  const now = new Date().toISOString(), text = String(note ? "Stock count: " + note : "Stock count").slice(0, 300);
+  const stmts = [], wrote = [];
+  for (const t of todo) {
+    const cur = curBy.get(t.transferId);
+    if (!cur) { out[t.i] = { error: "That transfer isn't on file." }; continue; }
+    if (Number(cur.quantity) !== t.shown) { out[t.i] = { error: `The stock changed while you were counting (it's ${Number(cur.quantity)} now) — count that row again.` }; continue; }
+    const delta = t.want - t.shown;
+    if (!delta) { out[t.i] = { delta: 0 }; continue; }
+    wrote.push({ i: t.i, delta, at: stmts.length });
+    stmts.push(db.prepare(`INSERT INTO transfer_movements (transferId, transferName, qtyDelta, unitCostCents, kind, note, occurredAt, createdAt)
+      SELECT ?, ?, ?, ?, 'adjust', ?, ?, ? WHERE (SELECT quantity FROM transfers WHERE id=?) = ?`)
+      .bind(t.transferId, cur.name || "", delta, Math.max(0, Number(cur.purchasePriceCents) || 0), text, at || now, now, t.transferId, t.shown));
+    stmts.push(db.prepare("UPDATE transfers SET quantity = ?, updatedAt = ? WHERE id = ? AND quantity = ?").bind(t.want, now, t.transferId, t.shown));
+  }
+  if (stmts.length) {
+    const res = await db.batch(stmts);
+    for (const w of wrote) out[w.i] = tookRow_(res[w.at]) ? { delta: w.delta } : { error: "The stock changed while you were counting — count that row again." };
+  }
+  return out;
 }
 
 // Consume one application per garment of each given transfer for one line (customer-chosen options +

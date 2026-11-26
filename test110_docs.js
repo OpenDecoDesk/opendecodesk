@@ -165,18 +165,36 @@ ok("docs/operations.md explains switching it on, the two secrets, restoring, mig
     "#!/bin/bash",
     'if [ "$1 $2" = "d1 export" ]; then out=""; while [ $# -gt 0 ]; do [ "$1" = "--output" ] && out="$2"; shift; done; printf "CREATE TABLE t(x);\\nINSERT INTO t VALUES(1);\\n" > "$out"; exit 0; fi',
     'if [ "$1 $2 $3" = "r2 object put" ]; then echo "$4" >> "$PUT_LOG"; exit 0; fi',
+    // `r2 object get` as wrangler 4.110 behaves: an object that's there is written to --file; a missing key (HTTP 404)
+    // fails with "The specified key does not exist."; any other failure says "Failed to fetch …".
+    'if [ "$1 $2 $3" = "r2 object get" ]; then echo "$4" >> "$GET_LOG"',
+    '  if [ -n "$GET_FAILS" ]; then echo "✘ [ERROR] A request to the Cloudflare API failed. Failed to fetch /accounts/x/r2/buckets/bk/objects/k - 500: Internal Server Error;" >&2; exit 1; fi',
+    '  if grep -qxF "$4" "$EXISTING" 2>/dev/null; then out=""; while [ $# -gt 0 ]; do [ "$1" = "--file" ] && out="$2"; shift; done; echo x > "$out"; exit 0; fi',
+    '  echo "✘ [ERROR] The specified key does not exist." >&2; exit 1; fi',
     "exit 1", ""].join("\n"), { mode: 0o755 });
-  const backup = (stamp) => {
-    const log = path.join(dir, "puts-" + stamp + ".txt");
+  const backup = (stamp, { existing = [], getFails = false } = {}) => {
+    const log = path.join(dir, "puts-" + stamp + ".txt"), gets = path.join(dir, "gets-" + stamp + ".txt"), have = path.join(dir, "have-" + stamp + ".txt");
+    for (const f of [log, gets]) fs.rmSync(f, { force: true });
+    fs.writeFileSync(have, existing.map(k => k + "\n").join(""));
     const r = spawnSync("bash", [path.join(__dirname, "scripts/d1-backup.sh"), "shopdb"], { encoding: "utf8",
-      env: { ...process.env, PATH: path.join(dir, "bin") + ":" + process.env.PATH, FAKE_STAMP: stamp, PUT_LOG: log, CLOUDFLARE_ACCOUNT_ID: "acct-test",
-        BACKUP_BUCKET: "bk", WRANGLER: "bash " + path.join(dir, "wrangler.sh") } });
-    return { status: r.status, puts: fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : [], out: r.stdout + r.stderr };
+      env: { ...process.env, PATH: path.join(dir, "bin") + ":" + process.env.PATH, FAKE_STAMP: stamp, PUT_LOG: log, GET_LOG: gets, EXISTING: have,
+        GET_FAILS: getFails ? "1" : "", CLOUDFLARE_ACCOUNT_ID: "acct-test", BACKUP_BUCKET: "bk", WRANGLER: "bash " + path.join(dir, "wrangler.sh") } });
+    const lines = (f) => fs.existsSync(f) ? fs.readFileSync(f, "utf8").trim().split("\n").filter(Boolean) : [];
+    return { status: r.status, puts: lines(log), gets: lines(gets), out: r.stdout + r.stderr };
   };
-  const mid = backup("2026-11-14T030000Z"), first = backup("2026-12-01T030000Z");
-  ok("a nightly backup goes under <db>/daily/, where the lifecycle rule expires it", mid.status === 0 && mid.puts.join() === "bk/shopdb/daily/2026-11-14T030000Z.sql.gz");
+  const mid = backup("2026-11-14T030000Z", { existing: ["bk/shopdb/monthly/2026-11.sql.gz"] }), first = backup("2026-12-01T030000Z");
+  ok("a nightly backup goes under <db>/daily/, where the lifecycle rule expires it (this month's copy already there: not written again)",
+    mid.status === 0 && mid.puts.join() === "bk/shopdb/daily/2026-11-14T030000Z.sql.gz" && mid.gets.join() === "bk/shopdb/monthly/2026-11.sql.gz" && /already there/.test(mid.out));
   ok("on the 1st of the month it is also kept as <db>/monthly/<YYYY-MM>.sql.gz, which no rule touches", first.status === 0 &&
     first.puts.join() === "bk/shopdb/daily/2026-12-01T030000Z.sql.gz,bk/shopdb/monthly/2026-12.sql.gz");
+  const late = backup("2026-10-17T030000Z");
+  ok("a month whose 1st had no backup gets its copy from the first run that works (mid-month, none there yet)", late.status === 0 &&
+    late.puts.join() === "bk/shopdb/daily/2026-10-17T030000Z.sql.gz,bk/shopdb/monthly/2026-10.sql.gz" && late.gets.join() === "bk/shopdb/monthly/2026-10.sql.gz");
+  const lastMonthOnly = backup("2026-09-20T030000Z", { existing: ["bk/shopdb/monthly/2026-08.sql.gz"] });
+  ok("…looking for this month's copy only (last month's being there doesn't count)", lastMonthOnly.status === 0 && lastMonthOnly.puts.length === 2 && lastMonthOnly.puts[1] === "bk/shopdb/monthly/2026-09.sql.gz");
+  const unsure = backup("2026-11-15T030000Z", { existing: ["bk/shopdb/monthly/2026-11.sql.gz"], getFails: true });
+  ok("when the check itself fails (not \"does not exist\"), the month's copy is written anyway, and the script says why", unsure.status === 0 &&
+    unsure.puts.join() === "bk/shopdb/daily/2026-11-15T030000Z.sql.gz,bk/shopdb/monthly/2026-11.sql.gz" && /Couldn't check for this month's copy/.test(unsure.out));
   fs.rmSync(dir, { recursive: true, force: true });
   const ops = text["docs/operations.md"];
   ok("docs/operations.md gives the one-time 35-day rule on daily/ only, keeps monthly/, and says what to do with older flat files",
@@ -193,9 +211,27 @@ ok("the test workflow runs the scan in strict mode", /scan-private\.sh --strict/
   const job = (name) => (desk.match(new RegExp("\\n  " + name + ":\\n((?:    .*\\n|\\s*\\n)+)")) || [])[1] || "";
   ok("a desktop release can't be published unless the test suite passes on the same run", /^on:\n(?:  .*\n)*  workflow_call:/m.test(tw) &&
     /if: inputs\.release\n/.test(job("tests")) && /uses: \.\/\.github\/workflows\/test\.yml\n/.test(job("tests")) && /needs: \[version, build, tests\]/.test(job("release")));
+
+  // The end-to-end suite runs in test.yml as a second job, so every push and pull request runs it, and a release
+  // (whose `tests` job waits for every job of test.yml) can't be published past a failing one. Both jobs have a
+  // time limit, so a hang ends the run instead of holding it for GitHub's six hours.
+  const twJob = (name) => (tw.match(new RegExp("\\n  " + name + ":\\n((?:    .*\\n|\\s*\\n)+)")) || [])[1] || "";
+  const unit = twJob("test"), e2e = twJob("e2e");
+  ok("the test job has a 20-minute limit", /^    timeout-minutes: 20\b/m.test(unit));
+  ok("an e2e job with a 45-minute limit installs Chromium with its system libraries and runs `npm run e2e` one file at a time with CI set",
+    /^    timeout-minutes: 45\b/m.test(e2e) && /^      - run: npm ci\b/m.test(e2e) && /^      - run: npx playwright install --with-deps chromium\b/m.test(e2e) &&
+    /^      - run: npm run e2e\n        env:\n(?:          .*\n)*?          E2E_WORKERS: "1"/m.test(e2e) && /^          CI: "1"/m.test(e2e) &&
+    e2e.indexOf("npm ci") < e2e.indexOf("playwright install") && e2e.indexOf("playwright install") < e2e.indexOf("npm run e2e"));
+  ok("…on the same Node as the test job", (unit.match(/node-version: (\S+)/) || [])[1] === "22" && (e2e.match(/node-version: (\S+)/) || [])[1] === "22");
+  ok("…and when it fails it keeps the report and the traces as an artifact", /- uses: actions\/upload-artifact@[0-9a-f]{40} # v\d+\n        if: failure\(\)\n/.test(e2e) &&
+    /e2e\/\.report\n/.test(e2e) && /e2e\/\.results\n/.test(e2e) && /e2e-state\/wrangler-dev\.log\n/.test(e2e) && /include-hidden-files: true/.test(e2e));
+  ok("a failed end-to-end test runs once more on GitHub only (CI set), never on a person's computer",
+    /^  retries: process\.env\.CI \? 1 : 0,$/m.test(read("e2e/playwright.config.mjs")));
+  ok("every action the workflows use is pinned to a full commit", [tw, desk, read(".github/workflows/d1-backup.yml")]
+    .every(w => [...w.matchAll(/uses: (\S+)/g)].every(m => /^\.\//.test(m[1]) || /@[0-9a-f]{40}$/.test(m[1]))) && /actions\/upload-artifact@/.test(e2e));
 }
 const pkg = JSON.parse(read("package.json"));
-ok("every npm script the docs mention exists", [...new Set([...all.matchAll(/npm run ([a-z:]+)/g)].map(m => m[1]))].every(s => s in pkg.scripts));
+ok("every npm script the docs mention exists", [...new Set([...all.matchAll(/npm run ([a-z0-9:]+)/g)].map(m => m[1]))].every(s => s in pkg.scripts));
 ok("every script flag the docs mention is one the installer accepts", [...new Set([...all.matchAll(/(--[a-z][a-z-]+)/g)].map(m => m[1]))].filter(f => ["--dry-run", "--config", "--skip-deploy", "--new-passphrase", "--print-fresh-sql"].includes(f)).length === 5 &&
   ["--dry-run", "--skip-deploy", "--new-passphrase", "--print-fresh-sql"].every(f => read("scripts/setup.mjs").includes('a === "' + f + '"')));
 

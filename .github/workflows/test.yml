@@ -13,6 +13,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20   # the suite takes about 10; run-tests.sh also stops any one file after 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5 (pinned to a commit, like the backup workflow)
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -21,3 +22,32 @@ jobs:
       - run: npm ci   # exact versions from package-lock.json
       - run: npm test
       - run: bash scripts/scan-private.sh --strict   # no keys or account ids in the tree
+
+  # The end-to-end suite (e2e/README.md): a fresh local install driven in Playwright's Chromium. It needs no
+  # keys and talks to no outside service. A desktop release runs this file, so it waits for this job too.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5 (pinned to a commit, like the backup workflow)
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+      - run: npm ci   # exact versions from package-lock.json
+      - run: npx playwright install --with-deps chromium   # the browser, and the system libraries it needs
+      - run: npm run e2e
+        env:
+          CI: "1"            # a stray test.only fails the run
+          E2E_WORKERS: "1"   # one file at a time: with two, the runner's one local server fell behind and a different test timed out each run
+          E2E_STATE_DIR: ${{ runner.temp }}/e2e-state   # the local install, and the server's log kept below
+      # The HTML report, the traces and screenshots of the failed tests, and the local server's log, under the run's Artifacts.
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: failure()
+        with:
+          name: e2e-report
+          path: |
+            e2e/.report
+            e2e/.results
+            ${{ runner.temp }}/e2e-state/wrangler-dev.log
+          include-hidden-files: true
+          if-no-files-found: ignore

@@ -314,6 +314,41 @@ test("a cancelled line's Record refund by check goes into Payments once; by card
   await closePayments(page);
 });
 
+// 💰 Payments → Record refund checks the date and the paid-from account before it writes its audit entry
+// (orders.js recordRefund), so a refund the server refuses leaves no "payment.refunded" entry for money that
+// never moved. Here the account picked in the window is closed (made inactive) before Record refund is pressed.
+test("💰 Payments → Record refund from an account closed meanwhile is refused and leaves no audit entry", async ({ page, api }) => {
+  const { shop, order } = await shopWithOrder(api, page);
+  const id = order.orderId;
+  await api("markPaidManual", { org: shop.orgId, orderId: id, requestId: requestId() });
+  const name = uniq("Refund float");
+  const made = (await api("saveAccount", { account: { name, type: "checking", openingDate: "2020-01-01" } })).accounts.find(a => a.name === name);
+  const refundAudits = async () => (await api("getAuditLog", { orderId: id, filter: "payment.refunded", limit: 20 })).entries.filter(e => e.action === "payment.refunded");
+
+  await ordersPage(page, shop);
+  const { pm } = await openPayments(page, id);
+  await pm.locator("#pmRefundAmount").fill("5");
+  await pm.locator("#pmRefundMethod").selectOption("venmo");
+  await pm.locator("#pmRefundAccount").selectOption(String(made.id));
+  // Closed by someone else while the window was open.
+  await api("saveAccount", { account: { id: made.id, name, type: "checking", openingDate: "2020-01-01", active: false } });
+  await pm.locator("#pmSaveRefund").click();
+  await page.locator(".confirm-modal #cmOk").click();
+  await expect(page.locator("#pmError")).toHaveText("Choose an active account");
+  await page.waitForTimeout(1000);   // an audit entry written after the answer would be there by now
+  expect(await refundAudits()).toHaveLength(0);
+  expect(await ledgerRefunds(api, shop, id)).toHaveLength(0);
+
+  // Another account: recorded, and audited once.
+  const other = await pm.locator("#pmRefundAccount option").evaluateAll((os, v) => os.map(o => o.value).find(x => x && x !== v), String(made.id));
+  await pm.locator("#pmRefundAccount").selectOption(other);
+  await pm.locator("#pmSaveRefund").click();
+  await page.locator(".confirm-modal #cmOk").click();
+  await expect(toast(page)).toContainText("Refund recorded.");
+  expect(await ledgerRefunds(api, shop, id)).toHaveLength(1);
+  await expect.poll(async () => (await refundAudits()).length, { timeout: 10_000 }).toBe(1);
+});
+
 // ---- P20: bulk cancel and bulk tracking -------------------------------------------------------------------
 test("→ Cancel selected: 24 lines over three orders go in groups of at most 20, and the toast counts them", async ({ page, api }) => {
   const { shop, order: a } = await shopWithOrder(api, page);

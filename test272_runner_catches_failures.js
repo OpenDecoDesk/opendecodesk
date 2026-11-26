@@ -63,5 +63,43 @@ try {
   ok("…and `desc: true` for a truthy one, leaving the exit code alone", good.status === 0 && good.stdout === 'one: true\ntwo: true\n{"passed":2,"failed":0}\n');
 } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 
+// A test file that hangs: where a `timeout` command exists (Linux, so CI) the runner gives each file 5 minutes and
+// fails one it had to stop with its own line; where there is none (macOS) it runs node as before. Both are run
+// here with a PATH of just node, grep and tail, plus, for the first, a stand-in `timeout` that records how it
+// was called and answers 124 (what timeout exits with when it stops a command) for the "hang" file at once.
+{
+  ok("run-tests.sh uses timeout only when the command exists, at 300 seconds a file", /command -v timeout >\/dev\/null/.test(runner) && /^TIME_LIMIT=300$/m.test(runner));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "odd-runner-time-"));
+  try {
+    fs.copyFileSync(path.join(__dirname, "run-tests.sh"), path.join(dir, "run-tests.sh"));
+    const which = (cmd) => spawnSync("bash", ["-c", "command -v " + cmd], { encoding: "utf8" }).stdout.trim();
+    const bin = (name, extra) => {
+      const b = path.join(dir, name);
+      fs.mkdirSync(b);
+      fs.symlinkSync(process.execPath, path.join(b, "node"));
+      for (const c of ["grep", "tail"]) fs.symlinkSync(which(c), path.join(b, c));
+      if (extra) { fs.writeFileSync(path.join(b, "timeout"), extra); fs.chmodSync(path.join(b, "timeout"), 0o755); }
+      return b;
+    };
+    const calls = path.join(dir, "calls.txt");
+    const withTimeout = bin("with", "#!/bin/bash\necho \"$*\" >> " + JSON.stringify(calls) + "\ncase \"$3\" in *hang*) echo \"still going\"; exit 124;; esac\nshift\nexec \"$@\"\n");
+    const without = bin("without");
+    fs.writeFileSync(path.join(dir, "test1_pass.js"), 'console.log("it works:", true);\n');
+    fs.writeFileSync(path.join(dir, "test2_hang.js"), 'console.log("it works:", true);\n');
+    fs.writeFileSync(path.join(dir, "test3_exit124.js"), 'console.log("it works:", true); process.exit(124);\n');
+    const run = (b) => spawnSync("/bin/bash", ["run-tests.sh"], { cwd: dir, encoding: "utf8", env: { PATH: b } });
+
+    const a = run(withTimeout);
+    const logged = fs.existsSync(calls) ? fs.readFileSync(calls, "utf8") : "";
+    ok("with timeout: each file runs as `timeout 300 node <file>`", /^300 node test1_pass\.js$/m.test(logged) && /^300 node test2_hang\.js$/m.test(logged));
+    ok("…a file it stopped fails with a line saying it timed out, and shows what it printed", /^FAIL \(timed out after 300s\): test2_hang\.js$/m.test(a.stdout) && /still going/.test(a.stdout));
+    ok("…the others still pass, and the run as a whole fails", /^PASS: test1_pass\.js$/m.test(a.stdout) && a.status === 1);
+
+    const b = run(without);
+    ok("without timeout: files run with plain node (the \"hang\" file isn't stopped and passes)", /^PASS: test1_pass\.js$/m.test(b.stdout) && /^PASS: test2_hang\.js$/m.test(b.stdout));
+    ok("…and a file that exits 124 by itself is an ordinary failed exit, not a timeout", /^FAIL \(exit 124\): test3_exit124\.js$/m.test(b.stdout) && !/timed out/.test(b.stdout) && b.status === 1);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
 // The check that started this: its description had no colon.
 ok("test74's design check has its colon", /products aren't flagged for a design:", !prod\.dtf/.test(fs.readFileSync(path.join(__dirname, "test74_catalog_issues.js"), "utf8")));

@@ -160,11 +160,16 @@ export async function waitIdle(page, ms = 300) {
   await page.waitForTimeout(ms);
 }
 
-// Opens a menu of the admin bar and clicks one of its pages.
+// Opens a menu of the admin bar and clicks one of its pages. The bar can be drawn again while this happens (a list
+// arriving), which closes the open menu and leaves the click waiting on a button that is gone; so opening the menu
+// and clicking are tried again together, a few seconds at a time, instead of waiting out one long click.
 export async function navTo(page, menu, item) {
   const nav = page.getByRole("navigation", { name: "Admin" });
-  if (menu) await nav.getByRole("button", { name: menu + " ▾" }).click();
-  await nav.getByRole("button", { name: item, exact: true }).first().click();
+  const target = nav.getByRole("button", { name: item, exact: true }).first();
+  await expect(async () => {
+    if (menu && !(await target.isVisible())) await nav.getByRole("button", { name: menu + " ▾" }).click({ timeout: 5_000 });
+    await target.click({ timeout: 5_000 });
+  }).toPass({ timeout: 30_000 });
   await waitIdle(page);
 }
 

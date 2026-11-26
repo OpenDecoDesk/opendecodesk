@@ -305,7 +305,8 @@ CREATE TABLE IF NOT EXISTS orders (
   source              TEXT NOT NULL DEFAULT '',   -- migrations/0087: '' = made here; 'etsy' / 'shopify' / 'csv' = imported
   externalOrderId     TEXT,                       -- migrations/0087: the store's own order number
   payOnDelivery       INTEGER NOT NULL DEFAULT 0 CHECK (payOnDelivery IN (0, 1)),  -- migrations/0105: steps go on before it's paid
-  customerId          INTEGER REFERENCES customers(id)   -- migrations/0108: the customer it belongs to; NULL = none
+  customerId          INTEGER REFERENCES customers(id),  -- migrations/0108: the customer it belongs to; NULL = none
+  trackingCheckedAt   TEXT                        -- migrations/0111: the delivery check's last tracking lookup (least recent first)
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -887,6 +888,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_running_per_piece
   ON production_runs(itemId, pieceNo) WHERE status = 'running' AND pieceNo IS NOT NULL;
 -- migrations/0104: the finished runs by when they finished (the pricing analysis' last 12 months).
 CREATE INDEX IF NOT EXISTS idx_runs_done_finished ON production_runs(finishedAt) WHERE status = 'done';
+-- migrations/0112: runs by when they started (the Run times report's range and its run log's pages).
+CREATE INDEX IF NOT EXISTS idx_runs_started ON production_runs(startedAt);
 
 -- migrations/0032: a design's hoops (on its own / with a typed-in name), a product's designs in
 -- run order (one MAIN), and the order-specific design for a typed-in-personalization line.
@@ -1076,6 +1079,7 @@ CREATE INDEX IF NOT EXISTS idx_blank_colors          ON blank_colors(blankId);
 CREATE INDEX IF NOT EXISTS idx_inventory_type  ON inventory(productType, size);
 CREATE INDEX IF NOT EXISTS idx_blanks_type     ON blanks(productType);
 CREATE INDEX IF NOT EXISTS idx_prod_blank_link ON product_blank_links(orgId, productId);
+CREATE INDEX IF NOT EXISTS idx_prod_blank_link_blank ON product_blank_links(blankId, blankColor, blankSize);   -- migrations/0112: which products use a blank
 CREATE INDEX IF NOT EXISTS idx_rts_org         ON ready_to_ship(orgId, productId);
 CREATE INDEX IF NOT EXISTS idx_items_from_stock ON order_items (orgId, productId, size, stockVariant) WHERE fromStock = 1;
 
@@ -1179,6 +1183,8 @@ CREATE INDEX IF NOT EXISTS idx_movements_blank    ON inventory_movements(blankId
 CREATE INDEX IF NOT EXISTS idx_movements_blank_color ON inventory_movements(blankId, color, size, occurredAt);
 CREATE INDEX IF NOT EXISTS idx_movements_occurred ON inventory_movements(occurredAt);
 CREATE INDEX IF NOT EXISTS idx_movements_order    ON inventory_movements(orderId);
+-- migrations/0112: purchases still in force by when they were recorded (has restock on order arrived?).
+CREATE INDEX IF NOT EXISTS idx_movements_purchase_created ON inventory_movements(createdAt) WHERE kind = 'purchase' AND voidedAt IS NULL;
 
 -- Months already filed: changes that would alter them are refused (migrations/0010).
 CREATE TABLE IF NOT EXISTS closed_periods (

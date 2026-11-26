@@ -201,6 +201,7 @@ const ADMIN_ACTIONS_ = {
   expDelete_(){ expDelete_(this.dataset.id); },
   refreshComms_(){ refreshComms_(); },
   commsSendTest_(){ commsSendTest_(); },
+  commsClearIssues_(){ commsClearIssues_(this); },
   checkBlankShipmentsNow(){ checkBlankShipmentsNow(this); },
   refreshPriceReminderFromVendors_(){ refreshPriceReminderFromVendors_(); },
   auditReset_(){
@@ -3342,28 +3343,22 @@ async function bulkSendDesignVerification(orgId){
   const modal = await showDesignVerifModal();
   if(!modal) return;
 
-  const errEl = document.createElement("div");
   try{
-    const res = await fetch("/api/orders", {
-      method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({
-        action: "sendDesignVerification",
-        key: adminKey,
-        org: orgId,
-        orderIds,
-        message: modal.message,
-        imageUrls: modal.imageUrls,
-      })
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      showToast("Error: " + ((data && data.message) || "Unknown error"), true);
+    // In groups of BULK_STAGE_GROUP_ (the server sends at most that many proofs a request). A group that fails stops
+    // the rest, and the toast says how many were already sent, so they aren't sent twice.
+    const r = await postOrdersInGroups_({ action: "sendDesignVerification", org: orgId, message: modal.message, imageUrls: modal.imageUrls },
+      orderIds, BULK_STAGE_GROUP_);
+    if(!r.done){
+      showToast(r.unreachable ? "Network error — could not send verification emails." : "Error: " + r.error, true);
       return;
     }
-    const reasons = (data.skippedReasons || []).join("; ");
+    const data = { sent: 0, skipped: 0, skippedReasons: [] };
+    r.replies.forEach(d => { data.sent += Number(d.sent) || 0; data.skipped += Number(d.skipped) || 0; data.skippedReasons.push(...(d.skippedReasons || [])); });
+    const reasons = data.skippedReasons.join("; ");
     const skippedNote = data.skipped ? ` (${data.skipped} skipped — ${reasons || "no email address on file"})` : "";
-    showToast(`✓ Verification email sent to ${data.sent} order${data.sent===1?"":"s"}${skippedNote}.`, !!data.skipped && !data.sent);
-    clearBulkSelection();
+    const stopped = r.error ? ` It stopped after ${r.done} of ${orderIds.length} orders (${r.error}) — the other ${orderIds.length - r.done} were not sent. Select them and try again.` : "";
+    showToast(`✓ Verification email sent to ${data.sent} order${data.sent===1?"":"s"}${skippedNote}.${stopped}`, !!r.error || (!!data.skipped && !data.sent));
+    if(!r.error) clearBulkSelection();
   }catch(e){
     showToast("Network error — could not send verification emails.", true);
   }
@@ -16662,7 +16657,8 @@ async function showBlankCatchUp_(onDone, filter){
 async function showTransferCatchUp_(onDone, filter){
   if (!adminKey) adminKey = (await adminLogin()) || "";
   if (!adminKey) return;
-  const fmt = adminMoney_;
+  // Read on Transfers without costs.view gets the preview without costs (orders.js stripCosts_): a dash, never $NaN.
+  const fmt = (n) => adminMoneyOr_(Number.isFinite(n) ? n : null);
   const { ov, close } = inventoryModal_("Use transfers for past orders", `<div id="tcuBody" style="font-size:13px;color:#777;">Checking past orders…</div>`, 1100);
   const body = ov.querySelector("#tcuBody");
   let d;
@@ -16701,7 +16697,7 @@ async function showTransferCatchUp_(onDone, filter){
       <tbody>${shops.map(s => `<tr><td colspan="7" style="${td}background:#fafafa;font-weight:700;"><label style="cursor:pointer;"><input type="checkbox" data-tcu-shop="${escapeHtml(s)}"> ${escapeHtml(shopName(s))}</label></td></tr>` +
         d.lines.filter(l => l.orgId === s).map(row).join("")).join("")}</tbody></table></div>
     <div id="tcuShort" style="display:none;margin-top:10px;padding:8px 12px;border:1px solid #fcd34d;background:#fffbeb;border-radius:6px;font-size:12px;color:#78350f;"></div>
-    <div style="margin-top:10px;font-size:12px;color:#666;">A use dated in the past changes how many were on hand when later sheets came in, so later uses whose average moved are re-costed too (except in a closed month, and pieces made for stock).${d.recostLines && !filter ? ` With every transfer ticked that's ${d.recostLines} order line${d.recostLines === 1 ? "" : "s"}, ${d.recostTotal >= 0 ? "+" : "−"}${fmt(Math.abs(d.recostTotal))}.` : ""}</div>
+    <div style="margin-top:10px;font-size:12px;color:#666;">A use dated in the past changes how many were on hand when later sheets came in, so later uses whose average moved are re-costed too (except in a closed month, and pieces made for stock).${d.recostLines && !filter ? ` With every transfer ticked that's ${d.recostLines} order line${d.recostLines === 1 ? "" : "s"}${d.recostTotal == null ? "" : `, ${d.recostTotal >= 0 ? "+" : "−"}${fmt(Math.abs(d.recostTotal))}`}.` : ""}</div>
     <div id="tcuErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
       <button type="button" class="admin-btn" id="tcuCancel" style="background:#fff;color:#232323;border:1px solid #999;">Cancel</button>
@@ -17554,7 +17550,7 @@ async function showBlankHistoryModal(blank, onDone){
       const d = await r.json();
       const body = ov.querySelector("#histBody");
       if (!r.ok || d.status === "error") { body.textContent = (d && d.message) || "Could not load history."; return; }
-      const costs = adminSeesBlankCosts_();   // Read on Blanks alone: no Unit cost column (the server sends none)
+      const costs = adminSeesBlankCosts_();   // Read on Blanks alone: no Unit cost column or Receipt button (the server sends neither)
       body.innerHTML = d.movements.length ? `<table style="border-collapse:collapse;width:100%;font-size:12px;color:#1a1a1a;">
         <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:4px 6px;">Date</th><th style="padding:4px 6px;">Color / size</th><th style="padding:4px 6px;">Type</th><th style="padding:4px 6px;text-align:right;">Qty</th>${costs ? `<th style="padding:4px 6px;text-align:right;">Unit cost</th>` : ""}<th style="padding:4px 6px;">Details</th><th style="padding:4px 6px;"></th></tr></thead>
         <tbody>${d.movements.map(m => { const dim = m.voidedAt ? "opacity:.5;text-decoration:line-through;" : ""; return `<tr style="border-bottom:1px solid #eee;">
@@ -17564,7 +17560,7 @@ async function showBlankHistoryModal(blank, onDone){
           <td style="${dim}padding:4px 6px;text-align:right;color:${m.qtyDelta < 0 ? "#b03a2e" : "#166534"};">${m.qtyDelta > 0 ? "+" : ""}${m.qtyDelta}</td>
           ${costs ? `<td style="${dim}padding:4px 6px;text-align:right;">${adminMoneyOr_(m.unitCost)}</td>` : ""}
           <td style="${dim}padding:4px 6px;">${escapeHtml([m.orderId && "Order " + m.orderId, m.vendor, m.vendorRef && "#" + m.vendorRef, m.note].filter(Boolean).join(" · "))}
-            ${m.receiptKey && adminFeatureOn_("bookkeeping") ? ` <button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;" title="${escapeHtml(m.receiptName || "Receipt")}" data-key="${escapeHtml(m.receiptKey)}" data-admin-action="expViewReceipt_">📎 Receipt</button>` : ""}
+            ${m.receiptKey && adminFeatureOn_("bookkeeping") && costs ? ` <button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;" title="${escapeHtml(m.receiptName || "Receipt")}" data-key="${escapeHtml(m.receiptKey)}" data-admin-action="expViewReceipt_">📎 Receipt</button>` : ""}
             ${m.voidedAt ? `<div style="color:#b03a2e;">Voided${m.voidReason ? ": " + escapeHtml(m.voidReason) : ""}</div>` : ""}</td>
           <td style="padding:4px 6px;text-align:right;white-space:nowrap;">${!m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn admin-btn-danger" style="padding:2px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.blanks:full" data-admin-action="voidBlankMovement_">Void</button>` : ""}${m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;text-decoration:none;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" data-need="inventory.blanks:edit" title="Make this entry count toward stock and cost again" data-admin-action="restoreBlankMovement_">Undo void</button>` : ""}</td>
         </tr>`; }).join("")}</tbody></table>` : "No movements yet.";
@@ -18454,7 +18450,7 @@ function supplierOrdersHtml_(orders){
       <td style="${td}">${escapeHtml(adminDay_(o.placedAt || o.createdAt))}</td>
       <td style="${td}">${escapeHtml(o.vendor)}</td>
       <td style="${td}">${(o.lines || []).length} line${(o.lines || []).length === 1 ? "" : "s"} · ${pieces} pc</td>
-      <td style="${td}text-align:right;">$${Number(o.total || 0).toFixed(2)}</td>
+      <td style="${td}text-align:right;">${o.total == null ? "—" : "$" + Number(o.total).toFixed(2)}</td>
       <td style="${td}color:${color};">${escapeHtml(statusText)}${o.cancelledAt && o.cancelNote ? `<div style="font-size:11px;color:#555;">${escapeHtml(o.cancelNote)}</div>` : ""}${o.error && !o.cancelledAt ? `<div style="font-size:11px;color:#7f1d1d;">${escapeHtml(o.error)}</div>` : ""}</td>
       <td style="${td}font-size:12px;">${ships || (o.status === "placed" && !o.cancelledAt ? `<span style="color:#888;">none yet</span>` : "")}</td>
       <td style="${td}white-space:nowrap;">
@@ -20661,6 +20657,18 @@ async function commsSendTest_(){
   finally { btn.disabled = false; }
 }
 
+// ---- Communications → Clear the problems list -----------------------------------------------
+// The roll-up clears the problems it reports; with no email set up it never sends, so this empties the list by hand.
+async function commsClearIssues_(btn){
+  if(!await askConfirm_("Clear the list of problems?\n\nThey won't be in the next roll-up email. New problems are listed again as they happen.", { confirmLabel: "Clear" })) return;
+  btn.disabled = true;
+  try{
+    const d = await adminApi_({ action: "clearSystemIssues" });
+    showToast(d.cleared ? `Cleared ${d.cleared} problem${d.cleared === 1 ? "" : "s"}.` : "The list was already empty.", false);
+    await refreshComms_();
+  }catch(e){ showToast(e.message || "Could not clear the list.", true); btn.disabled = false; }
+}
+
 // ---- Communications: what the next 6 AM roll-up email will contain ------------
 // After an action on Communications: refill it in place (no "Loading…", the scroll stays).
 function refreshComms_(){ return keepView_(() => renderCommunications(document.getElementById("app"), { soft: true })); }
@@ -20718,6 +20726,7 @@ async function renderCommunications(app, opts){
     : run.sent ? `an email was sent${run.orders ? ` (${Number(run.orders)} order${Number(run.orders) === 1 ? "" : "s"})` : ""}.`
     : run.heartbeat === "sent" ? "nothing new — a short “nothing new” email was sent."
     : run.heartbeat === "failed" ? `nothing new, and <b style="color:#b03a2e;">the “nothing new” email could not be sent</b>.`
+    : run.reason === "email not set up" ? "no email was sent, because email isn't set up (Global settings → Setup status)."
     : "nothing new, so no email was sent."}</div>`;
 
   const noticeTable = (rows) => `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
@@ -20740,7 +20749,7 @@ async function renderCommunications(app, opts){
         <td style="${td}font-size:13px;">${o.items.map(it => escapeHtml(itemLine(it))).join("<br>")}</td>
         <td style="${td}white-space:nowrap;">${escapeHtml(o.paymentMethod || "")}<br><span style="font-size:12px;color:${o.paid ? "#15803d" : "#b45309"};">${o.paid ? "Paid" : "Unpaid"}</span></td>
         <td style="${td}text-align:right;white-space:nowrap;">${fmt(o.total)}</td>
-      </tr>`).join("")}</tbody></table></div>` : `<div style="color:#888;">No new orders.</div>`;
+      </tr>`).join("")}</tbody></table></div>${d.moreOrders ? `<div style="margin-top:6px;font-size:13px;color:#555;">…and ${Number(d.moreOrders)} more order${Number(d.moreOrders) === 1 ? "" : "s"} — see <a href="#orders">Orders</a>. A roll-up lists 200 at most; the rest are in the next one.</div>` : ""}` : `<div style="color:#888;">No new orders.</div>`;
 
   const inTransitHtml = inTransit.length ? `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
       <thead><tr><th style="${th}">Order</th><th style="${th}">Shop</th><th style="${th}">Customer</th><th style="${th}">Carrier / tracking</th><th style="${th}">Shipped</th><th style="${th}">Status</th></tr></thead>
@@ -20797,8 +20806,9 @@ async function renderCommunications(app, opts){
       ${Number(d.security.code || 0) > 0 ? `<div style="font-size:13px;margin-top:4px;"><strong>A wrong 2FA code means the password was right</strong> — change it if that wasn't you.</div>` : ""}
       <div style="font-size:12px;color:#555;margin-top:4px;">Reported in the next roll-up (5 or more send one even with no orders), then cleared.</div></div>` : ""}
     ${(d.issues || []).length ? `<div style="border:2px solid #b45309;border-radius:6px;padding:10px 12px;margin-bottom:20px;background:#fffbeb;">
-      <h2 style="margin:0 0 6px;color:#92400e;font-size:16px;">⚠️ Problems since the last roll-up</h2>
-      <ul style="margin:0;padding-left:18px;font-size:14px;">${d.issues.map(x => `<li><strong>${escapeHtml(x.label)}: ${Number(x.count)}</strong>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 6px;"><h2 style="margin:0;color:#92400e;font-size:16px;">⚠️ Problems since the last roll-up</h2>
+        <button id="commsClearIssuesBtn" class="admin-btn" style="font-size:12px;padding:4px 10px;" data-need="settings.comms:edit" data-admin-action="commsClearIssues_">Clear</button></div>
+      <ul id="commsIssues" style="margin:0;padding-left:18px;font-size:14px;">${d.issues.map(x => `<li><strong>${escapeHtml(x.label)}: ${Number(x.count)}</strong>
         <span style="${sub}">(${escapeHtml(when(x.first))}${x.count > 1 ? " – " + escapeHtml(when(x.last)) : ""})</span>
         ${(x.samples || []).length ? `<br><span style="${sub}">e.g. ${x.samples.map(t => escapeHtml(t)).join(" · ")}</span>` : ""}</li>`).join("")}</ul>
       <div style="font-size:12px;color:#555;margin-top:4px;">Reported in the next roll-up (it's sent even with nothing else new), then cleared. Details are in ${adminDesktop_() ? "the program's log (Help → Open the log)" : "the Cloudflare logs"}.</div></div>` : ""}
@@ -23729,7 +23739,10 @@ function showOrderCsvImportModal_(orgId, file, onDone){
     intro: () => `<div style="font-size:12px;color:#555;margin-bottom:8px;">Reading this as ${ORDER_IMPORT_SOURCE_[format] ? `<b>${ORDER_IMPORT_SOURCE_[format]}</b>` : "an orders file"}.</div>`,
     detail: (r) => [r.lines && r.lines.length ? r.lines.map(escapeHtml).join("<br>") : "", [r.total, r.paid ? "paid" : r.action !== "skip" ? "unpaid" : "", r.shipped ? "shipped" : ""].filter(Boolean).join(" · ")]
       .filter(Boolean).join("<br>"),
-    done: (r) => `Orders imported: ${r.created}${r.skipped ? `, ${r.skipped} skipped` : ""}.`,
+    // An order made whose later step (discount, payment, stock, shipped) failed is kept; the toast names it to finish by hand.
+    done: (r) => { const part = (r.results || []).filter(x => x.orderId && x.unfinished);
+      return `Orders imported: ${r.created}${r.skipped ? `, ${r.skipped} skipped` : ""}.` +
+        (part.length ? ` ⚠ ${part.length} not finished — open ${part.length === 1 ? "it" : "them"} and finish by hand: ${part.map(x => `${x.orderNo} (${x.unfinished})`).join(", ")}.` : ""); },
   });
 }
 function pickOrderImportFile_(orgId){
@@ -24281,11 +24294,45 @@ async function renderRunReport(app){
   const thL = th.replace("text-align:right", "text-align:left");
   const cell = "padding:8px 12px;text-align:right;border-bottom:1px solid #ddd;color:#111;background:#fff;";
   const cellL = cell.replace("text-align:right", "text-align:left");
+  // One run log row. The log comes 500 runs at a time, newest first; Load older adds the next ones under it.
+  const logRow = (x, kinds) => `<tr>
+            <td style="${cellL}">${escapeHtml(x.startedAt ? adminDateTime_(x.startedAt) : "")}</td>
+            <td style="${cellL}">${escapeHtml(x.designName)}</td>
+            <td style="${cellL}">${escapeHtml(x.machineName)}</td>
+            <td style="${cellL}">${escapeHtml(x.orgName)} · ${escapeHtml(x.orderId)}</td>
+            <td style="${cell}">${x.status === "done" ? dur(x.durationMs) : "—"}</td>
+            <td style="${cell}" class="rr-stitches">${x.status === "aborted" ? (x.stitchesCounted ? Number(x.stitchesCounted).toLocaleString() : "—") : x.stitchCount != null ? Number(x.stitchCount).toLocaleString() : `<span style="color:#bbb;">—</span>`}</td>
+            <td style="${cellL}">${x.status === "aborted" ? "Aborted" + (x.abortReasonLabel ? " — " + escapeHtml(x.abortReasonLabel) : "") + (x.abortNote ? " (" + escapeHtml(x.abortNote) + ")" : "") : (x.status === "done" ? "Done" : "Running")}</td>
+            <td style="${cellL}">${escapeHtml(runIssuesText_(x.issues, kinds)) || `<span style="color:#bbb;">—</span>`}</td>
+          </tr>`;
+  // Under the log: how many runs are shown and, when older ones are in the range too, a button for the next page.
+  function logFooter(shown, more, range, kinds){
+    const foot = document.getElementById("rrRunLogFooter");
+    if (!foot) return;
+    const n = shown.length;
+    foot.innerHTML = more
+      ? `Showing the newest ${n} runs <button type="button" class="admin-btn" id="rrLoadOlder" style="padding:2px 10px;font-size:12px;margin-left:4px;">Load older</button>`
+      : `${n} run${n === 1 ? "" : "s"}`;
+    const btn = document.getElementById("rrLoadOlder");
+    if (!btn) return;
+    btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = "Loading…";
+      const last = shown[shown.length - 1];
+      try {
+        const r = await runOrderApi_({ action: "getRunReportByDesign", ...range, before: { startedAt: last.startedAt, id: last.runId } });
+        const page = (r.report && r.report.detail) || [];
+        const body = document.querySelector("#rrRunLog tbody");
+        if (body) body.insertAdjacentHTML("beforeend", page.map(x => logRow(x, kinds)).join(""));
+        logFooter(shown.concat(page), !!(r.report && r.report.detailMore) && page.length > 0, range, kinds);
+      } catch (e) { foot.innerHTML = `<span style="color:#b03a2e;">${escapeHtml(e.message)}</span>`; }
+    };
+  }
   async function load(){
     const el = document.getElementById("rrResults");
     el.innerHTML = `<div style="color:#888;font-size:14px;padding:20px 0;">Loading…</div>`;
     try {
-      const r = await runOrderApi_({ action: "getRunReportByDesign", from: document.getElementById("rrFrom").value, to: document.getElementById("rrTo").value });
+      const range = { from: document.getElementById("rrFrom").value, to: document.getElementById("rrTo").value };
+      const r = await runOrderApi_({ action: "getRunReportByDesign", ...range });
       const rep = r.report || { designs: [], detail: [] };
       if (!rep.designs.length && !rep.detail.length) { el.innerHTML = `<div style="color:#888;padding:20px 0;">No runs in this range.</div>`; return; }
       // Issues noted when each run was finished (migrations/0046): a column per kind, per design and per machine.
@@ -24311,19 +24358,11 @@ async function renderRunReport(app){
           </tbody>
         </table></div>`).join("");
       const detail = `<h3 style="margin:24px 0 8px;font-size:15px;">Run log</h3>
-        <table style="width:100%;border-collapse:collapse;">
+        <table id="rrRunLog" style="width:100%;border-collapse:collapse;">
           <thead><tr><th style="${thL}">Started</th><th style="${thL}">Design</th><th style="${thL}">Machine</th><th style="${thL}">Order</th><th style="${th}">Duration</th><th style="${th}">Stitches</th><th style="${thL}">Status</th><th style="${thL}">Issues</th></tr></thead>
-          <tbody>${rep.detail.map(x => `<tr>
-            <td style="${cellL}">${escapeHtml(x.startedAt ? adminDateTime_(x.startedAt) : "")}</td>
-            <td style="${cellL}">${escapeHtml(x.designName)}</td>
-            <td style="${cellL}">${escapeHtml(x.machineName)}</td>
-            <td style="${cellL}">${escapeHtml(x.orgName)} · ${escapeHtml(x.orderId)}</td>
-            <td style="${cell}">${x.status === "done" ? dur(x.durationMs) : "—"}</td>
-            <td style="${cell}" class="rr-stitches">${x.status === "aborted" ? (x.stitchesCounted ? Number(x.stitchesCounted).toLocaleString() : "—") : x.stitchCount != null ? Number(x.stitchCount).toLocaleString() : `<span style="color:#bbb;">—</span>`}</td>
-            <td style="${cellL}">${x.status === "aborted" ? "Aborted" + (x.abortReasonLabel ? " — " + escapeHtml(x.abortReasonLabel) : "") + (x.abortNote ? " (" + escapeHtml(x.abortNote) + ")" : "") : (x.status === "done" ? "Done" : "Running")}</td>
-            <td style="${cellL}">${escapeHtml(runIssuesText_(x.issues, kinds)) || `<span style="color:#bbb;">—</span>`}</td>
-          </tr>`).join("")}</tbody>
-        </table>`;
+          <tbody>${rep.detail.map(x => logRow(x, kinds)).join("")}</tbody>
+        </table>
+        <div id="rrRunLogFooter" style="font-size:13px;color:#666;margin:8px 0 0;"></div>`;
       // The free-text details typed for "Other", newest first.
       const notes = rep.otherNotes || [];
       const other = `<h3 style="margin:24px 0 8px;font-size:15px;">Other issue details</h3>` + (notes.length ? `
@@ -24338,6 +24377,7 @@ async function renderRunReport(app){
           </tr>`).join("")}</tbody>
         </table></div>` : `<div id="rrOtherNotes" style="color:#888;font-size:13px;">No “Other” details were entered in this range.</div>`);
       el.innerHTML = designBlocks + detail + other;
+      logFooter(rep.detail, !!rep.detailMore, range, kinds);
     } catch (e) { el.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; }
   }
   document.getElementById("rrFilters").onsubmit = (e) => { e.preventDefault(); load(); };
@@ -24715,7 +24755,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
     ${lockNote}
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:end;">
       <label style="font-size:12px;font-weight:600;">Date<br><input id="trDate" type="date" value="${escapeHtml(ed ? ed.date : today)}" max="${today}" style="${inp}"></label>
-      <label style="font-size:12px;font-weight:600;">Sheet total ($)<br>$<input id="trTotal" type="number" min="0" step="0.01" value="${ed ? Number(ed.total).toFixed(2) : ""}" style="${inp}width:100px;"></label>
+      <label style="font-size:12px;font-weight:600;">Sheet total ($)<br>$<input id="trTotal" type="number" min="0" step="0.01" value="${ed && ed.total != null ? Number(ed.total).toFixed(2) : ""}" style="${inp}width:100px;"></label>
       <label style="font-size:12px;font-weight:600;">Vendor<br>${vendorPickerHtml_("trVendor", ed ? ed.vendor : "", { style: inp + "width:150px;" })}</label>
       <label style="font-size:12px;font-weight:600;">Invoice #<br><input id="trRef" value="${escapeHtml(ed ? ed.vendorRef : "")}" style="${inp}width:120px;"></label>
       <label style="font-size:12px;font-weight:600;">Paid from<br><select id="trPaid" style="${inp}"><option value="">Loading…</option></select></label>
@@ -24761,14 +24801,16 @@ function showTransferSheetModal_(transfers, onDone, existing){
   const recompute = () => {
     unpreview();
     const total = parseFloat(ov.querySelector("#trTotal").value) || 0;
+    // No total yet (or a sheet sent without its amounts): the dollar columns are a dash, not $0.00.
+    const noTotal = ov.querySelector("#trTotal").value.trim() === "";
     const rows = [...ov.querySelectorAll(".trRow")];
     const pcts = rows.map(r => parseFloat(r.querySelector(".trPct").value) || 0);
     const pctSum = pcts.reduce((a, b) => a + b, 0);
     rows.forEach((r, i) => {
       const count = parseInt(r.querySelector(".trCount").value) || 0;
       const dollars = pctSum ? total * (pcts[i] / 100) : 0;
-      r.querySelector(".trRowDollars").textContent = "$" + dollars.toFixed(2);
-      r.querySelector(".trRowPer").textContent = count ? "$" + (dollars / count).toFixed(2) : "—";
+      r.querySelector(".trRowDollars").textContent = noTotal ? "—" : "$" + dollars.toFixed(2);
+      r.querySelector(".trRowPer").textContent = count && !noTotal ? "$" + (dollars / count).toFixed(2) : "—";
     });
     const woPct = Math.max(0, parseFloat(ov.querySelector("#trWoPct").value) || 0), pePct = Math.max(0, parseFloat(ov.querySelector("#trPePct").value) || 0);
     const all = pctSum + woPct + pePct, left = 100 - all, over = all > 100.05, done = Math.abs(left) <= 0.05;

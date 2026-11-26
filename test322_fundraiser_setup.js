@@ -114,7 +114,9 @@ const PER = (amount, extra = {}) => ({ mode: "perPiece", amount, label: "Example
     ok(`and the owner's own "${taken}" is left as it was (no key, its own deduction type)`,
       same(d1.q("SELECT name, deductionType, systemKey FROM expense_categories WHERE name = ? COLLATE BINARY", taken), [{ name: taken, deductionType: "none", systemKey: null }]));
   }
-  ok("the Worker's migration list ships it, as its newest migration", MIGRATIONS.includes(MIGRATION) && MIGRATIONS[MIGRATIONS.length - 1] === MIGRATION);
+  // In its place in the list (later migrations may follow it), once.
+  ok("the Worker's migration list ships it, in order", MIGRATIONS.filter(m => m === MIGRATION).length === 1 &&
+    MIGRATIONS[MIGRATIONS.indexOf(MIGRATION) - 1] === "0109_estimates.sql" && MIGRATIONS.join() === MIGRATIONS.slice().sort().join());
   ok("and the list matches the migrations folder", same(MIGRATIONS, fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_.*\.sql$/.test(f)).sort()));
 
   // =====================================================================================================

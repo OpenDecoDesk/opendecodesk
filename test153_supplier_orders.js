@@ -1,6 +1,6 @@
 const fs = require("fs");
 const { storefrontPage } = require("./testlib/storefront-page");
-const { may, lowest, pageLowest, asRole } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
+const { may, lowest, pageLowest, asRole, adminAs } = require("./testlib/roles");   // the built-in roles (functions/_lib/permissions.js)
 const { autoConfirm } = require("./testlib/confirm.js");
 const { ADMIN_ORIGIN } = require("./testlib/hosts.js");
 const { JSDOM, ResourceLoader } = require("jsdom");
@@ -22,7 +22,8 @@ const built = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + 
   require("fs").readFileSync(__dirname + "/functions/_lib/permissions.js", "utf8").replace(/export (async function|function|const)/g, "$1") + "\n" +
   // The real roles (functions/_lib/permissions.js) for the role the request names; "staff" (any signed-in user) as adminAuth.js reads it.
   "const requireAdmin = async (env, host, key, request, msg, need) => { const r = (request.headers.get('x-role') || 'admin'); return roleAllows(DEFAULT_ROLES[r] || null, need === 'staff' ? '*' : need) ? null : new Response(JSON.stringify({ status: 'error', code: 'forbidden' }), { status: 403 }); };\n" +
-  "const adminActor = () => 'owner@test'; const adminUser = () => null; const copyVendorImage = async () => ({ ok: false });\n" +
+  // …and the same role signed in (testlib/roles adminAs): the cost checks in orders.js fail closed without a user.
+  "const adminActor = () => 'owner@test'; const copyVendorImage = async () => ({ ok: false });\n" + adminAs({ roleFrom: "request.headers.get('x-role') || 'admin'" }) + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +

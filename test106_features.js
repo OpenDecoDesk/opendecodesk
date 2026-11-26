@@ -425,7 +425,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   const ALWAYS_ON = [
     "getAccountingSettings", "updateAccountingSettings",   // Global settings → Bookkeeping: Home and the reports use it with any feature set
     // Orders, payments, fulfilment stages (incl. Mark manufactured, which uses blanks)
-    "listOrgs", "getOrders", "getOrdersByIds", "getOrdersAllShops", "getOpenOrders", "getPendingCommunications", "sendTestEmail", "checkMailbox", "setOrderCompleted", "useBlanksFromStock", "markPaidManual", "resendEmail",
+    "listOrgs", "getOrders", "getOrdersByIds", "getOrdersAllShops", "getOpenOrders", "getPendingCommunications", "clearSystemIssues", "sendTestEmail", "checkMailbox", "setOrderCompleted", "useBlanksFromStock", "markPaidManual", "resendEmail",
     "addPayment", "recordRefund", "setRefundShipping", "backfillStripeFees", "setPaymentDate", "deletePayment", "voidPayment", "setDiscount", "deleteOrder", "voidOrder",
     "updateCustomerInfo", "createLocalSale", "setPayOnDelivery", "importOrders", "createTestTransaction", "setFulfillmentStage", "bulkSetFulfillmentStage", "cancelLineItem", "bulkCancelLineItems", "setLineItemRefund", "editOrder",
     "setRushFee", "recordTracking", "bulkRecordTracking", "setShippingInfo", "setShippingPaidAmount", "createShippingPaymentLink", "sendInvoice", "getInvoiceDocument", "getOrderPdf", "updateOrderDate", "setOrderDates", "setOrderDueDate", "bulkSetDueDate",

@@ -19,10 +19,23 @@ set -uo pipefail
 FAIL_LINE='(^|[[:space:]])false$|: (0|undefined|null)$|:[[:space:]]*$'
 STACK_LINE='^[[:space:]]+at '
 
+# Each file gets at most 5 minutes where a `timeout` command exists (Linux, so CI): a test that hangs then
+# fails the run with its own line instead of holding the job until GitHub stops it with no clue which file it
+# was. macOS has no `timeout`, so a local run there is unchanged. timeout exits 124 when it stops a file.
+TIME_LIMIT=300
+run=(node)
+if command -v timeout >/dev/null 2>&1; then run=(timeout "$TIME_LIMIT" node); fi
+
 fail=0
 for f in test*.js; do
-  out=$(node "$f" 2>&1)
+  out=$("${run[@]}" "$f" 2>&1)
   code=$?
+  if [ $code -eq 124 ] && [ "${run[0]}" = timeout ]; then
+    echo "FAIL (timed out after ${TIME_LIMIT}s): $f"
+    echo "$out" | tail -30
+    fail=1
+    continue
+  fi
   if [ $code -ne 0 ]; then
     echo "FAIL (exit $code): $f"
     echo "$out" | tail -30

@@ -29,6 +29,8 @@ const EXT_TYPES = { jpg: "image/jpeg", png: "image/png", webp: "image/webp", pdf
 const MAX_BYTES = 10 * 1024 * 1024;
 const LINK_TTL_SECONDS = 60;
 export const RECEIPT_KEY_RE = /^receipts\/\d{4}\/[a-z0-9]{32}\.(jpg|png|webp|pdf)$/;
+// The screens of the gate below whose Read alone opens a receipt (their View buttons). Blanks and Transfers ask for more.
+const RECEIPT_SCREENS_ = [["finance.expenses", "read"], ["finance.money", "read"], ["finance.accountviewer", "read"], ["orders.payments", "read"], ["catalog.brandApprovals", "read"]];
 
 export async function onRequestPost({ request, env }) {
   const url = new URL(request.url);
@@ -36,10 +38,19 @@ export async function onRequestPost({ request, env }) {
 
   // Receipts belong to expenses, money entries and payments (functions/_lib/permissions.js). Looking at one is for
   // anyone who can see a screen that shows a receipt's View button (expenses, money, the account viewer, payments,
-  // brand approvals, blank stock movements); uploading one needs Edit on expenses, money or payments, checked below.
+  // brand approvals, blank and transfer stock); uploading one needs Edit on expenses, money or payments, checked below.
   const denied = await requireAdmin(env, classifyHost(url.hostname, null, env), request.headers.get("X-Admin-Key"), request, "Not available here.",
-    [["finance.expenses", "read"], ["finance.money", "read"], ["finance.accountviewer", "read"], ["orders.payments", "read"], ["catalog.brandApprovals", "read"], ["inventory.blanks", "read"]]);
+    [["finance.expenses", "read"], ["finance.money", "read"], ["finance.accountviewer", "read"], ["orders.payments", "read"], ["catalog.brandApprovals", "read"],
+      ["inventory.blanks", "read"], ["inventory.transfers", "read"]]);
   if (denied) return denied;
+  // Blanks and Transfers: a vendor invoice shows what the stock cost, and Read there is stock and details only (owner's
+  // decision, 2026-11-23). So a role that gets here only through one of them needs Edit there (it receives the stock), or
+  // Read there together with costs.view — the same roles orders.js sends a movement's receipt to.
+  const roleOn = typeof adminUser === "function" && !!(adminUser(request) || {}).roleInfo;   // none: a test's stand-in, as below
+  if (roleOn && !RECEIPT_SCREENS_.some(([fn, level]) => adminCan(request, fn, level)) &&
+      !adminCan(request, "inventory.blanks", "edit") && !adminCan(request, "inventory.transfers", "edit") && !adminCan(request, "costs.view", "read")) {
+    return jsonResponse({ status: "error", code: "forbidden", message: "Your role can't see what stock cost, so it can't open vendor receipts. Ask an admin." }, 403);
+  }
   // Global settings → Features → Bookkeeping switched off: no receipt uploads or links.
   if (await featureIsOff(env, "bookkeeping")) return featureOffResponse("bookkeeping", "Bookkeeping");
   if (!env.RECEIPTS) return jsonResponse({ status: "error", message: "Receipt storage isn't set up (RECEIPTS bucket binding)." }, 500);

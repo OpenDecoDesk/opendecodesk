@@ -37,6 +37,17 @@ async function sessionWorks(storageState) {
 
 const menu = (page) => page.getByRole("navigation", { name: "Admin" });
 
+// "Try again" after a refused sign-in, until the sign-in box is open. A click that lands while the refused sign-in
+// is still finishing is taken as part of that sign-in (one sign-in at a time) and opens nothing, as it would for a
+// person, who would click again.
+async function tryAgain(page) {
+  const dialog = page.getByRole("dialog", { name: "Sign in" });
+  await expect(async () => {
+    if (!(await dialog.isVisible())) await page.getByRole("button", { name: "Try again" }).click({ timeout: 3_000 });
+    await expect(dialog).toBeVisible({ timeout: 3_000 });
+  }).toPass({ timeout: 20_000 });
+}
+
 test.describe("signing in and out", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
@@ -48,13 +59,13 @@ test.describe("signing in and out", () => {
     await expect(page.locator("#adminPanel")).toContainText("Passphrase required.");
     await expect(menu(page)).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Try again" }).click();
+    await tryAgain(page);
     await signInThroughPage(page, { email: "nobody-" + slug("x") + "@example.test", password: owner.password });
     await expect(toast(page).last()).toContainText("That email and password don't match.");
     await expect(menu(page)).toHaveCount(0);
 
     // The right password still works afterwards.
-    await page.getByRole("button", { name: "Try again" }).click();
+    await tryAgain(page);
     await signInThroughPage(page, owner);
     await expect(menu(page)).toBeVisible();
   });
@@ -71,8 +82,9 @@ test.describe("signing in and out", () => {
     await menu(page).getByRole("button", { name: "Sign out", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
     await expect(menu(page)).toHaveCount(0);
-    // The cookie the browser had is refused now, wherever it is replayed from.
-    expect(await sessionWorks(signedIn)).toBe(false);
+    // The cookie the browser had is refused now, wherever it is replayed from. The page sends the sign-out without
+    // waiting for it, so the server may take a moment longer than the sign-in box to catch up.
+    await expect.poll(() => sessionWorks(signedIn), { timeout: 10_000 }).toBe(false);
   });
 
   test("two-step sign-in: a wrong code is refused, the authenticator's code signs in", async ({ page }) => {
@@ -88,7 +100,7 @@ test.describe("signing in and out", () => {
     await expect(menu(page)).toHaveCount(0);
     await expect(page.locator("#adminPanel")).toContainText("Passphrase required.");
 
-    await page.getByRole("button", { name: "Try again" }).click();
+    await tryAgain(page);
     const step = await signInThroughPage(page, { email: u.email, password: u.password, totpSecret: u.totpSecret, lastStep: u.lastStep });
     await expect(menu(page)).toBeVisible();
     updateCredentials(c => { c.users.twostep.lastStep = Math.max(step, c.users.twostep.lastStep || -1); });
@@ -176,7 +188,7 @@ test.describe("a session that ends", () => {
     await page.reload();
     await expect(page.locator("#adminPanel")).toContainText("Session expired — please log in again.");
     await expect(menu(page)).toHaveCount(0);
-    await page.getByRole("button", { name: "Try again" }).click();
+    await tryAgain(page);
     await signInThroughPage(page, u);
     await expect(menu(page)).toBeVisible();
   });
@@ -220,7 +232,7 @@ test.describe("a session that ends", () => {
 
     await signInThroughPage(page, { email: u.email, password: u.password });
     await expect(toast(page).last()).toContainText("That email and password don't match.");
-    await page.getByRole("button", { name: "Try again" }).click();
+    await tryAgain(page);
     await signInThroughPage(page, { email: u.email, password: next });
     await expect(menu(page)).toBeVisible();
   });
@@ -344,13 +356,13 @@ test.describe("users and roles", () => {
 
     // A disabled user can't sign in.
     await theirPage.reload();
-    await theirPage.getByRole("button", { name: "Try again" }).click();
+    await tryAgain(theirPage);
     await signInThroughPage(theirPage, u);
     await expect(toast(theirPage).last()).toContainText("That email and password don't match.");
 
     await row().getByRole("button", { name: "Enable" }).click();
     await expect(toast(page)).toContainText("Enabled.");
-    await theirPage.getByRole("button", { name: "Try again" }).click();
+    await tryAgain(theirPage);
     await signInThroughPage(theirPage, u);
     await expect(menu(theirPage)).toBeVisible();
   });
@@ -367,7 +379,7 @@ test.describe("users and roles", () => {
     await theirPage.goto(ADMIN + "/");
     await signInThroughPage(theirPage, { email: u.email, password: u.password });
     await expect(toast(theirPage)).toContainText("That email and password don't match.");
-    await theirPage.getByRole("button", { name: "Try again" }).click();
+    await tryAgain(theirPage);
     await signInThroughPage(theirPage, { email: u.email, password: temp });
     await expect(theirPage.getByRole("heading", { name: "Choose your password", level: 2 })).toBeVisible();
     await expect(menu(theirPage)).toHaveCount(0);

@@ -31,7 +31,7 @@ const download = new Function(hostSrc + "\n" + httpSrc + "\n" + dbSrc + "\n" + e
   strip(read("functions/api/download.js")) + "\nreturn onRequestGet;")();
 const catalog = new Function(hostSrc + "\n" + httpSrc + "\nconst getReadyToShipByOrg = async () => []; const getBlankReadyByOrg = async () => ({});\n" +
   "const getDraftCatalogShop = async () => null; const verifyPreviewToken = async () => false;\nlet getCatalogData;\n" +
-  "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn { get: onRequestGet, set: (f) => { getCatalogData = f; } };")();
+  "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn { get: onRequestGet, set: (f) => { getCatalogData = f; }, forget: () => _resetShopStock() };")();
 
 // The admin's order cell, from public/admin.js, with what it calls stubbed.
 const adminSrc = read("public/admin.js");
@@ -89,7 +89,8 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("the product with no file says why it isn't shown", /digitalNoFiles/.test(codes("empty")) && /isn't shown in the shop until one is added/.test(codes("empty")));
   ok("…and the one with a file doesn't", !/digitalNoFiles/.test(codes("rose")));
   await lib.addProductFile(d1, "acme", "empty", { fileKey: "digital/acme/empty/" + "b".repeat(32) + ".pdf", fileName: "pattern.pdf", fileExt: "pdf", bytes: 30 });
-  ok("once a file is added it's shown at once", (await shopProducts()).ids === "cap,empty,rose");
+  catalog.forget();   // the shop's stock and files are kept 30 seconds (catalog.js readShopStock_): as if they had passed
+  ok("once a file is added it's shown (within 30 seconds)", (await shopProducts()).ids === "cap,empty,rose");
 
   console.log("\n=== An order of only downloads: received → paid → completed ===");
   r = await shop({ orderId: "D-1", items: [{ productId: "rose", qty: 1 }] });

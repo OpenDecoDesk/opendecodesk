@@ -95,14 +95,14 @@ const tick = (ms) => new Promise(r => setTimeout(r, ms));
     "let _data, _fail = false; const getCatalogData = async () => _data;\n" +
     "const getReadyToShipByOrg = (db, o) => L.getReadyToShipByOrg(db, o);\n" +
     "const getBlankReadyByOrg = async (db, o) => { if (_fail) throw new Error('boom'); return L.getBlankReadyByOrg(db, o); };\n" +
-    "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn { onRequestGet, set: (d) => { _data = d; }, fail: (f) => { _fail = f; } };")(lib);
+    "const getCatalogShop = async (env, orgId) => (((await getCatalogData(env)) || {}).orgs || {})[orgId] || null;\n" + strip(read("functions/api/catalog.js")) + "\nreturn { onRequestGet, set: (d) => { _data = d; }, fail: (f) => { _fail = f; }, forget: () => _resetShopStock() };")(lib);
   catalogGet.set(await lib.getPublicCatalogData(d1));
   const get = async () => JSON.parse(await (await catalogGet.onRequestGet({ request: { url: "https://club.example.com/api/catalog" }, env: { DB: d1 } })).text());
   let sent = await get();
   const prod = (id) => sent.catalog.products.find(p => p.productId === id || p.id === id);
   ok("each product carries blankStock (color → size → n)", prod("tee").blankStock[""].M === 3 && prod("polo").blankStock.Navy.M === 3 && prod("cap").blankStock[""][""] === 9);
   ok("a product with none says null", prod("scrap").blankStock === null);
-  catalogGet.fail(true);
+  catalogGet.forget(); catalogGet.fail(true);   // (the counts are kept 30 seconds: forget them, as if that had passed)
   const ce = console.error; console.error = () => {};
   sent = await get();
   console.error = ce;
@@ -112,6 +112,7 @@ const tick = (ms) => new Promise(r => setTimeout(r, ms));
   console.log("\n=== The shop page ===");
   // Finished stock on the cap: 2 decorated pieces win over 9 blanks.
   d1._raw.exec(`INSERT INTO ready_to_ship (orgId, productId, size, quantity, updatedAt) VALUES ('club','cap','',2,'t')`);
+  catalogGet.forget();
   const dom = new JSDOM(storefrontPage(), { runScripts: "dangerously", resources: "usable", url: "https://club.example.com/", pretendToBeVisual: true,
     beforeParse(win){ win.fetch = async (url) => { const res = await catalogGet.onRequestGet({ request: { url: win.location.origin + url }, env: { DB: d1 } });
       const text = await res.text(); return { ok: true, status: 200, json: async () => JSON.parse(text), text: async () => text }; }; } });

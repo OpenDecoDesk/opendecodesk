@@ -112,4 +112,6 @@ export const MIGRATIONS = [
   "0108_customers.sql",
   "0109_estimates.sql",
   "0110_fundraising.sql",
+  "0111_order_tracking_checked.sql",
+  "0112_growth_indexes.sql",
 ];

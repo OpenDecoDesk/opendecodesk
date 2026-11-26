@@ -34,6 +34,71 @@ import { getCatalogData, getCatalogShop } from "../_lib/catalogCache.js";
 import { jsonResponse } from "../_lib/http.js";
 import { getReadyToShipByOrg, getBlankReadyByOrg, getDraftCatalogShop, verifyPreviewToken } from "../_lib/db.js";
 
+// ---- The shop page's stock, kept 30 seconds ----
+// Every view of a shop page needs the shop's finished stock (getReadyToShipByOrg), which of its digital products have
+// files, and its blanks' free stock (getBlankReadyByOrg): about six D1 queries, two of them over every open order. A
+// shop's launch (a team's parents opening the link at once) or a crawler would repeat them on every view, so the
+// answers are kept SHOP_STOCK_TTL_MS per shop: in this isolate's memory (the shops used most recently, at most
+// SHOP_STOCK_MEMORY_MAX), and in the Cache API for this colo's other isolates. So the stock badges and "ready to
+// decorate" counts can be up to 30 seconds behind. Placing an order never reads them: a line is filled from stock
+// only if the database still has the pieces when the order is written (db.js insertOrder's guarded statement).
+// A read that failed isn't kept (the next view tries again), and an admin's draft preview always reads fresh.
+// The key carries the request's host as well as the shop, so two environments on one zone never share an entry.
+// Kept objects are shared between requests: they're only read, never changed.
+const SHOP_STOCK_TTL_MS = 30_000;
+const SHOP_STOCK_MEMORY_MAX = 50;
+const SHOP_STOCK_READ_AT = "X-Stock-Read-At";
+const _shopStock = new Map();   // key → { data, at }, the one used longest ago first
+function rememberShopStock_(key, data, at){
+  _shopStock.delete(key); _shopStock.set(key, { data, at });
+  while(_shopStock.size > SHOP_STOCK_MEMORY_MAX) _shopStock.delete(_shopStock.keys().next().value);
+}
+// Test hook (the harnesses load this file's source): forgets every shop's stock kept in memory.
+function _resetShopStock(){ _shopStock.clear(); }
+// { stockRead, filesRead, blankRead }, each {v} or {e} (filesRead null when the files aren't wanted), as the page
+// builds them; from memory, the Cache API, or fresh from D1 (and then kept, when all of them were read).
+async function readShopStock_(env, orgId, { host = "", wantFiles = false, fresh = false, waitUntil } = {}){
+  const key = "https://shop-stock.internal/" + encodeURIComponent(host) + "/" + encodeURIComponent(orgId);
+  const fits = (d) => d && typeof d === "object" && (!wantFiles || Array.isArray(d.files));
+  const asReads = (d) => ({ stockRead: { v: d.stock }, filesRead: wantFiles ? { v: { results: d.files } } : null, blankRead: { v: d.blank } });
+  const cache = !fresh && typeof caches !== "undefined" && caches && caches.default ? caches.default : null;
+  if(!fresh){
+    const now = Date.now(), mem = _shopStock.get(key);
+    if(mem && now - mem.at < SHOP_STOCK_TTL_MS && fits(mem.data)){ rememberShopStock_(key, mem.data, mem.at); return asReads(mem.data); }
+    if(cache){
+      try{
+        const hit = await cache.match(key);
+        const at = hit ? Number(hit.headers.get(SHOP_STOCK_READ_AT)) || 0 : 0;
+        if(hit && now - at < SHOP_STOCK_TTL_MS){
+          const data = await hit.json();
+          if(fits(data)){ rememberShopStock_(key, data, at); return asReads(data); }
+        }
+      }catch(e){ /* a Cache API failure only costs fresh reads */ }
+    }
+  }
+  // Three fresh reads, made at the same time. Each one failing only leaves its part out.
+  const settle = (read) => Promise.resolve().then(read).then(v => ({ v }), e => ({ e }));
+  const [stockRead, filesRead, blankRead] = await Promise.all([
+    settle(() => getReadyToShipByOrg(env.DB, orgId)),
+    wantFiles ? settle(() => env.DB.prepare("SELECT DISTINCT productId FROM product_files WHERE orgId = ?").bind(orgId).all()) : null,
+    settle(() => getBlankReadyByOrg(env.DB, orgId)),
+  ]);
+  if(!fresh && !stockRead.e && !blankRead.e && !(filesRead && filesRead.e)){
+    const at = Date.now();
+    const data = { stock: stockRead.v, files: filesRead ? ((filesRead.v || {}).results || []) : null, blank: blankRead.v };
+    rememberShopStock_(key, data, at);
+    if(cache){
+      try{
+        const put = cache.put(key, new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json",
+          "Cache-Control": "max-age=" + Math.round(SHOP_STOCK_TTL_MS / 1000), [SHOP_STOCK_READ_AT]: String(at) } }));
+        if(typeof waitUntil === "function") waitUntil(Promise.resolve(put).catch(() => {}));
+        else await put;
+      }catch(e){ /* kept in memory; another isolate reads it again */ }
+    }
+  }
+  return { stockRead, filesRead, blankRead };
+}
+
 // Computes which payment methods are enabled for an org.
 // Result is the intersection of:
 //   - globalSettings.enabledPayments (admin-set global toggles)
@@ -311,18 +376,15 @@ export async function onRequestGet(context){
   const enabledPayments = computeEnabledPayments(org, catalogData.globalSettings, !!env.STRIPE_SECRET_KEY);
   const fundraiserText = fundraiserShopText_(org.fundraiser);
 
-  // Three fresh reads (not cached — they change with every order), made at the same time: finished stock, the digital
-  // products' files and the blanks' free stock. Each one failing only leaves its part out.
+  // The shop's stock block — finished stock, the digital products' files and the blanks' free stock — kept up to 30
+  // seconds per shop (readShopStock_ above; a draft preview reads it fresh). Each part that can't be read is left out.
   let shownProducts = org.products;
-  const wantFiles = shownProducts.some(p => p.digital) && env.DB && features.digital !== false;
-  const settle = (read) => Promise.resolve().then(read).then(v => ({ v }), e => ({ e }));
-  const [stockRead, filesRead, blankRead] = env.DB ? await Promise.all([
-    settle(() => getReadyToShipByOrg(env.DB, orgId)),
-    wantFiles ? settle(() => env.DB.prepare("SELECT DISTINCT productId FROM product_files WHERE orgId = ?").bind(orgId).all()) : null,
-    settle(() => getBlankReadyByOrg(env.DB, orgId)),
-  ]) : [null, null, null];
+  const wantFiles = !!(shownProducts.some(p => p.digital) && env.DB && features.digital !== false);
+  const { stockRead, filesRead, blankRead } = env.DB
+    ? await readShopStock_(env, orgId, { host: url.host, wantFiles, fresh: preview, waitUntil: context.waitUntil?.bind(context) })
+    : { stockRead: null, filesRead: null, blankRead: null };
 
-  // Fetch ready-to-ship stock fresh from D1 (not cached — stock changes with every fulfillment).
+  // Ready-to-ship stock (up to 30 seconds old; an order is still filled from stock only if the database has the pieces).
   // stock: {size: n} for a product with no choices; stockVariants: {combination key: {size: n}} for one with
   // color and graphic choices (migrations/0080 — storefront.js's stockVariantKey_ builds the key from the picks).
   let stockByProduct = {}, stockByVariant = {};
@@ -345,8 +407,9 @@ export async function onRequestGet(context){
     }
   }
   // Digital products (migrations/0086) are only shown with at least one file to download, and not at all while the
-  // Digital products feature is off (they can't be ordered then). Files are read fresh, like stock: adding one shows the
-  // product at once. If they can't be read, the digital products are left out rather than sold with nothing to send.
+  // Digital products feature is off (they can't be ordered then). Which have files is read with the stock: adding one
+  // shows the product within 30 seconds (at once in the draft preview). If they can't be read, the digital products are
+  // left out rather than sold with nothing to send.
   if(shownProducts.some(p => p.digital)){
     let withFiles = new Set();
     if(wantFiles){

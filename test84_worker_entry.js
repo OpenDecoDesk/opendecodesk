@@ -94,7 +94,7 @@ const path = require("path");
     console.log("an off-hour tick does nothing:", off.ran === false);
     const { makePlatformDb, platformGlobals } = require("./testlib/platform-db");
     const DB = await makePlatformDb();
-    const res = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T10:00:00Z") }, { DB, TIMEZONE: "America/New_York" }); // no secrets/orgs table → the roll-up can't complete
+    const res = await w.handleScheduled({ scheduledTime: Date.parse("2026-07-15T10:00:00Z") }, { DB, TIMEZONE: "America/New_York", CF_EMAIL_API_TOKEN: "test-token", CF_ACCOUNT_ID: "ACCT" }); // email set up, but no orgs table → the roll-up can't complete
     const issue = DB.q("SELECT group_concat(kind) AS value FROM system_issues");
     console.log("an on-hour tick runs the roll-up:", res.ran === true);
     console.log("a roll-up that fails is recorded for the owner (digest_failed):", res.ok === false && issue.length === 1 && /digest_failed/.test(issue[0].value));

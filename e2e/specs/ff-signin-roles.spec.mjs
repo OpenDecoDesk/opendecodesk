@@ -68,8 +68,10 @@ function people(api, workerIndex) {
 // What the account list holds for a role kept from the business's money: these four, nothing else.
 const NAME_FIELDS = ["active", "id", "name", "type"];
 const MONEY_FIELDS = ["balance", "openingBalance", "openingDate", "moves", "csvMapping"];
+// Every account the full list had (other specs running alongside may have added more since), by name only.
 const expectNamesOnly = (reply, full) => {
-  expect(reply.accounts.map(a => a.name)).toEqual(full.accounts.map(a => a.name));
+  const names = reply.accounts.map(a => a.name);
+  for (const a of full.accounts) expect(names).toContain(a.name);
   for (const a of reply.accounts) expect(Object.keys(a).sort()).toEqual(NAME_FIELDS);
   for (const f of MONEY_FIELDS) expect(JSON.stringify(reply), "no " + f + " in the reply").not.toContain('"' + f + '"');
   expect(reply.defaults).toEqual({});
@@ -182,7 +184,10 @@ test("Back office: the payment window lists the accounts by name, and the accoun
   await expect(pm).toContainText(/Amount due\s*\$15\.00/);
   const picker = pm.locator("#pmAccount");
   await expect(picker).toBeVisible();
-  await expect(picker.locator("option")).toHaveText(active);
+  // Every active account (other specs running alongside may have added more since the list above was read).
+  await expect(picker.locator("option").first()).toBeAttached();
+  const offered = await picker.locator("option").allTextContents();
+  for (const name of active) expect(offered).toContain(name);
   // Choosing a method still moves the picker to the account that method usually goes to (by the account's type).
   const cash = full.accounts.find(a => a.active && a.type === "cash");
   if (cash) {
@@ -221,8 +226,12 @@ test("Blanks at Edit only: Receive order opens and offers what it was paid from"
     await expect(dlg).toBeVisible();
     const paidFrom = dlg.locator("#roPaidFrom");
     await expect(paidFrom).toBeVisible();
-    // Every active account by name, then personal funds — not "(accounts unavailable)".
-    await expect(paidFrom.locator("option").filter({ hasNotText: /^Choose…$/ })).toHaveText([...active, "Personal funds (owner paid)"]);
+    // Every active account by name, then personal funds — not "(accounts unavailable)". Other specs running at the
+    // same time may add accounts meanwhile, so the list is checked for these names, not for exactly these.
+    const offered = paidFrom.locator("option").filter({ hasNotText: /^Choose…$/ });
+    await expect(offered.last()).toHaveText("Personal funds (owner paid)");
+    const names = await offered.allTextContents();
+    for (const name of active) expect(names).toContain(name);
     await expect(paidFrom).not.toContainText("accounts unavailable");
     // One can be chosen, and the form's own blank is on offer.
     await paidFrom.selectOption({ label: active[0] });

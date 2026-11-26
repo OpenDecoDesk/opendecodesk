@@ -352,6 +352,73 @@ test("a role that only looks at Blanks gets them without costs, and the Blanks p
   }
 });
 
+// The same rule for what a blank or transfer was bought at (review round 2): a received blank's history carried its
+// vendor receipt and a note naming the landed cost ("Received (landed cost incl. $2.50 shipping & other costs)"), and
+// /api/receipt opened that invoice for Read on Blanks. Now this role sees the movement as "Received", with no Receipt
+// button, and gets no link; a transfer sheet and Use transfers for past orders come without their money too.
+test("a role that only looks at Blanks or Transfers gets no receipt, landed cost or sheet money", async ({ browser }, testInfo) => {
+  const owner = await apiContext("owner", testInfo.workerIndex);
+  const theirs = await client(D.user.state, testInfo.workerIndex);
+  const opened = [];
+  try {
+    const api = (action, body, opts) => callApi(owner, action, body, opts);
+    // The owner attaches the vendor's invoice to a blank order with $2.50 of shipping (Blanks → Receive order).
+    const PDF = Buffer.from("%PDF-1.4\n1 0 obj << >> endobj\ntrailer << >>\n%%EOF\n", "latin1");
+    const res = await owner.post("/api/receipt?name=" + encodeURIComponent("blank-invoice.pdf"), { headers: { "Content-Type": "application/pdf" }, data: PDF });
+    const up = await res.json();
+    expect(res.ok(), JSON.stringify(up)).toBe(true);
+    const blankName = uniq("Sample Receipt Blank");
+    const blankId = (await api("createBlank", { name: blankName, brand: "Test Blank Co", productType: "Tee",
+      colors: [{ color: "Navy", sizes: [{ size: "M", quantity: 0, purchasePrice: 0 }] }] })).id;
+    await api("receiveBlankOrder", { requestId: slug("receive"), receivedAt: today(), paidPersonally: true, vendorRef: "INV-RCPT-1", extraCost: 2.5,
+      receiptKey: up.key, receiptName: "blank-invoice.pdf", groups: [{ blankId, lines: [{ color: "Navy", size: "M", qty: 4, unitCost: 5 }] }] });
+    const ownerMove = (await api("getBlankMovements", { blankId })).movements.find(m => m.vendorRef === "INV-RCPT-1");
+    expect(ownerMove).toMatchObject({ receiptKey: up.key, note: "Received (landed cost incl. $2.50 shipping & other costs)" });
+
+    // Their answer: the movements (landed cost can split a size in two, a cent apart) and their count, without the
+    // receipt or the landed cost.
+    const theirMoves = (await callApi(theirs, "getBlankMovements", { blankId })).movements.filter(m => m.vendorRef === "INV-RCPT-1");
+    expect(theirMoves.reduce((n, m) => n + m.qtyDelta, 0)).toBe(4);
+    for (const m of theirMoves) expect(m.note).toBe("Received");
+    expect(costKeys(theirMoves, /^(receiptKey|receiptName|unitCost)$/)).toEqual([]);
+    // …and the receipt itself is refused to them.
+    const link = await theirs.post("/api/receipt", { data: { key: up.key } });
+    expect(link.status(), "Read on Blanks alone gets no receipt link").toBe(403);
+
+    // The page: Blanks → History shows "Received", no Receipt button and no dollar amount.
+    const page = await browserAs(browser, D.user.state, testInfo.workerIndex, opened);
+    await openAdmin(page, "inventory");
+    await page.getByRole("searchbox", { name: /Search name, vendor/ }).fill(blankName);
+    await page.getByRole("row", { name: new RegExp(blankName) }).getByRole("button", { name: "History" }).click();
+    const hist = page.getByRole("dialog", { name: "Stock history — " + blankName });
+    const row = hist.getByRole("row", { name: /Navy · M Received \+\d/ }).first();
+    await expect(row).toBeVisible();
+    await expect(row).toContainText("INV-RCPT-1");
+    await expect(hist.getByRole("button", { name: /Receipt/ })).toHaveCount(0);
+    await expect(hist.locator("#histBody")).not.toContainText("$");
+    await expect(hist.locator("#histBody")).not.toContainText("landed cost");
+
+    // A transfer sheet (Open sheet reads it) and Use transfers for past orders: the owner's have their amounts, theirs don't.
+    const purchase = (await api("getTransferMovements", { transferId: D.transferId })).movements.find(m => m.kind === "purchase");
+    const ownerSheet = (await api("getTransferSheet", { movementId: purchase.id })).sheet;
+    expect(ownerSheet).toMatchObject({ total: 25 });
+    expect(ownerSheet.rows[0]).toMatchObject({ count: 10, amount: 25, perItem: 2.5 });
+    const theirSheet = (await callApi(theirs, "getTransferSheet", { movementId: purchase.id })).sheet;
+    expect(theirSheet.rows[0]).toMatchObject({ transferId: D.transferId, count: 10, pctOfSheet: 100 });
+    expect(costKeys(theirSheet, /^(total|totalCents|stockCents|amount|perItem|cents|receiptKey|receiptName)$/)).toEqual([]);
+    const ownerCatchUp = await api("previewTransferCatchUp");
+    expect(ownerCatchUp).toHaveProperty("total");
+    expect(ownerCatchUp).toHaveProperty("recostTotal");
+    const theirCatchUp = await callApi(theirs, "previewTransferCatchUp");
+    expect(theirCatchUp.totalUnits).toBe(ownerCatchUp.totalUnits);
+    expect(costKeys(theirCatchUp, /^(unitCost|cost|total|recostTotal)(Cents)?$/)).toEqual([]);
+  } finally {
+    await owner.dispose();
+    await theirs.dispose();
+    await closeBrowsers(opened);
+  }
+});
+
 // D1 counts the rows a statement's triggers change in meta.changes too: the blank_sizes UPDATE reads 2 (its row and
 // the list-cache trigger's, lcv_blank_sizes_upd). Make for stock once took that as a lost race and answered 409
 // "Those blanks were just used by something else" after making the pieces (a retry made them twice). It must say ok.

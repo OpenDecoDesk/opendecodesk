@@ -1,7 +1,7 @@
 name: Nightly D1 backup
 
 # Exports the D1 database to a private R2 bucket every night (and on demand from the Actions tab):
-# <db>/daily/<timestamp>.sql.gz, plus <db>/monthly/<YYYY-MM>.sql.gz on the 1st of the month. The daily
+# <db>/daily/<timestamp>.sql.gz, plus <db>/monthly/<YYYY-MM>.sql.gz from the month's first good run. The daily
 # copies are deleted after 35 days by a lifecycle rule you add to the bucket once; the monthly ones are kept.
 # See scripts/d1-backup.sh and docs/operations.md ("Backups") for setup, the rule, and restoring.
 #

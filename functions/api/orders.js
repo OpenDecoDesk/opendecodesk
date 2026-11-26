@@ -50,7 +50,7 @@ import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { readInvoiceWithAi } from "../_lib/invoiceAi.js";
 import { jsonResponse, featureOffResponse, signOrderToken, fetchWithTimeout } from "../_lib/http.js";
 import {
-  getAllOrgs, getOrgById, createOrg, updateOrg, cleanDeliveryOptions, setOrgDeliveryOptions, defaultDeliveryOptions, cleanShippingAddress, stagePrereqError, stageTimeError, shopTime_, ORDER_DATE_FIELDS, orderDatesError, setOrderDates, whyNotCompletable_, getSystemIssues,
+  getAllOrgs, getOrgById, createOrg, updateOrg, cleanDeliveryOptions, setOrgDeliveryOptions, defaultDeliveryOptions, cleanShippingAddress, stagePrereqError, stageTimeError, shopTime_, ORDER_DATE_FIELDS, orderDatesError, setOrderDates, whyNotCompletable_, getSystemIssues, clearSystemIssues,
   getProductsByOrg, getProductsByIds, priceLookups, productShipWeightOz, createProduct, updateProduct, setProductVisible,
   getGlobalSettings, setGlobalSettings, getMachineSettings, setMachineSettings, getPayOnDeliveryRule, setOrderPayOnDelivery,
   getShipFromAddress, setShipFromAddress, shipFromMissing, getBusinessProfile, setBusinessProfile, getLocaleSettings, setLocaleSettings, FEATURES, getFeatures, setFeatures, resolveTimeZone, setOrdersCompleted, getShippedAwaitingDelivery,
@@ -98,7 +98,7 @@ import {
   getLatestVerificationsByOrg,
   updateOrderShipping,
   addOrderPayment, getOrderPaymentById, setOrderDiscount,
-  getReadyToShipByOrg, upsertReadyToShipQty, addBlankSizes, getFinishedStock, makeForStock, setFinishedCount, getFinishedGoodsMovements,
+  getReadyToShipByOrg, getFinishedSetAside, upsertReadyToShipQty, addBlankSizes, getFinishedStock, makeForStock, setFinishedCount, getFinishedGoodsMovements,
   voidFinishedGoodsMovement, getFinishedGoodsValuation, getFinishedGoodsValuations, WRITEOFF_REASONS,
   updateOrderPlacedAt, setOrderDueDate,
   insertAuditLog, getAuditLog,
@@ -112,7 +112,7 @@ import {
   importStatementLines, autoMatchStatement, getStatementLine, matchStatementLine, unmatchStatementLine, setStatementLineIgnored,
   getReconciliationData, setReconciled, clearReconciled, isReconciled, saveCsvMapping, previewExpenseRows, landedCostLines, spreadCents,
   SCHEDULE_C_LINES, DEDUCTION_TYPES, DEPRECIATION_METHODS, listExpenseCategories, getExpenseCategory, findExpenseCategoryByName,
-  saveExpenseCategory, deleteExpenseCategory, listExpenses, getExpense, saveExpense, deleteExpense, expenseMonth, getExpenseSummary,
+  saveExpenseCategory, deleteExpenseCategory, listExpenses, getExpense, saveExpense, insertExpenses, deleteExpense, expenseMonth, getExpenseSummary,
   RECURRING_FREQUENCIES, recurringDueDates, recurringIndexAfter, listRecurringExpenses, getRecurringExpense, saveRecurringExpense, stopRecurringExpense,
   deleteRecurringExpense, recordDueRecurringExpenses, getRecurringExpensesRecorded,
   getRefundedCents, getDepositPayments, linkPaymentsToCashout, cashoutNetCents_,
@@ -593,6 +593,7 @@ const NO_MONTH_ACTIONS = new Set([
   "updateAccountingSettings", "updateMachineSettings", "updatePricingSettings", "updateRushSettings", "updateEmailSettings",
   "sendSampleEmail", "sendTestEmail", "checkMailbox", "updateDigitalSettings", "getCloudflareSetup", "connectCloudflare", "backfillStripeFees",
   "saveVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks", "deleteVendorConnection", "deleteOrphanImages",
+  "clearSystemIssues",   // Communications: the list of problems for the next roll-up
 ]);
 
 // Costs in a reply (stripCosts_ in handleOrdersPost_): which fields are costs, by kind of answer.
@@ -604,12 +605,22 @@ const COST_FIELDS_ = {
   // money — no average cost, vendor price (or when it was entered), MAP, movement cost, or anything worked out from them.
   blanks: (k) => /^(purchasePrice|vendorPrice|vendorPriceAt|mapPrice)(Cents)?$/.test(k),   // a blank's sizes
   blankPrices: (k) => /^(price|previous)(Cents)?$/.test(k),                                // a blank's vendor-price history
-  catchUp: (k) => /^(unitCost|cost|oldCost|total|replacedEstimate)(Cents)?$/.test(k),     // Use blanks for past orders
+  catchUp: (k) => /^(unitCost|cost|oldCost|total|replacedEstimate|recostTotal)(Cents)?$/.test(k),   // Use blanks / transfers for past orders
   vendorPlan: (k) => /^(price|current|map|mapCurrent)$/.test(k),                         // a vendor file's plan, per size
   vendorProducts: (k) => /^(prices|maps)$/.test(k),                                      // products fetched from a vendor
   colorGroups: (k) => /^(costs|sizePricing|flatPrice)$/.test(k),                         // color groups priced on blank cost
   blankOrder: (k) => /^(price|vendorPrice|vendorPriceAt|purchasePrice|cost)(Cents)?$/.test(k),   // Blanks to Order, free shipping
+  // A blank or transfer stock movement: its cost, and the vendor invoice it was received on (a receipt shows the prices).
+  // The "(landed cost incl. $X …)" part of its note goes too (movementCostsFor_).
+  movements: (k) => /^(cost|avgCost|value|unitCost)(Cents)?$/.test(k) || /^receipt(Key|Name)$/.test(k),
+  // A received transfer sheet (db.js getTransferSheet): its total, each row's dollars and per-item price, the written-off
+  // and personal amounts, and its invoice. The rows' % of the sheet, counts, vendor and date stay.
+  transferSheet: (k) => /^(total|stock|amount|perItem|cents)(Cents)?$/.test(k) || /^receipt(Key|Name)$/.test(k),
+  supplierOrders: (k) => /^(total|unit|price)(Cents)?$/.test(k),                         // a supplier order's total, its lines' prices
 };
+// The landed-cost part of a received blank's note, "(landed cost incl. $12.50 shipping & other costs)", as receiveBlanks
+// and Record order write it: money, so it is taken out when read for a role that isn't sent costs (old notes included).
+const LANDED_NOTE_RE_ = /\s*\(landed cost incl\.[^)]*\)/g;
 // A copy of `v` without the fields `drop` names, at any depth.
 const dropFields_ = (v, drop) => Array.isArray(v) ? v.map(x => dropFields_(x, drop))
   : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).filter(([k]) => !drop(k)).map(([k, x]) => [k, dropFields_(x, drop)])) : v;
@@ -847,6 +858,13 @@ async function handleOrdersPost_(context, listBefore = null) {
   // product) still sees them, as does a role with costs.view. `fn` is the screen's function, `kind` which fields
   // are costs (COST_FIELDS_); they are left out wherever they sit in the answer (a size row, its blank, a link).
   const stripCosts_ = (data, fn, kind) => seesPricing_() || can_(fn, "edit") ? data : dropFields_(data, COST_FIELDS_[kind]);
+  // Stock movements (Blanks or Transfers → History) the same way, without their receipt, and with their note's
+  // landed-cost amount taken out: Read there is stock and details only (owner's decision, 2026-11-23).
+  const movementCostsFor_ = (moves, fn) => seesPricing_() || can_(fn, "edit") ? moves
+    : dropFields_(moves, COST_FIELDS_.movements).map(m => m && typeof m.note === "string" ? { ...m, note: m.note.replace(LANDED_NOTE_RE_, "") } : m);
+  // Supplier orders: their total and line prices go with the costs, except to whoever receives blanks (Receive… fills
+  // its form from the order's prices, and Edit on Blanks is sent blank costs anyway).
+  const supplierOrderCostsFor_ = (data) => can_("inventory.blanks", "edit") ? data : stripCosts_(data, "inventory.supplierOrders", "supplierOrders");
   // The audit log's money entries (pricing settings, shop rate, payments, expenses) keep their row without costs.view,
   // not their detail: the amounts are in it.
   const auditCostsFor_ = (entries) => seesPricing_() ? entries : entries.map(e => {
@@ -2066,12 +2084,19 @@ async function handleOrdersPost_(context, listBefore = null) {
         if (!r.description) return bad(`Row ${i + 1}: description is required`);
         if (!cats.has(r.categoryId)) return bad(`Row ${i + 1}: choose a category`);
       }
-      const ids = [];
-      for (const r of rows) {
-        const cat = cats.get(r.categoryId);
-        ids.push(await saveExpense(env.DB, 0, { date: r.date, description: r.description, categoryId: cat.id, amount: r.amount, vendor: r.vendor,
-          businessUsePct: 100, receiptKey: "", receiptName: "", placedInService: cat.deductionType === "depreciation" ? r.date : null,
-          depMethod: cat.deductionType === "depreciation" ? "ask_cpa" : null, vendorChargedTax: true, accountId, paidPersonally }));
+      // One batch for the whole file (db.js insertExpenses): all the rows go in or none do, so a failure part-way
+      // can't leave half a file behind to be duplicated when it's imported again.
+      let ids;
+      try {
+        ids = await insertExpenses(env.DB, rows.map(r => {
+          const cat = cats.get(r.categoryId);
+          return { date: r.date, description: r.description, categoryId: cat.id, amount: r.amount, vendor: r.vendor,
+            businessUsePct: 100, receiptKey: "", receiptName: "", placedInService: cat.deductionType === "depreciation" ? r.date : null,
+            depMethod: cat.deductionType === "depreciation" ? "ask_cpa" : null, vendorChargedTax: true, accountId, paidPersonally };
+        }));
+      } catch (e) {
+        console.error("Expense import failed:", e);
+        return jsonResponse({ status: "error", message: "The import failed, so none of its rows were saved. Try again." }, 500);
       }
       audit({ orgId: null, orderId: null, action: "expense.imported", detail: { count: ids.length, total: Math.round(rows.reduce((a, r) => a + r.amountCents, 0)) / 100,
         paidFrom: paidPersonally ? "personal" : accountId, ids: ids.slice(0, 100) } });
@@ -2166,13 +2191,13 @@ async function handleOrdersPost_(context, listBefore = null) {
     const state = await getDigestState(env.DB);
     // Run delivery check first so newly-delivered notices are included below.
     const deliveries = await checkShippedDeliveries(env).catch(() => ({ inTransit: [], delivered: [], pickedUp: [], awaitingPickup: [] }));
-    const [{ orders }, notices, orgs, security, issues, awaitingBlanks] = await Promise.all([
+    const [{ orders, more }, notices, orgs, security, issues, awaitingBlanks] = await Promise.all([
       getOrdersForDigest(env.DB, state), getUnsentOwnerNotices(env.DB), getAllOrgs(env.DB), getFailedAdminLogins(env.DB),
       getSystemIssues(env.DB).catch(() => null), getOrdersAwaitingBlanks(env.DB).catch(() => []),
     ]);
     const priceReminder = await getBlankPriceReminder(env.DB).catch(() => null);
     const names = Object.fromEntries(orgs.map(o => [o.orgId, o.name]));
-    return jsonResponse({ status: "ok", lastSentAt: (state && state.sentAt) || "", firstRun: !state, security, issues: issues || [],
+    return jsonResponse({ status: "ok", lastSentAt: (state && state.sentAt) || "", firstRun: !state, security, issues: issues || [], moreOrders: more || 0,
       lastRun: await getDigestRun(env.DB).catch(() => null),
       priceReminder: priceReminder && { ...priceReminder, products: priceReminder.products.map(p => ({ ...p, orgName: names[p.orgId] || p.orgId })),
         blanks: priceReminder.blanks.map(b => ({ ...b, products: b.products.map(p => ({ ...p, orgName: names[p.orgId] || p.orgId })) })) },
@@ -2193,6 +2218,20 @@ async function handleOrdersPost_(context, listBefore = null) {
       rushToSet: (await getRushFeesToSet(env.DB).catch(() => [])).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
       // Recurring expenses recorded since the last roll-up (migrations/0085) — the roll-up lists them.
       recurringRecorded: await getRecurringExpensesRecorded(env.DB, (state && state.sentAt) || new Date(Date.now() - 86400000).toISOString()).catch(() => []) });
+  }
+
+  // ---- clearSystemIssues — empty the list of problems waiting for the roll-up (Communications page) ----
+  // The roll-up clears the problems it reports; with no email set up it reports none, so they'd stay. Clears
+  // what the page showed and anything recorded since (all of them). Audited first: no record, nothing cleared.
+  if (body.action === "clearSystemIssues") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const issues = (await getSystemIssues(env.DB).catch(() => null)) || [];
+    const auditErr = await auditStrict({ orgId: null, orderId: null, action: "system_issues.cleared",
+      detail: { problems: issues.map(x => ({ kind: x.kind, count: x.count })) } });
+    if (auditErr) return auditErr;
+    await clearSystemIssues(env.DB);
+    return jsonResponse({ status: "ok", cleared: issues.reduce((t, x) => t + (Number(x.count) || 0), 0) });
   }
 
   // ---- sendTestEmail — one test message, and what the email provider said (Communications page) ----
@@ -2575,6 +2614,15 @@ async function handleOrdersPost_(context, listBefore = null) {
     const shipping = body.shippingAmount == null || body.shippingAmount === "" ? 0 : Number(body.shippingAmount);
     if (!Number.isFinite(shipping) || shipping < 0) return jsonResponse({ status: "error", message: "The shipping part must be $0 or more" }, 400);
     if (Math.round(shipping * 100) > Math.round(amount * 100)) return jsonResponse({ status: "error", message: "The shipping part can't be more than the refund" }, 400);
+    // The date and the account are checked before the audit entry, so a refused refund leaves no audit row.
+    const when = paymentDate(body);
+    if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
+    let accountId;
+    if (body.accountId) {
+      const acct = await getAccount(env.DB, body.accountId);
+      if (!acct || !acct.active) return jsonResponse({ status: "error", message: "Choose an active account" }, 400);
+      accountId = acct.id;
+    }
     // Recorded once per Save (requestKeyOf): the same request again — a double click, a retry — changes nothing,
     // and isn't audited a second time.
     const requestKey = requestKeyOf(body, "refund");
@@ -2586,14 +2634,6 @@ async function handleOrdersPost_(context, listBefore = null) {
     const auditErr = await auditStrict({ orgId: order.orgId, orderId, action: "payment.refunded",
       detail: { amount, method, reference, note, shipping } });
     if (auditErr) return auditErr;
-    const when = paymentDate(body);
-    if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
-    let accountId;
-    if (body.accountId) {
-      const acct = await getAccount(env.DB, body.accountId);
-      if (!acct || !acct.active) return jsonResponse({ status: "error", message: "Choose an active account" }, 400);
-      accountId = acct.id;
-    }
     await addOrderPayment(env.DB, orderId, -amount, note, "", { method, reference, kind: "refund", receivedAt: when ? when.receivedAt : undefined, accountId,
       shippingCents: Math.round(shipping * 100), ...(requestKey ? { requestKey } : {}) });
     const updated = await getOrderById(env.DB, orderId);
@@ -3614,10 +3654,21 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (!rows.length) return jsonResponse({ status: "error", message: "No orders to import" }, 400);
     if (rows.length > IMPORT_MAX_ROWS) return jsonResponse({ status: "error", message: `Too many orders in one request (${rows.length}) — send up to ${IMPORT_MAX_ROWS} at a time` }, 400);
     const dryRun = !!body.dryRun;
-    const result = await importOrdersCsv(env.DB, body.org, rows,
-      { dryRun, rowOffset: Number(body.rowOffset) || 0, seen: Array.isArray(body.seen) ? body.seen.slice(0, 5000).map(String) : [] });
-    if (!dryRun && result.created) audit({ orgId: body.org, orderId: null, action: "orders.imported",
-      detail: { created: result.created, skipped: result.skipped, orderIds: result.results.filter(x => x.orderId).map(x => x.orderId).slice(0, 200) } });
+    // Every order made is audited (awaited, not left to run after the reply), also when the import throws part-way:
+    // importOrdersCsv adds each order to createdIds as it's made, and the audit is written in `finally`.
+    const createdIds = [];
+    let result;
+    try {
+      result = await importOrdersCsv(env.DB, body.org, rows,
+        { dryRun, rowOffset: Number(body.rowOffset) || 0, seen: Array.isArray(body.seen) ? body.seen.slice(0, 5000).map(String) : [], createdIds });
+    } finally {
+      // The orders already exist, so an audit write that fails can't refuse them: auditStrict logs it, and the reply
+      // still says what was imported.
+      if (!dryRun && createdIds.length) await auditStrict({ orgId: body.org, orderId: null, action: "orders.imported",
+        detail: { created: createdIds.length, orderIds: createdIds,
+          ...(result ? { skipped: result.skipped, unfinished: result.results.filter(x => x.orderId && x.unfinished).map(x => ({ orderId: x.orderId, step: x.unfinished })) }
+            : { stoppedPartWay: true }) } });
+    }
     return jsonResponse({ status: "ok", ...result });
   }
 
@@ -5948,7 +5999,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       const conns = all.filter(c => c.endpoints && c.endpoints.po)
         .map(c => ({ id: c.id, name: c.name, companyCode: c.companyCode, environment: c.endpoints.environment === "test" ? "test" : "production", hasCredentials: c.hasCredentials,
           stock: !!c.endpoints.inv, shipments: !!c.endpoints.osn, shipMethods: supplierShipMethods(c.companyCode) }));
-      return jsonResponse({ status: "ok", orders: await listSupplierOrders(env.DB, { limit: Number(body.limit) || 30 }), connections: conns, companies });
+      return jsonResponse({ status: "ok", orders: supplierOrderCostsFor_(await listSupplierOrders(env.DB, { limit: Number(body.limit) || 30 })), connections: conns, companies });
     }
     if (body.action === "previewSupplierOrder" || body.action === "placeSupplierOrder") {
       const rl = await rateLimited(env, "vendor_api", request, 30);
@@ -6053,7 +6104,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       let one = null;
       if (body.id) { one = await getSupplierOrder(env.DB, body.id); if (!one) return jsonResponse({ status: "error", message: "That supplier order wasn't found" }, 404); }
       const r = await checkSupplierShipments(env, one ? { order: one, context: body.action, actor: adminActor(request) } : { limit: 10, context: body.action, actor: adminActor(request) });
-      return jsonResponse({ status: "ok", ...r, orders: await listSupplierOrders(env.DB, { limit: 30 }) });
+      return jsonResponse(supplierOrderCostsFor_({ status: "ok", ...r, orders: await listSupplierOrders(env.DB, { limit: 30 }) }));
     }
 
     // An image a vendor lists that isn't in the downloaded image folder: fetched once into our image bucket.
@@ -6411,7 +6462,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (body.action === "getTransferSheet") {
       const sheet = await getTransferSheet(env.DB, Number(body.movementId));
       if (!sheet) return jsonResponse({ status: "error", message: "That sheet wasn't found — it may have been voided." }, 404);
-      return jsonResponse({ status: "ok", sheet });
+      return jsonResponse({ status: "ok", sheet: stripCosts_(sheet, "inventory.transfers", "transferSheet") });
     }
     // Correct a received sheet: its rows (item, count, % of sheet), total, written-off and personal parts, date,
     // vendor and payer. Held to the Receive rules (checkTransferSheet_) and to closed months (periodGuard: the
@@ -6474,7 +6525,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       return jsonResponse({ status: "ok", corrected: done, failed, transfers: await listTransfers(env.DB, body.org || null) });
     }
     if (body.action === "getTransferMovements") {
-      return jsonResponse({ status: "ok", movements: stripCosts_(await getTransferMovements(env.DB, Number(body.transferId)), "inventory.transfers", "purchases") });
+      return jsonResponse({ status: "ok", movements: movementCostsFor_(await getTransferMovements(env.DB, Number(body.transferId)), "inventory.transfers") });
     }
     // Void a mistaken transfer movement. Held to the same rules as voiding a blank movement: a closed month
     // refuses it (periodGuard), and the audit row is written FIRST — no record, no change.
@@ -6963,8 +7014,10 @@ async function handleOrdersPost_(context, listBefore = null) {
       return jsonResponse({ status: "ok", checked: todo.length, filled, unreadable, more: todo.length >= 40 && filled > 0 });
     }
 
+    // The Run times report. `before` ({startedAt, id} of the last run shown): the run log's next page only (Load older).
     if (body.action === "getRunReportByDesign") {
-      return jsonResponse({ status: "ok", report: await getRunReportByDesign(env.DB, { from: body.from, to: body.to }) });
+      const before = body.before && typeof body.before === "object" ? { startedAt: String(body.before.startedAt || ""), id: Number(body.before.id) } : null;
+      return jsonResponse({ status: "ok", report: await getRunReportByDesign(env.DB, { from: body.from, to: body.to, before }) });
     }
 
     if (body.action === "importThreadChart") {
@@ -7100,7 +7153,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       return withList_({ status: "ok", corrected: done, failed }, "blanks", "blanks", blankCostsFor_);
     }
     if (body.action === "getBlankMovements") {
-      return jsonResponse({ status: "ok", movements: stripCosts_(await getBlankMovements(env.DB, Number(body.blankId)), "inventory.blanks", "stock") });
+      return jsonResponse({ status: "ok", movements: movementCostsFor_(await getBlankMovements(env.DB, Number(body.blankId)), "inventory.blanks") });
     }
     if (body.action === "voidInventoryMovement") {
       const locked = await periodGuard(body); if (locked) return locked;
@@ -7183,10 +7236,10 @@ async function handleOrdersPost_(context, listBefore = null) {
       }
       const plan = await planTransferCatchUp(env.DB, ids, pick);
       const money = (c) => c / 100;
-      if (preview) return jsonResponse({ status: "ok",
+      if (preview) return jsonResponse(stripCosts_({ status: "ok",
         lines: plan.lines.map(l => ({ ...l, cost: money(l.costCents), uses: l.uses.map(u => ({ ...u, unitCost: money(u.unitCostCents) })) })),
         totalUnits: plan.totalUnits, total: money(plan.totalCents), shortLines: plan.shortLines,
-        recostLines: plan.recostLines, recostTotal: money(plan.recostCents), skippedClosed: plan.skippedClosed, skippedFinished: plan.skippedFinished });
+        recostLines: plan.recostLines, recostTotal: money(plan.recostCents), skippedClosed: plan.skippedClosed, skippedFinished: plan.skippedFinished }, "inventory.transfers", "catchUp"));
       if (!plan.lines.length) return jsonResponse({ status: "error", message: "Nothing to apply — those lines were already done or no longer qualify" }, 400);
       const locked = plan.lines.find(l => l.locked);
       if (locked) {
@@ -7341,11 +7394,13 @@ async function handleOrdersPost_(context, listBefore = null) {
     }
 
     // Finished stock (migrations/0060). getReadyToShip: the shop's AVAILABLE counts (what its site shows),
-    // and with a productId that product's full picture for the Stock window (getFinishedStock).
+    // and with a productId that product's full picture for the Stock window (getFinishedStock). The pieces set aside
+    // are read once for both.
     if (body.action === "getReadyToShip") {
       if (!body.org) return jsonResponse({ status: "error", message: "org required" }, 400);
-      const stock = await getReadyToShipByOrg(env.DB, body.org);
-      const finished = body.productId ? await getFinishedStock(env.DB, body.org, String(body.productId)) : undefined;
+      const held = await getFinishedSetAside(env.DB, body.org);
+      const stock = await getReadyToShipByOrg(env.DB, body.org, { held });
+      const finished = body.productId ? await getFinishedStock(env.DB, body.org, String(body.productId), { held }) : undefined;
       return jsonResponse({ status: "ok", stock, finished: stripCosts_(finished, "inventory.blanks", "stock") });
     }
 
@@ -7481,6 +7536,10 @@ async function handleOrdersPost_(context, listBefore = null) {
 
     const orderIds = Array.isArray(body.orderIds) ? body.orderIds.filter(id => ORDER_ID_RE.test(id)) : [];
     if (!orderIds.length) return jsonResponse({ status: "error", message: "No valid order IDs provided" }, 400);
+    // One request sends at most BULK_STAGE_MAX proofs (an email each); the admin sends a bigger selection in groups.
+    if (body.orderIds.length > BULK_STAGE_MAX) {
+      return jsonResponse({ status: "error", message: `Too many orders at once (max ${BULK_STAGE_MAX})` }, 400);
+    }
 
     const message = String(body.message || "").trim().slice(0, 5000);
     if (!message) return jsonResponse({ status: "error", message: "Message is required" }, 400);
@@ -7497,8 +7556,16 @@ async function handleOrdersPost_(context, listBefore = null) {
     let sent = 0, skipped = 0;
     const skippedReasons = [];
 
+    // The orders in one read, and each of their shops once — not a full read of the order and its shop per email.
+    const loaded = new Map((await getOrdersByIds(env.DB, orderIds)).map(o => [o.orderId, o]));
+    const subdomains = new Map();
+    await Promise.all([...new Set([...loaded.values()].map(o => o.orgId))].map(async (orgId) => {
+      try { const org = await getOrgById(env.DB, orgId); subdomains.set(orgId, (org && org.subdomain) || ""); }
+      catch (_) { subdomains.set(orgId, ""); }
+    }));
+
     for (const orderId of orderIds) {
-      const order = await getOrderById(env.DB, orderId);
+      const order = loaded.get(orderId);
       if (!order) { skipped++; skippedReasons.push(orderId + ": not found"); continue; }
       if (!order.contact || !order.contact.includes("@")) {
         skipped++; skippedReasons.push(orderId + ": no email"); continue;
@@ -7509,11 +7576,7 @@ async function handleOrdersPost_(context, listBefore = null) {
         skipped++; skippedReasons.push(orderId + ": order design not uploaded yet"); continue;
       }
 
-      let orgSubdomain = "";
-      try {
-        const org = await getOrgById(env.DB, order.orgId);
-        if (org) orgSubdomain = org.subdomain;
-      } catch (_) {}
+      const orgSubdomain = subdomains.get(order.orgId) || "";
 
       const token = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2))
         .replace(/[^a-z0-9]/gi, "").slice(0, 32).toLowerCase();

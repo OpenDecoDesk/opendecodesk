@@ -17,8 +17,11 @@ export default defineConfig({
   outputDir: path.join(here, ".results"),
   globalSetup: path.join(here, "global-setup.mjs"),
   globalTeardown: path.join(here, "global-teardown.mjs"),
-  // Nothing is retried: a flaky test is a bug to fix, not to retry into passing.
-  retries: 0,
+  // A flaky test is a bug to fix, not to retry into passing. On this computer nothing is retried. On GitHub (CI set),
+  // whose slower runner shows timing faults a fast machine hides, a failed test runs once more: one that then passes
+  // is listed as "flaky" in the run's summary and report, to be fixed; a real break fails both times and still fails
+  // the run.
+  retries: process.env.CI ? 1 : 0,
   // The tests share one install (one database). Each makes its own data with unique names, so files can
   // run side by side; tests inside a file run in order.
   workers: Number(process.env.E2E_WORKERS || 3),

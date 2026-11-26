@@ -7809,18 +7809,50 @@ export async function setDesignStitchCount(db, table, id, value) {
 // Issues (migrations/0046): each design and each of its machines carries `issues` — the total count
 // of every kind noted on its runs — and `runsWithIssues`; `issueTotals` is the same across the whole
 // range; each log row has its own `issues` / `issueNote`; `otherNotes` lists the free-text details.
-export async function getRunReportByDesign(db, { from, to } = {}) {
+// A range can hold tens of thousands of runs (one per hooping), so the totals are added up by the database — one row
+// per design / machine / issues noted (the same answer as adding up every run) — and the log is paged: the newest
+// RUN_LOG_PAGE runs, `detailMore` saying older ones are in range too. `before` ({startedAt, id} of the last run shown,
+// the audit log's keyset) asks for the page after it, and then only `{ detail, detailMore }` comes back.
+// All of them read the range on idx_runs_started (migrations/0112); the "+status" keeps the planner off the status index,
+// which holds nearly every run.
+const RUN_LOG_PAGE = 500;
+export async function getRunReportByDesign(db, { from, to, before = null } = {}) {
   const lo = from ? String(from) : "0000";
   const hi = to ? String(to) + "T23:59:59.999Z" : "9999";
+  const dur = (a, b) => Math.max(0, Date.parse(b) - Date.parse(a));
+  const issuesOf = (r) => cleanRunIssues(tryParse_(r.issuesJson, {}), "").issues;
+  const after = before && typeof before === "object" && before.startedAt && Number.isFinite(Number(before.id));
+  const { results: detailRows } = await db.prepare(
+    `SELECT pr.id AS runId, pr.designName, pr.machineName, pr.orgId, org.name AS orgName, pr.orderId,
+            pr.startedAt, pr.finishedAt, pr.status, pr.abortReasonLabel, pr.abortNote, pr.stepLabel, pr.issuesJson, pr.issueNote,
+            pr.stitchCount, pr.stitchesCounted
+     FROM production_runs pr LEFT JOIN orgs org ON org.orgId = pr.orgId
+     WHERE pr.startedAt >= ? AND pr.startedAt <= ? AND COALESCE(pr.timed, 1) = 1${after ? " AND (pr.startedAt < ? OR (pr.startedAt = ? AND pr.id < ?))" : ""}
+     ORDER BY pr.startedAt DESC, pr.id DESC LIMIT ?`
+  ).bind(lo, hi, ...(after ? [String(before.startedAt), String(before.startedAt), Number(before.id)] : []), RUN_LOG_PAGE + 1).all();
+  const detail = detailRows.slice(0, RUN_LOG_PAGE).map(r => ({
+    runId: Number(r.runId), designName: r.designName || "(no design)", machineName: r.machineName || "(unassigned)",
+    orgName: r.orgName || r.orgId, orderId: r.orderId, startedAt: r.startedAt, finishedAt: r.finishedAt || "",
+    status: r.status, durationMs: r.finishedAt ? dur(r.startedAt, r.finishedAt) : null,
+    abortReasonLabel: r.abortReasonLabel || "", abortNote: r.abortNote || "", stepLabel: r.stepLabel || "",
+    issues: r.status === "done" ? issuesOf(r) : {}, issueNote: r.status === "done" ? (r.issueNote || "") : "",
+    stitchCount: r.stitchCount == null ? null : Number(r.stitchCount), stitchesCounted: r.stitchesCounted == null ? null : Number(r.stitchesCounted),
+  }));
+  const detailMore = detailRows.length > RUN_LOG_PAGE;
+  if (after) return { detail, detailMore };
+  // Each group's runs, time (ms, as dur() works it out) and stitches; groups in the order of their first run, so each
+  // design and machine is met in the same order as when every run was read one by one.
+  const msSql = "MAX(0, CAST(ROUND((julianday(finishedAt) - julianday(startedAt)) * 86400000) AS INTEGER))";
   const { results: done } = await db.prepare(
-    `SELECT designId, designName, orgId, machineName, startedAt, finishedAt, issuesJson, stitchCount
-     FROM production_runs WHERE status='done' AND finishedAt IS NOT NULL AND startedAt >= ? AND startedAt <= ?
-       AND COALESCE(timed, 1) = 1`
+    `SELECT designId, designName, machineName, issuesJson, COUNT(*) AS runs, SUM(${msSql}) AS totalMs,
+            SUM(stitchCount) AS stitches, COUNT(stitchCount) AS stitchRuns, SUM(CASE WHEN stitchCount IS NOT NULL THEN ${msSql} ELSE 0 END) AS stitchMs
+     FROM production_runs WHERE +status='done' AND finishedAt IS NOT NULL AND startedAt >= ? AND startedAt <= ?
+       AND COALESCE(timed, 1) = 1
+     GROUP BY designId, designName, machineName, issuesJson ORDER BY MIN(id)`
   ).bind(lo, hi).all();
   const { results: aborted } = await db.prepare(
-    "SELECT designId, designName FROM production_runs WHERE status='aborted' AND startedAt >= ? AND startedAt <= ?"
+    "SELECT designId, designName, COUNT(*) AS runs FROM production_runs WHERE +status='aborted' AND startedAt >= ? AND startedAt <= ? GROUP BY designId, designName ORDER BY MIN(id)"
   ).bind(lo, hi).all();
-  const dur = (a, b) => Math.max(0, Date.parse(b) - Date.parse(a));
   const byDesign = new Map();
   const keyOf = (r) => (r.designId == null ? "none" : String(r.designId));
   const ensure = (r) => {
@@ -7829,30 +7861,29 @@ export async function getRunReportByDesign(db, { from, to } = {}) {
       designName: r.designName || "(no design)", runs: 0, totalMs: 0, abortedCount: 0, issues: {}, runsWithIssues: 0, _byMachine: new Map(), ...stitchAcc_() });
     return byDesign.get(k);
   };
-  const issuesOf = (r) => cleanRunIssues(tryParse_(r.issuesJson, {}), "").issues;
-  const addIssues = (into, issues) => { for (const k of Object.keys(issues)) into[k] = (into[k] || 0) + issues[k]; };
+  const addIssues = (into, issues, times) => { for (const k of Object.keys(issues)) into[k] = (into[k] || 0) + issues[k] * times; };
   const issueTotals = {};
-  let runsWithIssues = 0;
+  let runsWithIssues = 0, doneRuns = 0;
   // Stitches (migrations/0071): over the timed runs whose design's stitch count is known — total, per run, per minute.
   const stitchAcc_ = () => ({ stitches: 0, stitchRuns: 0, stitchMs: 0 });
-  const addStitches_ = (into, n, ms) => { if (n == null) return; into.stitches += Number(n) || 0; into.stitchRuns++; into.stitchMs += ms; };
+  const addStitches_ = (into, r) => { into.stitches += Number(r.stitches) || 0; into.stitchRuns += Number(r.stitchRuns) || 0; into.stitchMs += Number(r.stitchMs) || 0; };
   const stitchOut_ = (a) => ({ stitches: a.stitches, avgStitches: a.stitchRuns ? Math.round(a.stitches / a.stitchRuns) : 0,
     stitchesPerMin: a.stitchMs > 0 ? Math.round(a.stitches / (a.stitchMs / 60000)) : 0 });
   const allStitches = stitchAcc_();
   for (const r of done) {
-    const g = ensure(r); const ms = dur(r.startedAt, r.finishedAt);
-    g.runs++; g.totalMs += ms;
+    const g = ensure(r); const n = Number(r.runs) || 0, ms = Number(r.totalMs) || 0;
+    doneRuns += n; g.runs += n; g.totalMs += ms;
     const mk = r.machineName || "(unassigned)";
     const mm = g._byMachine.get(mk) || { machineName: mk, runs: 0, totalMs: 0, issues: {}, runsWithIssues: 0, ...stitchAcc_() };
-    mm.runs++; mm.totalMs += ms; g._byMachine.set(mk, mm);
-    addStitches_(g, r.stitchCount, ms); addStitches_(mm, r.stitchCount, ms); addStitches_(allStitches, r.stitchCount, ms);
+    mm.runs += n; mm.totalMs += ms; g._byMachine.set(mk, mm);
+    addStitches_(g, r); addStitches_(mm, r); addStitches_(allStitches, r);
     const issues = issuesOf(r);
     if (Object.keys(issues).length) {
-      addIssues(g.issues, issues); addIssues(mm.issues, issues); addIssues(issueTotals, issues);
-      g.runsWithIssues++; mm.runsWithIssues++; runsWithIssues++;
+      addIssues(g.issues, issues, n); addIssues(mm.issues, issues, n); addIssues(issueTotals, issues, n);
+      g.runsWithIssues += n; mm.runsWithIssues += n; runsWithIssues += n;
     }
   }
-  for (const r of aborted) ensure(r).abortedCount++;
+  for (const r of aborted) ensure(r).abortedCount += Number(r.runs) || 0;
   const designs = [...byDesign.values()].map(g => ({
     designId: g.designId, designName: g.designName, runs: g.runs, totalMs: g.totalMs,
     avgMs: g.runs ? Math.round(g.totalMs / g.runs) : 0, abortedCount: g.abortedCount,
@@ -7862,31 +7893,23 @@ export async function getRunReportByDesign(db, { from, to } = {}) {
       ...stitchOut_(m), runsNoStitches: m.runs - m.stitchRuns }))
       .sort((a, b) => b.runs - a.runs),
   })).sort((a, b) => b.runs - a.runs);
-  const { results: detailRows } = await db.prepare(
-    `SELECT pr.id AS runId, pr.designName, pr.machineName, pr.orgId, org.name AS orgName, pr.orderId,
-            pr.startedAt, pr.finishedAt, pr.status, pr.abortReasonLabel, pr.abortNote, pr.stepLabel, pr.issuesJson, pr.issueNote,
-            pr.stitchCount, pr.stitchesCounted
+  // The free-text "other" details over the whole range (not just the log's page), newest first — the list at the
+  // bottom of the report. Only finished, timed runs carry one, as in the log.
+  const { results: noteRows } = await db.prepare(
+    `SELECT pr.id AS runId, pr.designName, pr.machineName, pr.orgId, org.name AS orgName, pr.orderId, pr.startedAt, pr.stepLabel, pr.issuesJson, pr.issueNote
      FROM production_runs pr LEFT JOIN orgs org ON org.orgId = pr.orgId
-     WHERE pr.startedAt >= ? AND pr.startedAt <= ? AND COALESCE(pr.timed, 1) = 1 ORDER BY pr.startedAt DESC, pr.id DESC`
+     WHERE +pr.status = 'done' AND pr.issueNote <> '' AND pr.startedAt >= ? AND pr.startedAt <= ? AND COALESCE(pr.timed, 1) = 1
+     ORDER BY pr.startedAt DESC, pr.id DESC`
   ).bind(lo, hi).all();
-  const detail = detailRows.map(r => ({
-    runId: Number(r.runId), designName: r.designName || "(no design)", machineName: r.machineName || "(unassigned)",
-    orgName: r.orgName || r.orgId, orderId: r.orderId, startedAt: r.startedAt, finishedAt: r.finishedAt || "",
-    status: r.status, durationMs: r.finishedAt ? dur(r.startedAt, r.finishedAt) : null,
-    abortReasonLabel: r.abortReasonLabel || "", abortNote: r.abortNote || "", stepLabel: r.stepLabel || "",
-    issues: r.status === "done" ? issuesOf(r) : {}, issueNote: r.status === "done" ? (r.issueNote || "") : "",
-    stitchCount: r.stitchCount == null ? null : Number(r.stitchCount), stitchesCounted: r.stitchesCounted == null ? null : Number(r.stitchesCounted),
-  }));
-  // The free-text "other" details, newest first — the list at the bottom of the report.
-  const otherNotes = detail.filter(x => x.issueNote).map(x => ({ runId: x.runId, startedAt: x.startedAt, designName: x.designName, machineName: x.machineName,
-    orgName: x.orgName, orderId: x.orderId, stepLabel: x.stepLabel, count: x.issues.other || 1, note: x.issueNote }));
+  const otherNotes = noteRows.map(r => ({ runId: Number(r.runId), startedAt: r.startedAt, designName: r.designName || "(no design)", machineName: r.machineName || "(unassigned)",
+    orgName: r.orgName || r.orgId, orderId: r.orderId, stepLabel: r.stepLabel || "", count: issuesOf(r).other || 1, note: r.issueNote }));
   // Untimed hoopings ("Mark done (no timing)") aren't in the timings, but their stitches still ran.
   const untimed = await db.prepare(
     `SELECT COUNT(*) AS n, COALESCE(SUM(stitchCount), 0) AS stitches FROM production_runs
-     WHERE status='done' AND COALESCE(timed, 1) = 0 AND startedAt >= ? AND startedAt <= ?`).bind(lo, hi).first();
-  const stitchSummary = Object.assign(stitchOut_(allStitches), { runsNoStitches: done.length - allStitches.stitchRuns,
+     WHERE +status='done' AND COALESCE(timed, 1) = 0 AND startedAt >= ? AND startedAt <= ?`).bind(lo, hi).first();
+  const stitchSummary = Object.assign(stitchOut_(allStitches), { runsNoStitches: doneRuns - allStitches.stitchRuns,
     untimedRuns: Number(untimed && untimed.n) || 0, untimedStitches: Number(untimed && untimed.stitches) || 0 });
-  return { designs, detail, issueKinds: RUN_ISSUE_KINDS, issueTotals, runsWithIssues, doneRuns: done.length, otherNotes, stitchSummary };
+  return { designs, detail, detailMore, issueKinds: RUN_ISSUE_KINDS, issueTotals, runsWithIssues, doneRuns, otherNotes, stitchSummary };
 }
 
 // ---- Catch-up: use blanks for orders that were made before stock was tracked ----
@@ -7914,11 +7937,23 @@ export async function planBlankCatchUp(db) {
        AND (i.cogsCents IS NULL OR i.cogsSource = 'estimate') AND NOT ${fs("i")}
      ORDER BY useDate, i.id`).all();
   if (!cands.length) return { lines: [], totalUnits: 0, totalCents: 0, replacedEstimateCents: 0, shortLines: 0 };
-  const { results: mv } = await db.prepare(
-    "SELECT id, blankId, color, size, qtyDelta, unitCostCents, kind, occurredAt FROM inventory_movements WHERE voidedAt IS NULL ORDER BY occurredAt, id").all();
-  const { results: cur } = await db.prepare("SELECT blankId, color, size, purchasePriceCents FROM blank_sizes").all();
+  // Only the history that can move these lines' costs: the movements of their blank / color / size (on
+  // idx_movements_blank_color), up to the latest line's date — a later one comes after every line in the replay.
+  // And only those blanks' sizes and names. Each key's replay sorts its own events, so no ORDER BY is needed.
+  const keys = JSON.stringify([...new Map(cands.map(c => [c.blankId + "|" + (c.blankColor || "") + "|" + (c.blankSize || ""),
+    [Number(c.blankId), c.blankColor || "", c.blankSize || ""]])).values()]);
+  const ids = JSON.stringify([...new Set(cands.map(c => Number(c.blankId)))]);
+  const lastUse = cands.reduce((a, c) => (String(c.useDate) > a ? String(c.useDate) : a), "");
+  const [{ results: mv }, { results: cur }, { results: names }] = await Promise.all([
+    db.prepare(
+      `SELECT m.id, m.blankId, m.color, m.size, m.qtyDelta, m.unitCostCents, m.kind, m.occurredAt
+       FROM (SELECT DISTINCT json_extract(value, '$[0]') AS b, json_extract(value, '$[1]') AS c, json_extract(value, '$[2]') AS s FROM json_each(?)) k
+       JOIN inventory_movements m ON m.blankId = k.b AND m.color = k.c AND m.size = k.s
+       WHERE m.voidedAt IS NULL AND m.occurredAt <= ?`).bind(keys, lastUse).all(),
+    db.prepare("SELECT blankId, color, size, purchasePriceCents FROM blank_sizes WHERE blankId IN (SELECT value FROM json_each(?))").bind(ids).all(),
+    db.prepare("SELECT id, name FROM blanks WHERE id IN (SELECT value FROM json_each(?))").bind(ids).all(),
+  ]);
   const curAvg = new Map(cur.map(r => [r.blankId + "|" + (r.color || "") + "|" + r.size, Number(r.purchasePriceCents) || 0]));
-  const { results: names } = await db.prepare("SELECT id, name FROM blanks").all();
   const blankNames = new Map(names.map(r => [Number(r.id), r.name]));
 
   const byKey = new Map();
@@ -10645,14 +10680,27 @@ export async function importOrdersCsv(db, orgId, units, opts = {}) {
       throw e;
     }
     res.orderId = orderId;
-    if (discount > 0) await setOrderDiscount(db, orderId, discount, ORDER_IMPORT_SOURCES[format] + " discount");
-    if (res.paid) await settleOrderBalance(db, orderId, "Paid on " + (ORDER_IMPORT_SOURCES[format] === "CSV" ? "the store" : ORDER_IMPORT_SOURCES[format]), paidAt);
-    // Shipped by the store already: its stock lines are handed over and the order is marked shipped.
-    if (res.shipped) {
-      await pullStockLines(db, orderId, shippedAt || placedAt);
-      await setFulfillmentStage(db, orderId, "shipped", { at: shippedAt || placedAt });
-    }
+    // The caller's list of every order made (opts.createdIds), so it can audit them even if a later order throws.
+    if (Array.isArray(opts.createdIds)) opts.createdIds.push(orderId);
     created++;
+    // The order exists now, so a later step that fails doesn't undo it or stop the import (a re-run would skip it as
+    // already imported): the order is kept, the result names it and the step, and the rest of the file goes on.
+    let step = "";
+    try {
+      step = "discount";
+      if (discount > 0) await setOrderDiscount(db, orderId, discount, ORDER_IMPORT_SOURCES[format] + " discount");
+      step = "payment";
+      if (res.paid) await settleOrderBalance(db, orderId, "Paid on " + (ORDER_IMPORT_SOURCES[format] === "CSV" ? "the store" : ORDER_IMPORT_SOURCES[format]), paidAt);
+      // Shipped by the store already: its stock lines are handed over and the order is marked shipped.
+      step = "stock hand-over";
+      if (res.shipped) await pullStockLines(db, orderId, shippedAt || placedAt);
+      step = "shipped stage";
+      if (res.shipped) await setFulfillmentStage(db, orderId, "shipped", { at: shippedAt || placedAt });
+    } catch (e) {
+      console.error("Order import: a step failed after the order was made", orderId, step, e);
+      res.unfinished = step;
+      res.problems.push(`Order ${orderNo} was imported as ${orderId}, but it stopped at the ${step} step (${String((e && e.message) || e).slice(0, 200)}) — finish it on the order.`);
+    }
   }
   return { dryRun, results: out, created, updated: 0, skipped };
 }
@@ -12007,18 +12055,17 @@ export async function setFulfillmentStage(db, orderId, stage, extras = {}) {
   if (stage === "blankOrdered") {
     // Stamp the chosen line items (default all active) with the vendor order, then roll up to orders.
     const ids = await blankTargetItemIds_(db, orderId, extras);
-    for (const id of ids) {
-      await db.prepare(`UPDATE order_items SET blankOrderedAt=COALESCE(blankOrderedAt, ?), blankVendor=?, blankVendorOrderId=?, blankEstDelivery=? WHERE id=? AND orderId=? AND cancelDate IS NULL`)
-        .bind(now, extras.vendor || "", extras.vendorOrderId || "", extras.estimatedDelivery || null, id, orderId).run();
-    }
+    // One batch for all the lines (as markItemsBlankOrdered does): one round trip, and all of them or none.
+    const stmts = ids.map(id => db.prepare(`UPDATE order_items SET blankOrderedAt=COALESCE(blankOrderedAt, ?), blankVendor=?, blankVendorOrderId=?, blankEstDelivery=? WHERE id=? AND orderId=? AND cancelDate IS NULL`)
+      .bind(now, extras.vendor || "", extras.vendorOrderId || "", extras.estimatedDelivery || null, id, orderId));
+    if (stmts.length) await db.batch(stmts);
     await recomputeOrderBlankStatus_(db, orderId);
   } else if (stage === "blankShipped") {
     // Mark the chosen items shipped (tracking numbers are added separately via addBlankShipment).
     const ids = await blankTargetItemIds_(db, orderId, extras);
-    for (const id of ids) {
-      await db.prepare(`UPDATE order_items SET blankShippedAt=COALESCE(blankShippedAt, ?) WHERE id=? AND orderId=? AND cancelDate IS NULL`)
-        .bind(extras.shippedAt || now, id, orderId).run();
-    }
+    const stmts = ids.map(id => db.prepare(`UPDATE order_items SET blankShippedAt=COALESCE(blankShippedAt, ?) WHERE id=? AND orderId=? AND cancelDate IS NULL`)
+      .bind(extras.shippedAt || now, id, orderId));
+    if (stmts.length) await db.batch(stmts);
     await recomputeOrderBlankStatus_(db, orderId);
   } else if (stage === "blankReceived") {
     const ids = await blankTargetItemIds_(db, orderId, extras);
@@ -12027,11 +12074,12 @@ export async function setFulfillmentStage(db, orderId, stage, extras = {}) {
       const itemId = ic.itemId != null ? ic.itemId : ic.sheetRow;
       if (itemId != null) condByItem[Number(itemId)] = { condition: ic.condition || "Good", note: ic.note || "" };
     }
-    for (const id of ids) {
+    const stmts = ids.map(id => {
       const c = condByItem[id] || { condition: extras.blankCondition || "Good", note: "" };
-      await db.prepare(`UPDATE order_items SET blankReceivedAt=COALESCE(blankReceivedAt, ?), blankCondition=?, blankConditionNote=? WHERE id=? AND orderId=? AND cancelDate IS NULL`)
-        .bind(now, c.condition, c.note, id, orderId).run();
-    }
+      return db.prepare(`UPDATE order_items SET blankReceivedAt=COALESCE(blankReceivedAt, ?), blankCondition=?, blankConditionNote=? WHERE id=? AND orderId=? AND cancelDate IS NULL`)
+        .bind(now, c.condition, c.note, id, orderId);
+    });
+    if (stmts.length) await db.batch(stmts);
     await recomputeOrderBlankStatus_(db, orderId);
   } else if (stage === "shipped") {
     const before = await db.prepare("SELECT shippedAt FROM orders WHERE orderId=?").bind(orderId).first();
@@ -12100,30 +12148,40 @@ export async function setOrdersCompleted(db, orderIds, completed, at = null) {
 }
 
 // ---- Delivery check (the 6 AM roll-up) ---------------------------------------
+// The check looks shipments up for this long after they ship (or get their label); after that it stops
+// and the roll-up lists them for a person to resolve (getUnconfirmedShipments) — a package lost or
+// delivered without a scan would otherwise take one of the morning's lookups every day for ever.
+export const TRACKING_CHECK_DAYS = 90;
+const trackingCutoff_ = (now = new Date()) => new Date(now.getTime() - TRACKING_CHECK_DAYS * 86400000).toISOString();
+
 // Shipped orders still waiting on a delivery, with a tracking number to look up
-// (the order's own, else its site-bought label's) and the carrier to ask.
-export async function getShippedAwaitingDelivery(db, limit = 40) {
+// (the order's own, else its site-bought label's) and the carrier to ask. Least recently looked up
+// first (never looked up before all), then oldest shipment: with more waiting than one morning's
+// lookups, each still gets its turn (orders.trackingCheckedAt, migrations/0111; markTrackingChecked).
+export async function getShippedAwaitingDelivery(db, limit = 40, { now = new Date() } = {}) {
   const { results } = await db.prepare(
     `SELECT * FROM (
-       SELECT o.orderId, o.orgId, o.customerName, o.shippedAt, o.shippingMethod, o.paid,
+       SELECT o.orderId, o.orgId, o.customerName, o.shippedAt, o.shippingMethod, o.paid, o.trackingCheckedAt,
          COALESCE(NULLIF(o.trackingNumber, ''),
            (SELECT l.trackingNumber FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL AND l.trackingNumber <> '' ORDER BY l.id DESC LIMIT 1), '') AS tracking,
          (SELECT l.carrier FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL ORDER BY l.id DESC LIMIT 1) AS labelCarrier
        FROM orders o
        WHERE o.shippedAt IS NOT NULL AND o.deliveredAt IS NULL AND o.completedAt IS NULL
-         AND o.voidedAt IS NULL AND o.isTest = 0
-     ) WHERE tracking <> '' ORDER BY shippedAt ASC LIMIT ?`).bind(Math.max(1, Math.min(200, Number(limit) || 40))).all();
+         AND o.voidedAt IS NULL AND o.isTest = 0 AND o.shippedAt >= ?
+     ) WHERE tracking <> '' ORDER BY (trackingCheckedAt IS NOT NULL), trackingCheckedAt, shippedAt ASC LIMIT ?`)
+    .bind(trackingCutoff_(now), Math.max(1, Math.min(200, Number(limit) || 40))).all();
   return results.map(r => ({ orderId: r.orderId, orgId: r.orgId, customerName: r.customerName, shippedAt: r.shippedAt,
     shippingMethod: r.shippingMethod || "", paid: !!r.paid, tracking: r.tracking, labelCarrier: r.labelCarrier || "" }));
 }
 
 // Orders with a label or tracking number that AREN'T marked shipped yet — a label existing doesn't
 // mean the carrier has the package. The daily check looks these up and marks one shipped only once
-// tracking shows a carrier scan (dated by that scan). Oldest label first.
-export async function getLabeledAwaitingShipment(db, limit = 40) {
+// tracking shows a carrier scan (dated by that scan). Least recently looked up first, then oldest label
+// (as getShippedAwaitingDelivery); one with no label is dated by when the order was placed.
+export async function getLabeledAwaitingShipment(db, limit = 40, { now = new Date() } = {}) {
   const { results } = await db.prepare(
     `SELECT * FROM (
-       SELECT o.orderId, o.orgId, o.customerName, o.shippingMethod, o.paid,
+       SELECT o.orderId, o.orgId, o.customerName, o.shippingMethod, o.paid, o.placedAt, o.trackingCheckedAt,
          COALESCE(NULLIF(o.trackingNumber, ''),
            (SELECT l.trackingNumber FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL AND l.trackingNumber <> '' ORDER BY l.id DESC LIMIT 1), '') AS tracking,
          (SELECT l.carrier FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL ORDER BY l.id DESC LIMIT 1) AS labelCarrier,
@@ -12131,9 +12189,36 @@ export async function getLabeledAwaitingShipment(db, limit = 40) {
        FROM orders o
        WHERE o.shippedAt IS NULL AND o.deliveredAt IS NULL AND o.completedAt IS NULL
          AND o.voidedAt IS NULL AND o.isTest = 0
-     ) WHERE tracking <> '' ORDER BY COALESCE(labelAt, '') ASC LIMIT ?`).bind(Math.max(1, Math.min(200, Number(limit) || 40))).all();
+     ) WHERE tracking <> '' AND COALESCE(NULLIF(labelAt, ''), placedAt) >= ?
+       ORDER BY (trackingCheckedAt IS NOT NULL), trackingCheckedAt, COALESCE(labelAt, '') ASC LIMIT ?`)
+    .bind(trackingCutoff_(now), Math.max(1, Math.min(200, Number(limit) || 40))).all();
   return results.map(r => ({ orderId: r.orderId, orgId: r.orgId, customerName: r.customerName, labelAt: r.labelAt || "",
     shippingMethod: r.shippingMethod || "", paid: !!r.paid, tracking: r.tracking, labelCarrier: r.labelCarrier || "" }));
+}
+
+// Stamps an order's tracking lookup (migrations/0111), whatever it found — a lookup that failed too, so
+// one tracking number that always errors can't hold the front of the queue.
+export async function markTrackingChecked(db, orderId, at = new Date().toISOString()) {
+  await db.prepare("UPDATE orders SET trackingCheckedAt = ? WHERE orderId = ?").bind(at, orderId).run();
+}
+
+// Shipments the check has stopped looking up (TRACKING_CHECK_DAYS after they shipped, or after their label
+// when the carrier never scanned it), still not marked delivered: for a person to check by hand. The oldest
+// `limit` of them, and how many there are in all. Listed in the roll-up; marking one delivered or completed
+// (or voiding it) takes it off.
+export async function getUnconfirmedShipments(db, { limit = 20, now = new Date() } = {}) {
+  const n = Math.max(1, Math.min(200, Number(limit) || 20));
+  const { results } = await db.prepare(
+    `SELECT *, COUNT(*) OVER () AS total FROM (
+       SELECT o.orderId, o.orgId, o.customerName, o.shippedAt,
+         COALESCE(o.shippedAt, NULLIF((SELECT l.purchasedAt FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL ORDER BY l.id DESC LIMIT 1), ''), o.placedAt) AS since,
+         COALESCE(NULLIF(o.trackingNumber, ''),
+           (SELECT l.trackingNumber FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL AND l.trackingNumber <> '' ORDER BY l.id DESC LIMIT 1), '') AS tracking
+       FROM orders o
+       WHERE o.deliveredAt IS NULL AND o.completedAt IS NULL AND o.voidedAt IS NULL AND o.isTest = 0
+     ) WHERE tracking <> '' AND since < ? ORDER BY since, orderId LIMIT ?`).bind(trackingCutoff_(now), n).all();
+  return { count: results.length ? Number(results[0].total) || 0 : 0, orders: results.map(r => ({ orderId: r.orderId, orgId: r.orgId, customerName: r.customerName || "",
+    tracking: r.tracking, shipped: !!r.shippedAt, since: r.since || "" })) };
 }
 
 // Marks an order shipped from a carrier scan — only if it isn't already (a person may have got
@@ -13431,23 +13516,37 @@ export async function getExpense(db, id) {
 // Fields already validated by the caller (orders.js saveExpense).
 export async function saveExpense(db, id, x) {
   const now = new Date().toISOString();
-  const vals = [x.date, String(x.description).trim(), Number(x.categoryId), toCents(x.amount), x.vendor || "",
-    Number(x.businessUsePct), x.receiptKey || "", x.receiptName || "", x.placedInService || null, x.depMethod || null,
-    x.vendorChargedTax === false ? 0 : 1, x.paidPersonally ? null : (x.accountId ? Number(x.accountId) : null), x.paidPersonally ? 1 : 0,
-    x.refundOfId ? Number(x.refundOfId) : null];
   if (id) {
     await db.prepare(`UPDATE expenses SET expenseDate = ?, description = ?, categoryId = ?, amountCents = ?, vendor = ?,
       businessUsePct = ?, receiptKey = ?, receiptName = ?, placedInService = ?, depMethod = ?, vendorChargedTax = ?, accountId = ?, paidPersonally = ?, refundOfId = ?, updatedAt = ?
-      WHERE id = ? AND deletedAt IS NULL`).bind(...vals, now, Number(id)).run();
+      WHERE id = ? AND deletedAt IS NULL`).bind(...expenseVals_(x), now, Number(id)).run();
     return Number(id);
   }
+  const r = await insertExpenseStmt_(db, x, now).first();
+  return Number(r.id);
+}
+// One expense's column values, in the order saveExpense's UPDATE and the INSERT below list them.
+function expenseVals_(x) {
+  return [x.date, String(x.description).trim(), Number(x.categoryId), toCents(x.amount), x.vendor || "",
+    Number(x.businessUsePct), x.receiptKey || "", x.receiptName || "", x.placedInService || null, x.depMethod || null,
+    x.vendorChargedTax === false ? 0 : 1, x.paidPersonally ? null : (x.accountId ? Number(x.accountId) : null), x.paidPersonally ? 1 : 0,
+    x.refundOfId ? Number(x.refundOfId) : null];
+}
+function insertExpenseStmt_(db, x, now) {
   // A fundraiser payout (recordFundraiserPayout, migrations/0110) is tied to its shop as it's written; the column is
   // named only then, so every other expense still saves on a database from before 0110. An edit keeps the tie.
   const fr = x.fundraiserOrgId ? [String(x.fundraiserOrgId)] : [];
-  const r = await db.prepare(`INSERT INTO expenses (expenseDate, description, categoryId, amountCents, vendor, businessUsePct,
+  return db.prepare(`INSERT INTO expenses (expenseDate, description, categoryId, amountCents, vendor, businessUsePct,
     receiptKey, receiptName, placedInService, depMethod, vendorChargedTax, accountId, paidPersonally, refundOfId, createdAt, updatedAt, receiptGroup${fr.length ? ", fundraiserOrgId" : ""}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${fr.length ? ", ?" : ""}) RETURNING id`)
-    .bind(...vals, now, now, x.receiptGroup ? String(x.receiptGroup).slice(0, 64) : null, ...fr).first();
-  return Number(r.id);
+    .bind(...expenseVals_(x), now, now, x.receiptGroup ? String(x.receiptGroup).slice(0, 64) : null, ...fr);
+}
+// Several new expenses (the CSV import) as one batch: one round trip, and all of them or none — a row that fails
+// leaves nothing behind, so importing the file again can't make duplicates. Returns their ids in the list's order.
+export async function insertExpenses(db, list) {
+  if (!list || !list.length) return [];
+  const now = new Date().toISOString();
+  const res = await db.batch(list.map(x => insertExpenseStmt_(db, x, now)));
+  return res.map(r => Number(r.results[0].id));
 }
 // How much of a purchase has already been refunded (positive cents), counting the live refund
 // expenses linked to it (optionally leaving one out — the one being edited).
@@ -14856,7 +14955,13 @@ export async function getRushFeesToSet(db) {
 }
 
 // Real orders not yet reported (test and voided orders are skipped), full detail, plus `cursor` —
-// the fields to save as the new state once the email has gone out.
+// the fields to save as the new state once the email has gone out — and `more`, how many real orders
+// are still waiting after this batch.
+//
+// One roll-up takes at most DIGEST_MAX_ORDERS of them (counting test and voided ones it passes over),
+// the oldest first: the cursor stops at the last one taken, so the rest are the next roll-up's, and the
+// email says how many more there are. (After weeks without an email — no email set up, a broken key —
+// loading every order at once could run the Worker out of time or memory, and the roll-up never sent.)
 //
 // "Not yet reported" = written after the cursor {afterInsertedAt, afterOrderId} (migrations/0031:
 // orders.insertedAt, set by a trigger on insert). insertedAt, not placedAt: a backdated order (a local
@@ -14865,6 +14970,7 @@ export async function getRushFeesToSet(db) {
 // Switch-over: a state saved before 0031 holds {afterRowid}; that one run still uses rowid (so
 // nothing is skipped or repeated), then the cursor jumps to the newest order.
 // Before 0031 is applied (no insertedAt column), the rowid logic runs and saves {afterRowid}.
+export const DIGEST_MAX_ORDERS = 200;
 export async function getOrdersForDigest(db, state, now = new Date()) {
   const real = (r) => !Number(r.isTest) && !r.voidedAt;
   const load = async (ids) => ids.length
@@ -14883,19 +14989,23 @@ export async function getOrdersForDigest(db, state, now = new Date()) {
     const { results } = await db.prepare(
       `SELECT orderId, insertedAt, isTest, voidedAt FROM orders
         WHERE insertedAt > ? OR (insertedAt = ? AND orderId > ?)
-        ORDER BY insertedAt, orderId`).bind(state.afterInsertedAt, state.afterInsertedAt, String(state.afterOrderId || "")).all();
+        ORDER BY insertedAt, orderId LIMIT ?`).bind(state.afterInsertedAt, state.afterInsertedAt, String(state.afterOrderId || ""), DIGEST_MAX_ORDERS).all();
     const last = results[results.length - 1];
     const cursor = last ? { afterInsertedAt: last.insertedAt, afterOrderId: last.orderId }
                         : { afterInsertedAt: state.afterInsertedAt, afterOrderId: String(state.afterOrderId || "") };
-    return { orders: await load(results.filter(real).map(r => r.orderId)), cursor };
+    // A full batch: count the real orders after it (only then — usually there are none).
+    const more = results.length < DIGEST_MAX_ORDERS ? 0 : Number((await db.prepare(
+      `SELECT COUNT(*) AS n FROM orders WHERE (insertedAt > ? OR (insertedAt = ? AND orderId > ?)) AND isTest = 0 AND voidedAt IS NULL`)
+      .bind(cursor.afterInsertedAt, cursor.afterInsertedAt, cursor.afterOrderId).first() || {}).n) || 0;
+    return { orders: await load(results.filter(real).map(r => r.orderId)), cursor, more };
   }
   if (state && Number.isFinite(Number(state.afterRowid))) {
     const old = await getOrdersForDigestByRowid_(db, state, now, load, real);
-    return { orders: old.orders, cursor: atNewest };
+    return { orders: old.orders, cursor: atNewest, more: 0 };
   }
   const { results } = await db.prepare("SELECT orderId, isTest, voidedAt FROM orders WHERE placedAt >= ?")
     .bind(new Date(now.getTime() - 24 * 3600 * 1000).toISOString()).all();
-  return { orders: await load(results.filter(real).map(r => r.orderId)), cursor: atNewest };
+  return { orders: await load(results.filter(real).map(r => r.orderId)), cursor: atNewest, more: 0 };
 }
 
 // The pre-0031 cursor (implicit rowid): used before the migration, and once for the switch-over.
@@ -15329,13 +15439,17 @@ async function stockLink_(db, orgId, productId, pricingMode, size, color = "") {
   return null;
 }
 
+// The shop's pieces set aside (finishedSetAside_), for a caller that reads the shop's stock and a product's Stock window
+// in one request: read once, then handed to both (getReadyToShipByOrg's and getFinishedStock's `held`).
+export async function getFinishedSetAside(db, orgId) { return finishedSetAside_(db, orgId); }
+
 // What the storefront badge shows: AVAILABLE pieces (on hand less set aside), per product + size + combination
-// (variant '' for a product with no choices).
-export async function getReadyToShipByOrg(db, orgId) {
+// (variant '' for a product with no choices). `held`: the shop's set-aside pieces when the caller already has them.
+export async function getReadyToShipByOrg(db, orgId, { held: given } = {}) {
   const { results } = await db.prepare(
     "SELECT productId, size, variant, quantity FROM ready_to_ship WHERE orgId=? ORDER BY productId, size"
   ).bind(orgId).all();
-  const held = await finishedSetAside_(db, orgId);
+  const held = given || await finishedSetAside_(db, orgId);
   return results.map(r => ({ productId: r.productId, size: r.size, variant: r.variant || "",
     quantity: Math.max(0, (Number(r.quantity) || 0) - ((held[heldKey_(orgId, r.productId, r.size, r.variant)] || {}).n || 0)) }));
 }
@@ -15374,29 +15488,43 @@ export async function getBlankReadyByOrg(db, orgId) {
 // orders) / available / average cost / value, and what Make for stock would use — the linked blank and how many of it
 // are free. A product with choices also gets what can be picked (`options`) and the blank behind each color + size
 // (`links`), for making a new combination.
-export async function getFinishedStock(db, orgId, productId) {
+// The product's blank links are read in one query and looked up in memory (stockLink_'s rule: a flat product's link
+// is under "OSFA", else ''), and only those blanks' reservations are read — so the queries don't grow with the
+// product's colors × sizes. `held`: the shop's set-aside pieces when the caller already has them (getFinishedSetAside).
+export async function getFinishedStock(db, orgId, productId, { held: given } = {}) {
   const p = await stockProduct_(db, orgId, productId);
   if (!p) return null;
   const configurable = !!Number(p.configurable), flat = p.pricingMode === "flat";
-  const { results: rows } = await db.prepare("SELECT size, variant, variantLabel, quantity, avgCostCents FROM ready_to_ship WHERE orgId=? AND productId=? ORDER BY variantLabel, size").bind(orgId, productId).all();
-  const held = await finishedSetAside_(db, orgId), reserved = await getBlankReservations(db);
+  const [{ results: rows }, { results: linkRows }] = await Promise.all([
+    db.prepare("SELECT size, variant, variantLabel, quantity, avgCostCents FROM ready_to_ship WHERE orgId=? AND productId=? ORDER BY variantLabel, size").bind(orgId, productId).all(),
+    db.prepare(
+      `SELECT l.productColor, l.productSize, l.blankId, l.blankColor, l.blankSize, b.name AS blankName, COALESCE(bs.quantity, 0) AS quantity, COALESCE(bs.purchasePriceCents, 0) AS avg
+       FROM product_blank_links l LEFT JOIN blanks b ON b.id = l.blankId
+       LEFT JOIN blank_sizes bs ON bs.blankId = l.blankId AND bs.color = l.blankColor AND bs.size = l.blankSize
+       WHERE l.orgId = ? AND l.productId = ?`).bind(orgId, productId).all(),
+  ]);
+  const linkKey = (color, size) => String(color || "") + "\u0001" + String(size || "");
+  const linkAt = new Map(linkRows.filter(l => l.blankId != null).map(l => [linkKey(l.productColor, l.productSize), l]));
+  const held = given || await finishedSetAside_(db, orgId);
+  const reserved = await getBlankReservations(db, { blankIds: [...linkAt.values()].map(l => Number(l.blankId)) });
   const sizes = flat ? [""] : Object.keys(tryParse_(p.sizePricingCents, {}) || {});
   for (const r of rows) if (!sizes.includes(r.size)) sizes.push(r.size);
-  const blankOf = async (size, color) => {
-    const link = await stockLink_(db, orgId, productId, p.pricingMode, size, color);
+  const blankOf = (size, color) => {
+    let link = null;
+    for (const sz of flat ? ["OSFA", ""] : [size]) if ((link = linkAt.get(linkKey(color, sz)) || null)) break;
     return link ? { blankId: Number(link.blankId), name: link.blankName || "", color: link.blankColor || "", size: link.blankSize || "", avgCost: fromCents(link.avg),
       free: Math.max(0, Number(link.quantity) - (reserved[[link.blankId, link.blankColor || "", link.blankSize || ""].join("|")] || 0)) } : null;
   };
-  const sizeRow = async (size, variant, label, color) => {
+  const sizeRow = (size, variant, label, color) => {
     const r = rows.find(x => x.size === size && (x.variant || "") === variant) || { quantity: 0, avgCostCents: 0 };
     const h = held[heldKey_(orgId, productId, size, variant)] || { n: 0, orderIds: [] };
     const onHand = Number(r.quantity) || 0, avg = Number(r.avgCostCents) || 0;
     return { size, variant, label, onHand, setAside: h.n, setAsideOrders: h.orderIds, available: Math.max(0, onHand - h.n), avgCost: fromCents(avg),
-      value: fromCents(Math.max(0, onHand) * avg), blank: await blankOf(size, color) };
+      value: fromCents(Math.max(0, onHand) * avg), blank: blankOf(size, color) };
   };
   const out = { productId, name: p.name || productId, flat, configurable, noBlankNeeded: !!Number(p.noBlankNeeded), sizes: [] };
   if (!configurable) {
-    for (const size of sizes) out.sizes.push(await sizeRow(size, "", "", ""));
+    for (const size of sizes) out.sizes.push(sizeRow(size, "", "", ""));
     return out;
   }
   // Every combination stock has been recorded for, with each of its sizes that has a row.
@@ -15405,7 +15533,7 @@ export async function getFinishedStock(db, orgId, productId) {
     const v = r.variant || "";
     let c = combos.find(x => x.variant === v);
     if (!c) { let color = ""; try { color = String(JSON.parse(v)[0] || ""); } catch (e) { /* '' or not ours */ } combos.push(c = { variant: v, label: r.variantLabel || "", color, sizes: [] }); }
-    c.sizes.push(await sizeRow(r.size, v, c.label, c.color));
+    c.sizes.push(sizeRow(r.size, v, c.label, c.color));
   }
   out.combinations = combos;
   // What can be picked, the way the shop page offers it.
@@ -15418,7 +15546,7 @@ export async function getFinishedStock(db, orgId, productId) {
       graphics: (loc.graphicIds || []).map(Number).map(id => byId.get(id)).filter(g => g && g.visible)
         .map(g => ({ id: Number(g.id), name: g.name, inkColors: g.inkColors || [], allowedGarmentColors: g.allowedGarmentColors || [] })) })) };
   out.links = {};
-  for (const color of colors) { out.links[color] = {}; for (const size of sizes) out.links[color][size] = await blankOf(size, color); }
+  for (const color of colors) { out.links[color] = {}; for (const size of sizes) out.links[color][size] = blankOf(size, color); }
   return out;
 }
 

@@ -201,9 +201,17 @@ async function backUp() {
   const r = await dialog.showOpenDialog(win, { title: "Back up to which folder?", buttonLabel: "Back up here", properties: ["openDirectory", "createDirectory"] });
   if (r.canceled || !r.filePaths[0]) return;
   const dest = path.join(r.filePaths[0], "OpenDecoDesk backup " + stamp());
-  await whileStopped(async () => { if (copyState(dataDir, dest)) recordBackup(dataDir, crypt()); });
-  log("Backed up to " + dest);
-  if (fs.existsSync(dest)) dialog.showMessageBox(win, { message: "Backed up.", detail: "Everything — orders, books, stock, pictures and files — is in\n" + dest + "\n\nKeep a copy somewhere other than this computer." });
+  // "Backed up." only when the copy finished: copyState gives the folder back once every file is in
+  // it, and throws (leaving nothing behind) when the copy stopped part-way. whileStopped shows the error.
+  let made = null;
+  const done = await whileStopped(async () => {
+    try { made = copyState(dataDir, dest); }
+    catch (e) { made = null; throw new Error("The backup was not made.\n\n" + String((e && e.message) || e) + "\n\nYour data is unchanged. Check the folder you chose and try again."); }
+    if (made) recordBackup(dataDir, crypt());
+  });
+  if (!done || !made) return;
+  log("Backed up to " + made);
+  dialog.showMessageBox(win, { message: "Backed up.", detail: "Everything — orders, books, stock, pictures and files — is in\n" + made + "\n\nKeep a copy somewhere other than this computer." });
 }
 
 async function restore() {

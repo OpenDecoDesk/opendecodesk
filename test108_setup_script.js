@@ -278,7 +278,9 @@ const UUID = [hex(8, "1a"), hex(4, "b"), hex(4, "c"), hex(4, "d"), hex(12, "e")]
     ok("the commands run in the right order: check (wrangler, sign-in, R2), database, buckets, migrations, the shops' hostnames, secrets, profile, deploy", seq.join(" | ") === ["--version", "whoami", "r2 bucket list", "d1 list --json", "d1 create opendecodesk-db",
       "r2 bucket create opendecodesk-images", "r2 bucket create opendecodesk-receipts", "r2 bucket create opendecodesk-designs",
       "d1 execute DB --remote --json --yes --config CFG --command SQL", "d1 execute DB --remote --yes --config CFG --file TMP", "d1 migrations apply DB --remote --config CFG",
-      "d1 execute DB --remote --json --yes --config CFG --command SQL", "secret list --format json --config CFG", "d1 execute DB --remote --yes --config CFG --command SQL", "deploy --config CFG --secrets-file TMP"].join(" | "));
+      "d1 execute DB --remote --json --yes --config CFG --command SQL", "secret list --format json --config CFG",
+      // no Worker yet, so the secrets can't be listed: it checks the database has no users or shops before making new ones (test290)
+      "d1 execute DB --remote --json --yes --config CFG --command SQL", "d1 execute DB --remote --yes --config CFG --command SQL", "deploy --config CFG --secrets-file TMP"].join(" | "));
     console.log("--- a new database ---");
     const tablesIn = (db) => db.q("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> 'd1_migrations' ORDER BY name").map(r => r.name).join();
     const ref = await newDb(); ref._raw.exec(read("schema.sql"));

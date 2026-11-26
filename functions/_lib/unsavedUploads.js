@@ -14,8 +14,11 @@
 // here. A customer's design upload waiting for its order is named by customer_design_uploads, so it stays until its
 // own clean-up (customer-design.js) deletes the row and the file together.
 //
-// Never touched: anything uploaded in the last UNSAVED_UPLOADS_KEEP_HOURS (a form may still be open with it), and
-// anything at all when no …Key column can be found. At most UNSAVED_UPLOADS_DELETE_MAX deletions a run, and listing
+// Never touched: anything uploaded in the last UNSAVED_UPLOADS_KEEP_DAYS, and anything at all when no …Key column
+// can be found. The wait is 30 days, not the hour or two an open form needs, because of a restored database: after a
+// restore to an earlier point, every file saved since then is one "nothing names", and those files are what the
+// owner re-enters the lost records from. Deleting is for good (the buckets have no backup), so they get 30 days from
+// their upload first (docs/operations.md, "Restoring"). At most UNSAVED_UPLOADS_DELETE_MAX deletions a run, and listing
 // stops when the run has used its time (UNSAVED_UPLOADS_BUDGET_MS) or looked at UNSAVED_UPLOADS_MAX_PAGES pages of
 // 1,000 files (each page is one storage call and one database query, and the housekeeping tick shares Cloudflare's
 // per-run request allowance — 50 on the Free plan — with its other jobs); where it stopped is kept (global_settings
@@ -25,7 +28,7 @@
 // left where it was, so the next run looks at those files again.
 // No imports: tests load this file as plain source.
 
-export const UNSAVED_UPLOADS_KEEP_HOURS = 48;
+export const UNSAVED_UPLOADS_KEEP_DAYS = 30;
 export const UNSAVED_UPLOADS_DELETE_MAX = 1000;
 export const UNSAVED_UPLOADS_BUDGET_MS = 20000;
 export const UNSAVED_UPLOADS_MAX_PAGES = 8;
@@ -83,7 +86,7 @@ export async function cleanUpUnsavedUploads(env, { now = Date.now(), clock = Dat
   if (!places.length || !env.DB) return out;
   const started = clock();
   const cap = Math.max(0, Math.min(UNSAVED_UPLOADS_DELETE_MAX, Number(limit) || 0));
-  const cutoff = now - UNSAVED_UPLOADS_KEEP_HOURS * 3600 * 1000;
+  const cutoff = now - UNSAVED_UPLOADS_KEEP_DAYS * 24 * 3600 * 1000;
   const columns = await uploadKeyColumns(env.DB);
   // Without the columns that name uploads, every file would look unsaved: delete nothing.
   if (!columns.length) throw new Error("No …Key columns found in the database; nothing was deleted.");

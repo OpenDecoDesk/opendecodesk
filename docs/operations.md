@@ -20,9 +20,10 @@ Free plan). A clean-up that fails is recorded and reported in the roll-up an hou
 - Deletes vendor web-service logs older than 30 days.
 - Deletes customers' design uploads (see [shops-and-domains.md](shops-and-domains.md#customers-own-designs))
   that are older than 48 hours and on no order — up to 200 a day, in one go; any more wait for the next day.
-- Deletes receipts and design, order and digital-product files uploaded more than 48 hours ago that nothing in
+- Deletes receipts and design, order and digital-product files uploaded more than 30 days ago that nothing in
   the database names (their form was never saved) — up to 1,000 a day, looking through at most 8,000 files a run
   (and 20 seconds); the next day carries on where it stopped. A storage bucket that isn't set up is skipped.
+  The 30 days are there for a restored database: see [Restoring](#restoring).
 
 **What the roll-up's tick does**, in order:
 
@@ -141,6 +142,14 @@ It is not a substitute for backups you hold yourself.
 
 **Files are not in the database.** Pictures, receipts and design files are in the R2 buckets. This
 script does not copy them; protect those buckets separately if losing them would hurt.
+
+**After a restore, re-enter what was lost within 30 days.** A restored database no longer names the
+receipts and design, order and digital-product files that were saved after the restore point. The
+files themselves are still in the buckets, and the daily housekeeping leaves each one alone until
+30 days after it was uploaded. Re-enter those records within that time, uploading each file again
+(`npx wrangler r2 object get <bucket>/<file> --remote --file <name>` fetches one from a bucket if you
+no longer have it). After the 30 days, the housekeeping deletes any file the database still doesn't
+name, for good.
 
 ## Migrations
 

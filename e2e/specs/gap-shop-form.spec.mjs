@@ -15,8 +15,8 @@
 //   reserved one, another shop's (known to the page, or made by someone else after the page loaded — the server's
 //   answer), a bad accent colour, an image address that isn't http(s) (the form's check) or has characters the server
 //   refuses (the server's), the delivery list's problems (no options, a custom option with no name, two with the
-//   same name, a fee over 1000). Two answers look wrong and are marked test.fail: an empty name is saved, and a
-//   refused tax exemption still saves the rest of the form.
+//   same name, a fee over 1000), an empty name, and a refused tax exemption (which saves nothing else of the form
+//   either). These last two were bugs this spec found, fixed in the same change.
 // - The Reorder QR code & option prices box saves the tier prices on its own button.
 //
 // Every test makes its own shop(s) with the owner's API (unique names); the thing tested is done through the page.
@@ -271,16 +271,14 @@ test("Shop settings refuses a bad accent colour, a non-web image address and eve
 });
 
 test("Shop settings refuses an empty name", async ({ page, api }) => {
-  // BUG: submitOrgForm (public/admin.js ~11731) never checks the name, and updateOrg (functions/api/orders.js ~3459)
-  // saves whatever comes — createOrg refuses a missing name, updateOrg doesn't, so a shop can be left nameless.
-  test.fail(true, "BUG: an empty shop name is saved (updateOrg has no name check)");
+  // The form refuses it before sending, and updateOrg refuses it too (as createOrg does), so a shop can't be left nameless.
   const shop = await makeShop(api, { prefix: "noname" });
   await editShop(page, shop);
   await field(page, "Name *").fill("   ");
   await save(page);
   await waitIdle(page);
-  // Today the form saves it and goes back to Manage catalog, and the shop's name is "". The name is put back first
-  // (a nameless shop would show as a blank entry in every shop list the other specs open).
+  // Should it ever be saved, the name is put back before failing (a nameless shop would show as a blank entry in every
+  // shop list the other specs open).
   const after = await orgOf(api, shop.orgId);
   if (after.name !== shop.name) {
     await api("updateOrg", { orgId: shop.orgId, subdomain: after.subdomain, name: shop.name, eyebrow: after.eyebrow, accent: after.accent,
@@ -288,13 +286,11 @@ test("Shop settings refuses an empty name", async ({ page, api }) => {
   }
   expect(after.name, "the shop's name after saving an empty one").toBe(shop.name);
   await expect(page).toHaveURL(/\/edit$/);
-  await expect(formError(page)).not.toBeEmpty();
+  await expect(formError(page)).toHaveText("The shop needs a name: it's what customers see at the top of its page.");
 });
 
 test("a refused tax exemption saves nothing else of the form", async ({ page, api }) => {
-  // BUG: updateOrg (functions/api/orders.js ~3500) writes the shop's settings, delivery and rush fee first and only then
-  // checks the exemption certificate: the form shows the error, yet the rest of what was typed is already saved.
-  test.fail(true, "BUG: updateOrg saves the form before refusing a tax exemption with no certificate");
+  // updateOrg checks the exemption before writing anything, so the description typed with it isn't saved either.
   const shop = await makeShop(api, { prefix: "taxform" });   // tax-exempt, with a certificate
   await editShop(page, shop);
   await field(page, "Description").fill("Changed together with a refused exemption.");

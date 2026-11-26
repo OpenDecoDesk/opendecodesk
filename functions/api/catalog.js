@@ -183,6 +183,18 @@ function fundraiserShopText_(f){
   return null;
 }
 
+// Whether the checkout shows its "Discount code" box (migrations/0115): some code that's switched on, not used up and not
+// past its last day works at this shop (its own or an every-shop code). Read fresh on every request, never cached with the
+// published shop — saving or switching off a code needs no Publish. Only a yes/no leaves the server: no code, value or
+// count. The expiry test is loose by a day on purpose (any time zone's today is at least yesterday in UTC), so the box can
+// show a few hours after a code's last day — the server refuses the code then — but never hides while one still works.
+// No 0115 yet (no such table) or any failure: no box.
+const DISCOUNT_BOX_SQL_ = `SELECT 1 AS ok FROM discount_codes d
+  WHERE d.active = 1 AND (d.orgId IS NULL OR d.orgId = ?) AND (d.expiresOn IS NULL OR d.expiresOn >= ?)
+    AND (SELECT COUNT(*) FROM discount_code_uses u WHERE u.codeId = d.id AND u.releasedAt IS NULL) < d.maxUses
+  LIMIT 1`;
+function discountBoxSince_(now){ return new Date(now.getTime() - 86400000).toISOString().slice(0, 10); }
+
 // Maps a stored product (productId/pricingMode/flatPrice/sizePricing) to the
 // shape storefront.js's rendering expects (id, and sizePricing OR flatPrice —
 // no pricingMode field).
@@ -393,9 +405,18 @@ export async function onRequestGet(context){
   // seconds per shop (readShopStock_ above; a draft preview reads it fresh). Each part that can't be read is left out.
   let shownProducts = org.products;
   const wantFiles = !!(shownProducts.some(p => p.digital) && env.DB && features.digital !== false);
-  const { stockRead, filesRead, blankRead } = env.DB
-    ? await readShopStock_(env, orgId, { host: url.host, wantFiles, fresh: preview, waitUntil: context.waitUntil?.bind(context) })
-    : { stockRead: null, filesRead: null, blankRead: null };
+  // The discount box's yes/no (DISCOUNT_BOX_SQL_): read fresh, not with the stock block, so a code saved a moment ago
+  // shows its box at once; read at the same time, and only while the Discount codes feature is on.
+  const wantDiscounts = !!(env.DB && features.discounts !== false);
+  const settle = (read) => Promise.resolve().then(read).then(v => ({ v }), e => ({ e }));
+  const [{ stockRead, filesRead, blankRead }, discountRead] = await Promise.all([
+    env.DB
+      ? readShopStock_(env, orgId, { host: url.host, wantFiles, fresh: preview, waitUntil: context.waitUntil?.bind(context) })
+      : { stockRead: null, filesRead: null, blankRead: null },
+    wantDiscounts ? settle(() => env.DB.prepare(DISCOUNT_BOX_SQL_).bind(orgId, discountBoxSince_(new Date())).first()) : null,
+  ]);
+  const discountCodes = !!(discountRead && !discountRead.e && discountRead.v);
+  if(discountRead && discountRead.e && !/no such table/i.test(String(discountRead.e.message))) console.error("discount code check failed:", discountRead.e);
 
   // Ready-to-ship stock (up to 30 seconds old; an order is still filled from stock only if the database has the pieces).
   // stock: {size: n} for a product with no choices; stockVariants: {combination key: {size: n}} for one with
@@ -487,6 +508,9 @@ export async function onRequestGet(context){
       // The shop's fundraiser (migrations/0110), only as the sentence under its heading and only when it's to be shown;
       // left out otherwise. It's inside the prices, so nothing in the cart depends on it.
       ...(fundraiserText ? { fundraiser: { text: fundraiserText } } : {}),
+      // The checkout's "Discount code" box: true only when a code could work here now (DISCOUNT_BOX_SQL_). The server
+      // checks the code itself, and decides the discount, when it's applied and again when the order is placed.
+      discountCodes,
       // Public Turnstile site key (not secret) — only when server-side
       // verification is actually on, so the widget never renders for nothing.
       turnstileSiteKey: (env.TURNSTILE_SECRET_KEY && env.TURNSTILE_SITE_KEY) ? env.TURNSTILE_SITE_KEY : null

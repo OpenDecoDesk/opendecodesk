@@ -106,6 +106,10 @@ and the tax and shipping features are built around a US business (see [Region](#
   the price or an amount per piece, inside the prices, optionally said on the shop page ("$2.00 of every
   item supports Example Boosters"). A Fundraising report shows what each shop raised, what was paid out
   to the group and what is still owed, and a payout is recorded as an expense.
+- Discount codes customers type at checkout: a percent or an amount off the goods, for every shop or
+  one, with an optional last day. A code for one person (tied to their email, used once), or one for
+  anyone that works a set number of times; codes for a pasted list of emails in one go. A voided order
+  gives its use back.
 
 **Running it**
 - An admin panel on its own address, with a sign-in for each person, three roles (back office, manager, admin), two-step sign-in that can be required, and an audit log.
@@ -193,8 +197,8 @@ without it.
 
 ## Feature switches
 
-Seven parts of the site are optional. Each has a switch in the admin under Settings → Global settings →
-Features. **All seven are on by default.** Turning one off hides its pages in the admin menu (opening one
+Eight parts of the site are optional. Each has a switch in the admin under Settings → Global settings →
+Features. **All eight are on by default.** Turning one off hides its pages in the admin menu (opening one
 of them directly shows a "this feature is turned off" page), and the server refuses its actions. Nothing
 is deleted — every table and row stays — so turning it back on brings everything back as it was. Each
 change is written to the audit log.
@@ -234,6 +238,10 @@ change is written to the audit log.
 - **Quotes** — building quotes for customers, emailing them, and the page where a customer accepts one
   or asks for changes (see docs/shops-and-domains.md). Off: the Quotes page is hidden, and a quote link
   already emailed says "Quotes aren't available." Orders made from quotes stay as they are.
+- **Discount codes** — codes customers type at checkout, and the Discount codes page where you make
+  them (see docs/operations.md). Off: the page is hidden, the checkout shows no code box, and an order
+  sent with a code is refused ("Discount codes aren't available right now."). Orders that already used
+  a code keep their discount.
 
 **Inventory is always on.** Stock of blanks and transfers, and cost of goods, are part of making an order
 (marking it manufactured uses the blanks), so there is no switch for them in this release.

@@ -140,6 +140,12 @@ About fifty tables (`schema.sql`). The main groups:
   the shop (`expenses.fundraiserOrgId`), in the built-in category whose `systemKey` is
   `fundraiser_payout` (Schedule C line 27a, other expenses), as `sales_tax_paid` is the built-in
   category for sales tax paid.
+- **Discount codes** — `discount_codes` (the code, upper-case and unique; percent in basis points or an
+  amount in cents; the shop, or none for every shop; the one email it is for, or empty for anyone; its
+  number of uses, once-per-email, last day, on/off and note) and `discount_code_uses` (one row per order
+  that used a code: the order, email and amount). A void or delete sets the use's `releasedAt` rather
+  than removing it, and a released use no longer counts. The order itself keeps the discount in
+  `orders.discountCents` / `discountNote` like any other discount.
 - **Inventory** — `blanks`, `blank_colors`, `blank_sizes`, `inventory_movements`; `transfers`,
   `transfer_movements`.
 - **Production** — `threads`, `hoops`, `designs`, `design_versions`, `machines`, `production_runs`.
@@ -179,6 +185,14 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
   Fundraising report (`getFundraisingReport`) sums those lines for paid orders only, less cancelled
   lines and refunded shares; the storefront only ever gets the sentence the shop page shows
   (`functions/api/catalog.js`), never the setting.
+- **A code's last use goes to one order.** Placing an order with a code claims a use with one
+  conditional insert (`claimDiscountCode` in `db.js`): it is written only while the code is switched on,
+  has uses left and (when it is once per email) hasn't been used by that email — checked in the same
+  statement, so two orders racing for the last use can't both win. The claim is made just before the
+  order is inserted; if the insert fails, the use is released. The discount is worked out on the server
+  from the order's priced lines; the storefront only shows it. Whether a shop's checkout shows the code
+  box is read fresh on each catalog request (`functions/api/catalog.js`), not cached, so a new code needs
+  no Publish.
 - **A built-in expense category can't be deleted.** A category with a `systemKey` (`sales_tax_paid`,
   `fundraiser_payout`) is one the code looks up; it can be renamed, never removed.
 

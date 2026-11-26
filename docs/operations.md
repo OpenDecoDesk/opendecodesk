@@ -303,6 +303,11 @@ Bookkeeping feature; setting up a shop's fundraiser needs the edit level of the 
 with Customers, a role you made yourself, or a built-in one you have changed, starts without it
 ([Fundraising](#fundraising-the-report-and-payouts) below).
 
+**Discount codes** is a permission of its own, "Discount codes". Manager and Admin can make, change,
+switch off and delete codes; Back office can look at them and the orders that used them; Production
+can't open the page. As with Customers, a role you made yourself, or a built-in one you have changed,
+starts without it ([Discount codes](#discount-codes) below).
+
 - **Adding someone:** name, email, role. You are shown a temporary password once; give it to
   them. They must choose their own the first time they sign in.
 - **Someone leaves:** disable them. They are signed out at once and can't sign in. Users are
@@ -498,3 +503,57 @@ The built-in category (named "Fundraiser payouts (built in)" if you already had 
 "Fundraiser payouts") can be renamed but not deleted. Nothing is paid to the group automatically: the report tells
 you what is owed, and you pay it the way you always have.
 
+
+## Discount codes
+
+Codes a customer types at checkout on a shop's page, made on the **Discount codes** page (in the menu
+after Quotes). Each code is either:
+
+- **For one person** — tied to one email address. It works once, and only on an order placed with that
+  email (spaces and capitals don't matter). Anyone else typing it is told the code isn't valid; the
+  address is never shown.
+- **For anyone** — it works a set number of times in all (1 to 100,000), by whoever has it. Tick
+  **Once per email address** to stop the same email using it twice.
+
+Either kind takes a **percent off** (0.01% to 100%) or an **amount off** ($0.01 to $10,000), works at
+**all shops or one**, and can have a **last day** (it works through the end of that day, in the
+business's time zone — Global settings → Region), and a private note. Leave the code blank and one is
+made for you; codes are letters, digits, `-` and `_`, 3 to 32 characters, and read the same in any case.
+
+**What it takes off.** The discount is off the order's goods — the lines as priced, quantity breaks and
+personalization included — never the delivery or the rush fee. A percent is rounded to the cent; an
+amount is never more than the goods. It is stored as the order's discount, like one you type on an
+order (its note says "Code SAVE10"), so the balance, card checkout, the reports and the Fundraising
+report treat it the same. The Orders page shows "Code SAVE10" next to it. One code per order.
+
+**At checkout.** The shop page shows a **Discount code** box only while the shop has a code that can be
+used — switched on, not used up and not past its last day, for that shop or all shops. **Apply** checks
+the code (with the email typed so far) and shows the discount in the totals; changing the cart checks it
+again. The server checks it once more when the order is placed and decides the discount; two orders
+racing for a code's last use can't both get it. An order the code covers in full has nothing to pay and
+skips the card step.
+
+**Codes for a list of emails…** makes one single-use code per address for up to 500 pasted emails (one
+per line or separated by commas), all with the same discount, shop, last day and note, and an optional
+prefix. Duplicates and addresses that aren't emails are skipped and listed. **Copy as CSV** and
+**Download CSV** give you `email,code` to send — the app doesn't email codes; you send them.
+
+**Uses.** The list shows each code's uses ("3 of 50") and its status: active, switched off, expired or
+used up. Opening a code lists the orders that used it. **Voiding or deleting an order gives its use
+back**, so a customer whose order never went ahead can use the code again; the code's list still shows
+that order, marked "given back".
+
+**Changing a code.** Until it is used, anything can change. Once it has been used, only its last day,
+its number of uses (never below the uses so far), its note and whether it is switched on — so the
+orders that used it keep meaning what they did. **Switch it off** to stop it working; switch it on again
+later. A code can be **deleted only while it has never been used**.
+
+**Who can.** The **Discount codes** permission: Admin and Manager can make and change codes, Back office
+can see them, Production has no access ([Users and roles](#users-and-roles)). Making, changing,
+switching and deleting codes are in the audit log (for a list of emails, only how many were made). The
+page also needs the **Discount codes** feature (Global settings → Features), on unless you turned it
+off: off, the page is hidden, the checkout has no code box and an order sent with a code is refused.
+
+**Not included:** codes on a local sale, an invoice or a quote (type a discount on the order instead);
+gift cards or store credit; a minimum order; free-shipping codes; more than one code on an order; and
+emailing codes to customers.

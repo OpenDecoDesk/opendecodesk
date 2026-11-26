@@ -461,7 +461,7 @@ function receiptLines_(order) {
   else if (deliveryIsCustom_(order)) rows.push({ label: deliveryLabel_(order), value: "Free" });
   if (rushPending) rows.push({ label: "Rush fee", value: RUSH_FOLLOW_TEXT_, muted: true });
   else if (rushCents > 0) rows.push({ label: "Rush fee", value: fmtCents_(rushShown) });
-  if (discountCents > 0) rows.push({ label: "Discount" + (order.discountNote ? " (" + order.discountNote + ")" : ""), value: "−" + fmtCents_(discountShown), green: true });
+  if (discountCents > 0) rows.push({ label: "Discount" + discountLabelNote_(order), value: "−" + fmtCents_(discountShown), green: true });
   const taxLabel = "Sales tax" + (order.taxRate ? ` (${order.taxRate}%)` : "");
   if (order.taxExempt) rows.push({ label: "Sales tax", value: "Tax-exempt", muted: true });
   else if (beforeTax && taxCents > 0) rows.push({ label: taxLabel, value: fmtCents_(taxCents) });
@@ -472,6 +472,16 @@ function receiptLines_(order) {
   const roundedUnits = lines.some(l => l.unitCents * l.qty !== l.amountCents);
   return { lines, rows, totalCents, tbd, beforeTax, roundedUnits, // "Before tax" is only worth saying when there is tax on the order.
     note: [beforeTax && taxCents > 0 ? "Prices are shown before sales tax." : "", roundedUnits ? "Unit prices are rounded to the cent; the amounts are exact." : ""].filter(Boolean).join(" ") };
+}
+// " (SAVE10)" after "Discount": a discount code's own text (migrations/0115 — discountCode, the code of the order's live
+// use) rather than its stored note "Code SAVE10", plus anything the owner added to the note since ("SAVE10; Balance
+// waived"). Without a code, the manual discount's note as before; nothing when neither is set.
+function discountLabelNote_(order) {
+  const code = String(order.discountCode || "").trim();
+  const note = String(order.discountNote || "").trim();
+  if (!code) return note ? " (" + note + ")" : "";
+  const rest = note.replace(new RegExp("^Code " + code.replace(/[^A-Za-z0-9_-]/g, "") + "(?![A-Za-z0-9_-])(;\\s*)?", "i"), "").trim();
+  return " (" + code + (rest ? "; " + rest : "") + ")";
 }
 // Paid so far / balance due under the totals (the invoice and the payment-received email).
 function paymentRows_(order) {

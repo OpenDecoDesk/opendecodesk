@@ -394,6 +394,15 @@
   .rush-date input{font-family:'IBM Plex Mono',monospace; font-size:13px; background:#0f1012; border:1px solid #3a3a38; color:#F6F3EC; padding:5px 8px; border-radius:var(--radius); color-scheme:dark;}
   .ticket-breakdown{padding-top:10px; margin-top:6px; border-top:1px solid #3a3a38;}
   .ticket-breakdown-line{display:flex; justify-content:space-between; font-family:'IBM Plex Mono',monospace; font-size:12px; color:#8b8a82; padding:2px 0;}
+  /* Discount code box (migrations/0115): the code, Apply / Remove, and the server's answer under it */
+  .discount-row{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+  .discount-input{width:auto; flex:1 1 140px; min-width:0; max-width:220px; text-transform:uppercase;}
+  .discount-input[readonly]{opacity:.8;}
+  .discount-btn{font-family:'IBM Plex Mono',monospace; font-size:12px; background:none; border:1px solid #3a3a38; color:#F6F3EC; padding:6px 12px; border-radius:var(--radius); cursor:pointer;}
+  .discount-btn:disabled{opacity:.55; cursor:default;}
+  .discount-on{margin-top:6px; font-family:'IBM Plex Mono',monospace; font-size:12px; color:#86efac;}
+  .discount-msg{margin-top:6px; font-size:12px; line-height:1.4; color:#fca5a5;}
+  .ticket-discount-line{color:#86efac;}
 
   /* ---- shipping address modal ---- */
   .ship-addr-overlay{position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:1000; padding:20px;}

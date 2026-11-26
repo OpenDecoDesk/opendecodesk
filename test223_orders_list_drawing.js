@@ -106,7 +106,10 @@ const wait = async (fn, n = 400) => { for (let i = 0; i < n && !fn(); i++) await
   ok("Show more on All shops draws the rest without a request", drawn() === 329 && !sent.length);
 
   console.log("\n=== The default dates follow the calendar ===");
-  const day = (n) => w.localDay_(new Date(Date.now() - n * 86400000));
+  // n calendar days before the business's today. Not "now less n × 24 hours": across a clock change (within the
+  // last 31 days) that lands an hour off, which near midnight is the next or previous day.
+  const today = w.localDay_(new Date()), [ty, tm, td] = today.split("-").map(Number);
+  const day = (n) => new Date(Date.UTC(ty, tm - 1, td - n)).toISOString().slice(0, 10);
   // As if the page was opened yesterday: the range it set then is still the automatic one.
   w._ordersFilter = { from: day(31), to: day(1) }; w._ordersFilterAuto_ = { from: day(31), to: day(1) };
   ok("a range left from yesterday moves on to today", w.ordersRollDates_() === true && w._ordersFilter.to === day(0) && w._ordersFilter.from === day(30));

@@ -11759,6 +11759,7 @@ async function submitOrgForm(isEdit){
     taxExemptCertificate: document.getElementById("orgFormTaxCert").value.trim(),
     taxExemptExpires: document.getElementById("orgFormTaxExpires").value.trim()
   };
+  if(!body.name){ errEl.textContent = "The shop needs a name: it's what customers see at the top of its page."; return; }
   { const why = orgDeliveryProblem_(body.deliveryOptions); if(why){ errEl.textContent = why; return; } }
   if(body.rushFee && body.rushFee.error){ errEl.textContent = body.rushFee.error; return; }
   { const why = webAddressProblem_(body.subdomain, isEdit ? body.orgId : null); if(why){ errEl.textContent = why; return; } }

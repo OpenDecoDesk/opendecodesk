@@ -3460,6 +3460,10 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (!body.orgId) return jsonResponse({ status: "error", message: "Missing orgId" }, 400);
       const existingOrg = await getOrgById(env.DB, body.orgId);
       if (!existingOrg) return jsonResponse({ status: "error", message: "Unknown org" }, 404);
+      // The name is what customers see at the top of the shop's page, so it can't be cleared (createOrg
+      // requires one too). A caller that doesn't send it keeps the current one.
+      if (body.name === undefined) body.name = existingOrg.name;
+      else if (!(body.name = String(body.name).trim())) return jsonResponse({ status: "error", message: "The shop needs a name: it's what customers see at the top of its page." }, 400);
       // A blank subdomain keeps the current one. An unchanged subdomain isn't re-checked, so an
       // org whose stored subdomain wouldn't pass today's checks can still be edited.
       if (noDomainYet() && body.ready && !existingOrg.ready) return noDomainResponse();
@@ -3493,6 +3497,20 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (body.shippingEnabled && !existingOrg.shippingEnabled && !featureOn("shipping")) return jsonResponse({ status: "error", message: NO_SHIPPING_FEATURE_MSG }, 400);
       const newRush = shopRushOf_(body);
       if (newRush.error) return jsonResponse({ status: "error", message: newRush.error }, 400);
+      // Tax exemption is only touched when the form sends it (see setOrgTaxExemption). It is checked
+      // here, before anything is written, so a refused exemption leaves the whole form unsaved.
+      let exemption = null;
+      if (body.taxExempt !== undefined) {
+        const certificate = String(body.taxExemptCertificate || "").trim().slice(0, 100);
+        const expires = String(body.taxExemptExpires || "").trim();
+        if (expires && !/^\d{4}-\d{2}-\d{2}$/.test(expires)) {
+          return jsonResponse({ status: "error", message: "Exemption expiry must be YYYY-MM-DD" }, 400);
+        }
+        if (body.taxExempt && !certificate) {
+          return jsonResponse({ status: "error", message: "A tax-exempt org needs its exemption certificate number" }, 400);
+        }
+        exemption = { taxExempt: !!body.taxExempt, certificate, expires };
+      }
       await updateOrg(env.DB, body.orgId, {
         subdomain: body.subdomain,
         name: body.name, eyebrow: body.eyebrow || "", accent: body.accent || "#2563eb",
@@ -3510,19 +3528,10 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (!newRush.skip) await setOrgRushFee(env.DB, body.orgId, newRush.value);
       { const changes = diff_(existingOrg, await getOrgById(env.DB, body.orgId), ORG_AUDIT_FIELDS);
         if (Object.keys(changes).length) audit({ orgId: body.orgId, orderId: null, action: "org.updated", detail: { changes } }); }
-      // Tax exemption is only touched when the form sends it (see setOrgTaxExemption).
-      if (body.taxExempt !== undefined) {
-        const certificate = String(body.taxExemptCertificate || "").trim().slice(0, 100);
-        const expires = String(body.taxExemptExpires || "").trim();
-        if (expires && !/^\d{4}-\d{2}-\d{2}$/.test(expires)) {
-          return jsonResponse({ status: "error", message: "Exemption expiry must be YYYY-MM-DD" }, 400);
-        }
-        if (body.taxExempt && !certificate) {
-          return jsonResponse({ status: "error", message: "A tax-exempt org needs its exemption certificate number" }, 400);
-        }
-        await setOrgTaxExemption(env.DB, body.orgId, { taxExempt: !!body.taxExempt, certificate, expires });
+      if (exemption) {
+        await setOrgTaxExemption(env.DB, body.orgId, exemption);
         audit({ orgId: body.orgId, orderId: null, action: "org.tax_exemption_set",
-          detail: { taxExempt: !!body.taxExempt, certificate, expires: expires || null } });
+          detail: { taxExempt: exemption.taxExempt, certificate: exemption.certificate, expires: exemption.expires || null } });
       }
       return jsonResponse({ status: "ok" });
     }

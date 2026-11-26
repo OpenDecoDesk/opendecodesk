@@ -190,6 +190,20 @@ async function migratedDb(){
   r = await call({ action: "updateOrg", orgId: "prime", name: "Example League renamed", subdomain: "prime" });
   const prime = (await lib.getAllOrgs(d1)).find(x => x.orgId === "prime");
   console.log("an org update that doesn't mention tax leaves the exemption alone:", r.status === 200 && prime.name === "Example League renamed" && prime.taxExempt === true);
+  // A refused exemption is checked before anything is written: the rest of the form isn't saved either.
+  const orgNow = async () => (await lib.getAllOrgs(d1)).find(x => x.orgId === "prime");
+  const descBefore = (await orgNow()).desc;
+  r = await call({ action: "updateOrg", orgId: "prime", name: "Example League renamed", subdomain: "prime", desc: "Words that must not be saved", taxExempt: true, taxExemptCertificate: "" });
+  console.log("a refused exemption (no certificate) leaves the rest of the shop form unsaved:", r.status === 400 && (await orgNow()).desc === descBefore && (await orgNow()).taxExemptCertificate === "CERT-9");
+  r = await call({ action: "updateOrg", orgId: "prime", name: "Example League renamed", subdomain: "prime", desc: "Words that must not be saved", taxExempt: true, taxExemptCertificate: "CERT-9", taxExemptExpires: "next year" });
+  console.log("…and so does a refused expiry date:", r.status === 400 && (await orgNow()).desc === descBefore);
+  // The shop's name can't be cleared (createOrg needs one too); a caller that doesn't send it keeps it.
+  r = await call({ action: "updateOrg", orgId: "prime", name: "   ", subdomain: "prime", desc: "Words that must not be saved" });
+  console.log("a blank shop name is refused, and nothing is saved:", r.status === 400 && /needs a name/.test(r.body.message) && (await orgNow()).name === "Example League renamed" && (await orgNow()).desc === descBefore);
+  r = await call({ action: "updateOrg", orgId: "prime", subdomain: "prime", desc: "Saved without a name sent" });
+  console.log("an update that doesn't send the name keeps it:", r.status === 200 && (await orgNow()).name === "Example League renamed" && (await orgNow()).desc === "Saved without a name sent");
+  r = await call({ action: "updateOrg", orgId: "prime", name: "  Example League renamed  ", subdomain: "prime" });
+  console.log("…and a name with spaces around it is saved trimmed:", r.status === 200 && (await orgNow()).name === "Example League renamed");
   r = await call({ action: "getSalesTaxReport", dateFrom: "2026-08-01", dateTo: "2026-09-30" });
   console.log("report API totals: tax = sum of rows, exempt sales listed:",
     r.status === 200 && r.body.totals.taxCollected === Math.round(r.body.rows.reduce((a, x) => a + x.taxCollected * 100, 0)) / 100 &&

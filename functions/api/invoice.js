@@ -165,7 +165,7 @@ async function invoiceView_(env, inv, order, org) {
     payments: paymentMethods_(org, settings, !!env.STRIPE_SECRET_KEY),
     // Paid by gift card so far (a payment, listed as "Paid by gift card ••1234"), and what can still be added.
     giftCardPaid: (order.payments || []).filter(p => !p.voidedAt && /^Gift card/i.test(String(p.reference || "")) && Number(p.amount) > 0)
-      .map(p => ({ label: String(p.reference).slice(0, 40), amount: Number(p.amount) || 0 })),
+      .map(p => ({ label: String(p.reference).slice(0, 40), amount: Number(p.amount) })),
     addOns: await addOns_(env, order, org, settings),
   };
 }

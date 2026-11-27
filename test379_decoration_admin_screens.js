@@ -566,6 +566,22 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   setWiz({}, { decoration: "screenprint" }); prodScreen();
   ok("a product's switched-off type stays, marked", /Screen print \(switched off\)/.test(labelOf("wizPDeco", "screenprint")) && checkedOf("wizPDeco") === "screenprint");
 
+  // Add image… on the graphics screen: the new graphic carries the product's printed type, not a silent DTF.
+  {
+    const asked = [], realApi = w.hoopApi_, realUp = w.uploadImage;
+    w.hoopApi_ = async (b) => { asked.push(b); return { id: 7 }; };
+    w.uploadImage = async () => "https://img.example/uploads/mark.png";
+    const addImg = async (kind, deco) => { asked.length = 0; setWiz({}, {}); await w.wizAddGraphicImage_(kind, { name: "Club_mark.png" }, deco); return asked.filter(x => x.action === "saveGraphic").map(x => x.graphic)[0]; };
+    try {
+      const got = {};
+      for (const k of ["screenprint", "vinyl", "dtg", "sublimation", "dtf", "both", undefined]) got[k] = await addImg("transfer", k);
+      ok("Add image… on a screen print, vinyl, DTG or sublimation product saves a transfer graphic of that type", ["screenprint", "vinyl", "dtg", "sublimation"].every(k => got[k] && got[k].kind === "transfer" && got[k].decoration === k && got[k].name === "Club mark"));
+      ok("…on a DTF or Both product (or with no answer) it is DTF", ["dtf", "both", "undefined"].every(k => got[k] && got[k].kind === "transfer" && got[k].decoration === "dtf"));
+      const emb = await addImg("embroidery", "screenprint");
+      ok("…an embroidery graphic carries no printed type", emb && emb.kind === "embroidery" && !("decoration" in emb));
+    } finally { w.hoopApi_ = realApi; w.uploadImage = realUp; }
+  }
+
   console.log("\n=== The wizard: what is still to come for each type ===");
   await setDeco(KEYS, ALL6);
   const todo = (decoration) => { setWiz({}, { decoration, fixed: {} }); return w.eval("wizDesignsPending_(_wiz.state.products[0])"); };

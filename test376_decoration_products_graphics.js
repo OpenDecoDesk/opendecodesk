@@ -90,7 +90,8 @@ const OFF = "That decoration type is switched off in Global settings";
   ok("an ordinary product that needs a design is embroidery", pd({}) === "embroidery" && pd({ noDesignNeeded: false, digital: false, fixedTransfers: [] }) === "embroidery");
   ok("a product that needs no design is DTF", pd({ noDesignNeeded: true }) === "dtf");
   ok("a product with fixed transfers and no design is DTF", pd({ fixedTransfers: [{ graphicId: 1 }] }) === "dtf");
-  ok("fixed transfers make a digital product DTF; no design needed does too", pd({ digital: true, fixedTransfers: [{ graphicId: 1 }] }) === "dtf" && pd({ digital: true, noDesignNeeded: true }) === "dtf");
+  ok("fixed transfers make a digital product DTF; no design needed does too", pd({ digital: true, fixedTransfers: [{ graphicId: 1 }] }) === "dtf");
+  ok("a digital product (which also sets no design needed) has nothing to decorate, not DTF", pd({ digital: true, noDesignNeeded: true }) === "" && pd({ digital: true, noDesignNeeded: true, designs: [] }) === "");
   ok("a digital product with nothing to decorate has none", pd({ digital: true }) === "");
   ok("fixed transfers that are not a list are nothing", pd({ digital: true, fixedTransfers: "x" }) === "");
 
@@ -381,11 +382,15 @@ const OFF = "That decoration type is switched off in Global settings";
   const two = await snap("snap", { garmentColor: "Navy", locations: { front: { graphicId: G.vinyl }, back: { graphicId: G.emb } } });
   ok("each location carries its own", two.locations.find(l => l.location === "front").decoration === "vinyl" && two.locations.find(l => l.location === "back").decoration === "embroidery");
 
-  // Fixed transfers are DTF whatever the graphic prints with.
+  // A fixed transfer is stamped with its linked graphic's printed type (dtf when it has none).
   const BACK = await lib.saveLocation(d1, { name: "Back" });
   await make("fixed", { noDesignNeeded: true, reorderQr: "none", fixedTransfers: [{ locationId: BACK, graphicId: G.screenprint }] });
   const fx = await snap("fixed", null);
-  ok("a product's fixed transfer is DTF, whatever its graphic is printed with", fx.locations.length === 1 && fx.locations[0].fixed === true && fx.locations[0].decoration === "dtf");
+  ok("a product's fixed transfer is stamped with its graphic's type (screen print), not always DTF", fx.locations.length === 1 && fx.locations[0].fixed === true && fx.locations[0].decoration === "screenprint");
+  await make("fixed-dtf", { noDesignNeeded: true, reorderQr: "none", fixedTransfers: [{ locationId: BACK, graphicId: G.dtf }] });
+  const fxd = await snap("fixed-dtf", null);
+  ok("…a DTF graphic's fixed transfer is DTF, and a vinyl one vinyl", fxd.locations[0].decoration === "dtf" &&
+    (await (async () => { await make("fixed-vinyl", { noDesignNeeded: true, reorderQr: "none", fixedTransfers: [{ locationId: BACK, graphicId: G.vinyl }] }); return (await snap("fixed-vinyl", null)).locations[0].decoration === "vinyl"; })()));
 
   // The reorder QR: a transfer is DTF; one chosen through a graphic is that graphic's type.
   await make("qr-t", { noDesignNeeded: true, reorderQr: "t" + sheet });
@@ -445,6 +450,7 @@ const OFF = "That decoration type is switched off in Global settings";
   const L = (...ds) => ({ config: { locations: ds.map((d, i) => ({ location: "l" + i, kind: d === "embroidery" ? "embroidery" : "transfer", decoration: d })) } });
   ok("a line lists the unique decorations of its locations in registry order", same(ldl(L("vinyl", "embroidery", "vinyl", "dtf")), ["embroidery", "dtf", "vinyl"]));
   ok("a line of one type lists one", same(ldl(L("sublimation", "sublimation")), ["sublimation"]));
+  ok("a digital line with no locations has no decorations (and a non-digital no-design one is DTF)", same(ldl({ config: { locations: [] } }, { digital: true, noDesignNeeded: true }), []) && same(ldl({ config: { locations: [] } }, { noDesignNeeded: true }), ["dtf"]));
   ok("a line placed before 0118 reads each location by its kind", same(ldl({ config: { locations: [{ location: "a", kind: "embroidery" }, { location: "b", kind: "transfer" }] } }), ["embroidery", "dtf"]));
   ok("a line read from its stored text works the same", same(ldl({ configJson: JSON.stringify(L("dtg", "screenprint").config) }), ["screenprint", "dtg"]));
   ok("an entry with no location is not counted", same(ldl({ config: { locations: [{ kind: "embroidery" }, { location: "x", kind: "transfer", decoration: "vinyl" }, null] } }), ["vinyl"]));

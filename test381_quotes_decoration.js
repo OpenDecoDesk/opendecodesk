@@ -569,6 +569,16 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
     ok("a kind the roll-up has no name for shows as it is", odd === true && /<td[^>]*>mystery<\/td>/.test(mail[mail.length - 1].htmlBody));
     ok("the plain-text roll-up lists them with the same names", ["Quote  ACME-Q00123", "Quote  Q-00124", "Invoice  ACME-1001", "Gift card  GC-1", "PO  PO-1"].every(t => roll.body.includes(t)));
 
+    console.log("\n=== The admin Communications page names the notices ===");
+    {
+      const adminSrc = read("public/admin.js");
+      const fn = adminSrc.slice(adminSrc.indexOf("async function renderCommunications("), adminSrc.indexOf("async function checkBlankShipmentsNow("));
+      const m = fn.match(/const KIND = (\{[^}]*\});/);
+      const KIND = m ? new Function("return " + m[1])() : {};
+      ok("its kind names include Quote, Gift card and PO (as the roll-up's do), so a quote notice is not shown as raw \"quote\"", KIND.quote === "Quote" && KIND.gift_card === "Gift card" && KIND.po === "PO");
+      ok("…and the ones it already had are unchanged", KIND.payment === "Payment" && KIND.refund === "Refund" && KIND.dispute === "Dispute" && KIND.design === "Design response" && KIND.delivered === "Delivered" && KIND.picked_up === "Picked up");
+    }
+
     console.log("\n=== A database from before the quote notices ===");
     const old = await createD1();
     old._raw.exec(read("testlib/schema-pre-0006.sql"));

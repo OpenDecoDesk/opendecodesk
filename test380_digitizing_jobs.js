@@ -61,6 +61,9 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   console.log("\n=== saveDigitizingJob: what is refused, and the sentence ===");
   {
     const cases = [
+      ["no name", { name: "" }, "Say what was sent (its name)"],
+      ["a name of only spaces", { name: "   " }, "Say what was sent (its name)"],
+      ["a name that is missing", { name: undefined }, "Say what was sent (its name)"],
       ["a name over 200 characters", { name: "x".repeat(201) }, "What was sent can be at most 200 characters."],
       ["a vendor name over 120 characters", { vendor: "v".repeat(121) }, "The digitizer's name can be at most 120 characters."],
       ["a vendor that isn't on the list", { vendor: "Nobody Digitizing" }, "“Nobody Digitizing” isn't in the vendor list — add it with Manage… next to the digitizer."],
@@ -91,7 +94,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
       (await lib.saveDigitizingJob(d1, Object.assign({}, base, { vendor: "", name: "Unnamed vendor" }))).vendor === "");
     ok("a vendor that doesn't digitize (marked for blanks only) is still on the list, so it is accepted",
       (await lib.saveDigitizingJob(d1, Object.assign({}, base, { vendor: "Other Supplier", name: "Odd one" }))).vendor === "Other Supplier");
-    ok("a missing job (null) is refused as no date, not a crash", (await rej(null)).message === "Pick the date it was sent.");
+    ok("a missing job (null) is refused as no name, not a crash", (await rej(null)).message === "Say what was sent (its name)");
     d1._raw.run("DELETE FROM digitizing_jobs");
   }
 
@@ -111,7 +114,6 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
     ok("an order id is trimmed and cut to 64 characters", longId.orderId === "9".repeat(64));
     ok("a cost of exactly $1,000,000 is allowed", (await lib.saveDigitizingJob(d1, Object.assign({}, base, { name: "Big", costCents: 100000000 }))).costCents === 100000000);
     ok("a record may come back the day it was sent", (await lib.saveDigitizingJob(d1, Object.assign({}, base, { name: "Same day", returnedAt: "2026-03-02" }))).returnedAt === "2026-03-02");
-    ok("a name may be left empty at this level (the action asks for one)", (await lib.saveDigitizingJob(d1, Object.assign({}, base, { name: "" }))).name === "");
     d1._raw.run("DELETE FROM digitizing_jobs WHERE id <> ?", [first.id]);
   }
 
@@ -588,6 +590,17 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
     ok("an order's Action cell has a Digitizing… button for the order (data-org, data-order), with its title", !!btn && btn.textContent === "Digitizing…" && btn.dataset.org === "acme" && btn.dataset.order === "O-1" && /outside digitizer/.test(btn.title));
     ok("…Admin, Manager, Back office and Production (read) all get it", ["manager", "staff", "production"].every(r => { const b = cell(r); return !!b && b.textContent === "Digitizing…"; }));
     ok("…a role with no access to Outside digitizing gets none", cell(null, withLevels("admin", { "production.digitizing": "none" })) === null);
+    {
+      const unpaid = Object.assign({}, o, { paid: false, paidForWork: false, payOnDelivery: false });
+      const find = (html, a) => { const t = d.createElement("div"); t.innerHTML = html; return t.querySelector('[data-admin-action="' + a + '"]'); };
+      asRole("admin");
+      const ucell = w.adminActionCell({ orgId: "acme" }, unpaid);
+      const ub = find(ucell, "showOrderDigitizing_");
+      ok("an order that isn't paid or cleared for work still has Digitizing… (it is often sent out before payment), with its data and title", !!ub && ub.textContent === "Digitizing…" && ub.dataset.org === "acme" && ub.dataset.order === "O-1" && /outside digitizer/.test(ub.title) && !!find(ucell, "markOrderPaid"));
+      ok("…on an unpaid order Back office and Production (read) get it too, and a role with no access to Outside digitizing gets none", ["manager", "staff", "production"].every(r => { asRole(r); return !!find(w.adminActionCell({ orgId: "acme" }, unpaid), "showOrderDigitizing_"); }) &&
+        (signInWith(withLevels("admin", { "production.digitizing": "none" })), find(w.adminActionCell({ orgId: "acme" }, unpaid), "showOrderDigitizing_") === null));
+      asRole("admin");
+    }
     ok("the button is on the paid orders' Action cell, which is where Dates… and the stage menu are too (an unpaid order's cell offers payment first)", !!btn && !!(() => { const t = d.createElement("div"); t.innerHTML = w.adminActionCell({ orgId: "acme" }, o); return t.querySelector('[data-admin-action="showOrderDates_"]'); })());
     ok("the button's action is one the page knows (admin.js's action list names showOrderDigitizing_)", typeof w.showOrderDigitizing_ === "function" && /showOrderDigitizing_\(\)\{ showOrderDigitizing_\(this\.dataset\.org,this\.dataset\.order\); \}/.test(adminJs));
   }
@@ -754,7 +767,8 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
     D._raw.run("DELETE FROM digitizing_jobs; DELETE FROM expenses");
     const XSS = '<img src=x onerror="window.__xss380=1">Cap & Co';
     await seed({ name: XSS, note: '<b onmouseover="window.__xss380=2">bold</b>', vendor: "Example Digitizing Co", sentAt: "2026-02-01", costCents: 1234 });
-    await lib.saveDigitizingJob(D, { orderId: "O-1", name: "", vendor: "", sentAt: "2026-01-01", returnedAt: "2026-01-04", costCents: 0 });
+    const nameless = await lib.saveDigitizingJob(D, { orderId: "O-1", name: "Old record", vendor: "", sentAt: "2026-01-01", returnedAt: "2026-01-04", costCents: 0 });
+    D._raw.run("UPDATE digitizing_jobs SET name = '' WHERE id = ?", [nameless.id]);   // a record from before a name was required
     asRole("admin");
     await openOrder("O-1");
     ok("names and notes are text, never markup", !w.__xss380 && !topModal().querySelector("[data-dg-list] img") && !topModal().querySelector("[data-dg-list] b") && rowsOf()[0].children[0].textContent.includes(XSS));

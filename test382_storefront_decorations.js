@@ -193,8 +193,11 @@ async function freshDb() {
   const P = (id) => a.body.catalog.products.find(p => p.id === id);
   ok("a product with a chosen type sends it", P("pers-dtg").decorationType === "dtg" && P("pers-emb").decorationType === "embroidery");
   ok("a product with no chosen type sends no decorationType key", !("decorationType" in P("pers-none")) && !("decorationType" in P("emb")));
-  ok("a decoration the server lists is {kind, name, location}, with the type's made-label as its kind",
-    JSON.stringify(P("fx-screenprint").decorations) === JSON.stringify([{ kind: "Screen printed", name: "<i>SP Mark</i>", location: "Front" }]));
+  ok("a decoration the server lists is {kind, name, location, type}, with the type's made-label as its kind",
+    JSON.stringify(P("fx-screenprint").decorations) === JSON.stringify([{ kind: "Screen printed", name: "<i>SP Mark</i>", location: "Front", type: "screenprint" }]));
+  ok("…and the decoration's type (its key) is on every entry, so the page can filter switched-off types: embroidery, dtf, vinyl, dtg, sublimation",
+    P("emb").decorations.length > 0 && P("emb").decorations.every(x => x.type === "embroidery") && P("fx-dtf").decorations.every(x => x.type === "dtf") && P("fx-vinyl").decorations.every(x => x.type === "vinyl") &&
+    P("fx-dtg").decorations.every(x => x.type === "dtg") && P("fx-sublimation").decorations.every(x => x.type === "sublimation"));
 
   {
     const base = { productId: "x", type: "shirt", name: "X", sub: "", images: [], features: [], personalizationPrice: null, pricingMode: "flat", flatPrice: 1 };

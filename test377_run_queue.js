@@ -20,7 +20,7 @@ global.fetch = async (url) => { throw new Error("unexpected fetch " + url); };
 const dbSrc = strip(read("functions/_lib/db.js"));
 const lib = new Function(dbSrc + `\nreturn { insertOrder, getOrderById, createHoop, createThread, saveDesign, addDesignVersion, setProductDesign,
   createProduct, setBlankLink, createBlank, receiveBlanks, getProductionQueue, getRunQueue, getTransferQueue, getPaidUnrunOrders,
-  setDecorationStarted, makeDecoratedLine, createTransfer, receiveTransferSheet };`)();
+  setDecorationStarted, makeDecoratedLine, createTransfer, receiveTransferSheet, createGraphic, saveLocation, priceItem };`)();
 const roles_ = require("./testlib/roles");
 const ordersJsSrc = read("functions/api/orders.js");
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -85,7 +85,7 @@ const loc = (decoration, label, extra = {}) => ({ location: label.toLowerCase(),
     card.dueDate === "2026-11-05" && card.placedAt === "2026-10-01T00:00:00Z");
   ok("…it is not started, not embroidered, and its blank is the linked blank in the line's colour and size",
     card.started === false && card.hasEmbroidery === false && card.embroideryDone === false && card.blankReceived === true &&
-    same(card.blank, { id: blankId, name: "Example Tee Blank", color: "Navy", size: "L" }));
+    same(card.blank, { id: blankId, name: "Example Tee Blank", color: "Navy", size: "L", productType: "shirt" }));
   ok("…its locations are only the screen printed ones (the DTF sleeve is left to the DTF card), in the line's words, with a customer's own image marked",
     same(card.locations, [{ location: "Front", graphicName: "Crest Front", ink: "Red", imageUrl: "/img/f.png", thumbUrl: "/img/f-t.png" },
       { location: "Back", graphicName: "Crest Back", ink: "Red", imageUrl: "", thumbUrl: "", custom: true, fileKey: "up/back.png", fileName: "back.png" }]));
@@ -102,15 +102,38 @@ const loc = (decoration, label, extra = {}) => ({ location: label.toLowerCase(),
   ok("…with only that type's location on it", (await cardOf("DG1")).locations.length === 1 && (await cardOf("DG1")).locations[0].location === "Chest");
   ok("…and none of them is on the transfer queue (DTF only)", !ids((await rq()).transfers.ready.concat((await rq()).transfers.waiting)).some(o => ["VN1", "DG1", "SB1"].includes(o)));
   const tq = await lib.getTransferQueue(d1);
+  ok("a DTF card's blank carries the blank's product type too, as the other cards' and the embroidery cards' do (so Order by Blank groups it with them)",
+    same(tq.ready.concat(tq.waiting).find(c => c.orderId === "SP1").blank, { id: blankId, name: "Example Tee Blank", color: "Navy", size: "L", productType: "shirt" }));
   ok("getTransferQueue no longer lists a screen print pick: the screen print line's DTF sleeve only", tq.ready.concat(tq.waiting).filter(c => c.orderId === "SP1").every(c => c.transfers.length === 1 && c.transfers[0].location === "Sleeve"));
   await order("SPONLY", {});
   ok("…and a line with only screen print picks is not on it at all", !ids(tq.ready.concat(tq.waiting)).includes("SPONLY") && !ids((await lib.getTransferQueue(d1)).ready.concat((await lib.getTransferQueue(d1)).waiting)).includes("SPONLY"));
+
+  // ---- a product's fixed printed transfer takes its graphic's type, so the line is routed by it
+  {
+    const sheet = await lib.createTransfer(d1, { name: "Example Fixed Sheet" });
+    const place = await lib.saveLocation(d1, { name: "Back" });
+    const gSp = await lib.createGraphic(d1, "club", { name: "Fixed screen mark", kind: "transfer", transferId: sheet, decoration: "screenprint" });
+    const gDtf = await lib.createGraphic(d1, "club", { name: "Fixed DTF mark", kind: "transfer", transferId: sheet });
+    for (const [id, g] of [["fxsp", gSp], ["fxdtf", gDtf]])
+      await lib.createProduct(d1, "club", { productId: id, type: "shirt", name: "Fixed " + id, pricingMode: "flat", flatPrice: 20, visible: true, noDesignNeeded: true, reorderQr: "none", fixedTransfers: [{ locationId: place, graphicId: g }] });
+    await lib.setBlankLink(d1, "club", "fxsp", "", "L", blankId, "Navy", "L");
+    await lib.setBlankLink(d1, "club", "fxdtf", "", "L", blankId, "Navy", "L");
+    const fxCfg = async (id) => (await lib.priceItem(d1, "club", id, "L", 2, false, { garmentColor: "Navy" })).config;
+    const spCfg = await fxCfg("fxsp"), dtfCfg = await fxCfg("fxdtf");
+    ok("a fixed transfer's order-line entry carries its graphic's type (screen print), and a DTF graphic's stays DTF", spCfg.locations[0].fixed === true && spCfg.locations[0].decoration === "screenprint" && dtfCfg.locations[0].fixed === true && dtfCfg.locations[0].decoration === "dtf");
+    await order("FXSP", { product: "fxsp", config: spCfg, sets: { blankReceivedAt: "2026-10-03T00:00:00Z" } });
+    await order("FXDTF", { product: "fxdtf", config: dtfCfg, sets: { blankReceivedAt: "2026-10-03T00:00:00Z" } });
+    const rr = await rq(), tIds = ids(rr.transfers.ready.concat(rr.transfers.waiting));
+    const fc = await cardOf("FXSP");
+    ok("a line whose fixed transfer is screen printed is a screen print card on the Run order (with that location), not a DTF card", !!fc && fc.type === "screenprint" && fc.locations.length === 1 && fc.locations[0].graphicName === "Fixed screen mark" && !tIds.includes("FXSP"));
+    ok("…while a DTF fixed transfer is still a DTF card and has no other card", tIds.includes("FXDTF") && !(await cardOf("FXDTF")));
+  }
 
   // ---- a line with no locations takes its product's own type
   await order("PRD1", { product: "vtee", config: null });
   const pc = await cardOf("PRD1");
   ok("a line with no locations on a vinyl product gets a vinyl card from the product's own type, with no locations or colour",
-    !!pc && pc.type === "vinyl" && pc.locations.length === 0 && pc.garmentColor === "" && same(pc.blank, { id: blankId, name: "Example Tee Blank", color: "Navy", size: "L" }));
+    !!pc && pc.type === "vinyl" && pc.locations.length === 0 && pc.garmentColor === "" && same(pc.blank, { id: blankId, name: "Example Tee Blank", color: "Navy", size: "L", productType: "shirt" }));
   await order("DTFONLY", { product: "nbtee", config: null });
   ok("…a no-design product's plain line is DTF: no other card", !(await otherAll()).some(c => c.orderId === "DTFONLY"));
 
@@ -134,7 +157,12 @@ const loc = (decoration, label, extra = {}) => ({ location: label.toLowerCase(),
   q("UPDATE order_items SET decMadeAt='2026-10-10T00:00:00Z' WHERE id=?", emb);
   ok("…and with the printing marked made (and the pieces made) it leaves", !(await cardOf("EMB")));
   q("UPDATE order_items SET manufacturedQty=0 WHERE id=?", emb);
-  ok("…but a printed line whose pieces aren't made yet is still listed (an embroidered line stays until both are done)", !!(await cardOf("EMB")));
+  ok("…and an embroidered line whose printing is marked made leaves even though its embroidery is not finished (like DTF's transfersAppliedAt)", !(await cardOf("EMB")));
+  q("UPDATE order_items SET decMadeAt=NULL WHERE id=?", emb);
+  ok("…but with the printing not marked made it is still listed, embroidery finished or not", !!(await cardOf("EMB")));
+  q("UPDATE order_items SET manufacturedQty=2 WHERE id=?", emb);
+  ok("…even with its embroidery finished", !!(await cardOf("EMB")));
+  q("UPDATE order_items SET manufacturedQty=0, decMadeAt='2026-10-10T00:00:00Z' WHERE id=?", emb);
 
   // ---- counts
   r = await rq();
@@ -177,7 +205,7 @@ const loc = (decoration, label, extra = {}) => ({ location: label.toLowerCase(),
   ok("blank not received → waiting, and its card says blankReceived false", where("B-NONE") === "waiting" && !r.other.waiting.find(c => c.orderId === "B-NONE").blankReceived);
   ok("blank received on the line alone → ready", where("B-LINE") === "ready");
   ok("a product that needs no blank → ready without one (and no blank on the card)", where("B-NOBLANK") === "ready" && r.other.ready.find(c => c.orderId === "B-NOBLANK").blank === null);
-  ok("…a line with a blank linked at its size has it on the card", same(r.other.waiting.find(c => c.orderId === "B-NONE").blank, { id: blankId, name: "Example Tee Blank", color: "Navy", size: "L" }));
+  ok("…a line with a blank linked at its size has it on the card", same(r.other.waiting.find(c => c.orderId === "B-NONE").blank, { id: blankId, name: "Example Tee Blank", color: "Navy", size: "L", productType: "shirt" }));
   await order("B-NOLINK", { item: { size: "XL" } });
   r = await rq();
   ok("a line whose size has no blank link waits with a null blank", where("B-NOLINK") === "waiting" && r.other.waiting.find(c => c.orderId === "B-NOLINK").blank === null);
@@ -316,9 +344,9 @@ const loc = (decoration, label, extra = {}) => ({ location: label.toLowerCase(),
   ok("…no piece is made and no blank used (Run order makes it when the embroidery is finished)", rowOf(em2).mq === 0 && orderMade("EM2") === null && onHand() === bw && rowOf(em2).d === "2026-10-09T12:00:00.000Z");
   res = await lib.makeDecoratedLine(d1, "EM2", em2, "2026-10-12T00:00:00.000Z");
   ok("…again: alreadyDone and applied, the first stamp kept", same(res, { alreadyDone: true, applied: true, orderComplete: false }) && rowOf(em2).d === "2026-10-09T12:00:00.000Z");
-  ok("…the embroidered line's card leaves only once its embroidery is finished too", !!(await cardOf("EM2")) === true);
+  ok("…the embroidered line's card leaves the Run order once its printing is marked done, its embroidery not yet finished", !(await cardOf("EM2")));
   q("UPDATE order_items SET manufacturedQty=2 WHERE id=?", em2);
-  ok("…finished and printed: it leaves the Run order", !(await cardOf("EM2")));
+  ok("…and stays gone when the embroidery is finished too", !(await cardOf("EM2")));
 
   const cancelled2 = await order("MK5", {}); q("UPDATE order_items SET cancelDate='2026-10-02' WHERE id=?", cancelled2);
   ok("a line that doesn't exist is refused: Line item not found", await throwsMsg(() => lib.makeDecoratedLine(d1, "MK1", 99999)) === "Line item not found");

@@ -245,10 +245,13 @@ async function applyGiftCard_(context, body, got, token) {
   if (await isMonthClosed(env.DB, String(today).slice(0, 7))) return jsonResponse({ status: "error", message: INVOICE_CHANGE_CLOSED_ }, 409);
   const dueCents = Math.round(Number(order.balanceDue) * 100);
   const last4 = typed.slice(-4);
+  // The key names this state of the order (its payment rows, voided ones included): a double click repeats it, but the
+  // same card typed again after staff voided its payment is a new spend, not a "done already" that pays nothing.
+  const payRows = Array.isArray(order.payments) ? order.payments.length : 0;
   let r;
   try {
     r = await redeemGiftCard(env.DB, { code: typed, orderId: order.orderId, amountCents: dueCents, by: "customer-invoice",
-      requestKey: "invgc:" + order.orderId + ":" + last4 + ":" + dueCents });
+      requestKey: "invgc:" + order.orderId + ":" + last4 + ":" + dueCents + ":" + payRows });
   } catch (e) { console.error("A gift card on an invoice failed:", order.orderId, e); return jsonResponse({ status: "error", message: "We couldn't use that gift card just now. Please try again." }, 500); }
   if (!r || r.ok === false) return jsonResponse({ status: "error", message: String((r && (r.reason || r.message)) || "That gift card number isn't right.") }, 400);
   const record = insertAuditLog(env.DB, { orgId: order.orgId, orderId: order.orderId, action: "order.invoice_gift_card_used",

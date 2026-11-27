@@ -351,10 +351,15 @@ process.on("exit", () => { if (!finished) { console.log("the test ran to its end
   pm = await openPay("OLD-1");
   ok("an older order shape: codes from the joined text, shipping off from cents", same(chips(), ["SHIPFREE", "TEAM5"]) && qa("#pmContent tr").some(tr => text(tr) === "Free shipping (SHIPFREE, TEAM5)−$8.00"));
   await closePay(pm);
-  w._ordersCache.club.push(Object.assign({}, shipOrder, { orderId: "OLD-2", discountCodes: undefined, discountCode: "", shippingDiscount: 2, payments: [{ id: 99, amount: 4, method: "other", reference: "Gift card ••2345", kind: "payment", receivedAt: "2026-11-01T00:00:00Z" }] }));
+  w._ordersCache.club.push(Object.assign({}, shipOrder, { orderId: "OLD-2", discountCodes: undefined, discountCode: "", shippingDiscount: 2, payments: [{ id: 99, amount: 4, method: "other", reference: "Gift card ••2345", kind: "payment", receivedAt: "2026-11-01T00:00:00Z" },
+    { id: 98, amount: 3, method: "other", reference: "Gift card ••W5TX", kind: "payment", receivedAt: "2026-11-01T00:00:00Z" },
+    { id: 97, amount: 2, method: "other", reference: "Gift card ••w5tx!", kind: "payment", receivedAt: "2026-11-01T00:00:00Z" }] }));
   pm = await openPay("OLD-2");
   ok("free shipping with no code named: “Free shipping −$2.00”", qa("#pmContent tr").some(tr => text(tr) === "Free shipping−$2.00"));
   ok("a payment the page only knows by its reference (••2345) is still shown as a gift card", qa("#pmContent tbody tr").some(tr => text(tr).includes("Gift card · Gift card ••2345")));
+  ok("…and so is one whose last four are letters and digits, as a card's are (••W5TX), with its Back to card button",
+    qa("#pmContent tbody tr").some(tr => text(tr).includes("Gift card · Gift card ••W5TX") && !!tr.querySelector("[data-admin-action=pmRefundToGiftCard]")));
+  ok("…while a reference that only looks like one (••w5tx!) is not taken for a card", qa("#pmContent tbody tr").some(tr => text(tr).includes("Other · Gift card ••w5tx!")));
   await closePay(pm);
 
   features({ discounts: false, giftCards: false });

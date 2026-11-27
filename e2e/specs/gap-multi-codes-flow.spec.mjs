@@ -547,8 +547,8 @@ test("A quote with a code: added in the quote editor, sent, seen by the customer
     await page.locator("#qtCode").fill(p15.toLowerCase());
     await page.locator("#qtCodeAdd").click();
     await expect(page.locator("#qtCodeMsg")).toHaveText("That code is already on this quote.");
-    // 10% and 15% of the $40: $10 in all (the editor's totals show the codes on one line).
-    await expect(page.locator("#qtTotals tr.qt-sum-disc")).toHaveText([`Discount (${p10}, ${p15})−$10.00`]);
+    // 10% and 15% of the $40: $10 in all (the editor's totals show a line per code, as the email and customer page do).
+    await expect(page.locator("#qtTotals tr.qt-sum-disc")).toHaveText([`Discount (${p10})−$4.00`, `Discount (${p15})−$6.00`]);
     const q2Totals = (await api("getEstimate", { id: q2.id })).totals;
     expect(q2Totals).toMatchObject({ discount: 10, total: 30 });
     expect(q2Totals.discountCodes.map(x => [x.code, x.discount])).toEqual([[p10, 4], [p15, 6]]);

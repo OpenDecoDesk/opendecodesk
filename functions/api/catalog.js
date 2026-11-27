@@ -449,10 +449,11 @@ export async function onRequestGet(context){
   const rules = checkoutRules_(rulesRead && !rulesRead.e && rulesRead.v ? rulesRead.v.results : []);
   if(rulesRead && rulesRead.e && !/no such table/i.test(String(rulesRead.e.message))) console.error("checkout rules read failed:", rulesRead.e);
   // Gift cards (migrations/0120): spendable at checkout while the Gift cards feature is on and the method isn't switched off
-  // (globally or for this shop); sold online only when the owner turned that on AND this shop takes cards (the sale is a card order).
+  // (globally or for this shop); sold online only when they are spendable here (the rule buyGiftCard's giftCardsAvailable_ uses),
+  // the owner turned selling on AND this shop takes cards (the sale is a card order).
   const giftCardsOn = features.giftCards !== false;
   const giftCardPay = giftCardsOn && ((catalogData.globalSettings || {}).enabledPayments || {}).giftCard !== false && ((org && org.enabledPayments) || {}).giftCard !== false;
-  const giftCardSell = giftCardsOn && rules.sellOnline && enabledPayments.includes("Card") && rules.amounts.length > 0;
+  const giftCardSell = giftCardPay && rules.sellOnline && enabledPayments.includes("Card") && rules.amounts.length > 0;
 
   // Ready-to-ship stock (up to 30 seconds old; an order is still filled from stock only if the database has the pieces).
   // stock: {size: n} for a product with no choices; stockVariants: {combination key: {size: n}} for one with

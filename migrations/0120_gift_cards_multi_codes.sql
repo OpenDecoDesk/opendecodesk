@@ -48,10 +48,12 @@ CREATE TABLE IF NOT EXISTS gift_cards (
   note           TEXT NOT NULL DEFAULT '',
   createdAt      TEXT NOT NULL,
   createdBy      TEXT NOT NULL DEFAULT '',
-  voidedAt       TEXT
+  voidedAt       TEXT,
+  requestKey     TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_gift_cards_code ON gift_cards(code);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_gift_cards_source ON gift_cards(sourceOrderId) WHERE sourceOrderId <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gift_cards_request ON gift_cards(requestKey) WHERE requestKey IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS gift_card_ledger (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,

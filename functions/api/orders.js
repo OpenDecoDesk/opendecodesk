@@ -225,17 +225,21 @@ function discountCodesOf_(b) {
 // What an order's discount note says of its codes: "Code SAVE10", or "Codes SAVE10, TEAM5" (as db.js writes it when
 // a code is put on an existing order).
 const discountNoteOf_ = (names) => (names.length === 1 ? "Code " : "Codes ") + names.join(", ");
+// A quote's goods for a code's minimum order: its lines without the fee lines (setup, digitizing, art — not goods), in
+// cents — the same basis the quote editor checks a code against before it is saved.
+const estimateGoodsCents_ = (items) => (Array.isArray(items) ? items : []).filter(it => it && it.kind !== "fee")
+  .reduce((a, it) => a + Math.round((Number(it.lineTotal) || 0) * 100), 0);
 // Checks the codes typed on one cart or order and works out what they take off TOGETHER: db.js planDiscountCodes checks
 // each in turn (the ones before it as `others`: a second code is refused while the shop takes one at a time, and the
 // same code twice), then combines them (percent codes add up, amounts come off what is left, shipping once). goodsCents /
 // shippingCents: the goods as priced and the shipping charge. → { uses: [{ codeId, code, amountCents }], goodsOffCents,
 // shippingOffCents, names, note } or { error } (a reason the customer reads).
-async function resolveDiscountCodes_(db, { codes, orgId, email, goodsCents, shippingCents = 0, today }) {
-  const r = await planDiscountCodes(db, { codes, goodsCents, shippingCents, orgId, email, today });
+async function resolveDiscountCodes_(db, { codes, orgId, email, goodsCents, shippingCents = 0, today, minGoodsCents }) {
+  const r = await planDiscountCodes(db, { codes, goodsCents, shippingCents, orgId, email, today, minGoodsCents });
   if (!r || !r.ok) {
     // Before the discount codes migration there are no codes to check: planDiscountCodes only says the reason a
     // customer reads, so the refused code is asked once more to learn whether that is why.
-    const probe = r && r.code ? await checkDiscountCode(db, { code: r.code, orgId, email, subtotal: goodsCents / 100, today }).catch(() => null) : null;
+    const probe = r && r.code ? await checkDiscountCode(db, { code: r.code, orgId, email, subtotal: (minGoodsCents != null ? minGoodsCents : goodsCents) / 100, today }).catch(() => null) : null;
     if (probe && probe.notReady) return { notReady: true };
     return { error: (r && r.reason) || "This code isn't valid." };
   }
@@ -423,7 +427,7 @@ export async function convertEstimateToOrder_(env, estimate, { actor = "", ip = 
   if (quoteCodes.length) {
     const email = String(customer.email || "").trim().toLowerCase();
     const got2 = await resolveDiscountCodes_(env.DB, { codes: quoteCodes, orgId: est.orgId, email, goodsCents: Math.round((Number(totals.subtotal) || 0) * 100),
-      shippingCents: 0, today: await localToday(env) });
+      minGoodsCents: estimateGoodsCents_(lines), shippingCents: 0, today: await localToday(env) });
     if (got2.notReady) return { error: "Discount codes need the latest database update. Apply the migrations, then try again.", status: 503 };
     if (got2.error) return { error: got2.error, status: 409 };
     const claim = await claimResolvedCodes_(env.DB, orderId, email, got2);
@@ -1648,6 +1652,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       const ship      = Number(row.shippingCost) || 0;       // already 0 when nothing is left on the order
       const effective = Number(row.effectiveTotal) || 0;     // db.js orderAmounts — the one place it's worked out
       const received  = Number(row.received) || 0;
+      const owed      = Number(row.owedTotal) || 0;          // what the customer owes, a gift card they bought included
       entry.orderCount++;
       entry.subtotal      += items;
       entry.discounts     += discount;
@@ -1655,7 +1660,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       entry.rushFees      += Number(row.rushFee) || 0;   // rush fees (migrations/0082)
       entry.effectiveTotal += effective;
       entry.received      += received;
-      entry.balance       += Math.max(0, effective - received);
+      entry.balance       += Math.max(0, owed - received);
     }
 
     const orgs = Object.values(byOrg).sort((a, b) => a.name.localeCompare(b.name));
@@ -3381,7 +3386,7 @@ async function handleOrdersPost_(context, listBefore = null) {
           return {
             // A catalog line's name and type come from the catalog (with a version's label — "Club Tee
             // (Long sleeve)"), as on a storefront order; only a custom line names itself.
-            productId: it.productId, name: isCustomItem ? String(it.name || "").slice(0, 200) : (catalogName || it.name), type: isCustomItem ? it.type : (catalogType || it.type), size: it.size || "",
+            productId: it.productId, name: isCustomItem ? String(it.name || "").slice(0, 200) : (catalogName || it.name), type: isCustomItem ? String(it.type || "custom").slice(0, 50) : String(catalogType || it.type || ""), size: String(it.size || ""),
             qty, unitPrice, personalized: hasCustom ? false : !!it.personalized,
             persName: String(it.persName || "").slice(0, 200),
             personalizationFee, lineTotal,
@@ -3976,7 +3981,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       const sendCodes = (Array.isArray(est.discountCodes) ? est.discountCodes : []).map(c => String(c).trim()).filter(Boolean);
       if (sendCodes.length) {
         const chk = await resolveDiscountCodes_(env.DB, { codes: sendCodes, orgId: est.orgId, email: email.toLowerCase(),
-          goodsCents: Math.round((Number(got.totals && got.totals.subtotal) || 0) * 100), shippingCents: 0, today: await localToday(env) });
+          goodsCents: Math.round((Number(got.totals && got.totals.subtotal) || 0) * 100), minGoodsCents: estimateGoodsCents_(got.items), shippingCents: 0, today: await localToday(env) });
         if (chk.notReady) return jsonResponse({ status: "error", message: "Discount codes need the latest database update. Apply the migrations, then try again." }, 503);
         if (chk.error) return jsonResponse({ status: "error", message: chk.error }, 409);
       }
@@ -4277,7 +4282,10 @@ async function handleOrdersPost_(context, listBefore = null) {
   const emailGiftCard_ = async (card, code, to) => {
     try {
       const business = await getBusinessProfile(env.DB).catch(() => null);
-      return !!(await sendGiftCardEmail(env, { card, code: giftCodeShown_(code), business, to }));
+      // A card sold online (Resend): its order's shop names it when the Business profile has no name.
+      const shop = card && card.sourceOrderId ? await env.DB.prepare("SELECT g.name FROM orders o JOIN orgs g ON g.orgId = o.orgId WHERE o.orderId = ?")
+        .bind(card.sourceOrderId).first().catch(() => null) : null;
+      return !!(await sendGiftCardEmail(env, { card, code: giftCodeShown_(code), business, shopName: (shop && shop.name) || "", to }));
     } catch (e) { console.error("Emailing a gift card failed for card", card && card.id, e); return false; }
   };
   const giftGuard_ = async (idRaw) => {
@@ -4339,15 +4347,12 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (isDesktopEdition(env) && !desktopEmailOn(env)) return jsonResponse({ status: "error", code: "desktop", message: DESKTOP_EMAIL_OFF_MSG }, 403);
     }
     const by = giftActor_();
-    // The same card saved twice (a double click, a retry of the same Save — it carries the form's requestId): the first
-    // one's card is the answer; its number is shown with Show on the card.
-    if (requestKeyOf(body, "giftcard")) {
-      const dup = await env.DB.prepare("SELECT id FROM gift_cards WHERE sourceOrderId = '' AND createdBy = ? AND initialCents = ? AND recipientEmail = ? AND recipientName = ? AND note = ? AND createdAt > ? ORDER BY id DESC LIMIT 1")
-        .bind(by, amountCents, recipientEmail, recipientName, note, new Date(Date.now() - 60000).toISOString()).first().catch(() => null);
-      if (dup) return jsonResponse({ status: "ok", duplicate: true, card: await getGiftCard(env.DB, { id: dup.id }) });
-    }
-    const made = await issueGiftCard(env.DB, { amountCents, recipientName, recipientEmail, buyerName: "", buyerEmail: "", message, note, sourceOrderId: "", by, now: new Date().toISOString() });
+    // The same Save twice (a double click, a retry — it carries the window's requestId, stored with the card): the first
+    // one's card is the answer; its number is shown with Show on the card. Another requestId is another card.
+    const made = await issueGiftCard(env.DB, { amountCents, recipientName, recipientEmail, buyerName: "", buyerEmail: "", message, note, sourceOrderId: "", by,
+      now: new Date().toISOString(), requestKey: requestKeyOf(body, "giftcard") });
     if (!made || made.error) return jsonResponse({ status: "error", message: (made && made.error) || "Couldn't make the gift card. Try again." }, 400);
+    if (made.created === false) return jsonResponse({ status: "ok", duplicate: true, card: await getGiftCard(env.DB, { id: made.id }) });
     const card = await getGiftCard(env.DB, { id: made.id });
     const emailSent = sendEmail ? await emailGiftCard_(card, made.code, recipientEmail) : false;
     audit({ orgId: null, orderId: null, action: "giftcard.issued", detail: { cardId: made.id, last4: made.last4, amount: amountCents / 100, recipientEmail, emailed: emailSent, note } });

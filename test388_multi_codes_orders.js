@@ -226,7 +226,8 @@ const ANY = "0000-01-01", EVER = "9999-12-31";
     placedAt: "2026-05-02T11:00:00.000Z", discount: { cents: 0, note: "Code SHIPFREE", shippingCents: 9999 } }, [tee(1, 10)]);
   row = q1("SELECT * FROM orders WHERE orderId = 'SH-2'");
   ok("a shipping discount above the shipping is cut to the shipping (500), and a code that takes only shipping writes no goods discount",
-    row.shippingDiscountCents === 500 && row.discountCents === 0 && row.discountNote === "" && capped.shippingDiscount === 5 && capped.discount === 0 && capped.total === 10.6);
+    row.shippingDiscountCents === 500 && row.discountCents === 0 && capped.shippingDiscount === 5 && capped.discount === 0 && capped.total === 10.6);
+  ok("…but its note \"Code SHIPFREE\" is still stored, as applying the code to the order later writes it", row.discountNote === "Code SHIPFREE");
   await S.insertOrder(d1, { orderId: "SH-3", orgId: "acme", customerName: "Pat Example", contact: "pat@example.com", shippingCost: 5,
     placedAt: "2026-05-02T12:00:00.000Z", discount: { cents: 100, note: "Code X" } }, [tee(1, 10)]);
   await S.insertOrder(d1, { orderId: "SH-4", orgId: "acme", customerName: "Pat Example", contact: "pat@example.com", shippingCost: 5, placedAt: "2026-05-02T13:00:00.000Z" }, [tee(1, 10)]);
@@ -306,6 +307,12 @@ const ANY = "0000-01-01", EVER = "9999-12-31";
   await S.releaseDiscountCodeUse(d1, "SH-4");
   await S.updateOrderShipping(d1, "SH-4", { shippingCost: 7, shippingMethod: "UPS Ground" });
   ok("(another order's shipping discount is never touched)", q1("SELECT shippingDiscountCents AS s FROM orders WHERE orderId = 'SH-1'").s === shBefore);
+  // SH-2's free-shipping use given back behind the order's back (its discount row left as it was): the next shipping
+  // change charges the shipping, since no live code makes it free any more.
+  d1.q("UPDATE discount_code_uses SET releasedAt = ? WHERE orderId = 'SH-2'", now);
+  await S.updateOrderShipping(d1, "SH-2", { shippingCost: 6, shippingMethod: "UPS Ground" });
+  ok("an order whose free-shipping code is no longer live: the next shipping change leaves no shipping discount (0, not the old 300)",
+    q1("SELECT shippingDiscountCents AS s FROM orders WHERE orderId = 'SH-2'").s === 0 && (await S.getOrderById(d1, "SH-2")).shippingCharged === 6);
 
   console.log("\n=== The storefront order with several codes ===");
   await S.setSalesTaxSettings(d1, { rateBps: 0, jurisdiction: "OH", taxMode: "inclusive" });
@@ -357,6 +364,7 @@ const ANY = "0000-01-01", EVER = "9999-12-31";
   ok("one free-shipping code alone: the goods at full price, the shipping free, the code on the order",
     o.status === 200 && o.body.discount === 0 && o.body.shippingDiscount === 6 && o.body.owed === 100 && same(o.body.discountCodes, ["SHIPFREE"]) &&
     q1("SELECT discountCents AS d FROM orders WHERE orderId = ?", o.orderId).d === 0 && same((await S.getOrderById(d1, o.orderId)).discountCodes, ["SHIPFREE"]));
+  ok("…stored with the note \"Code SHIPFREE\" though nothing came off the goods", q1("SELECT discountNote AS n FROM orders WHERE orderId = ?", o.orderId).n === "Code SHIPFREE");
 
   console.log("\n=== The storefront: an order that can't be written gives back every use ===");
   await S.setDiscountRules(d1, { multiple: true });

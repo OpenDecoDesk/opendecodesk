@@ -54,7 +54,7 @@ const A = new Function(libs +
   "const checkoutApi = (function(){\n" + strip(read("functions/api/checkout.js")) + "\nreturn onRequestPost; })();\n" +
   "const webhookApi = (function(){\n" + strip(read("functions/api/stripe-webhook.js")) + "\nreturn onRequestPost; })();\n" +
   "return { ordersApi, invoiceApi, checkoutApi, webhookApi, issueGiftCard, adjustGiftCard, voidGiftCard, getOrderById, saveDiscountCode, setSalesTaxSettings, localToday, " +
-  "setDiscountRules, setGiftCardSettings, getOrderInvoiceByOrder, voidOrder, setFeatures };")();
+  "setDiscountRules, setGiftCardSettings, getOrderInvoiceByOrder, voidOrder, setFeatures, buildGiftCardEmail };")();
 
 // The catalog: the real catalogCache.js and catalog.js on the same kind of database (the Cache API is a Map).
 const C = new Function(libs + strip(read("functions/_lib/db.js")) + "\n" + strip(read("functions/_lib/catalogCache.js")) + "\n" +
@@ -503,6 +503,24 @@ const harness = (d1, env = {}) => {
       q1("SELECT initialCents FROM gift_cards WHERE sourceOrderId = ?", short.body.orderId).initialCents === 2500 && mail.some(m => m.to === "sam@example.com"));
   }
   {
+    // The Business profile with no name: the card is named by the shop it was bought from (Example Club), never "our shop".
+    d1.q("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('business', ?)", JSON.stringify({ name: "" }));
+    const anon = await buy({ requestId: "GC-NONAME-00001" });
+    mail.length = 0;
+    r = await hook(paidEvent("evt_noname", anon.body.orderId, 5000));
+    const toSam2 = mail.filter(m => m.to === "sam@example.com"), toPat2 = mail.filter(m => m.to === "pat@example.com");
+    ok("with no business name, the recipient's email says the card is for the shop it came from: \"…gift card for Example Club\", spent \"at checkout on the Example Club shop\"",
+      r.status === 200 && toSam2.length === 1 && /sent you a \$50\.00 gift card for Example Club\./.test(toSam2[0].body) && /at checkout on the Example Club shop\./.test(toSam2[0].body) &&
+      !/our shop/.test(toSam2[0].body + toSam2[0].htmlBody));
+    ok("…and the buyer's note says it is from Example Club", toPat2.some(m => m.subject === "Your gift card was sent" && /gift card from Example Club was emailed/.test(m.body)));
+    d1.q("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('business', ?)", JSON.stringify({ name: "Example Embroidery" }));
+    const none = A.buildGiftCardEmail({ card: { initial: 20, recipientName: "Sam Example", buyerName: "Pat Example" }, code: "ABCDEFGHJKLMNPQR" });
+    ok("no business name and no shop at all: \"…gift card from the shop.\" and \"at checkout on our site\", never \"our shop\"",
+      /sent you a \$20\.00 gift card from the shop\./.test(none.text) && /Gift card box at checkout on our site\./.test(none.text) && !/our shop/.test(none.text + none.html));
+    const staff = A.buildGiftCardEmail({ card: { initial: 20 }, code: "ABCDEFGHJKLMNPQR" });
+    ok("…and a card with no buyer either comes \"from the shop\"", staff.subject === "You've got a gift card from the shop" && !/our shop/.test(staff.text));
+  }
+  {
     const gone = await buy({ requestId: "GC-VOIDED-00001" });
     await A.voidOrder(d1, gone.body.orderId, "customer changed their mind (test)");
     mail.length = 0;
@@ -737,12 +755,14 @@ const harness = (d1, env = {}) => {
   k = await cat();
   setGlobalPayments(ALL_ON);
   ok("the Gift card payment method off for every shop: not spendable at checkout", k.giftCardPay === false);
+  ok("…and not sold online either (buyGiftCard would refuse it): sellOnline false, no amount buttons", k.giftCards.sellOnline === false && JSON.stringify(k.giftCards.amounts) === "[]");
   setShopPayments("acme", { ...ALL_ON, giftCard: false });
   await C.publishShop(d1, "acme");
   k = await cat();
   setShopPayments("acme", ALL_ON);
   await C.publishShop(d1, "acme");
   ok("…or for this shop", k.giftCardPay === false);
+  ok("…and then this shop doesn't sell them online either: sellOnline false, no amount buttons", k.giftCards.sellOnline === false && JSON.stringify(k.giftCards.amounts) === "[]");
   d1.q("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('giftCards', ?)", JSON.stringify({ sellOnline: true, amounts: "lots", minCents: 50, maxCents: 10 }));
   k = await cat();
   ok("settings saved oddly fall back field by field: the $25 / $50 / $100 buttons, a $5 minimum and a $500 maximum",

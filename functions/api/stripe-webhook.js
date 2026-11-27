@@ -133,7 +133,8 @@ async function issueSoldGiftCard_(env, orderId, orgId){
   let cfg = null;
   try{ cfg = JSON.parse(line.configJson || "{}"); }catch(e){ cfg = null; }
   const gift = (cfg && cfg.giftCard) || {};
-  const order = (await env.DB.prepare("SELECT customerName, contact FROM orders WHERE orderId = ?").bind(orderId).first()) || {};
+  // The order's own shop names the card when the Business profile has no name.
+  const order = (await env.DB.prepare("SELECT o.customerName, o.contact, COALESCE(g.name, '') AS shopName FROM orders o LEFT JOIN orgs g ON g.orgId = o.orgId WHERE o.orderId = ?").bind(orderId).first()) || {};
   const existed = !!(await env.DB.prepare("SELECT 1 AS x FROM gift_cards WHERE sourceOrderId = ?").bind(orderId).first());
   const made = await issueGiftCard(env.DB, { amountCents, recipientName: String(gift.recipientName || ""), recipientEmail: String(gift.recipientEmail || ""),
     buyerName: String(order.customerName || ""), buyerEmail: String(order.contact || ""), message: String(gift.message || ""), note: "",
@@ -145,9 +146,10 @@ async function issueSoldGiftCard_(env, orderId, orgId){
   const business = await getBusinessProfile(env.DB).catch(() => null);
   let sent = false;
   try{
-    sent = !!(await sendGiftCardEmail(env, { card, code: made.code, business, to: String(gift.recipientEmail || "") }));
+    const shopName = String(order.shopName || "");
+    sent = !!(await sendGiftCardEmail(env, { card, code: made.code, business, shopName, to: String(gift.recipientEmail || "") }));
     // The buyer's note that it went out (a line to keep with their receipt); its failure matters less.
-    await sendGiftCardSentReceipt(env, { card, to: String(order.contact || ""), business }).catch((e) => console.error("Gift card sent-receipt failed for", orderId, e));
+    await sendGiftCardSentReceipt(env, { card, to: String(order.contact || ""), business, shopName }).catch((e) => console.error("Gift card sent-receipt failed for", orderId, e));
   }catch(e){ console.error("Emailing the gift card failed for", orderId, e); }
   if(!sent) await recordSystemIssue(env.DB, "gift_card_email_failed", "order " + orderId + ": the gift card was made but its email to the recipient didn't send — use Resend on the Gift cards page");
   await queueGiftCardSoldNotice(env, { orderId, orgId, amount: amountCents / 100, recipientName: String(gift.recipientName || "") })

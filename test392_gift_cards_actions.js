@@ -169,8 +169,11 @@ console.error = (...a) => { logged.push(a.map(String).join(" ")); };
     await admin({ action: "issueGiftCard", amountCents: 1500, recipientEmail: "ari@example.com", note: "Refund" });
     await admin({ action: "issueGiftCard", amountCents: 1500, recipientEmail: "ari@example.com", note: "Refund" });
     ok("without a form key (a script), each request makes its own card", q1("SELECT count(*) AS n FROM gift_cards").n === cnt + 3);
+    const next = await admin({ action: "issueGiftCard", amountCents: 1500, recipientEmail: "ari@example.com", note: "Refund", requestId: "issue392bb" });
+    ok("the same card from another Issue window (another form key) a moment later is a new card, with its number",
+      next.status === 200 && !next.body.duplicate && next.body.card.id !== first.body.card.id && CODE_RE.test(next.body.code) && q1("SELECT count(*) AS n FROM gift_cards").n === cnt + 4);
     const other = await admin({ action: "issueGiftCard", amountCents: 1600, recipientEmail: "ari@example.com", note: "Refund", requestId: "issue392aa" });
-    ok("a different amount is a different card, form key or not", other.status === 200 && !other.body.duplicate && other.body.card.id !== first.body.card.id);
+    ok("the first window's key again, even with the amount changed, is still that window's one card", other.status === 200 && other.body.duplicate === true && other.body.card.id === first.body.card.id && q1("SELECT count(*) AS n FROM gift_cards").n === cnt + 4);
 
     ENV = { SIGNING_SECRET: "s".repeat(40), EDITION: "desktop" };
     r = await admin({ action: "issueGiftCard", amountCents: 2000, recipientEmail: "pat@example.com", sendEmail: true });
@@ -663,6 +666,14 @@ console.error = (...a) => { logged.push(a.map(String).join(" ")); };
       card(G2.card.id).balanceCents === 6000 && q1("SELECT sum(amountCents) AS n FROM order_payments WHERE orderId = ? AND giftCardId IS NULL", o2.orderId).n === 6000);
     r = await sale({});
     ok("a sale without cards answers no giftCards", r.status === 200 && r.body.giftCards === undefined);
+    // A custom line sent without a type (or a size), as a script or an older page might, and paid by a card.
+    const G3 = await issue(1000, {});
+    // (The real server answers a throw from the handler with a 500; here it is caught and read as one.)
+    r = await admin({ action: "createLocalSale", org: "acme", requestId: "req392notype", paymentMethod: "Cash", items: [{ productId: "__custom__", name: "Club pin", customUnitPrice: 5, qty: 2 }],
+      giftCards: [{ code: G3.code }] }).catch((e) => ({ status: 500, body: { message: String(e && e.message) } }));
+    const pin = r.status === 200 ? q1("SELECT type, size FROM order_items WHERE orderId = ?", r.body.orderId) : null;
+    ok("a custom line with no type is still a sale (200, not a server error), stored as type “custom” with no size, and the card pays it",
+      r.status === 200 && !!pin && pin.type === "custom" && pin.size === "" && r.body.giftCards[0].ok === true && r.body.giftCards[0].taken === 10);
   }
 
   console.log("\n=== Reorder: getOrderForReorder ===");

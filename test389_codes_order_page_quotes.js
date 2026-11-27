@@ -503,6 +503,18 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
     d1._raw.run("UPDATE estimates SET discountCodes = '[\"LEEONLY\"]' WHERE id = ?", [t]);
     r = await call({ action: "sendEstimate", id: t, email: "lee@example.com" });
     ok("the code is checked against the address it is sent to: LEEONLY sent to lee@example.com goes", r.status === 200 && r.body.sentTo === "lee@example.com");
+    // A fee line isn't goods: a $100-minimum code on $50 of goods and a $60 setup fee is checked against the $50, as the
+    // quote editor checks it before it is put on.
+    const feeLines = LINES.concat([{ kind: "fee", feeKind: "setup", name: "Setup", amount: 60, taxable: false }]);
+    const withFee = await newQuote({ items: feeLines });
+    d1._raw.run("UPDATE estimates SET discountCodes = '[\"BIG50\"]' WHERE id = ?", [withFee]);
+    mail.length = 0;
+    ok("(the quote's subtotal with the fee is $110)", (await M.getEstimate(d1, withFee)).totals.subtotal === 110);
+    r = await call({ action: "sendEstimate", id: withFee });
+    ok("a $100-minimum code on $50 of goods plus a $60 setup fee isn't sent: 409 “This code needs an order of at least $100.00.” (the fee isn't goods)",
+      refused(r, 409, "This code needs an order of at least $100.00.") && mail.length === 0 && estRow(withFee).status === "draft");
+    const cv = await call({ action: "convertEstimate", id: withFee });
+    ok("…and isn't made into an order either: the same 409, no order", refused(cv, 409, "This code needs an order of at least $100.00.") && !estRow(withFee).orderId);
   }
 
   console.log("\n=== A quote becoming an order claims its codes ===");
@@ -741,7 +753,8 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
     typeCode("save10");
     await pressApply();
     ok("SAVE10 is checked with TEAM5 as the code already on it, then both are saved", same(of("checkLocalSaleCode")[0].others, ["TEAM5"]) && same(of("saveEstimate")[0].discountCodes, ["TEAM5", "SAVE10"]));
-    ok("…the totals show the two codes' discount together: “Discount (TEAM5, SAVE10) −$10.00”, Total $42.56", same(sumRows(), ["Subtotal $50.00", "Discount (TEAM5, SAVE10) −$10.00", "Sales tax $2.56", "Total $42.56"]));
+    ok("…the totals show a line per code, as the email and the customer's page do: “Discount (TEAM5) −$5.00”, “Discount (SAVE10) −$5.00”, Total $42.56",
+      same(sumRows(), ["Subtotal $50.00", "Discount (TEAM5) −$5.00", "Discount (SAVE10) −$5.00", "Sales tax $2.56", "Total $42.56"]));
     P.reset();
     q("[data-qt-code-remove='0']").click();
     await wait(() => of("saveEstimate").length === 1); await pause(60);

@@ -254,6 +254,13 @@ function failing(db, re, message) {
     ok("no gift card is a blank to order", !blanks.unlinked.some(l => /^Gift card/.test(l.name)) && blanks.unlinked.some(l => l.orderId === "M1"));
     const queue = await lib.getProductionQueue(d1);
     ok("the Run order has the paid no-blank shirt but never the gift card beside it", queue.some(j => j.orderId === "P1") && queue.filter(j => j.orderId === "P1").length === 1 && !queue.some(j => j.orderId === "G1"));
+    // P2: a downloads-only product and a gift card. Neither has a design to stitch, so the order never waits on digitizing.
+    await lib.createProduct(d1, "club", { productId: "pattern", type: "other", name: "Club Pattern", pricingMode: "flat", flatPrice: 8, visible: true, taxable: true, digital: true });
+    await lib.insertOrder(d1, { orderId: "P2", orgId: "club", ...customer, placedAt: "2027-03-12T12:00:00.000Z" }, [gift(15), tee(1, 8, "pattern")]);
+    ok("(setup) the pattern is a digital product", q("SELECT digital FROM products WHERE productId = 'pattern'")[0].digital === 1);
+    ok("a gift card line doesn't make an order need digitizing (a downloads line and a gift card: no stitch file to make)", (await lib.getOrderById(d1, "P2")).needsDigitizing === false);
+    ok("nor does an order that is only a gift card", (await lib.getOrderById(d1, "G1")).needsDigitizing === false);
+    q("DELETE FROM order_items WHERE orderId = 'P2'"); q("DELETE FROM orders WHERE orderId = 'P2'");
     const done = await lib.setOrdersCompleted(d1, ["G1", "G2", "M1"], true, "2027-03-20T12:00:00.000Z");
     ok("a paid gift-card-only order completes without being delivered", done.updated.some(u => u.orderId === "G1"));
     ok("an unpaid one can't: a balance is still due", done.skipped.some(s => s.orderId === "G2" && s.reason === "a balance is still due"));
@@ -272,6 +279,28 @@ function failing(db, re, message) {
     const e2 = await lib.getOrderById(old, "E2");
     ok("its gift card line still reads as digital and needing no blank", e2.items[0].digital === true && e2.items[0].noBlank === true);
     q("UPDATE orders SET paid = 0 WHERE orderId = 'E2'");
+  }
+
+  console.log("\n=== Receivables: what the customer owes includes a gift card they bought ===");
+  {
+    const rd = await makeDb();
+    await lib.setSalesTaxSettings(rd, { rateBps: 1000, jurisdiction: "", taxMode: "exclusive" });
+    await lib.setAccountingSettings(rd, { saleDate: "placed" });
+    await lib.createProduct(rd, "club", { productId: "tee", type: "shirt", name: "Club Tee", pricingMode: "flat", flatPrice: 20, visible: true, taxable: true });
+    // A $50 gift card and two $20 shirts with 10% tax on top: $94 owed; $30 of it received.
+    await lib.insertOrder(rd, { orderId: "K1", orgId: "club", ...customer, placedAt: "2027-03-06T10:00:00.000Z" }, [gift(50), tee(2)]);
+    await lib.addOrderPayment(rd, "K1", 30, "", "", { method: "cash", ...at("2027-03-07T10:00:00.000Z") });
+    const row = (await lib.getRevenueData(rd, ...MAR, { basis: "placed" })).find(r => r.orderId === "K1");
+    ok("Revenue still counts the mixed order's sales as $44 (the gift card left out)", !!row && near(row.effectiveTotal, 44));
+    ok("while its owed total is the whole $94, the gift card included", !!row && near(row.owedTotal, 94));
+    const rec = (await lib.getTaxPacketExtras(rd, ...MAR)).receivables.find(r => r.orderId === "K1");
+    ok("the tax packet's receivables list the mixed order at its $94 total, $30 received", !!rec && near(rec.total, 94) && near(rec.received, 30));
+    ok("so the customer still owes $64 on it (not $14)", !!rec && near(rec.balance, 64));
+    await lib.addOrderPayment(rd, "K1", 14, "", "", { method: "cash", ...at("2027-03-08T10:00:00.000Z") });
+    const after = (await lib.getTaxPacketExtras(rd, ...MAR)).receivables.find(r => r.orderId === "K1");
+    ok("with $44 received it is still a receivable: $50 owed for the gift card", !!after && near(after.balance, 50));
+    await lib.addOrderPayment(rd, "K1", 50, "", "", { method: "cash", ...at("2027-03-09T10:00:00.000Z") });
+    ok("and it drops off only once all $94 is in", !(await lib.getTaxPacketExtras(rd, ...MAR)).receivables.some(r => r.orderId === "K1"));
   }
 
   console.log("\n=== A database from before migrations/0120 ===");

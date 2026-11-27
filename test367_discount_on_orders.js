@@ -148,8 +148,9 @@ async function pair(d1, extra, items, cents, note = "Code SAVE10") {
   for (const [id, discount] of [["NONE-1", undefined], ["ZERO-1", { cents: 0, note: "Code ZERO" }], ["NEG-1", { cents: -500, note: "Code NEG" }], ["JUNK-1", { cents: "lots", note: "Code JUNK" }]]) {
     r = await lib.insertOrder(d1, order(id, discount ? { discount } : {}), [TEE3], {});
     row = one(d1, "SELECT discountCents, discountNote, discountTaxCents, totalCents FROM orders WHERE orderId = ?", id);
-    ok(`no discount (${discount ? JSON.stringify(discount.cents) : "none given"}) stores none and answers discount 0 and the full total ($74.00)`,
-      row.discountCents === 0 && row.discountNote === "" && row.discountTaxCents === 0 && r.discount === 0 && r.total === 74 && row.totalCents === 7400);
+    // A code that took nothing off the goods (a free-shipping code) was still used: its note stays, as applying it later writes it.
+    ok(`no discount (${discount ? JSON.stringify(discount.cents) : "none given"}) stores none and answers discount 0 and the full total ($74.00)${discount ? ", keeping the code's note" : ""}`,
+      row.discountCents === 0 && row.discountNote === (discount ? discount.note : "") && row.discountTaxCents === 0 && r.discount === 0 && r.total === 74 && row.totalCents === 7400);
   }
 
   console.log("\n=== A 100% code ===");

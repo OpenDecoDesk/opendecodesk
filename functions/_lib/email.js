@@ -1717,18 +1717,24 @@ function giftCardGroups_(code) {
 }
 export function buildGiftCardEmail({ card, code, business, shopName, to, giftUrl } = {}) {
   const c = card || {};
-  const biz = String((business && typeof business === "object" ? business.name : business) || shopName || "").trim() || "our shop";
+  // Who the card is for: the Business profile's name, else the shop it was bought from (shopName); with neither, the
+  // wording falls back to "the shop" / "our site" rather than naming nothing.
+  const bizName = String((business && typeof business === "object" ? business.name : business) || "").trim();
+  const shop = String(shopName || "").trim();
+  const biz = bizName || shop;
   const buyer = String(c.buyerName || "").trim();
-  const from = buyer || biz;
+  const from = buyer || biz || "the shop";
+  const forWhom = buyer && biz && biz !== buyer ? " for " + biz : buyer && !biz ? " from the shop" : "";
   const amount = Number(c.initial != null ? c.initial : c.balance) || 0;
   const number = giftCardGroups_(code);
   const hello = String(c.recipientName || "").trim() ? `Hi ${String(c.recipientName).trim()},` : "Hello,";
   const message = String(c.message || "").trim();
   const subject = `You've got a gift card from ${from}`;
-  const how = "To use it, enter the number in the Gift card box at checkout on any of " + (buyer ? biz + "'s" : "our") + " shops. It can be spent over more than one order until the balance runs out, and it never expires.";
+  const where = bizName ? "at checkout on any of " + (buyer ? bizName + "'s" : "our") + " shops" : shop ? "at checkout on the " + shop + " shop" : "at checkout on our site";
+  const how = "To use it, enter the number in the Gift card box " + where + ". It can be spent over more than one order until the balance runs out, and it never expires.";
   const html = `<div style="font-family:sans-serif;max-width:600px;margin:auto">
     <h2 style="color:#15803d">You've got a gift card</h2>
-    <p>${escHtml(hello)} ${escHtml(from)} sent you a ${escHtml(fmt$(amount))} gift card${buyer && biz !== buyer ? " for " + escHtml(biz) : ""}.</p>
+    <p>${escHtml(hello)} ${escHtml(from)} sent you a ${escHtml(fmt$(amount))} gift card${escHtml(forWhom)}.</p>
     ${message ? `<p style="background:#f8fafc;border-left:3px solid #15803d;padding:10px 14px;white-space:pre-wrap">${escHtml(message)}</p>` : ""}
     <div style="margin:20px 0;border:2px dashed #15803d;border-radius:8px;padding:16px;text-align:center">
       <div style="font-size:28px;font-weight:bold">${escHtml(fmt$(amount))}</div>
@@ -1739,7 +1745,7 @@ export function buildGiftCardEmail({ card, code, business, shopName, to, giftUrl
     <p style="font-size:13px;color:#555">Keep this email: the number is the only record of the card.</p>
     %%FOOTER_HTML%%
   </div>`;
-  const text = `You've got a gift card from ${from}\n\n${hello} ${from} sent you a ${fmt$(amount)} gift card${buyer && biz !== buyer ? " for " + biz : ""}.\n` +
+  const text = `You've got a gift card from ${from}\n\n${hello} ${from} sent you a ${fmt$(amount)} gift card${forWhom}.\n` +
     (message ? "\n" + message + "\n" : "") + `\nAmount: ${fmt$(amount)}\nGift card number: ${number}\n\n${how}\n${giftUrl ? "\n" + giftUrl + "\n" : ""}\nKeep this email: the number is the only record of the card.\n\n%%FOOTER_TEXT%%`;
   return { to: String(to || c.recipientEmail || "").trim(), subject, html, text };
 }
@@ -1747,12 +1753,12 @@ export async function sendGiftCardEmail(env, args) {
   return send_(env, buildGiftCardEmail(args || {}));
 }
 // The buyer's note that the card went out (an online sale): a line they can keep with their receipt.
-export async function sendGiftCardSentReceipt(env, { card, to, business } = {}) {
+export async function sendGiftCardSentReceipt(env, { card, to, business, shopName } = {}) {
   const c = card || {}, addr = String(to || c.buyerEmail || "").trim();
   if (!addr.includes("@")) return false;
   const amount = Number(c.initial != null ? c.initial : c.balance) || 0;
   const who = String(c.recipientName || c.recipientEmail || "your recipient").trim();
-  const biz = String((business && typeof business === "object" ? business.name : business) || "").trim();
+  const biz = String((business && typeof business === "object" ? business.name : business) || shopName || "").trim();
   const line = `Your ${fmt$(amount)} gift card${biz ? " from " + biz : ""} was emailed to ${who}${c.recipientName && c.recipientEmail ? " (" + c.recipientEmail + ")" : ""}. It never expires.`;
   const name = String(c.buyerName || "").trim();
   return send_(env, { to: addr, subject: "Your gift card was sent", html: `<div style="font-family:sans-serif;max-width:600px;margin:auto"><h2 style="color:#15803d">Your gift card was sent</h2><p>${escHtml((name ? `Hi ${name}, ` : "") + line)}</p>%%FOOTER_HTML%%</div>`,

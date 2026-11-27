@@ -1065,7 +1065,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (a === "saveExpense" && b.expense && /^\d{4}-\d{2}-\d{2}$/.test(String(b.expense.date || ""))) months.push(String(b.expense.date).slice(0, 7));
     // Outside digitizing (migrations/0118): "Record the cost as an expense" books an expense dated when it came back
     // (else when it was sent), so a closed month refuses it — the job's own dates alone are no sale (saveDigitizingJob).
-    if (a === "saveDigitizingJob" && b.job && b.job.recordExpense === true && Number(b.job.costCents) > 0 && !b.job.expenseId) {
+    if (a === "saveDigitizingJob" && b.job && b.job.recordExpense === true && Number(b.job.costCents) > 0) {
       const d = String(b.job.returnedAt || b.job.sentAt || "").trim();
       if (/^\d{4}-\d{2}-\d{2}$/.test(d)) months.push(d.slice(0, 7));
     }
@@ -7268,7 +7268,7 @@ async function handleOrdersPost_(context, listBefore = null) {
         return jsonResponse({ status: "error", message: "The cost is whole cents from $0 to $1,000,000" }, 400);
       if (j.orderId && !(await getOrderById(env.DB, String(j.orderId)))) return jsonResponse({ status: "error", message: "Order not found" }, 404);
       // Recording the cost as an expense is an expense: it needs Expenses (Edit) and Bookkeeping, and a closed month refuses it.
-      const wantsExpense = j.recordExpense === true && Number(j.costCents) > 0 && !j.expenseId;
+      const wantsExpense = j.recordExpense === true && Number(j.costCents) > 0;
       if (wantsExpense) {
         if (!can_("finance.expenses", "edit")) return forbidden_("Your role can't record an expense. Untick “Record the cost as an expense”, or ask an admin.");
         if (!featureOn("bookkeeping")) return featureOffResponse("bookkeeping", featureLabel_("bookkeeping"));

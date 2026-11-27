@@ -13,7 +13,7 @@ const dbSrc = strip(read("functions/_lib/db.js"));
 const lib = new Function(dbSrc + `\nreturn { createTransfer, createGraphic, createProduct, priceItem, insertOrder, getOrderById, getTransferQueue, getGangSheet, getProductionQueue,
   setOrgReorderQrTransfer, createHoop, createThread, saveDesign, addDesignVersion, setProductDesign, saveMachine, receiveTransferSheet, listTransfers, getProductsByOrg, lineHasEmbroidery, refreshOrderLinesFromCatalog, updateGraphic, getGraphic };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test'; " + require("./testlib/roles").adminAs() + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: { league: 'league' }, orgs: {} });\n" +
@@ -205,16 +205,16 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("it offers the shop default by name, None, and the transfers", [...qrSel.options].map(o => o.textContent.trim()).join("|") === "Shop default (League QR DTF)|None|Crest sheet|League QR DTF");
   qrSel.value = "none";
   ok("the form saves the choice for a plain product", w._productConfigGet().configurable === false && w._productConfigGet().reorderQr === "none");
-  ok("it explains the two queues", /listed on Run Order \(its embroidery\) and on Run Transfer Sheets \(its QR code\)/.test(text(d.getElementById("cfgQrWrap"))));
+  ok("it explains the two queues", /listed on Run order twice: its embroidery, and its QR code as a DTF transfer/.test(text(d.getElementById("cfgQrWrap"))));
 
-  console.log("\n=== Run Transfer Sheets screen ===");
+  console.log("\n=== The Run order's DTF cards (the old Run Transfer Sheets) ===");
   await call({ orderId: "P7", orgId: "league", customerName: "Seven", contact: "c@x.com", paymentMethod: "Venmo", items: [{ productId: "polo", size: "L", qty: 1 }] }, "league"); ready("P7");
   await call({ orderId: "P8", orgId: "league", customerName: "Eight", contact: "c@x.com", paymentMethod: "Venmo", items: [{ productId: "sticker-tee", size: "L", qty: 1 }] }, "league"); ready("P8");
   d1._raw.run("UPDATE order_items SET transferReceivedAt='2026-10-05T00:00:00Z' WHERE orderId IN ('P7','P8')");
   await w.renderRunTransfer(d.getElementById("app"));
   await until(() => d.querySelector(".rtApply"));
-  const cardOf = (name) => [...d.querySelectorAll("#rtBody > div")].find(el => new RegExp(name).test(el.textContent) && el.querySelector("button"));
-  ok("an embroidered line says so and offers 'Mark transfers applied' (not 'Mark made')", !!cardOf("Seven") && /Also embroidered — embroidery still to run on Run Order/.test(text(cardOf("Seven"))) && !!cardOf("Seven").querySelector(".rtApply") && !cardOf("Seven").querySelector(".rtMake"));
+  const cardOf = (name) => [...d.querySelectorAll(".ro-card-dtf")].find(el => new RegExp(name).test(el.textContent) && el.querySelector("button"));
+  ok("an embroidered line says so and offers 'Mark transfers applied' (not 'Mark made')", !!cardOf("Seven") && /Also embroidered — embroidery still to run \(its Embroidery card is on this page\)/.test(text(cardOf("Seven"))) && !!cardOf("Seven").querySelector(".rtApply") && !cardOf("Seven").querySelector(".rtMake"));
   ok("a transfer-only line still offers 'Mark made'", !!cardOf("Eight") && !!cardOf("Eight").querySelector(".rtMake") && !cardOf("Eight").querySelector(".rtApply") && !/Also embroidered/.test(text(cardOf("Eight"))));
   cardOf("Seven").querySelector(".rtApply").click();
   await until(() => !cardOf("Seven"));

@@ -283,7 +283,7 @@ const quietly = async (fn) => { console.error = (...a) => logged.push(a.map(Stri
     JSON.stringify(JSON.parse(au.detail)) === JSON.stringify({ estimate: A.number, note: "Could the caps be navy?\nAnd 2 more polos." }));
   let nt = lastNotice();
   ok("the owner is told (queued for the roll-up): \"Pat Example asked for changes to quote …\" with their note",
-    notices().length === 1 && nt.kind === "invoice" && nt.orgId === "club" && nt.orderId === A.number &&
+    notices().length === 1 && nt.kind === "quote" && nt.orgId === "club" && nt.orderId === A.number &&
     nt.summary === `Pat Example asked for changes to quote ${A.number}` && nt.detail === "Their note: Could the caps be navy?\nAnd 2 more polos.");
   r = await post({ token: A.token, action: "accept" });
   ok("accepting while waiting on changes: 409, in a plain sentence", r.status === 409 && r.body.message === "You've asked for changes to this quote — we'll send you the revised quote to accept.");
@@ -565,7 +565,7 @@ const quietly = async (fn) => { console.error = (...a) => logged.push(a.map(Stri
     await M.sendEstimateResponseNotification(env, { estimate: { number: "Q-00090", orgId: "club" }, accepted: true, orderId: "CLUB-Q00090", note: "" });
     let n = lastNotice();
     ok("an accept with an order, no name: \"The customer accepted quote … — it is now order …\", no detail, filed under the order",
-      notices().length === n0 + 1 && n.summary === "The customer accepted quote Q-00090 — it is now order CLUB-Q00090" && n.detail === "" && n.orderId === "CLUB-Q00090" && n.kind === "invoice");
+      notices().length === n0 + 1 && n.summary === "The customer accepted quote Q-00090 — it is now order CLUB-Q00090" && n.detail === "" && n.orderId === "CLUB-Q00090" && n.kind === "quote");
     await M.sendEstimateResponseNotification(env, { estimate: { number: "Q-00091", orgId: "club", customerName: "Lee Example" }, accepted: false, note: "  Blue  " });
     n = lastNotice();
     ok("a changes request uses the quote's customerName and the trimmed note, filed under the quote's number",

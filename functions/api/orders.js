@@ -72,6 +72,8 @@ import {
   getTransferSheet, editTransferSheet, transferSheetLabel,
   writeOffTransfers, setTransferCounts, getTransferMovements, voidTransferMovement, transferMovementVoidable, restoreTransferMovement, getTransferMovementById, getTransferRestoreBlocker, transferMovementMonth, getTransferValuation, getTransferValuations, getTransferCogs,
   getTransferQueue, setTransferReceived, getGangSheet, makeTransferLine, setTransfersApplied, lineHasEmbroidery, refreshOrderLinesFromCatalog,
+  getRunQueue, setDecorationStarted, makeDecoratedLine, getDecorationTypes, getDecorationPricing, buildDecorationSettings,
+  listDigitizingJobs, saveDigitizingJob, deleteDigitizingJob,
   listDesigns, getDesign, saveDesign, deleteDesign, listDesignVersions, addDesignVersion, updateDesignVersionThreads, setProductDesign,
   listProductDesigns, setProductDesigns, listOrderItemDesigns, addOrderItemDesign, getCatalogIssues, getBlankReadyByOrg,
   setMachineStitchCount, listMaintenanceTasks, saveMaintenanceTask, deleteMaintenanceTask, recordMaintenance, getMaintenanceLog,
@@ -150,6 +152,7 @@ import { verifyTurnstile } from "../_lib/turnstile.js";
 import { setMarketingChoice, getMarketingChoice, campaignAudience, listCampaigns, getCampaign, saveCampaign, copyCampaign, deleteCampaign, scheduleCampaign,
   cancelCampaign, sendCampaignTest, runCampaignQueue, cleanDiscount, AUDIENCE_MAX, CAMPAIGNS_NOT_READY } from "../_lib/campaigns.js";
 // Payments, refunds and money integrity (kept apart from the long list above).
+import { DECORATION_TYPES, DECORATION_KEYS, DEFAULT_DECORATION_PRICING, normalizeDecorationTypes, normalizeDecorationPricing, priceDecoration } from "../_lib/db.js";
 import { expireCheckoutSession, createCheckoutSession, CHECKOUT_LINK_SECONDS, listCacheVersions_, readCachedList_, refreshCachedLists_, peekCachedList_, blankListDelta_ } from "../_lib/db.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9\-]{1,64}$/;
@@ -436,6 +439,9 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "countTransferStock", "getTransferSheet", "editTransferSheet",
   "getTransferMovements", "voidTransferMovement", "restoreTransferMovement",
   "getTransferQueue", "setTransferReceived", "getGangSheet", "makeTransferLine", "setTransfersApplied", "refreshOrderFromCatalog",
+  // Decoration types (migrations/0118): which types the shop does and what each costs; the one Run order; outside digitizing.
+  "getDecorationSettings", "updateDecorationSettings", "priceDecoration", "getRunQueue", "setDecorationStarted", "makeDecoratedLine",
+  "listDigitizingJobs", "saveDigitizingJob", "deleteDigitizingJob",
 ]);
 
 // ---- Roles: see functions/_lib/permissions.js (ACTION_PERM) and functions/_lib/adminAuth.js -----
@@ -519,6 +525,7 @@ const GLOBAL_SETTINGS_SECTIONS_ = {
   machine: { action: "updateMachineSettings", label: "Machine settings" },
   pricing: { action: "updatePricingSettings", label: "Pricing" },
   rush: { action: "updateRushSettings", label: "Rush fee" },
+  decoration: { action: "updateDecorationSettings", label: "Decoration types" },
 };
 
 // A product's price must be entered: a flat price, or at least one size's (a blank box used to save as $0).
@@ -553,6 +560,8 @@ const ACTION_PERM_ = typeof ACTION_PERM !== "undefined" ? ACTION_PERM : Object.c
 // in periodGuard's rules or here, as touching no month's numbers (set-up, catalog, production, messages, settings).
 // test242 fails for an action in neither, so a new action can't miss the closed-month check by being forgotten.
 const NO_MONTH_ACTIONS = new Set([
+  // A read that the digitizing form's editors may also make (permissions.js ALSO): it changes nothing.
+  "listVendors",
   // Orders: details, files, steps that don't date stock, shipping, messages, downloads
   "updateCustomerInfo", "setOrderDates", "setOrderDueDate", "bulkSetDueDate", "refreshOrderFromCatalog", "saveOrderItemFile", "saveOrderItemDesign",
   "sendDesignVerification", "deleteOrderItemFile", "useBlanksFromStock", "addBlankShipment", "updateBlankShipment", "checkBlankShipments",
@@ -572,6 +581,10 @@ const NO_MONTH_ACTIONS = new Set([
   "saveCampaign", "copyCampaign", "deleteCampaign", "sendCampaignTest", "scheduleCampaign", "cancelCampaign", "runCampaignQueue", "setMarketingOptOut",
   // Run Order and transfer sheets
   "startRun", "completeRun", "abortRun", "markManufacturedOnMachine", "setTransferReceived", "setTransfersApplied",
+  // Decoration types (migrations/0118): the type list and its prices apply from now on; Start only notes that work began;
+  // outside digitizing's records are no sale (its expense, when one is recorded, is in periodGuard's rules); the price
+  // helper only works a price out. makeDecoratedLine dates blank use, as makeTransferLine does: periodGuard's.
+  "updateDecorationSettings", "setDecorationStarted", "deleteDigitizingJob", "priceDecoration",
   // Catalog and shops
   "createProduct", "updateProduct", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion",
   "copyProductsFromOrg", "importProducts", "setProductDesign", "setProductDesigns", "setProductGraphicImage", "setProductGraphicColorBlocked", "setTierPrices",
@@ -638,7 +651,7 @@ const dropFields_ = (v, drop) => Array.isArray(v) ? v.map(x => dropFields_(x, dr
 // catch-up costs, stock made at a cost, a receipt's account, supplier orders' totals, statement entries and
 // reconciliations, deposit mapping and Stripe fees, and the blank costs behind a product's confirmed prices. Their
 // rows stay; their detail goes to a role without costs.view (auditCostsFor_). Counts, write-offs, links and names stay.
-const MONEY_AUDIT_ACTIONS_ = new RegExp("^(settings\\.pricing|settings\\.shop_rate|payment\\.|expense\\.|recurring_expense\\.|fundraiser\\.payout_recorded$|" +
+const MONEY_AUDIT_ACTIONS_ = new RegExp("^(settings\\.pricing|settings\\.decoration_prices_set|digitizing\\.|settings\\.shop_rate|payment\\.|expense\\.|recurring_expense\\.|fundraiser\\.payout_recorded$|" +
   "inventory\\.(received|order_received|receipt_account_changed|vendor_prices_changed|average_cost_recomputed|catch_up|movement_voided|movement_restored|made_for_stock)$|" +
   "transfer\\.(received|sheet_edited|catch_up|movement_voided|movement_restored|receipt_account_changed)$|" +
   "supplier_order\\.(placed|failed)$|statement\\.(created_entry|reconciled)$|payments\\.(deposit_mapped|stripe_fees_backfilled)$|product\\.prices_confirmed$)");
@@ -665,6 +678,9 @@ const FEATURE_ACTIONS = {
     "listAbortReasons", "saveAbortReason", "deleteAbortReason",
     "listActiveRuns", "startRun", "completeRun", "getRunStats", "abortRun", "markHoopingDone", "getRunReportByDesign",
     "setMachineStitchCount", "listMaintenanceTasks", "saveMaintenanceTask", "deleteMaintenanceTask", "recordMaintenance", "getMaintenanceLog", "setDesignVersionStitches", "fillDesignStitchCounts",
+    // The one Run order (every decoration type's work) and the DTF transfer actions that were not gated before it.
+    "getRunQueue", "setDecorationStarted", "makeDecoratedLine",
+    "getTransferQueue", "getGangSheet", "setTransferReceived", "setTransfersApplied", "makeTransferLine",
   ],
   bookkeeping: [
     "listClosedPeriods", "closePeriod", "reopenPeriod", "getAccountantExport", "getTaxPacketExtras",
@@ -963,6 +979,8 @@ async function handleOrdersPost_(context, listBefore = null) {
         "createFromStatementLine", "setFulfillmentStage", "bulkSetFulfillmentStage", "addBlankShipment"].includes(a) && typeof body.vendor === "string") body.vendor = await vendorName_(body.vendor);
       if (a === "saveExpense" && body.expense && typeof body.expense.vendor === "string") body.expense.vendor = await vendorName_(body.expense.vendor);
       if (a === "saveRecurringExpense" && body.recurring && typeof body.recurring.vendor === "string") body.recurring.vendor = await vendorName_(body.recurring.vendor);
+      // Outside digitizing (migrations/0118): who a design was sent to is on the vendor list too ("" = not named yet).
+      if (a === "saveDigitizingJob" && body.job && typeof body.job === "object" && typeof body.job.vendor === "string") body.job.vendor = await vendorName_(body.job.vendor);
       return null;
     } catch (e) {
       if (!e || !e.userFacing) throw e;
@@ -1039,12 +1057,18 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (a === "createLocalSale" && /^\d{4}-\d{2}-\d{2}/.test(String(b.placedAt || ""))) months.push(String(b.placedAt).slice(0, 7));
     // Making things after the fact dates their blank use (cost of goods) in the month chosen.
     if (["setFulfillmentStage", "bulkSetFulfillmentStage"].includes(a) && b.stage === "manufactured" && b.at) { const t = actionTime(b); if (t && t.at) months.push(t.at.slice(0, 7)); }
-    if (["cancelLineItem", "bulkCancelLineItems", "markHoopingDone", "makeTransferLine"].includes(a) && b.at) { const t = actionTime(b); if (t && t.at) months.push(t.at.slice(0, 7)); }
+    if (["cancelLineItem", "bulkCancelLineItems", "markHoopingDone", "makeTransferLine", "makeDecoratedLine"].includes(a) && b.at) { const t = actionTime(b); if (t && t.at) months.push(t.at.slice(0, 7)); }
     if (["addPayment", "recordRefund", "setPaymentDate"].includes(a) && /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || ""))) months.push(String(b.date).slice(0, 7));
     // A payment / Mark as paid / count correction / transfer write-off dated with a date and time (2026-10).
     if (["addPayment", "recordRefund", "setPaymentDate", "markPaidManual", "setReadyToShipQty", "countBlankStock", "countTransferStock"].includes(a) && b.at) { const t = actionTime(b); if (t && t.at) months.push(t.at.slice(0, 7)); }
     if (a === "setPaymentDate" && b.paymentId) months.push(await paymentMonth(env.DB, b.paymentId));
     if (a === "saveExpense" && b.expense && /^\d{4}-\d{2}-\d{2}$/.test(String(b.expense.date || ""))) months.push(String(b.expense.date).slice(0, 7));
+    // Outside digitizing (migrations/0118): "Record the cost as an expense" books an expense dated when it came back
+    // (else when it was sent), so a closed month refuses it — the job's own dates alone are no sale (saveDigitizingJob).
+    if (a === "saveDigitizingJob" && b.job && b.job.recordExpense === true && Number(b.job.costCents) > 0 && !b.job.expenseId) {
+      const d = String(b.job.returnedAt || b.job.sentAt || "").trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d)) months.push(d.slice(0, 7));
+    }
     // A fundraiser payout is an expense dated when it was paid (migrations/0110).
     // The handler trims the date before saving it, so the month is read from the trimmed date too.
     if (a === "recordFundraiserPayout" && /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || "").trim())) months.push(String(b.date).trim().slice(0, 7));
@@ -4673,7 +4697,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     // Catalog/price edits are audited: what changed, from → to. Only the
     // fields that actually differ are recorded, so a price change reads as one line in the Audit Log.
     const PRODUCT_AUDIT_FIELDS = ["name", "sub", "type", "pricingMode", "flatPrice", "sizePricing", "colorGroups", "personalizationPrice", "noDesignNeeded", "noBlankNeeded", "digital", "digitalDelivery", "runMinutes", "transferCost", "suppliesCost",
-      "customDesign", "customDesignPrice", "personalizationOptions", "images", "features", "visible", "sortOrder", "weightOz", "taxable", "versionGroup", "versionLabel", "fixedTransfers", "mockupGraphics"];
+      "customDesign", "customDesignPrice", "personalizationOptions", "images", "features", "visible", "sortOrder", "weightOz", "taxable", "versionGroup", "versionLabel", "fixedTransfers", "mockupGraphics", "decorationType"];
     const ORG_AUDIT_FIELDS = ["subdomain", "name", "eyebrow", "accent", "desc", "ready", "shippingEnabled", "deliveryOptions", "enabledPayments",
       "orderDeadline", "closedMessage", "allowOrdersAfterDeadline", "designImageShirt", "designImageCap", "designImageDetail", "rushFee"];
     // The shop's rush fee (migrations/0082), only when sent: {use: "default" | "off" | "own", rule}. undefined = leave it.
@@ -4914,6 +4938,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       personalizationPrice: p.personalizationPrice, personalizationOptions: p.personalizationOptions,
       personalizationMode: p.personalizationMode, personalizationHoopId: p.personalizationHoopId, personalizationOptionDesigns: p.personalizationOptionDesigns,
       noDesignNeeded: p.noDesignNeeded, noBlankNeeded: p.noBlankNeeded, customDesign: p.customDesign, customDesignPrice: p.customDesignPrice,
+      decorationType: p.decorationType,
       configurable: p.configurable, locations: p.locations, reorderQr: p.reorderQr, fixedTransfers: p.fixedTransfers, mockupGraphics: p.mockupGraphics,
     });
     // Embroidered graphics for mockups (migrations/0069): [{locationId, graphicId}] — this shop's EMBROIDERY graphic at a
@@ -4982,6 +5007,99 @@ async function handleOrdersPost_(context, listBefore = null) {
       return "";
     };
 
+    // ---- Decoration types (migrations/0118; the top of functions/_lib/db.js) ----
+    // A decoration type as a record carries it ('' = none): a known key that is switched on in Global settings. A record
+    // that already has the type (`keep`) may keep it after it is switched off — only choosing it anew is refused.
+    // `both` is the product wizard's "Embroidery and DTF", offered when both are on. "" when it is fine, else the message.
+    const DECORATION_OFF_MSG_ = "That decoration type is switched off in Global settings";
+    const decorationKeyProblem_ = async (key, { keep = "", both = false } = {}) => {
+      const k = key == null ? "" : String(key);
+      if (!k) return "";
+      if (k === keep) return "";
+      const known = DECORATION_KEYS.includes(k) || (both && k === "both");
+      if (!known) return "Unknown decoration type: " + k.slice(0, 40);
+      const on = await getDecorationTypes(env.DB);
+      if (k === "both") return on.includes("embroidery") && on.includes("dtf") ? "" : DECORATION_OFF_MSG_;
+      return on.includes(k) ? "" : DECORATION_OFF_MSG_;
+    };
+    // A product's decoration type as sent (`decorationType`: '' = worked out from its design and transfers, or a known type
+    // that is switched on; a product keeps one already saved). Not sent = left as it is.
+    const checkDecorationType_ = async (b, before) => {
+      if (b.decorationType === undefined) return "";
+      if (b.decorationType === null) { b.decorationType = ""; return ""; }
+      if (typeof b.decorationType !== "string") return "Unknown decoration type";
+      return decorationKeyProblem_(b.decorationType, { keep: before && before.decorationType ? String(before.decorationType) : "" });
+    };
+    // The prices sent with the types (cents): only the fields each type has, whole cents from $0 to $1,000,000, most
+    // colours 1 to 12, the stitch pricing tick a tick. Unknown types and fields are left out by normalizeDecorationPricing.
+    const decorationPricingProblem_ = (p) => {
+      if (!p || typeof p !== "object" || Array.isArray(p)) return "That isn't a valid set of decoration prices.";
+      for (const t of DECORATION_TYPES) {
+        const sent = p[t.key];
+        if (sent === undefined) continue;
+        if (!sent || typeof sent !== "object" || Array.isArray(sent)) return `The ${t.label} prices aren't valid.`;
+        for (const f of Object.keys(DEFAULT_DECORATION_PRICING[t.key])) {
+          const v = sent[f];
+          if (v === undefined) continue;
+          if (f === "stitchPricing") { if (typeof v !== "boolean") return `${t.label}: price by stitch count is on or off.`; }
+          else if (f === "maxColors") { if (!Number.isInteger(v) || v < 1 || v > 12) return `${t.label}: the most colours is a whole number from 1 to 12.`; }
+          else if (f === "minStitches") { if (!Number.isInteger(v) || v < 0 || v > 100000000) return `${t.label}: the minimum stitches is a whole number from 0 up.`; }
+          else if (!Number.isInteger(v) || v < 0 || v > 100000000) return `${t.label}: prices are whole cents from $0 to $1,000,000.`;
+        }
+      }
+      return "";
+    };
+    // What a cost field is: the per-piece costs belong with Money, costs and margins, as Pricing's do (costs.view).
+    // Without it the costs are left out of an answer, and a save keeps the costs the shop has.
+    const decorationPricingFor_ = (pricing) => seesPricing_() ? pricing
+      : Object.fromEntries(Object.entries(pricing || {}).map(([k, v]) => { const { costCents, ...rest } = v || {}; return [k, rest]; }));
+    // The Decoration types section as sent ({ types, pricing }, either may be left out = kept), checked and normalized
+    // against `before` ({ types, pricing }): { types, pricing } or { error }.
+    const decorationInput_ = (raw, before) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: "That isn't a valid Decoration types section." };
+      let types = before.types, pricing = before.pricing;
+      if (raw.types !== undefined) {
+        const list = Array.isArray(raw.types) ? raw.types : null;
+        if (!list || !list.length) return { error: "Tick at least one decoration type" };
+        const unknown = list.map(k => String(k)).find(k => !DECORATION_KEYS.includes(k));
+        if (unknown !== undefined) return { error: "Unknown decoration type: " + unknown.slice(0, 40) };
+        types = normalizeDecorationTypes(list);
+      }
+      if (raw.pricing !== undefined) {
+        const bad = decorationPricingProblem_(raw.pricing);
+        if (bad) return { error: bad };
+        pricing = normalizeDecorationPricing(raw.pricing);
+        // A fields left out keeps what the shop has (a form that only changes one type sends that type).
+        for (const t of DECORATION_TYPES) {
+          const sent = raw.pricing[t.key] || {};
+          for (const f of Object.keys(DEFAULT_DECORATION_PRICING[t.key])) if (sent[f] === undefined || (!seesPricing_() && f === "costCents")) pricing[t.key][f] = before.pricing[t.key][f];
+        }
+      }
+      return { types, pricing };
+    };
+    // What a save changes: the types (switching one off takes things from the pickers: strict audit) and the prices.
+    const decorationChanges_ = (before, after) => {
+      const types = JSON.stringify(before.types) !== JSON.stringify(after.types) ? { from: before.types, to: after.types } : null;
+      const prices = {};
+      for (const t of DECORATION_TYPES) for (const f of Object.keys(DEFAULT_DECORATION_PRICING[t.key])) {
+        const a = (before.pricing[t.key] || {})[f], b = (after.pricing[t.key] || {})[f];
+        if (a !== b) prices[t.key + "." + f] = { from: a ?? null, to: b ?? null };
+      }
+      return { types, prices: Object.keys(prices).length ? prices : null };
+    };
+    // buildDecorationSettings's answer as a settings build the batch writer takes ({ stmts, value }).
+    const decorationBuild_ = (r, input) => ({
+      stmts: Array.isArray(r) ? r : (r && Array.isArray(r.stmts) ? r.stmts : []),
+      after: r && !Array.isArray(r) && Array.isArray(r.after) ? r.after : [],
+      value: { types: input.types, pricing: input.pricing },
+    });
+    const decorationAuditTypes_ = (changes) => ({ orgId: null, orderId: null, action: "settings.decoration_set", detail: { changes: { types: changes.types } } });
+    const decorationAuditPrices_ = (changes) => audit({ orgId: null, orderId: null, action: "settings.decoration_prices_set", detail: { changes: changes.prices } });
+    // Outside digitizing's cost shows to who may enter it or see costs (Production reads the record without it).
+    const digitizingFor_ = (jobs) => seesPricing_() || can_("production.digitizing", "edit") ? jobs
+      : (jobs || []).map(({ costCents, expenseId, ...rest }) => rest);
+
+
     // A configurable product's locations may each carry their own add-on for the customer's design
     // (blank = the product's). The form sends dollars (`customDesignPrice`); it's stored in whole cents
     // on the location (`customDesignPriceCents`, products.locationsJson), $0–$1,000.
@@ -5021,6 +5139,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       { const why = cleanLocationPrices_(body); if (why) return jsonResponse({ status: "error", message: why }, 400); }
       { const why = await checkPersonalization_(body); if (why) return jsonResponse({ status: "error", message: why }, 400); }
       { const why = checkCustomDesign_(body); if (why) return jsonResponse({ status: "error", message: why }, 400); }
+      { const why = await checkDecorationType_(body, null); if (why) return jsonResponse({ status: "error", message: why }, 400); }
       if (!PRODUCT_ID_RE.test(String(body.productId))) {
         return jsonResponse({ status: "error", message: "Product ID must be 1-40 lowercase letters, numbers, or hyphens." }, 400);
       }
@@ -5144,6 +5263,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (imgCheck.error) return jsonResponse({ status: "error", message: imgCheck.error }, 400);
       body.images = imgCheck.images;
       const beforeProduct = await productOf_(body.org, body.productId);
+      { const why = await checkDecorationType_(body, beforeProduct); if (why) return jsonResponse({ status: "error", message: why }, 400); }
       { const why = checkProductPrice_(body, beforeProduct || {}); if (why) return jsonResponse({ status: "error", message: why }, 400); }
       { const why = await checkCategory_(body, beforeProduct ? beforeProduct.type : null); if (why) return jsonResponse({ status: "error", message: why }, 400); }
       { const why = colorGroupsProblem_(body, beforeProduct); if (why) return jsonResponse({ status: "error", message: why }, 400); }
@@ -5777,12 +5897,26 @@ async function handleOrdersPost_(context, listBefore = null) {
         before.rush = await getRushSettings(env.DB);
         if ((r = await build("rush", () => buildRushSettings(env.DB, { rule: s.rush.rule, taxable: s.rush.taxable === true })))) return r;
       }
+      // Decoration types and their prices ({ types, pricing }, cents): checked as updateDecorationSettings checks them.
+      let decorationChanges = null;
+      if (s.decoration) {
+        before.decoration = { types: await getDecorationTypes(env.DB), pricing: await getDecorationPricing(env.DB) };
+        const input = decorationInput_(s.decoration, before.decoration);
+        if (input.error) return refuse("decoration", input.error);
+        let built;
+        try { built = await buildDecorationSettings(env.DB, input); }
+        catch (e) { if (e && e.userFacing) return refuse("decoration", e.message); throw e; }
+        builds.decoration = decorationBuild_(built, input);
+        decorationChanges = decorationChanges_(before.decoration, input);
+      }
 
       // Everything checked: the write, all of it or none of it.
       const writes = Object.values(builds);
       if (plan && Object.keys(plan.changes).length) {
         writes.push({ stmts: [auditLogStatement(env.DB, auditEntry({ orgId: null, orderId: null, action: "settings.features_set", detail: { changes: plan.changes } }))] });
       }
+      // Switching a decoration type off takes it from every picker: on record in the same write, as a feature is.
+      if (decorationChanges && decorationChanges.types) writes.push({ stmts: [auditLogStatement(env.DB, auditEntry(decorationAuditTypes_(decorationChanges)))] });
       try { await writeSettingBuilds(env.DB, writes, { batch: true }); }
       catch (e) {
         console.error("Saving Global settings failed (nothing was saved):", e);
@@ -5808,6 +5942,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       }
       if (builds.digital) audit({ orgId: null, orderId: null, action: "settings.digital_set", detail: { from: before.digital, to: v("digital") } });
       if (builds.machine) audit({ orgId: null, orderId: null, action: "settings.machine_set", detail: s.machine });
+      if (decorationChanges && decorationChanges.prices) decorationAuditPrices_(decorationChanges);
       if (builds.pricing) audit({ orgId: null, orderId: null, action: "settings.pricing_set", detail: v("pricing") });
       if (builds.rush) {
         audit({ orgId: null, orderId: null, action: "settings.rush_fee_set",
@@ -5816,7 +5951,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       // The storefront reads the country, the switches, the tax rate and mode, the business's name and payment
       // details and the rush rule from the cached catalog: one refresh for all of them. (The payment-method boxes
       // wait for Publish, as they always have.)
-      if (["locale", "features", "salesTax", "business", "rush"].some(k => builds[k])) {
+      if (["locale", "features", "salesTax", "business", "rush", "decoration"].some(k => builds[k])) {
         try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
       }
       // New fees, targets or a new tax rate re-check every product: which are now below a target.
@@ -5830,6 +5965,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (builds.shipFrom) saved.shipFrom = v("shipFrom");
       if (saved.salesTax) saved.salesTax = { ...saved.salesTax, ratePercent: saved.salesTax.rateBps / 100 };
       if (saved.rush) saved.rush = { rule: rushRuleView(saved.rush.rule), taxable: saved.rush.taxable };
+      if (saved.decoration) saved.decoration = { types: saved.decoration.types, pricing: decorationPricingFor_(saved.decoration.pricing) };
       if (!seesPricing_()) delete saved.pricing;
       // A Region save also sends the time zone now in force (the Region's, else TIMEZONE, else UTC): the admin page
       // shows every date and "today" on it.
@@ -5901,7 +6037,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (body.action === "saveVendor") {
       try {
         const r = await saveVendor(env.DB, body.vendor || {});
-        const fsText = (v) => v ? { forBlanks: v.forBlanks, hidden: v.hidden, freeShipping: v.freeShipping, noFreeShipping: v.noFreeShipping } : null;
+        const fsText = (v) => v ? { forBlanks: v.forBlanks, forDigitizing: v.forDigitizing, hidden: v.hidden, freeShipping: v.freeShipping, noFreeShipping: v.noFreeShipping } : null;
         audit({ orgId: null, orderId: null, action: r.before ? "vendor.updated" : "vendor.created",
           detail: { id: r.vendor.id, name: r.vendor.name, ...(r.before && r.before.name !== r.vendor.name ? { renamedFrom: r.before.name, recordsRenamed: r.renamed } : {}),
             from: fsText(r.before), to: fsText(r.vendor) } });
@@ -6246,7 +6382,10 @@ async function handleOrdersPost_(context, listBefore = null) {
         const used = new Set(all.map(p => p.productId));
         productId = base; for (let n = 2; used.has(productId); n++) productId = base + "-" + n;
       }
-      const decoration = ["embroidery", "dtf", "both"].includes(body.decoration) ? body.decoration : "embroidery";
+      // Any switched-on decoration type (embroidery, dtf, screenprint, vinyl, dtg, sublimation), or "both" = embroidery and
+      // DTF when both are on. A type that is switched off is refused; something not a type at all is embroidery, as before.
+      const decoration = [...DECORATION_KEYS, "both"].includes(body.decoration) ? body.decoration : "embroidery";
+      { const why = await decorationKeyProblem_(decoration, { both: true, keep: before && before.decorationType ? before.decorationType : "" }); if (why) return jsonResponse({ status: "error", message: why }, 400); }
       const p = {
         org: org.orgId, productId, name, sub: String(body.sub == null ? (before ? before.sub : "") : body.sub).slice(0, 300),
         type: String(body.type || (before && before.type) || blank.productType || ""),
@@ -6272,7 +6411,9 @@ async function handleOrdersPost_(context, listBefore = null) {
         // The picture of its embroidery on the shop page (an embroidery graphic at a decoration location, migrations/0069).
         mockupGraphics: Array.isArray(body.mockupGraphics) ? body.mockupGraphics : (before ? before.mockupGraphics || [] : []),
         colorGroups: Array.isArray(body.colorGroups) ? body.colorGroups : [],
-        noDesignNeeded: decoration === "dtf",
+        // Embroidery and DTF are worked out from the design and transfers as always; the other types are the product's own.
+        noDesignNeeded: decoration !== "embroidery" && decoration !== "both",
+        decorationType: ["screenprint", "vinyl", "dtg", "sublimation"].includes(decoration) ? decoration : "",
       };
       if (p.pricingMode === "flat" && !sizes.includes("OSFA")) sizes.splice(0, sizes.length, "OSFA");
       { const why = checkProductPrice_(p, before); if (why) return jsonResponse({ status: "error", message: why }, 400); }
@@ -6680,6 +6821,20 @@ async function handleOrdersPost_(context, listBefore = null) {
       const cur = g.id ? await getGraphic(env.DB, Number(g.id)) : null;
       if (g.id && (!cur || (cur.orgId !== body.org && !cur.isGlobal))) return jsonResponse({ status: "error", message: "Graphic not found" }, 404);
       { const why = await graphicGlobalProblem(env.DB, cur, g); if (why) return jsonResponse({ status: "error", message: why }, 400); }
+      // A printed graphic's type (migrations/0118: dtf, screenprint, vinyl, dtg, sublimation; "" and "dtf" are the same, as
+      // before): only a switched-on type is chosen anew, and an embroidery graphic has none.
+      if (g.decoration !== undefined) {
+        const kind = g.kind !== undefined ? g.kind : (cur ? cur.kind : "");
+        if (g.decoration === null) g.decoration = "";
+        if (typeof g.decoration !== "string" || (g.decoration === "embroidery" && kind !== "embroidery")) return jsonResponse({ status: "error", message: "Unknown decoration type" }, 400);
+        if (kind === "embroidery" || g.decoration === "embroidery") g.decoration = "";
+        else {
+          const keep = cur && cur.kind !== "embroidery" && cur.decoration && cur.decoration !== "embroidery" ? cur.decoration : "";
+          const why = await decorationKeyProblem_(g.decoration, { keep });
+          if (why) return jsonResponse({ status: "error", message: why }, 400);
+          if (g.decoration === "dtf") g.decoration = "";
+        }
+      }
       const globalChange = g.isGlobal !== undefined && !!g.isGlobal !== !!(cur ? cur.isGlobal : false);
       let id;
       if (g.id) { await updateGraphic(env.DB, Number(g.id), g); id = Number(g.id); audit({ orgId: body.org, orderId: null, action: "graphic.updated", detail: { id, name: g.name } }); }
@@ -7011,6 +7166,135 @@ async function handleOrdersPost_(context, listBefore = null) {
       catch (e) { return jsonResponse({ status: "error", message: e.message || "Could not mark made" }, 400); }
       audit({ orgId: body.org || null, orderId: body.orderId, action: "order.transfer_made", detail: { itemId: Number(body.itemId), orderComplete: !!res.orderComplete } });
       return jsonResponse({ status: "ok", orderComplete: !!res.orderComplete });
+    }
+
+
+    // ---- Decoration types: which the shop does, what each costs (migrations/0118) ----
+    if (body.action === "getDecorationSettings") {
+      return jsonResponse({ status: "ok", types: await getDecorationTypes(env.DB), registry: DECORATION_TYPES, pricing: decorationPricingFor_(await getDecorationPricing(env.DB)) });
+    }
+    if (body.action === "updateDecorationSettings") {
+      const before = { types: await getDecorationTypes(env.DB), pricing: await getDecorationPricing(env.DB) };
+      const input = decorationInput_(body, before);
+      if (input.error) return jsonResponse({ status: "error", message: input.error }, 400);
+      let built;
+      try { built = decorationBuild_(await buildDecorationSettings(env.DB, input), input); }
+      catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
+      const changes = decorationChanges_(before, input);
+      // Switching a type off takes it from the pickers and the shop page: audited FIRST, as a feature is.
+      if (changes.types) { const auditErr = await auditStrict(decorationAuditTypes_(changes)); if (auditErr) return auditErr; }
+      try { await writeSettingBuilds(env.DB, [built], { batch: true }); }
+      catch (e) {
+        console.error("Saving the decoration types failed (nothing was saved):", e);
+        return jsonResponse({ status: "error", message: "Nothing was saved: the database didn't take the change. Try again." }, 503);
+      }
+      if (changes.prices) decorationAuditPrices_(changes);
+      // The shop page reads the types from the cached catalog.
+      try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
+      return jsonResponse({ status: "ok", types: input.types, registry: DECORATION_TYPES, pricing: decorationPricingFor_(input.pricing) });
+    }
+    // What a decoration costs the customer, from the saved prices: the quote editor, the Local sale and the product form
+    // ask (stitches for embroidery; colors, locations and reorder for screen print; locations for the rest).
+    if (body.action === "priceDecoration") {
+      const type = String(body.type || "");
+      if (!DECORATION_KEYS.includes(type)) return jsonResponse({ status: "error", message: "Unknown decoration type: " + type.slice(0, 40) }, 400);
+      const params = body.params === undefined || body.params === null ? {} : body.params;
+      if (typeof params !== "object" || Array.isArray(params)) return jsonResponse({ status: "error", message: "params must be an object" }, 400);
+      return jsonResponse({ status: "ok", ...priceDecoration(type, params, await getDecorationPricing(env.DB)) });
+    }
+
+    // ---- The one Run order: every decoration type's work, by due date (migrations/0118) ----
+    // The page opens for run.queue (embroidery) or transfer.queue (DTF); the other types need either. A role with one
+    // half gets that half: the answer leaves out `embroidery` (and what only it uses) without run.queue, and
+    // `transfers` without transfer.queue.
+    if (body.action === "getRunQueue") {
+      const queue = await getRunQueue(env.DB, { today: await localToday(env) });
+      const embroidery = can_("run.queue", "read"), transfers = can_("transfer.queue", "read");
+      const out = { status: "ok", ...queue, paidUnrun: await getPaidUnrunOrders(env.DB) };
+      out.counts = { ...(queue.counts || {}) };
+      if (embroidery) { out.waitingOnBlanks = await getOrdersAwaitingBlanks(env.DB); out.needleSizes = await listNeedleSizes(env.DB); }
+      else { delete out.embroidery; out.counts.embroidery = 0; }
+      if (!transfers) { delete out.transfers; out.counts.dtf = 0; }
+      return jsonResponse(out);
+    }
+    // "Start" on a screen printed, vinyl, DTG or sublimated line (and its undo).
+    if (body.action === "setDecorationStarted") {
+      if (!body.orderId || !body.itemId) return jsonResponse({ status: "error", message: "orderId and itemId required" }, 400);
+      const on = body.on !== false;
+      const when = on ? actionTime(body) : null;
+      if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
+      try { await setDecorationStarted(env.DB, String(body.orderId), Number(body.itemId), on, when ? when.at : null); }
+      catch (e) { return jsonResponse({ status: "error", message: e.message || "Could not update the line" }, 400); }
+      audit({ orgId: body.org || null, orderId: String(body.orderId), action: on ? "order.decoration_started" : "order.decoration_unstarted", detail: { itemId: Number(body.itemId) } });
+      return jsonResponse({ status: "ok", started: on });
+    }
+    // "Mark made" on such a line: the pieces made and their blanks used — or, on a line that is also embroidered, only its
+    // decoration done (the line is made when its embroidery is finished), as makeTransferLine does for transfers.
+    if (body.action === "makeDecoratedLine") {
+      if (!body.orderId || !body.itemId) return jsonResponse({ status: "error", message: "orderId and itemId required" }, 400);
+      const when = actionTime(body);
+      if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
+      if (when) { const bad = stageTimeError(await getOrderById(env.DB, String(body.orderId)), "manufactured", when.at); if (bad) return jsonResponse({ status: "error", message: bad + "." }, 409); }
+      { const locked = await periodGuard(body); if (locked) return locked; }
+      let res;
+      try { res = await makeDecoratedLine(env.DB, String(body.orderId), Number(body.itemId), when ? when.at : null); }
+      catch (e) { return jsonResponse({ status: "error", message: e.message || "Could not mark made" }, 400); }
+      audit({ orgId: body.org || null, orderId: String(body.orderId), action: "order.decoration_made",
+        detail: { itemId: Number(body.itemId), orderComplete: !!res.orderComplete, ...(res.applied ? { applied: true } : {}), ...(res.alreadyDone ? { alreadyDone: true } : {}) } });
+      return jsonResponse({ status: "ok", orderComplete: !!res.orderComplete, ...(res.applied ? { applied: true } : {}), ...(res.alreadyDone ? { alreadyDone: true } : {}) });
+    }
+
+    // ---- Designs sent to an outside digitizer, and what it cost (migrations/0118) ----
+    if (body.action === "listDigitizingJobs") {
+      const orderId = body.orderId ? String(body.orderId) : "";
+      const estimateId = body.estimateId === undefined || body.estimateId === null || body.estimateId === "" ? null : Number(body.estimateId);
+      if (estimateId !== null && (!Number.isInteger(estimateId) || estimateId < 1)) return jsonResponse({ status: "error", message: "estimateId must be a whole number" }, 400);
+      if (!orderId && estimateId === null) return jsonResponse({ status: "error", message: "orderId or estimateId required" }, 400);
+      const filter = orderId ? { orderId } : { estimateId };
+      return jsonResponse({ status: "ok", jobs: digitizingFor_(await listDigitizingJobs(env.DB, filter)) });
+    }
+    if (body.action === "saveDigitizingJob") {
+      const j = body.job && typeof body.job === "object" && !Array.isArray(body.job) ? body.job : null;
+      if (!j) return jsonResponse({ status: "error", message: "job required" }, 400);
+      const text = (v) => typeof v === "string" ? v.trim() : "";
+      const day = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v.trim()) && !isNaN(Date.parse(v.trim() + "T00:00:00Z")) && new Date(v.trim() + "T00:00:00Z").toISOString().slice(0, 10) === v.trim();
+      if (!text(j.name)) return jsonResponse({ status: "error", message: "Say what was sent (its name)" }, 400);
+      if (text(j.name).length > 200) return jsonResponse({ status: "error", message: "The name is up to 200 characters" }, 400);
+      if (typeof j.vendor === "string" && j.vendor.trim().length > 120) return jsonResponse({ status: "error", message: "The vendor is up to 120 characters" }, 400);
+      if (!day(j.sentAt)) return jsonResponse({ status: "error", message: "Enter the day it was sent (YYYY-MM-DD)" }, 400);
+      if (j.returnedAt != null && j.returnedAt !== "" && !day(j.returnedAt)) return jsonResponse({ status: "error", message: "Enter the day it came back (YYYY-MM-DD) or leave it empty" }, 400);
+      if (day(j.returnedAt) && j.returnedAt.trim() < j.sentAt.trim()) return jsonResponse({ status: "error", message: "It can't come back before it was sent" }, 400);
+      if (j.costCents !== undefined && j.costCents !== null && j.costCents !== "" && (!Number.isInteger(Number(j.costCents)) || Number(j.costCents) < 0 || Number(j.costCents) > 100000000))
+        return jsonResponse({ status: "error", message: "The cost is whole cents from $0 to $1,000,000" }, 400);
+      if (j.orderId && !(await getOrderById(env.DB, String(j.orderId)))) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+      // Recording the cost as an expense is an expense: it needs Expenses (Edit) and Bookkeeping, and a closed month refuses it.
+      const wantsExpense = j.recordExpense === true && Number(j.costCents) > 0 && !j.expenseId;
+      if (wantsExpense) {
+        if (!can_("finance.expenses", "edit")) return forbidden_("Your role can't record an expense. Untick “Record the cost as an expense”, or ask an admin.");
+        if (!featureOn("bookkeeping")) return featureOffResponse("bookkeeping", featureLabel_("bookkeeping"));
+      }
+      { const locked = await periodGuard(body); if (locked) return locked; }
+      const before = j.id ? (await listDigitizingJobs(env.DB, j.orderId ? { orderId: String(j.orderId) } : { estimateId: Number(j.estimateId) })).find(x => Number(x.id) === Number(j.id)) || null : null;
+      let saved;
+      try { saved = await saveDigitizingJob(env.DB, j, { by: adminActor(request) }); }
+      catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
+      const id = typeof saved === "number" ? saved : saved && (saved.id || (saved.job && saved.job.id)) || null;
+      audit({ orgId: null, orderId: j.orderId ? String(j.orderId) : null, action: before ? "digitizing.updated" : "digitizing.sent",
+        detail: { id, name: text(j.name), vendor: text(j.vendor), sentAt: text(j.sentAt), returnedAt: text(j.returnedAt) || null, costCents: Number(j.costCents) || 0, expenseRecorded: wantsExpense,
+          ...(j.estimateId ? { estimateId: Number(j.estimateId) } : {}) } });
+      const filter = j.orderId ? { orderId: String(j.orderId) } : j.estimateId ? { estimateId: Number(j.estimateId) } : null;
+      return jsonResponse({ status: "ok", id, ...(filter ? { jobs: digitizingFor_(await listDigitizingJobs(env.DB, filter)) } : {}) });
+    }
+    if (body.action === "deleteDigitizingJob") {
+      const id = Number(body.id);
+      if (!Number.isInteger(id) || id < 1) return jsonResponse({ status: "error", message: "id required" }, 400);
+      try { await deleteDigitizingJob(env.DB, id); }
+      catch (e) {
+        if (e && (e.userFacing || e.message === "Delete its expense first")) return jsonResponse({ status: "error", message: e.message }, 409);
+        throw e;
+      }
+      audit({ orgId: null, orderId: body.orderId ? String(body.orderId) : null, action: "digitizing.deleted", detail: { id } });
+      return jsonResponse({ status: "ok" });
     }
 
     if (body.action === "listDesigns") {

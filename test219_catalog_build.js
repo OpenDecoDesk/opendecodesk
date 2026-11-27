@@ -72,7 +72,7 @@ async function addShop(d1, orgId, n) {
   const tee = cat.orgs.s1.products.find(p => p.productId === "tee"), cap = cat.orgs.s1.products.find(p => p.productId === "cap"), rag = cat.orgs.s1.products.find(p => p.productId === "rag");
   ok("…the data is really there (not two empty answers agreeing)", tee.colorImages.Navy[0] === "/img/tee-navy.png" && tee.colorImages.Grey[0] === "/img/tee-grey.png" &&
     tee.blankWeightBySize.L === 6 && cap.designs.length === 1 && cap.decorations.some(d => d.name === "Shared mark" && d.location === "Left chest") &&
-    tee.decorations.some(d => d.kind === "Printed" && d.name === "Crest 1" && d.location === "Front") && rag.graphicImages && cap.fixedMockups[0].label === "Left chest" &&
+    tee.decorations.some(d => d.kind === "Printed (DTF)" && d.name === "Crest 1" && d.location === "Front") && rag.graphicImages && cap.fixedMockups[0].label === "Left chest" &&
     cat.orgs.s1.graphics.map(g => g.name).join() === "Crest 1,Shared mark" && cat.orgs.s1.tierPricesCents.medium === 300 && !cat.orgs.s1.products.some(p => p.productId === "hidden"));
   ok("…in the shop's order, and the subdomains map", cat.orgs.s1.products.map(p => p.productId).join() === "rag,cap,tee" && cat.subdomainMap.s2 === "s2");
   // A draft edit after Publish shows in the preview, not in the published catalog.

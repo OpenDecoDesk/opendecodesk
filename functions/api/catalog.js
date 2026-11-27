@@ -227,7 +227,11 @@ function toClientProduct(p){
   // card with a toggle labelled by versionLabel ("Short sleeve | Long sleeve").
   // What decorates it, in words (name + decoration location), so the shop page can say so with or without a picture.
   if(Array.isArray(p.decorations) && p.decorations.length) out.decorations = p.decorations.slice(0, 12).map(d => ({
-    kind: String(d.kind || ""), name: String(d.name || ""), location: String(d.location || "") }));
+    kind: String(d.kind || ""), name: String(d.name || ""), location: String(d.location || ""),
+    ...(d.type ? { type: String(d.type) } : {}) }));
+  // The product's chosen decoration type ('' = worked out from its designs / transfers): the shop page offers a name to
+  // embroider only on an embroidered product and words its custom-design hints by type. Only a set value is sent.
+  if(p.decorationType) out.decorationType = String(p.decorationType);
   if(p.versionGroup){ out.versionGroup = String(p.versionGroup); out.versionLabel = String(p.versionLabel || ""); }
   // Configurable products (migrations/0036): per-location option menus + garment colors.
   if(p.configurable){
@@ -313,6 +317,10 @@ export async function onRequestGet(context){
   // Global settings → Features: which optional parts of the site are on. Sent with every answer so
   // the storefront and the admin know without another request; a missing key means on.
   const features = catalogData.features || {};
+  // Global settings → Decoration types: the enabled keys, sent with every answer like the features. Left out when the
+  // meta entry doesn't carry them (an entry cached before this setting): the page then treats every type as on.
+  const decorationTypes = Array.isArray(catalogData.decorationTypes) ? catalogData.decorationTypes.map(String) : undefined;
+  const decor = decorationTypes ? { decorationTypes } : {};
   // Carrier shipping needs both a US install and the Shipping feature.
   const carrierShipping = country === "US" && features.shipping !== false;
 
@@ -355,14 +363,14 @@ export async function onRequestGet(context){
     // repeated here to keep this file's one import). version: the program's (DESKTOP_VERSION, set by
     // desktop/server.js), shown above the business's name in the admin's header.
     // adminScript: the version to load admin.js under (adminScriptVersion above).
-    return jsonResponse({status:"admin", business: catalogData.business || {}, country, features, site: { rootDomain: siteRoot },
+    return jsonResponse({status:"admin", business: catalogData.business || {}, country, features, ...decor, site: { rootDomain: siteRoot },
       adminScript: await adminScriptVersion(env, url),
       ...(host.desktop ? {edition:"desktop", version: String(env.DESKTOP_VERSION || "").trim().slice(0, 40) || "dev",
         ...(String(env.DESKTOP_SUPPLIERS || "") === "on" ? {desktopSuppliers:true} : {}),
         ...(String(env.DESKTOP_EMAIL || "") === "on" ? {desktopEmail:true} : {})} : {})});
   } else {
     // Unknown hostname — refuse rather than treating it like a known host.
-    return jsonResponse({status:"error", message:"Unrecognized host", business: catalogData.business || {}, country, features}, 404);
+    return jsonResponse({status:"error", message:"Unrecognized host", business: catalogData.business || {}, country, features, ...decor}, 404);
   }
 
   // Storefront switched off (Global settings → Features): a shop host and the root domain get the
@@ -370,7 +378,7 @@ export async function onRequestGet(context){
   // shop: no name, no products, no prices. Not an error (200), so the page can tell it from a
   // mistyped address. The admin host was answered above and is unaffected.
   if(features.storefront === false){
-    return jsonResponse({status:"closed", message:"Online ordering isn't available here.", business: catalogData.business || {}, country, features});
+    return jsonResponse({status:"closed", message:"Online ordering isn't available here.", business: catalogData.business || {}, country, features, ...decor});
   }
 
   // Only this shop's catalog is read (catalogCache.js caches each shop apart), never the other shops'.
@@ -393,9 +401,9 @@ export async function onRequestGet(context){
     // Locked subdomains keep the 404 — their hostname is already the org
     // identity signal.
     if(host.kind === "root"){
-      return jsonResponse({status:"error", message:"Unknown org", business: catalogData.business || {}, country, features});
+      return jsonResponse({status:"error", message:"Unknown org", business: catalogData.business || {}, country, features, ...decor});
     }
-    return jsonResponse({status:"error", message:"Unknown org", business: catalogData.business || {}, country, features}, 404);
+    return jsonResponse({status:"error", message:"Unknown org", business: catalogData.business || {}, country, features, ...decor}, 404);
   }
 
   const enabledPayments = computeEnabledPayments(org, catalogData.globalSettings, !!env.STRIPE_SECRET_KEY);
@@ -467,6 +475,7 @@ export async function onRequestGet(context){
     business: catalogData.business || {},   // who runs the site: name, contact, how to pay by Venmo/Zelle/check
     country,   // "US" or "OTHER" (Global settings → Region): which address format the forms use
     features,  // Global settings → Features ({} or a missing key = on)
+    ...decor,  // Global settings → Decoration types (the enabled keys; absent = every type on)
     catalog: {
       name: org.name, eyebrow: org.eyebrow, accent: org.accent, ready: org.ready,
       desc: org.desc, designImages: {

@@ -59,6 +59,7 @@ const ADMIN_ACTIONS_ = {
   pickFulfillmentStage_(){ if (this.value) { setFulfillmentStage(this.dataset.org, this.dataset.order, this.value); this.value = ""; } },
   setShippingInfo(){ setShippingInfo(this.dataset.org,this.dataset.order); },
   showOrderDates_(){ showOrderDates_(this.dataset.org,this.dataset.order); },
+  showOrderDigitizing_(){ showOrderDigitizing_(this.dataset.org,this.dataset.order); },
   completeOrders(){ completeOrders(this.dataset.org, [this.dataset.order], false); },
   completeOrdersAsk_(){ completeOrdersAsk_(this.dataset.org, [this.dataset.order]); },
   showSendInvoiceModal(){ showSendInvoiceModal(this.dataset.org, this.dataset.order); },
@@ -122,6 +123,7 @@ const ADMIN_ACTIONS_ = {
   connectDomain_(){ connectDomain_(); },
   connectPickedDomain_(){ connectDomain_(document.getElementById('cfDomainPick').value); },
   regionCountryChanged_(){ regionCountryChanged_(); },
+  productDecorationChanged_(){ productDecorationChanged_(); },
   submitGlobalSettings(){ submitGlobalSettings(); },
   backfillStripeFees(){ backfillStripeFees(this); },
   goCatalog_(){ location.hash='#catalog'; },
@@ -2225,7 +2227,7 @@ const ADMIN_NAV_TOOLS = ADMIN_NAV_GROUPS.flatMap(g => g.items.filter(Array.isArr
 // listed is always there. The switches come with /api/catalog (storefront.js's siteFeatures /
 // featureOn_); the server refuses a switched-off feature's actions whatever this file shows.
 const ADMIN_PAGE_FEATURE = {
-  runorder: "production", machines: "production", maintenance: "production", machinefiles: "production", hoops: "production", threads: "production",
+  runorder: "production", runtransfer: "production", machines: "production", maintenance: "production", machinefiles: "production", hoops: "production", threads: "production",
   abortreasons: "production", runreport: "production", designs: "production",
   expenses: "bookkeeping", money: "bookkeeping", reconcile: "bookkeeping", books: "bookkeeping", taxpacket: "bookkeeping", accountviewer: "bookkeeping", shoprate: "bookkeeping",
   packages: "shipping",
@@ -2236,7 +2238,303 @@ const ADMIN_PAGE_FEATURE = {
 let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products", quotes: "Quotes", discounts: "Discount codes", emailCampaigns: "Email campaigns" };
 function adminFeatureOn_(key){ return typeof featureOn_ !== "function" || featureOn_(key); }
 function adminPageFeature_(hash){ return ADMIN_PAGE_FEATURE[String(hash || "").replace(/^#\/?/, "").split("/")[0]] || ""; }
-function adminPageOn_(hash){ const f = adminPageFeature_(hash); return !adminDesktopHides_(hash) && (!f || adminFeatureOn_(f)); }
+function adminPageOn_(hash){ const f = adminPageFeature_(hash); return !adminDesktopHides_(hash) && (!f || adminFeatureOn_(f)) && decorationPageOn_(hash); }
+
+// ---- Decoration types (Global settings → Decoration types) -----------------------------------------
+// Which kinds of work the shop does: embroidery, DTF, screen print, vinyl, DTG, sublimation. The list comes with
+// /api/catalog (storefront.js's siteDecorations / decorationOn_) and is refreshed from getDecorationSettings; Save in
+// Global settings updates it at once (applyDecorationList_) so menus and forms follow without a reload. A switched-off
+// type is hidden from pickers, never from records that already use it. These are small and synchronous on purpose —
+// every screen calls them while drawing; the settings form and the price helpers are in admin.js, loaded
+// the first time one is needed (ensureDecorationUi_).
+const DECORATION_LABELS_ = { embroidery: "Embroidery", dtf: "DTF transfer", screenprint: "Screen print", vinyl: "Vinyl / heat transfer", dtg: "DTG", sublimation: "Sublimation" };
+const DECORATION_KEYS_ = Object.keys(DECORATION_LABELS_);
+// Pages that only make sense for one type: hidden from the menu while that type is off (the page still opens by its
+// address, so what is already there can be reached).
+const ADMIN_PAGE_DECORATION = { transfers: "dtf", machines: "embroidery", maintenance: "embroidery", machinefiles: "embroidery", hoops: "embroidery", threads: "embroidery", abortreasons: "embroidery" };
+function decorationLabel_(key){
+  const r = (window._decorationRegistry || []).find(t => t.key === key);
+  return (r && r.label) || DECORATION_LABELS_[key] || "";
+}
+// The enabled keys, in registry order. Before anything has said (no catalog yet) it is today's behaviour: embroidery and DTF.
+function decorationTypesOn_(){
+  let list = null;
+  if(Array.isArray(window._decorationTypes)) list = window._decorationTypes;
+  else if(typeof siteDecorations !== "undefined" && Array.isArray(siteDecorations)) list = siteDecorations;
+  const have = (list || ["embroidery", "dtf"]).map(String);
+  return DECORATION_KEYS_.filter(k => have.includes(k));
+}
+function decorationIsOn_(key){
+  if(Array.isArray(window._decorationTypes)) return window._decorationTypes.includes(String(key));
+  return typeof decorationOn_ === "function" ? decorationOn_(key) : true;
+}
+function decorationPageOn_(hash){
+  const t = ADMIN_PAGE_DECORATION[String(hash || "").replace(/^#\/?/, "").split("/")[0]];
+  return !t || decorationIsOn_(t);
+}
+// <option>s for the enabled types, plus `selected` even when switched off (marked). includeKeys narrows the list
+// (e.g. only the printed types); the caller adds any blank option.
+function decorationOptionsHtml_(selected, { includeKeys } = {}){
+  const sel = selected == null ? "" : String(selected);
+  const keys = decorationTypesOn_().filter(k => !includeKeys || includeKeys.includes(k));
+  if(sel && DECORATION_KEYS_.includes(sel) && !keys.includes(sel) && (!includeKeys || includeKeys.includes(sel))) keys.push(sel);
+  return keys.map(k => `<option value="${k}"${k === sel ? " selected" : ""}>${escapeHtml(decorationLabel_(k))}${decorationIsOn_(k) ? "" : " (switched off)"}</option>`).join("");
+}
+// A new list (from the server, or just saved): every screen follows at once.
+function applyDecorationList_(list){
+  if(!Array.isArray(list)) return;
+  window._decorationTypes = list.map(String);
+  if(typeof applyDecorationTypes_ === "function") applyDecorationTypes_(window._decorationTypes);
+}
+// Reads the list, the registry and the prices once a minute at most (force: now). null when it can't be read.
+let _decorationLoadedAt_ = 0, _decorationPricing_ = null;
+async function loadDecorationTypes_(force){
+  if(!force && _decorationPricing_ && Date.now() - _decorationLoadedAt_ < 60000) return { types: decorationTypesOn_(), registry: window._decorationRegistry, pricing: _decorationPricing_ };
+  try{
+    const r = await hoopApi_({ action: "getDecorationSettings" });
+    if(!r || !Array.isArray(r.types)) return null;
+    if(Array.isArray(r.registry)) window._decorationRegistry = r.registry;
+    _decorationPricing_ = r.pricing || {};
+    _decorationLoadedAt_ = Date.now();
+    applyDecorationList_(r.types);
+    return { types: r.types.slice(), registry: r.registry, pricing: _decorationPricing_ };
+  }catch(e){ return null; }
+}
+// The settings form and the price helpers (below) are part of this file; ensureDecorationUi_ stays as the one name the
+// screens wait on.
+function ensureDecorationUi_(){ return Promise.resolve(); }
+
+// ---- Decoration types: the Global settings section and the product form's price helpers ----------------------
+// The admin's decoration-type screens (embroidery, DTF, screen print, vinyl, DTG, sublimation): the Global settings
+// section where the shop ticks what it does and sets each type's prices, and the price helpers on the product form.
+// (Formerly its own file, public/admin.js; merged into admin.js so no page has to fetch it.)
+// // (escapeHtml, hoopApi_, gFeatureRowHtml_, decorationTypesOn_, …). The small helpers every screen calls while it
+// draws (decorationTypesOn_, decorationOptionsHtml_, decorationIsOn_) are in admin.js; the server (db.js)
+// is the only place that works out a price — this file shows what it answers and never works one out itself.
+// Money is typed in dollars and goes over the wire as whole cents.
+
+// What each type is, in words, and the price fields it has. k is the key in decorationPricing; money fields are
+// cents on the wire, int fields are plain whole numbers, bool is a tick.
+const DECO_TYPE_TEXT_ = {
+  embroidery: "Stitched designs on a machine. Each design is its own hooping on the Run order; keep its machines, hoops and threads under Production.",
+  dtf: "Full-colour prints made on transfer sheets and pressed on. Needs the Transfers inventory (sheets bought, received and used).",
+  screenprint: "Ink through a screen, one screen per colour. Priced by colours and locations, with a setup fee per screen.",
+  vinyl: "Cut vinyl or other heat-transfer material, pressed on.",
+  dtg: "Direct-to-garment printing: the ink is printed straight on the blank.",
+  sublimation: "Dye pressed into polyester or coated items.",
+};
+const DECO_FIELDS_ = {
+  embroidery: [
+    { k: "stitchPricing", kind: "bool", label: "Price by stitch count" },
+    { k: "centsPer1000", kind: "money", label: "Price per 1,000 stitches ($)" },
+    { k: "minStitches", kind: "int", label: "Minimum stitches billed" },
+    { k: "minCents", kind: "money", label: "Minimum price per piece ($)" },
+  ],
+  screenprint: [
+    { k: "inkColorCents", kind: "money", label: "Price per ink colour, per location ($)" },
+    { k: "screenSetupCents", kind: "money", label: "Screen setup, per colour ($)" },
+    { k: "reorderSetupCents", kind: "money", label: "Reorder setup, per colour ($)" },
+    { k: "costCents", kind: "money", label: "Cost per colour per piece ($)" },
+    { k: "maxColors", kind: "int", label: "Most colours", min: 1, max: 12 },
+  ],
+};
+for (const key of ["dtf", "vinyl", "dtg", "sublimation"]) DECO_FIELDS_[key] = [
+  { k: "costCents", kind: "money", label: "Cost per location ($)" },
+  { k: "priceCents", kind: "money", label: "Price per location ($)" },
+  { k: "setupCents", kind: "money", label: "Setup fee ($)" },
+];
+const DECO_MAX_CENTS_ = 100000000;
+function decoDollars_(cents){ return (Math.round(Number(cents) || 0) / 100).toFixed(2); }
+function decoFieldId_(type, k){ return "gDeco-" + type + "-" + k; }
+
+// ---- Global settings → Decoration types ---------------------------------------------------------------
+// info: { types: [enabled keys], registry: [{key,label}], pricing: {type: {...}} } from loadDecorationTypes_.
+function decorationSettingsHtml_(info){
+  const on = new Set((info && info.types) || []);
+  const pricing = (info && info.pricing) || {};
+  const reg = (info && info.registry && info.registry.length) ? info.registry : DECORATION_KEYS_.map(k => ({ key: k, label: decorationLabel_(k) }));
+  const field = (type, f) => {
+    const v = (pricing[type] || {})[f.k];
+    const id = decoFieldId_(type, f.k);
+    if (f.kind === "bool") return `<label class="checkbox-row" style="flex:1 1 100%;"><input type="checkbox" id="${id}"${v ? " checked" : ""}> ${escapeHtml(f.label)}</label>`;
+    const val = f.kind === "money" ? decoDollars_(v) : String(Number(v) || (f.min || 0));
+    return `<label style="flex:0 0 210px;">${escapeHtml(f.label)}
+        <input type="number" id="${id}" min="${f.min != null ? f.min : 0}"${f.max != null ? ` max="${f.max}"` : ""} step="${f.kind === "money" ? "0.01" : "1"}" value="${escapeHtml(val)}"></label>`;
+  };
+  const panelFor = (type) => {
+    const fields = DECO_FIELDS_[type] || [];
+    const note = type === "embroidery"
+      ? `<div class="admin-note" style="margin:0 0 8px;">With this on, a product or quote line that has a design with a known stitch count can show what it comes to: stitches &times; the price per 1,000, never less than the minimum. It is a helper — the price you type stays the price.</div>`
+      : type === "screenprint"
+        ? `<div class="admin-note" style="margin:0 0 8px;">A job costs colours &times; the colour price &times; locations per piece, plus a setup fee for every screen (colours &times; locations).</div>`
+        : `<div class="admin-note" style="margin:0 0 8px;">A job costs the price per location &times; locations per piece, plus one setup fee. The cost is what it costs you, for margins in Price analysis.</div>`;
+    return `${note}<div style="display:flex;gap:10px;flex-wrap:wrap;">${fields.map(f => field(type, f)).join("")}</div>`;
+  };
+  const rows = reg.map(t => gFeatureRowHtml_(t.key, { label: t.label || decorationLabel_(t.key), desc: escapeHtml(DECO_TYPE_TEXT_[t.key] || ""),
+    checked: on.has(t.key), panel: panelFor(t.key), cls: "gDecoType" })).join("");
+  return `<h2 style="margin:22px 0 6px;">Decoration types</h2>
+        <div class="admin-note" style="margin-bottom:10px;">Tick the kinds of work you do. The Run order, graphics, products, quotes and the shop pages show only these. Unticking one hides it from the pickers; nothing is deleted, and orders and graphics that already use it stay as they are (marked “switched off”). Prices are per piece unless they say otherwise.</div>
+        <div id="gDecoration">${rows}</div>`;
+}
+// Ticking a type opens its prices; unticking closes them and keeps what is in them.
+function decorationSettingsWire_(){
+  const root = document.getElementById("gDecoration");
+  if (!root) return;
+  root.querySelectorAll(".gDecoType").forEach(box => {
+    box.addEventListener("change", () => {
+      const panel = document.getElementById("gPanel-" + box.dataset.feature);
+      if (panel) panel.hidden = !box.checked;
+    });
+  });
+}
+// What the form says, for the one save: { types, pricing } with money in cents, or { error, ids } when something is wrong.
+function decorationSettingsCollect_(){
+  const root = document.getElementById("gDecoration");
+  if (!root) return null;
+  const types = [...root.querySelectorAll(".gDecoType")].filter(b => b.checked).map(b => b.dataset.feature);
+  const pricing = {}, bad = [];
+  for (const type of Object.keys(DECO_FIELDS_)) {
+    const out = pricing[type] = {};
+    for (const f of DECO_FIELDS_[type]) {
+      const el = document.getElementById(decoFieldId_(type, f.k));
+      if (!el) continue;
+      if (f.kind === "bool") { out[f.k] = el.checked; continue; }
+      const raw = String(el.value).trim();
+      const n = raw === "" ? 0 : Number(raw);
+      const cents = f.kind === "money" ? Math.round(n * 100) : Math.round(n);
+      const min = f.min != null ? f.min : 0, max = f.max != null ? f.max : DECO_MAX_CENTS_;
+      if (!Number.isFinite(n) || n < 0 || cents < min || cents > max || (f.kind === "int" && !Number.isInteger(n))) { bad.push({ id: el.id, label: decoTypeLabel_(type) + " — " + f.label.replace(/ \(\$\)$/, "") }); out[f.k] = 0; continue; }
+      out[f.k] = cents;
+    }
+  }
+  return { types, pricing, bad };
+}
+function decoTypeLabel_(type){ return decorationLabel_(type) || type; }
+// "" when the form can be sent, else the words for the page (it is checked before anything is sent, like the features).
+function decorationSettingsProblem_(){
+  const c = decorationSettingsCollect_();
+  if (!c) return null;
+  document.querySelectorAll("#gDecoration input").forEach(e => { e.style.outline = ""; });
+  if (!c.types.length) {
+    const first = document.querySelector("#gDecoration .gDecoType");
+    if (first) first.id = "gDecoFirstBox";   // so the page can outline it and scroll to it
+    return { text: "Decoration types: tick at least one decoration type", ids: first ? ["gDecoFirstBox"] : [] };
+  }
+  if (c.bad.length) {
+    // Only the ticked types' prices are checked: a closed panel holds figures the shop isn't using.
+    const live = c.bad.filter(b => c.types.includes(b.id.split("-")[1]));
+    if (live.length) return { text: "Decoration types: " + live.map(b => b.label).join(", ") + (live.length > 1 ? " need" : " needs") + " a number, 0 or more", ids: live.map(b => b.id) };
+  }
+  return null;
+}
+// ---- Product form: the price helpers --------------------------------------------------------------------
+// The type the product uses: what is picked in the Decoration select, else what the server worked out from its
+// designs and transfers (product.decoration).
+function productDecorationEffective_(){
+  const sel = document.getElementById("prodFormDecoration");
+  const product = window._prodDecoProduct || null;
+  return (sel && sel.value) || (product && product.decoration) || "";
+}
+const decoStitchCache_ = new Map();
+// The stitches of the designs on the product, from each design's newest version: { total, known, unknown } — unknown
+// counts designs whose stitches aren't recorded yet.
+async function decoProductStitches_(){
+  const ctx = window._productDesignCtx;
+  const ids = [...new Set(((ctx && ctx.rows) || []).map(r => Number(r.designId)).filter(Boolean))];
+  let total = 0, known = 0, unknown = 0;
+  for (const id of ids) {
+    if (!decoStitchCache_.has(id)) {
+      let n = null;
+      try { const r = await hoopApi_({ action: "getDesign", id }); const v = (r.versions || [])[0]; if (v && v.stitchCount != null) n = Number(v.stitchCount); } catch (e) {}
+      decoStitchCache_.set(id, n);
+    }
+    const n = decoStitchCache_.get(id);
+    if (n == null) unknown++; else { total += n; known++; }
+  }
+  return { total, known, unknown, designs: ids.length };
+}
+async function decoPrice_(type, params){
+  try { const r = await hoopApi_({ action: "priceDecoration", type, params }); return r && r.status !== "error" ? r : null; }
+  catch (e) { return null; }
+}
+// Adds an amount (cents) to every price on the form's price boxes: the flat price, or each size that has one.
+function decoAddToPrices_(cents){
+  const add = (el) => {
+    if (!el || String(el.value).trim() === "") return false;
+    el.value = ((Math.round(Number(el.value) * 100) + cents) / 100).toFixed(2);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    return true;
+  };
+  const mode = (document.getElementById("prodFormPricingMode") || {}).value;
+  if (mode === "flat") return add(document.getElementById("prodFormFlatPrice"));
+  let any = false;
+  document.querySelectorAll(".prodFormSize").forEach(el => { if (add(el)) any = true; });
+  return any;
+}
+let _decoHelperSeq_ = 0;
+// Draws (or redraws) the helper under Prices & costs. Called when the form opens, when the Decoration select changes
+// and when the product's designs change (productDecorationRefresh_ in admin.js).
+async function productDecorationHelper_(){
+  const host = document.getElementById("prodDecoHelper");
+  if (!host) return;
+  const seq = ++_decoHelperSeq_;
+  const type = productDecorationEffective_();
+  const info = await loadDecorationTypes_();
+  if (seq !== _decoHelperSeq_ || !document.body.contains(host)) return;
+  const pricing = (info && info.pricing) || {};
+  const parts = [];
+  // Embroidery by stitch count.
+  if (type === "embroidery" && pricing.embroidery && pricing.embroidery.stitchPricing && decorationIsOn_("embroidery")) {
+    const st = await decoProductStitches_();
+    if (seq !== _decoHelperSeq_ || !document.body.contains(host)) return;
+    if (st.known) {
+      const r = await decoPrice_("embroidery", { stitches: st.total });
+      if (seq !== _decoHelperSeq_ || !document.body.contains(host)) return;
+      if (r && r.unitCents > 0) {
+        parts.push(`<div class="deco-helper-row" style="margin:10px 0;padding:8px 10px;border:1px solid var(--card-line,#e5e7eb);border-radius:6px;"><b>By stitch count:</b> ${escapeHtml(adminMoney_(r.unitCents / 100))} per piece <span class="admin-note" style="display:inline;">${escapeHtml(r.note || "")}${st.unknown ? ` · ${st.unknown} design${st.unknown === 1 ? " has" : "s have"} no stitch count yet, so it isn't counted` : ""}</span>
+          <button type="button" class="admin-btn" id="prodStitchUse" data-cents="${Number(r.unitCents)}" style="padding:2px 10px;font-size:12px;margin-left:6px;" title="Adds this to every price above (the price boxes stay what you save)">Use this</button></div>`);
+      }
+    } else if (st.designs) {
+      parts.push(`<div class="admin-note">Stitch pricing is on, but no stitch count is known for this product's designs yet (set it on the design's version, under Designs).</div>`);
+    }
+  }
+  // A printed type: a suggested price, for information.
+  if (["screenprint", "vinyl", "dtg", "sublimation"].includes(type)) {
+    const sp = type === "screenprint";
+    const maxColors = Number((pricing.screenprint || {}).maxColors) || 6;
+    parts.push(`<div class="deco-helper-row" style="margin:10px 0;padding:8px 10px;border:1px solid var(--card-line,#e5e7eb);border-radius:6px;"><b>Suggested decoration price</b> <span class="admin-note" style="display:inline;">(${escapeHtml(decorationLabel_(type))} — for information; the price you type is what is saved)</span>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:4px;">
+        ${sp ? `<label style="flex:0 0 120px;">Colours <input type="number" id="prodDecoColors" min="1" max="${maxColors}" step="1" value="1"></label>` : ""}
+        <label style="flex:0 0 120px;">Locations <input type="number" id="prodDecoLocs" min="1" max="12" step="1" value="1"></label>
+        ${sp ? `<label class="checkbox-row" style="flex:0 0 auto;"><input type="checkbox" id="prodDecoReorder"> A reorder (screens exist)</label>` : ""}
+      </div>
+      <div id="prodDecoResult" class="admin-note" style="margin-top:6px;"></div></div>`);
+  }
+  host.innerHTML = parts.join("");
+  if (!parts.length) return;
+  const use = document.getElementById("prodStitchUse");
+  if (use) use.addEventListener("click", () => {
+    const cents = Number(use.dataset.cents) || 0;
+    if (!decoAddToPrices_(cents)) { showToast("Enter a price first — this adds the stitch price to it.", true); return; }
+    use.disabled = true; use.textContent = "Added";
+  });
+  const res = document.getElementById("prodDecoResult");
+  if (res) {
+    const calc = async () => {
+      const num = (id, d) => { const e = document.getElementById(id); const n = e ? Math.round(Number(e.value)) : d; return n >= 1 ? n : d; };
+      const params = { locations: num("prodDecoLocs", 1) };
+      if (type === "screenprint") { params.colors = num("prodDecoColors", 1); params.reorder = !!(document.getElementById("prodDecoReorder") || {}).checked; }
+      const r = await decoPrice_(type, params);
+      if (!document.body.contains(res)) return;
+      res.textContent = !r ? "Couldn't work out a price." : (!r.unitCents && !r.setupCents)
+        ? "No prices are set for this type yet (Global settings → Decoration types)."
+        : `${adminMoney_(r.unitCents / 100)} per piece${r.setupCents ? ` + ${adminMoney_(r.setupCents / 100)} setup` : ""}${r.note ? " — " + r.note : ""}`;
+    };
+    host.querySelectorAll("input").forEach(e => e.addEventListener("input", calc));
+    host.querySelectorAll("input").forEach(e => e.addEventListener("change", calc));
+    calc();
+  }
+}
 
 // ---- The desktop edition (desktop/; /api/catalog says edition "desktop") ---------------------------
 // The same admin, inside the desktop program on one computer. What needs the internet is left out:
@@ -2512,6 +2810,11 @@ function globalSettingsProblem_(){
   }
   // The rush fee: its rule is read from the page the same way the save reads it.
   const featureProblems = problems.length;
+  // Decoration types: at least one ticked, and the prices of the ticked ones are numbers (before anything is sent).
+  if ($("gDecoration") && typeof decorationSettingsProblem_ === "function") {
+    const dp = decorationSettingsProblem_();
+    if (dp) { problems.push(dp.text.replace(/\.$/, "")); flagged.push(...dp.ids); }
+  }
   if ($("gRushMode")) { const rush = readRushRule_("gRush"); if (rush.error) { problems.push("Rush fee: " + rush.error.replace(/\.$/, "")); flagged.push(/Full payment/.test(rush.error) ? "gRushPayByDays" : /percentage/.test(rush.error) ? "gRushPct" : /usually/.test(rush.error) ? "gRushEstLow" : "gRushAmount"); } }
   if (!problems.length) return "";
   flagged.filter(Boolean).forEach(id => { const e = $(id); if (e) e.style.outline = "2px solid #b03a2e"; });
@@ -2617,6 +2920,8 @@ function adminCanOpenPage_(hash){
   if (page === "quotes") return adminCanQuotes_();   // the same, for Quotes (migrations/0109)
   if (page === "fundraising") return adminCanFundraising_();   // and for Fundraising (migrations/0110)
   if (page === "discounts") return adminCanDiscounts_();       // and for Discount codes (migrations/0115)
+  // The one Run order is for a role that has the production queue or the transfer queue (#runtransfer is the DTF filter).
+  if (page === "runorder" || page === "runtransfer") return adminCan_("run.queue", "read") || adminCan_("transfer.queue", "read");
   return adminItemOn_(adminPageItem_(hash));
 }
 // May this user open Reports → Fundraising (reports.fundraising, read)?
@@ -2637,7 +2942,7 @@ function adminNavGroups_(){
 function adminCanOpen_(hash){ return adminPageOn_(hash) && adminCanOpenPage_(hash); }
 // Where someone lands when the address points at a page they can't open: the first one they can.
 function adminFirstPage_(){
-  const first = ["home", "orders", "customers", "quotes", "discounts", "runorder", "runtransfer", "catalog"].find(h => adminCanOpen_(h));
+  const first = ["home", "orders", "customers", "quotes", "discounts", "runorder", "catalog"].find(h => adminCanOpen_(h));
   if (first) return first;
   const g = adminNavGroups_().map(g => g.items.find(Array.isArray)).find(Boolean);
   return g ? g[0] : "password";
@@ -2812,7 +3117,7 @@ function renderAdminNav(){
   // every page, grouped, so nothing hides inside a dropdown that can run off the screen.
   const navGroups = adminNavGroups_();   // pages of switched-off features are left out, here and in the sheet
   // The same top-level pages as the desktop row (Run Transfer Sheets was missing from the phone menu).
-  const top = [["home", "Home"], ["orders", "Orders"], ["runorder", "Run Order"], ["runtransfer", "Run Transfer Sheets"], ["catalog", "Manage catalog"]].filter(it => adminCanOpen_(it[0]));
+  const top = [["home", "Home"], ["orders", "Orders"], ["runorder", "Run Order"], ["catalog", "Manage catalog"]].filter(it => adminCanOpen_(it[0]));
   // Customers (migrations/0108) sits right after Orders — after Home for a role without Orders. It is put in here
   // because test57 reads the list above as it is written.
   if (adminCanOpen_("customers")) top.splice(Math.max(top.findIndex(it => it[0] === "orders"), top.findIndex(it => it[0] === "home")) + 1, 0, ["customers", "Customers"]);
@@ -4554,7 +4859,7 @@ async function bulkSetDueDate(orgId){
     ov.innerHTML = `
       <form class="admin-pass-box" style="max-width:380px;">
         <label style="font-weight:600;font-size:15px;margin-bottom:6px;display:block;">Due date — ${orderIds.length} order${orderIds.length === 1 ? "" : "s"}</label>
-        <div style="font-size:12px;color:var(--ink-soft,#666);margin-bottom:12px;">Optional. Soonest-due orders run first in Run Order and Run Transfer Sheets. Clear removes the due date from the selected orders.</div>
+        <div style="font-size:12px;color:var(--ink-soft,#666);margin-bottom:12px;">Optional. soonest-due orders run first on the Run order. Clear removes the due date from the selected orders.</div>
         <input type="date" id="bulkDueInput" style="width:100%;padding:8px 10px;border:1px solid var(--border,#ccc);border-radius:5px;font-size:14px;margin-bottom:14px;box-sizing:border-box;background:var(--surface,#fff);color:var(--ink,#111);">
         <div id="bulkDueErr" style="color:#b03a2e;font-size:13px;margin-bottom:8px;display:none;"></div>
         <div class="admin-pass-actions" style="justify-content:space-between;">
@@ -4792,6 +5097,7 @@ function adminActionCell(org, o){
   const shipBtn = o.digitalOnly || !can("orders.shipping", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.shipping:edit" data-admin-action="setShippingInfo" style="margin-top:4px;">${hasAddr ? "Edit shipping" : "Set shipping"}</button>`;
   const editBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" data-admin-action="editOrder" style="margin-top:4px;">Edit items</button>`;
   const datesBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-admin-action="showOrderDates_" title="Every date on this order — change or clear any of them" style="margin-top:4px;">Dates…</button>`;
+  const digitizingBtn = !can("production.digitizing", "read") ? "" : `<button class="admin-btn" ${dataAttrs} data-admin-action="showOrderDigitizing_" title="Designs sent to an outside digitizer for this order, and what they cost" style="margin-top:4px;">Digitizing…</button>`;
   const completeBtn = o.completedAt
     ? `<div class="mono" style="font-size:11px;color:var(--ink-soft);margin-top:4px;">Completed ${escapeHtml(adminDate_(o.completedAt))}</div><button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" data-admin-action="completeOrders" style="margin-top:4px;">Reopen</button>`
     : canCompleteOrder(o) && can("orders.stepsLate", "edit")
@@ -4799,7 +5105,7 @@ function adminActionCell(org, o){
       : "";
   // The rush fee still owed (the rest is paid), or a pay-on-delivery order's balance: Mark as paid settles it.
   const payRushBtn = !o.paid && Number(o.balanceDue) > 0 && can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid" title="${o.payOnDelivery && !o.paidForWork ? "Record the balance as paid" : "Record the rest of the balance — the rush fee — as paid"}" style="margin-top:4px;">Mark as paid</button>` : "";
-  return podTag + stageEl + completeBtn + payRushBtn + podOffBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + rushBtn + dlBtn + customerBtn + paymentsBtn + deleteBtn;
+  return podTag + stageEl + completeBtn + payRushBtn + podOffBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + digitizingBtn + rushBtn + dlBtn + customerBtn + paymentsBtn + deleteBtn;
 }
 
 // The order row's Resend downloads (digital products, migrations/0086): a new download link, emailed with the files
@@ -7829,6 +8135,31 @@ function ensureCustomersPage_(){
   });
   return _customersPagePromise;
 }
+// Outside digitizing (public/admin-digitizing.js): the section an order's window and a saved quote both show, loaded the
+// first time it is needed. It defines digitizingSectionHtml_(ctx) and wireDigitizingSection_(root, ctx).
+let _digitizingUiPromise = null;
+function ensureDigitizingUi_(){
+  if(typeof digitizingSectionHtml_ === "function" && typeof wireDigitizingSection_ === "function") return Promise.resolve();
+  if(!_digitizingUiPromise) _digitizingUiPromise = new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = "/admin-digitizing.js";
+    sc.onload = () => resolve();
+    sc.onerror = () => { _digitizingUiPromise = null; sc.remove(); reject(new Error("Couldn't load the digitizing records")); };
+    document.head.appendChild(sc);
+  });
+  return _digitizingUiPromise;
+}
+// The order's Digitizing… button: its outside-digitizing jobs in a window.
+async function showOrderDigitizing_(orgId, orderId){
+  const caches = window._ordersCache || {};
+  const o = (caches[orgId] || []).find(x => x.orderId === orderId) || Object.values(caches).flat().find(x => x && x.orderId === orderId);
+  if(!o){ showToast("Order not found — refresh the list.", true); return; }
+  try { await ensureDigitizingUi_(); } catch(e){ showToast(e.message || "Couldn't load the digitizing records", true); return; }
+  const ctx = { orderId, items: (o.items || []).filter(it => !it.cancelDate).map(it => ({ id: it.id != null ? it.id : it.itemId, name: it.name })),
+    canEdit: adminCan_("production.digitizing", "edit"), canExpense: adminCan_("finance.expenses", "edit") };
+  const { ov } = inventoryModal_("Outside digitizing — " + escapeHtml(orderId), digitizingSectionHtml_(ctx), 640);
+  wireDigitizingSection_(ov, ctx);
+}
 // The Quotes page (migrations/0109) is public/admin-quotes.js, loaded the same way: it defines renderQuotes(app, id).
 let _quotesPagePromise = null;
 function ensureQuotesPage_(){
@@ -9704,14 +10035,17 @@ function pricingTableHtml_(a, settings){
   const hasGroups = a.rows.some(r => r.group);
   const hasMap = a.rows.some(r => r.map != null);   // migrations/0070
   const hasOverhead = !!(settings && settings.shopRate);   // Finance → Shop rate saved
+  // A screen print / vinyl / DTG / sublimation product carries its decoration's cost as its own part, named for the type.
+  const hasDeco = a.rows.some(r => Number(r.decoration) > 0) || Number(a.decorationCost) > 0;
+  const decoName = a.decorationLabel || decorationLabel_(a.decoration) || "Decoration";
   return `<div style="overflow-x:auto;"><table class="pricing-table" style="border-collapse:collapse;width:100%;">
     <thead><tr><th style="${th}text-align:left;">${hasGroups ? "Colors · size" : "Size"}</th><th style="${th}">Price</th>${hasMap ? `<th style="${th}" title="The blank's minimum advertised price — the price can't be below it">MAP</th>` : ""}<th style="${th}">Blank</th><th style="${th}" title="Card processing at ${settings.cardPct}% + $${Number(settings.cardFixed).toFixed(2)}, as if paid by card">Card</th>
-      <th style="${th}" title="${settings && settings.taxMode === "exclusive" ? "Sales tax is added on top of your prices, so it costs you nothing (the card fee above is on the price plus tax)" : "Sales tax backed out of the price (in-state)"}">Tax</th><th style="${th}" title="Linked transfers (reorder QR, printed transfers) + this product's own DTF / transfer cost">DTF</th><th style="${th}">Supplies</th>${hasOverhead ? `<th style="${th}" title="Run time × the overhead per hour from Finance → Shop rate">Overhead</th>` : ""}
+      <th style="${th}" title="${settings && settings.taxMode === "exclusive" ? "Sales tax is added on top of your prices, so it costs you nothing (the card fee above is on the price plus tax)" : "Sales tax backed out of the price (in-state)"}">Tax</th><th style="${th}" title="Linked transfers (reorder QR, printed transfers) + this product's own DTF / transfer cost">DTF</th>${hasDeco ? `<th style="${th}" title="What ${escapeHtml(decoName)} costs you per piece (Global settings → Decoration types)">${escapeHtml(decoName)}</th>` : ""}<th style="${th}">Supplies</th>${hasOverhead ? `<th style="${th}" title="Run time × the overhead per hour from Finance → Shop rate">Overhead</th>` : ""}
       <th style="${th}">Costs</th><th style="${th}">Income</th><th style="${th}">$/hr</th></tr></thead>
     <tbody>${a.rows.map(r => `<tr class="pricing-row${r.flags.length ? " pricing-flagged" : ""}">
       <td style="${td}text-align:left;">${escapeHtml([r.group, r.size].filter(Boolean).join(" · ") || "One price")}</td>
       <td style="${td}${low(r, "map")}">${pricingMoney_(r.price)}</td>${hasMap ? `<td style="${td}color:#6b21a8;" title="${escapeHtml(r.mapOf || "")}">${r.map == null ? "—" : pricingMoney_(r.map)}</td>` : ""}<td style="${td}">${blankCell(r)}</td><td style="${td}">${pricingMoney_(r.card)}</td>
-      <td style="${td}">${pricingMoney_(r.tax)}</td><td style="${td}">${pricingMoney_(r.transfer)}</td><td style="${td}">${pricingMoney_(r.supplies)}</td>${hasOverhead ? `<td style="${td}">${r.overhead ? pricingMoney_(r.overhead) : `<span style="color:#888;" title="No run time typed: no overhead charged">—</span>`}</td>` : ""}
+      <td style="${td}">${pricingMoney_(r.tax)}</td><td style="${td}">${pricingMoney_(r.transfer)}</td>${hasDeco ? `<td style="${td}">${r.decoration ? pricingMoney_(r.decoration) : `<span style="color:#888;" title="No cost is set for this type yet">—</span>`}</td>` : ""}<td style="${td}">${pricingMoney_(r.supplies)}</td>${hasOverhead ? `<td style="${td}">${r.overhead ? pricingMoney_(r.overhead) : `<span style="color:#888;" title="No run time typed: no overhead charged">—</span>`}</td>` : ""}
       <td style="${td}">${pricingMoney_(r.costs)}</td><td style="${td}${low(r, "income")}">${pricingMoney_(r.income)}</td>
       <td style="${td}${low(r, "hourly")}">${r.hourly == null ? `<span style="color:#888;" title="Type a run time to see the hourly rate">—</span>` : pricingMoney_(r.hourly) + "/hr"}</td></tr>`).join("")}</tbody></table></div>
     ${a.rows.some(r => r.blankSource === "average") ? `<div class="admin-note" style="margin-top:2px;">* average cost — no vendor price entered for that blank size.</div>` : ""}
@@ -9991,6 +10325,27 @@ function wizStepStatus_(state, step){
 }
 // What's still to come on a product's Graphics screen, in words. Nothing there is required to save: a graphic or a
 // decoration location's options can come later, and the rail, the progress and Check everything say so until they're in.
+// A wizard decoration answer: "embroidery", "dtf", "both" (those two together) or a printed type (screenprint, vinyl, dtg,
+// sublimation). Embroidery is the default; every printed type is a printed (transfer-kind) graphic.
+const wizEmb_ = (d) => !d || d === "embroidery" || d === "both";
+const wizPrinted_ = (d) => !!d && d !== "embroidery";
+const WIZ_DECO_SUB_ = { embroidery: "Stitched designs", dtf: "Pressed-on full-color prints", screenprint: "Ink through a screen, one per color", vinyl: "Cut vinyl, heat pressed",
+  dtg: "Printed straight on the garment", sublimation: "Dye pressed into polyester", both: "Some embroidered, some printed — or both on one piece" };
+// What the decoration steps offer: the enabled types ("Embroidery and DTF" only when both are on), plus the one already
+// picked even if it has since been switched off (marked), so a saved answer is never silently changed.
+function wizDecoChoices_(current){
+  const on = decorationTypesOn_(), out = [];
+  for (const k of DECORATION_KEYS_) {
+    if (!on.includes(k)) continue;
+    out.push([k, k === "dtf" ? "DTF (printed transfers)" : decorationLabel_(k), WIZ_DECO_SUB_[k] || ""]);
+    if (k === "dtf" && on.includes("embroidery")) out.push(["both", "Both", WIZ_DECO_SUB_.both]);
+  }
+  if (current && !out.some(o => o[0] === current)) out.push([current, (current === "both" ? "Both" : decorationLabel_(current) || current) + " (switched off)", WIZ_DECO_SUB_[current] || ""]);
+  return out;
+}
+const wizDecoDefault_ = () => (wizDecoChoices_("")[0] || ["embroidery"])[0];
+// The word for the printed side of a product: "Printed (DTF)" for DTF (and Both), else the type's own name.
+const wizPrintedLabel_ = (d) => d && d !== "dtf" && d !== "both" ? decorationLabel_(d) : "Printed (DTF)";
 function wizDesignsPending_(p){
   const out = [], fixed = p.fixed || {};
   const locName = (id) => (((_wiz && _wiz.data && _wiz.data.locations) || []).find(l => l.id === Number(id)) || {}).name || "A decoration location";
@@ -10000,8 +10355,8 @@ function wizDesignsPending_(p){
     for (const l of locs) if (!(l.graphicIds || []).length) out.push(`${locName(l.locationId)} has no graphics to offer yet`);
   } else {
     // The graphic is what shoppers see; a design (stitch file) is production's business and never "still to come" here.
-    if (p.decoration !== "dtf" && !fixed.pictureGraphicId) out.push("Pick or add its embroidery graphic (the picture shoppers see)");
-    if ((p.decoration === "dtf" || p.decoration === "both") && !fixed.transferGraphicId) out.push("Pick or add its printed graphic (DTF)");
+    if (wizEmb_(p.decoration) && !fixed.pictureGraphicId) out.push("Pick or add its embroidery graphic (the picture shoppers see)");
+    if (wizPrinted_(p.decoration) && !fixed.transferGraphicId) out.push(`Pick or add its printed graphic (${wizPrintedLabel_(p.decoration).replace(/^Printed \((.*)\)$/, "$1")})`);
   }
   return out;
 }
@@ -10237,6 +10592,7 @@ async function wizSaveState_(){
 }
 const wizBlank_ = (id) => ((_wiz && _wiz.data.blanks) || []).find(b => b.id === Number(id)) || null;
 async function wizLoad_(...what){
+  loadDecorationTypes_();   // which decoration types are on (a minute's cache): the decoration steps and graphic lists follow it
   const d = _wiz.data, org = _wiz.orgId, need = what.filter(k => !d[k]);
   const get = { blanks: () => hoopApi_({ action: "getBlanks" }).then(r => r.blanks || []),
     locations: () => hoopApi_({ action: "listLocations" }).then(r => r.locations || []),
@@ -10327,10 +10683,8 @@ function wizScreen_(step){
     }
     case "decorate":
       return { title: "How will you decorate for this shop?", help: "This is the starting choice for every product — each one can still be different.",
-        html: radio("wizDeco", "embroidery", "Embroidery", (a.decoration || "embroidery") === "embroidery", "Stitched designs") +
-          radio("wizDeco", "dtf", "DTF (printed transfers)", a.decoration === "dtf", "Pressed-on full-color prints") +
-          radio("wizDeco", "both", "Both", a.decoration === "both", "Some embroidered, some printed — or both on one piece"),
-        save: async () => { a.decoration = picked("wizDeco")[0] || "embroidery"; return ""; } };
+        html: wizDecoChoices_(a.decoration).map(([v, l, x]) => radio("wizDeco", v, l, (a.decoration || wizDecoDefault_()) === v, x)).join(""),
+        save: async () => { a.decoration = picked("wizDeco")[0] || wizDecoDefault_(); return ""; } };
     case "delivery": {
       const list = o.deliveryOptions || [];
       const has = (t) => list.some(x => x.type === t), own = list.find(x => x.type === "custom");
@@ -10549,10 +10903,10 @@ function wizProductScreen_(step){
     save: async () => { if (!p.colors || !p.colors.length) return "Pick at least one color."; markDone("colors"); return rebuildIfSaved(); },
     nextStep: nextOf("colors") };
   if (k === "decoration") {
-    const d = p.decoration || (st.answers || {}).decoration || "embroidery";
-    const r = (v, l, x) => `<label class="wiz-choice"><input type="radio" name="wizPDeco" value="${v}"${d === v ? " checked" : ""}> <span>${l}<small>${x}</small></span></label>`;
-    return { title: "How is this product decorated?", html: r("embroidery", "Embroidery", "Stitched") + r("dtf", "DTF", "A printed transfer") + r("both", "Both", "Embroidery and a print"),
-      save: async () => { p.decoration = (document.querySelector('input[name="wizPDeco"]:checked') || {}).value || "embroidery"; markDone("decoration"); return rebuildIfSaved(); },
+    const d = p.decoration || (st.answers || {}).decoration || wizDecoDefault_();
+    const r = (v, l, x) => `<label class="wiz-choice"><input type="radio" name="wizPDeco" value="${v}"${d === v ? " checked" : ""}> <span>${escapeHtml(l)}<small>${escapeHtml(x)}</small></span></label>`;
+    return { title: "How is this product decorated?", html: wizDecoChoices_(d).map(([v, l, x]) => r(v, l, x)).join(""),
+      save: async () => { p.decoration = (document.querySelector('input[name="wizPDeco"]:checked') || {}).value || wizDecoDefault_(); markDone("decoration"); return rebuildIfSaved(); },
       nextStep: nextOf("decoration") };
   }
   if (k === "designs") return wizDesignsScreen_(p, i, markDone, rebuildIfSaved, nextOf("designs"));
@@ -10605,7 +10959,7 @@ async function wizAddGraphicImage_(kind, file){
 }
 
 function wizDesignsScreen_(p, i, markDone, rebuildIfSaved, nextStep){
-  const embroidery = p.decoration !== "dtf", dtf = p.decoration === "dtf" || p.decoration === "both";
+  const embroidery = wizEmb_(p.decoration), dtf = wizPrinted_(p.decoration), printedName = wizPrintedLabel_(p.decoration);
   p.fixed = p.fixed || {}; p.options = p.options || { locations: [] };
   return {
     title: "What goes on it?",
@@ -10626,7 +10980,7 @@ function wizDesignsScreen_(p, i, markDone, rebuildIfSaved, nextStep){
       const draw = () => {
         const mode = p.designMode || "fixed";
         const kinds = [embroidery && "embroidery", dtf && "transfer"].filter(Boolean);
-        const graphics = D.graphics.filter(g => g.visible !== false && kinds.includes(g.kind));
+        const graphics = D.graphics.filter(g => g.visible !== false && kinds.includes(g.kind) && (!g.decoration || decorationIsOn_(g.decoration)));   // a switched-off type isn't offered
         const pic = D.graphics.find(g => g.id === Number(p.fixed.pictureGraphicId));
         box.innerHTML = `
           <label class="wiz-choice"><input type="radio" name="wizMode" value="fixed"${mode === "fixed" ? " checked" : ""}> <span>One fixed graphic<small>Every piece looks the same</small></span></label>
@@ -10640,12 +10994,12 @@ function wizDesignsScreen_(p, i, markDone, rebuildIfSaved, nextStep){
                 <button type="button" class="admin-btn admin-btn-secondary" id="wizNewDesign">Upload a new design&hellip;</button></div>
                 <div class="wiz-note">The file the embroidery machine runs. It isn't needed to sell the product — link it here or on the Graphics screen once it's digitized.</div>
               </details>` : ""}</div>` : ""}
-            ${dtf ? `<div class="wiz-field">Printed (DTF)
+            ${dtf ? `<div class="wiz-field">${escapeHtml(printedName)}
               <div class="wiz-inline"><select id="wizFxTLoc" class="wiz-input wiz-short" aria-label="Decoration location">${locOpts(p.fixed.transferLocationId)}</select>${manageLocationsBtn_('data-after="wizLocationsChanged_"')}</div>
               <div class="wiz-inline"><select id="wizFxT" class="wiz-input" aria-label="Printed graphic">${gOpts("transfer", p.fixed.transferGraphicId, "— pick its graphic —")}</select>${adders("transfer", "transferGraphicId")}</div></div>` : ""}` : `
             ${D.locations.length ? D.locations.map(l => { const on = p.options.locations.find(x => Number(x.locationId) === l.id);
               return `<div class="wiz-loc"><label class="wiz-choice"><input type="checkbox" class="wizLoc" value="${l.id}"${on ? " checked" : ""}> <span>${escapeHtml(l.name)}</span></label>
-                ${on ? `<div class="wiz-loc-graphics">${graphics.map(g => `<label class="wiz-chip"><input type="checkbox" class="wizLocG" data-loc="${l.id}" value="${g.id}"${(on.graphicIds || []).map(Number).includes(g.id) ? " checked" : ""}> ${g.isGlobal ? "🌐 " : ""}${escapeHtml(g.name)}<small>${g.kind === "transfer" ? "DTF" : "Embroidery"}</small></label>`).join("")
+                ${on ? `<div class="wiz-loc-graphics">${graphics.map(g => `<label class="wiz-chip"><input type="checkbox" class="wizLocG" data-loc="${l.id}" value="${g.id}"${(on.graphicIds || []).map(Number).includes(g.id) ? " checked" : ""}> ${g.isGlobal ? "🌐 " : ""}${escapeHtml(g.name)}<small>${g.kind === "transfer" ? (g.decoration && g.decoration !== "dtf" ? escapeHtml(decorationLabel_(g.decoration)) : "DTF") : "Embroidery"}</small></label>`).join("")
                   || `<div class="wiz-note">No graphics to offer yet — add one here.</div>`}
                   <div class="wiz-inline">${kinds.map(k => kinds.length > 1 ? `<span class="wiz-opt">${k === "transfer" ? "Printed:" : "Embroidery:"}</span>${adders(k, "", l.id)}` : adders(k, "", l.id)).join("")}</div></div>` : ""}</div>`; }).join("")
               : `<div class="wiz-note">No decoration locations yet — add them with Manage&hellip; (e.g. Left chest, Back).</div>`}
@@ -10708,7 +11062,7 @@ function wizMockupGrid_(p){
   const f = p.fixed || {}, rows = [];
   if (p.designMode === "options") for (const l of (p.options && p.options.locations) || []) for (const g of l.graphicIds || []) rows.push({ locationId: Number(l.locationId), graphicId: Number(g) });
   else {
-    if (p.decoration !== "dtf" && f.pictureGraphicId && f.locationId) rows.push({ locationId: Number(f.locationId), graphicId: Number(f.pictureGraphicId), fixed: true });
+    if (wizEmb_(p.decoration) && f.pictureGraphicId && f.locationId) rows.push({ locationId: Number(f.locationId), graphicId: Number(f.pictureGraphicId), fixed: true });
     if (p.decoration !== "embroidery" && f.transferGraphicId && f.transferLocationId) rows.push({ locationId: Number(f.transferLocationId), graphicId: Number(f.transferGraphicId), fixed: true });
   }
   return rows;
@@ -10845,14 +11199,14 @@ async function wizBuildProduct_(p){
   const fixed = p.fixed || {}, options = p.designMode === "options";
   const body = { action: "buildProductFromBlank", org: _wiz.orgId, productId: p.productId || undefined, blankId: p.blankId,
     colors: p.colors, sizes: res.pricingMode === "flat" ? ["OSFA"] : p.sizes, name: p.name || b.name, sub: p.sub || "", type: p.type || b.productType,
-    decoration: p.decoration || "embroidery", pricingMode: res.pricingMode, flatPrice: res.flatPrice, sizePricing: res.sizePricing, colorGroups: res.colorGroups,
+    decoration: p.decoration || wizDecoDefault_(), pricingMode: res.pricingMode, flatPrice: res.flatPrice, sizePricing: res.sizePricing, colorGroups: res.colorGroups,
     personalizationPrice: p.personalizationPrice,
     ...(p.weightOz !== undefined ? { weightOz: p.weightOz } : {}),
     locations: options ? (p.options.locations || []).filter(l => (l.graphicIds || []).length).map(l => ({ key: "loc" + l.locationId, label: locName(l.locationId), locationId: Number(l.locationId), graphicIds: l.graphicIds.map(Number) })) : [],
     fixedTransfers: !options && fixed.transferGraphicId && fixed.transferLocationId ? [{ locationId: Number(fixed.transferLocationId), graphicId: Number(fixed.transferGraphicId), ink: "" }] : [],
-    mockupGraphics: !options && p.decoration !== "dtf" && fixed.pictureGraphicId && fixed.locationId ? [{ locationId: Number(fixed.locationId), graphicId: Number(fixed.pictureGraphicId) }] : [],
+    mockupGraphics: !options && wizEmb_(p.decoration) && fixed.pictureGraphicId && fixed.locationId ? [{ locationId: Number(fixed.locationId), graphicId: Number(fixed.pictureGraphicId) }] : [],
     designs: (() => {   // the design picked, else the embroidery graphic's own (a graphic may have none yet)
-      if (options || p.decoration === "dtf") return [];
+      if (options || !wizEmb_(p.decoration)) return [];
       const g = (_wiz.data.graphics || []).find(x => x.id === Number(fixed.pictureGraphicId));
       const id = Number(fixed.designId) || (g && Number(g.designId)) || 0;
       return id ? [{ designId: id, placement: fixed.locationId ? locName(fixed.locationId) : "", isMain: true }] : [];
@@ -11266,6 +11620,10 @@ async function renderGlobalSettings(app){
     }catch(e){}
     let rush = { rule: { mode: "off" }, taxable: false };   // migrations/0082
     try{ const rr = await hoopApi_({ action: "getRushSettings" }); if(rr && rr.rush) rush = rr.rush; }catch(e){}
+    // Decoration types: which kinds of work the shop does, and each one's prices (public/admin.js). Not drawn
+    // (and so not sent) when the server can't say, so a failed read can't save the form's defaults over the real ones.
+    let decoInfo = null;
+    try{ decoInfo = await loadDecorationTypes_(true); if(decoInfo) await ensureDecorationUi_(); }catch(e){ decoInfo = null; }
     const pv = (v) => v == null ? "" : escapeHtml(String(v));
     // Desktop: what the program keeps for the Features panels — whether a Shippo key is saved (never
     // the key itself), the mailbox (never its password) and whether supplier connections are on.
@@ -11326,6 +11684,8 @@ async function renderGlobalSettings(app){
           <strong>Other:</strong> postal code and state / region are free text and aren't checked. Carrier shipping rates and labels aren't available — shops offer pickup and flat-fee delivery options instead.</div>
 
         ${featureList.length ? globalFeaturesHtml_(ctx) : ""}
+
+        ${decoInfo ? decorationSettingsHtml_(decoInfo) : ""}
 
         <h2 style="margin:22px 0 12px;">Payment methods</h2>
         <div class="admin-note" style="margin-bottom:14px;">These are site-wide toggles. Disabling a method here removes it for <strong>all shops</strong>, even if that org has it enabled. Org-level settings can further restrict methods but cannot re-enable a globally disabled one.</div>
@@ -11413,6 +11773,7 @@ async function renderGlobalSettings(app){
     `;
     wireRushRule_("gRush");
     wireGlobalFeatures_(ctx);
+    if(decoInfo) decorationSettingsWire_();
     // Unsaved changes (review #110): typing or ticking anything in the form marks the page, so leaving it (the
     // menu, a link, back, closing the tab) asks first, as the product and shop forms do. A part that saves on its
     // own (data-no-dirty: supplier connections) doesn't; buttons that act at once (Send a test email, Preview,
@@ -11701,6 +12062,11 @@ async function submitGlobalSettings(){
     if(($g("gMachineSection") || {dataset: {}}).dataset.loaded === "1" && stillOn("production")) settings.machine = { showDeleteButton: $g("gMachShowDelete").checked };
     // Pricing is sent only when its section was shown (a role with costs.view, and it loaded).
     if($g("gPriceCardPct")) settings.pricing = { cardPct: gv("gPriceCardPct"), cardFixed: gv("gPriceCardFixed"), supplies: gv("gPriceSupplies"), targetHourly: gv("gPriceTargetHourly"), targetIncome: gv("gPriceTargetIncome") };
+    // Decoration types and their prices: sent only when the section was drawn (see renderGlobalSettings).
+    if($g("gDecoration") && typeof decorationSettingsCollect_ === "function" && adminCan_("settings.global", "edit")){
+      const dc = decorationSettingsCollect_();
+      if(dc) settings.decoration = { types: dc.types, pricing: dc.pricing };
+    }
     const rushRule = readRushRule_("gRush");   // checked before anything was sent (globalSettingsProblem_)
     if(rushRule.error) return { error: "Rush fee: " + rushRule.error };
     settings.rush = { rule: rushRule.rule, taxable: $g("gRushTaxable").checked };
@@ -11742,6 +12108,13 @@ async function submitGlobalSettings(){
       renderAdminNav();
     }
     if(saved.business) applyBusiness_(saved.business);   // the header and page titles follow at once
+    // Decoration types: the menus, filters and forms follow at once (read back, so what the server kept is what shows).
+    if(saved.decoration){
+      const dl = Array.isArray(saved.decoration) ? saved.decoration : saved.decoration.types;
+      if(Array.isArray(dl)) applyDecorationList_(dl);
+      await loadDecorationTypes_(true);
+      renderAdminNav();
+    }
     // How a cloud install sends email (its mailbox, signed in to above) is its own request, after the rest: the
     // password goes only there. Everything else is already saved if this one fails.
     if(mailboxChange){
@@ -13983,6 +14356,12 @@ function renderProductForm(app, orgId, product){
         <label>Subtitle
           <input type="text" id="prodFormSub" value="${escapeHtml(product ? product.sub : "")}" placeholder="e.g. Cotton pique, three-button placket">
         </label>
+        <label>Decoration
+          <select id="prodFormDecoration" data-admin-change="productDecorationChanged_">
+            <option value="">Worked out from the design / transfers</option>${decorationOptionsHtml_(product ? product.decorationType : "")}
+          </select>
+        </label>
+        <div class="admin-note" style="margin-top:-6px;">How this product is decorated. Leave it on “worked out” and the Run order goes by its designs and printed transfers; pick a type to say so. The types on offer are the ones ticked in Global settings → Decoration types.</div>
         <label class="checkbox-row">
           <input type="checkbox" id="prodFormVisible" ${product && product.visible ? "checked" : ""}>
           Visible on the storefront${product ? "" : ` <span style="font-weight:400;color:#666;">(a new product starts hidden — tick it once it's ready)</span>`}
@@ -14095,6 +14474,7 @@ function renderProductForm(app, orgId, product){
           <div class="admin-note">Leave a size blank to not offer it.</div>
           <div class="size-price-grid">${sizeRows}</div>
         </div>
+        <div id="prodDecoHelper" class="deco-helper"></div>
         ${qtyBreaksSectionHtml_(product)}
         ${isEdit ? `<details id="priceCalc" class="price-calc"><summary>Work out the prices from the blank's cost or MAP&hellip;</summary><div id="priceCalcBody"></div></details>` : ""}
         ${isEdit ? `<div id="colorGroupsSection" style="margin:10px 0 4px;"></div>` : ""}
@@ -14151,6 +14531,14 @@ function renderProductForm(app, orgId, product){
 
   initProductImagesField_(orgId, product && product.images ? product.images : []);
   initQtyBreaks_(product);
+  window._prodDecoProduct = product || null;
+  productDecorationVisibility_();
+  loadDecorationTypes_().then((info) => { if(!info || !document.getElementById("prodFormDecoration")) return;
+    // The list may have changed since the page loaded: draw the select and the hidden blocks again from it.
+    const sel = document.getElementById("prodFormDecoration");
+    if(sel){ const keep = sel.value; sel.innerHTML = `<option value="">Worked out from the design / transfers</option>${decorationOptionsHtml_(keep)}`; sel.value = keep; }
+    productDecorationVisibility_(); });
+  productDecorationRefresh_();
   // Unsaved changes on this form (for the version switch's "leave without saving?").
   window._prodFormDirty = false;
   { const panel = app.querySelector(".admin-panel"); if (panel) { const dirty = () => { window._prodFormDirty = true; }; panel.addEventListener("input", dirty); panel.addEventListener("change", dirty); } }
@@ -14270,13 +14658,13 @@ function runPreviewHtml_(pv){
   const rows = [];
   const always = pv.always || [];
   rows.push(`<li><b>Every piece:</b> ${always.length ? steps(always) : pv.noDesignNeeded || pv.offersOptions || pv.printed.length ? `<span class="rp-dim">nothing stitched</span>` : `<span class="rp-why">⚠ nothing stitched yet — add a design under “On every piece”, or tick “No embroidery design needed”</span>`}</li>`);
-  if (pv.printed.length) rows.push(`<li><b>Pressed on every piece:</b> ${pv.printed.map(escapeHtml).join(", ")} <span class="rp-dim">(Run Transfer Sheets)</span></li>`);
+  if (pv.printed.length) rows.push(`<li><b>Pressed on every piece:</b> ${pv.printed.map(escapeHtml).join(", ")} <span class="rp-dim">(Run order, DTF)</span></li>`);
   if (pv.offersOptions) for (const loc of pv.picks) rows.push(`<li><b>Plus the customer's pick at ${escapeHtml(loc.label)}:</b><ul>${loc.choices.map(c =>
-    `<li>${escapeHtml(c.graphic)} → ${c.kind === "transfer" ? `<span class="rp-dim">pressed as a transfer (Run Transfer Sheets)</span>` : steps(c.steps)}</li>`).join("")}</ul></li>`);
+    `<li>${escapeHtml(c.graphic)} → ${c.kind === "transfer" ? `<span class="rp-dim">pressed as a transfer (Run order, DTF)</span>` : steps(c.steps)}</li>`).join("")}</ul></li>`);
   const pz = pv.personalization;
   if (pz && pz.typed) rows.push(`<li><b>A typed-in name:</b> ${pz.typed.mode === "combined" ? "combined with the main design — " : "its own hooping — "}${steps(pz.typed.steps.filter(st => st.kind === "itemDesign"))} <span class="rp-dim">(the order design is uploaded per order)</span></li>`);
   if (pz && pz.options.length) rows.push(`<li><b>Personalization options:</b><ul>${pz.options.map(o => `<li>${escapeHtml(o.option)} → ${steps(o.steps)}</li>`).join("")}</ul></li>`);
-  if (pv.customDesign) rows.push(`<li><b>Customer's own design:</b> ${pv.customDesign === "embroidery" ? "replaces the designs above on that item, digitized per order" : "printed from their image (Run Transfer Sheets)"}</li>`);
+  if (pv.customDesign) rows.push(`<li><b>Customer's own design:</b> ${pv.customDesign === "embroidery" ? "replaces the designs above on that item, digitized per order" : "printed from their image (Run order, DTF)"}</li>`);
   const n = always.length;
   const locs = pv.offersOptions ? pv.picks.length : 0;
   const total = `${n} hooping${n === 1 ? "" : "s"}${locs ? ` + 1 for each location the customer picks embroidery at` : ""}`;
@@ -14406,6 +14794,7 @@ function drawProductDesignRows_(){
   el.querySelectorAll(".pd-down").forEach(x => x.onclick = () => move(Number(x.dataset.i), 1));
   el.querySelectorAll(".pd-remove").forEach(x => x.onclick = () => { ctx.rows.splice(Number(x.dataset.i), 1); rerow(); });
   el.querySelector("#pdAdd").onclick = () => { ctx.rows.push({ designId: null, placement: "", isMain: !ctx.rows.length }); rerow(); };
+  productDecorationVisibility_(); productDecorationRefresh_();   // the Decoration helpers follow the designs
 }
 // The product's designs are saved by the form's Save changes (submitProductForm). Returns "" on
 // success, else what went wrong; productDesignsProblem_ is the check run BEFORE anything is saved.
@@ -14716,6 +15105,53 @@ async function separateVersion_(orgId, productId){
   catch (e) { showToast(e.message, true); }
 }
 
+// ---- Product form: the Decoration type (Global settings → Decoration types) -----------------------------
+// What the product is decorated with: the Decoration select ('' = worked out by the server from its designs and
+// transfers, product.decoration). The embroidery-only blocks (designs, "What Run order will do", embroidered graphics
+// for mockups, personalization) are hidden while embroidery is switched off and the product doesn't use it; the
+// printed-only ones (printed transfers, the transfer cost) while no printed type is on and it doesn't use one. Never
+// hidden once the product has one: records stay reachable.
+function setDecoHidden_(el, hide){
+  if(!el) return;
+  if(hide){ if(el.dataset.decoHid !== "1"){ el.dataset.decoHid = "1"; el.dataset.decoPrev = el.style.display; } el.style.display = "none"; }
+  else if(el.dataset.decoHid === "1"){ el.style.display = el.dataset.decoPrev || ""; delete el.dataset.decoHid; delete el.dataset.decoPrev; }
+}
+function productDecorationVisibility_(){
+  const sel = document.getElementById("prodFormDecoration");
+  if(!sel) return;
+  const product = window._prodDecoProduct || null, ctx = window._productDesignCtx;
+  const eff = sel.value || (product && product.decoration) || "";
+  const PRINTED = ["dtf", "screenprint", "vinyl", "dtg", "sublimation"];
+  const hasDesign = !!((ctx && ctx.rows && ctx.rows.length) || (product && product.designId));
+  const hasPers = !!(product && (product.personalizationPrice != null || (product.personalizationOptions || []).length));
+  const embUsed = eff === "embroidery" || hasDesign;
+  const hideEmb = !decorationIsOn_("embroidery") && !embUsed;
+  const printedUsed = PRINTED.includes(eff) || (product && Number(product.transferCost) > 0);
+  const hidePrinted = !PRINTED.some(k => decorationIsOn_(k)) && !printedUsed;
+  const $ = (id) => document.getElementById(id), slot = (n) => document.querySelector(`.prod-slot[data-slot="${n}"]`);
+  const lab = (id) => { const e = $(id); return e && e.closest("label"); };
+  setDecoHidden_($("productDesignsBlock"), hideEmb);
+  const dn = $("productDesignsBlock") && $("productDesignsBlock").nextElementSibling;
+  if(dn && dn.classList.contains("admin-note")) setDecoHidden_(dn, hideEmb);
+  setDecoHidden_($("productDesignSection"), hideEmb);
+  setDecoHidden_(lab("prodFormNoDesign"), hideEmb);
+  setDecoHidden_($("prodRunPreview"), hideEmb);
+  setDecoHidden_(slot("cfgEmbWrap"), hideEmb);
+  setDecoHidden_(document.querySelector(".prod-emb-options-note"), hideEmb);
+  setDecoHidden_($("prodCardPers"), hideEmb && !hasPers);
+  setDecoHidden_(slot("cfgFixedWrap"), hidePrinted);
+  setDecoHidden_(lab("prodFormTransferCost"), hidePrinted);
+}
+function productDecorationChanged_(){
+  productDecorationVisibility_();
+  productDecorationRefresh_();
+}
+// The price helpers (stitch count, a suggested printed-type price) live in public/admin.js.
+function productDecorationRefresh_(){
+  if(!document.getElementById("prodDecoHelper")) return;
+  ensureDecorationUi_().then(() => productDecorationHelper_()).catch(() => {});
+}
+
 async function submitProductForm(orgId, isEdit){
   const errEl = document.getElementById("prodFormError");
   errEl.textContent = "";
@@ -14746,6 +15182,7 @@ async function submitProductForm(orgId, isEdit){
     visible: document.getElementById("prodFormVisible").checked,
     taxable: document.getElementById("prodFormTaxable").checked,
     noDesignNeeded: document.getElementById("prodFormNoDesign").checked,
+    ...(document.getElementById("prodFormDecoration") ? { decorationType: document.getElementById("prodFormDecoration").value } : {}),
     noBlankNeeded: document.getElementById("prodFormNoBlank").checked,
     ...digitalProductFormValues_(),
     sortOrder: Number(document.getElementById("prodFormSortOrder").value) || 0
@@ -15257,7 +15694,7 @@ async function loadProductConfigSection(orgId, product){
             ${qrTransfers.filter(t => t.visible !== false || product.reorderQr === "t" + t.id).map(t => `<option value="t${t.id}" ${product.reorderQr === "t" + t.id ? "selected" : ""}>${escapeHtml(t.name)}</option>`).join("")}
             ${/^\d+$/.test(String(product.reorderQr || "")) ? `<option value="${escapeHtml(String(product.reorderQr))}" selected>${escapeHtml(gName(product.reorderQr))} (a graphic — the old way; pick its transfer above instead)</option>` : ""}
           </select></label>
-        <div class="admin-note" style="margin-top:2px;">The QR-code transfer pressed onto this product at no charge — for any product, configurable or not. It's a transfer picked directly; it doesn't need a graphic. An embroidered product with one is listed on Run Order (its embroidery) and on Run Transfer Sheets (its QR code).</div>
+        <div class="admin-note" style="margin-top:2px;">The QR-code transfer pressed onto this product at no charge — for any product, configurable or not. It's a transfer picked directly; it doesn't need a graphic. An embroidered product with one is listed on Run order twice: its embroidery, and its QR code as a DTF transfer.</div>
       </div>`;
     toSlots();
     head().querySelector("#cfgOn").onchange = (e) => { product.configurable = e.target.checked; el.querySelector("#cfgFields").style.display = e.target.checked ? "" : "none";
@@ -15336,7 +15773,7 @@ async function loadProductConfigSection(orgId, product){
       </div>`;
     };
     host.innerHTML = `<div style="font-weight:600;">Printed transfers (DTF) ${manageLocationsBtn_('data-after="productFormLocationsChanged_"')}</div>
-      <div class="admin-note" style="margin:2px 0 8px;">Transfers pressed onto every one of these at a fixed spot — the customer doesn't choose them and pays nothing extra, so <b>put their cost in the price above</b> (the Pricing panel counts it). Works on any product: with embroidery too, it's listed on Run Order for the embroidery and on Run Transfer Sheets for these. Pick from this shop's transfer graphics (Graphics screen); link each to a transfer there so its stock is used.</div>
+      <div class="admin-note" style="margin:2px 0 8px;">Transfers pressed onto every one of these at a fixed spot — the customer doesn't choose them and pays nothing extra, so <b>put their cost in the price above</b> (the Pricing panel counts it). Works on any product: with embroidery too, it's listed on Run order for the embroidery and again as DTF transfers for these. Pick from this shop's transfer graphics (Graphics screen); link each to a transfer there so its stock is used.</div>
       ${fixedList.map(rowHtml).join("")}
       <button type="button" class="admin-btn" id="cfgFixedAdd" style="padding:2px 10px;">+ Add printed transfer</button>
       ${transferGraphics.length ? "" : `<div style="font-size:11px;color:#b45309;margin-top:4px;">This shop has no transfer graphics yet — add one on the Graphics screen (kind: Transfer).</div>`}
@@ -23528,7 +23965,7 @@ function runTransfersNoteHtml_(job){
   if (!t.length) return "";
   const names = t.map(x => escapeHtml(x.graphicName || (x.auto ? "Reorder QR" : "Transfer"))).join(", ");
   return `<div class="ro-transfers" style="font-size:13px;margin-top:6px;color:${job.transfersApplied ? "#166534" : "#92400e"};">
-      ${job.transfersApplied ? "✓ Transfers pressed" : "Also needs a transfer pressed"}: ${names}${job.transfersApplied ? "" : ` — on <a href="#runtransfer" style="color:inherit;">Run Transfer Sheets</a>`}</div>`;
+      ${job.transfersApplied ? "✓ Transfers pressed" : "Also needs a transfer pressed"}: ${names}${job.transfersApplied ? "" : ` — its DTF card is on this page (<a href="#runtransfer" style="color:inherit;">show DTF</a>)`}</div>`;
 }
 function needleLineHtml_(rec){
   const strong = (t) => `<b style="color:#1a1a1a;">${escapeHtml(t)}</b>`;
@@ -25274,7 +25711,7 @@ async function mountVendorManager_(box, onChange){
     body.innerHTML = `<table class="stack-mobile" style="width:100%;border-collapse:collapse;font-size:13px;">
       <thead><tr style="text-align:left;background:#f3f4f6;"><th style="${td}">Vendor</th><th style="${td}">For blanks</th><th style="${td}">Free shipping</th><th style="${td}">On records</th><th style="${td}"></th></tr></thead>
       <tbody>${rows.map(v => `<tr data-vendor-row="${v.id}"${v.hidden ? ' style="opacity:.6;"' : ""}>
-        <td class="stack-title" style="${td}font-weight:600;">${escapeHtml(v.name)}${v.hidden ? ` <span style="font-weight:400;color:#888;">(hidden)</span>` : ""}</td>
+        <td class="stack-title" style="${td}font-weight:600;">${escapeHtml(v.name)}${v.hidden ? ` <span style="font-weight:400;color:#888;">(hidden)</span>` : ""}${v.forDigitizing ? ` <span style="font-weight:400;color:#666;font-size:11px;">· digitizes designs</span>` : ""}</td>
         <td data-label="For blanks" style="${td}">${v.forBlanks ? "✓ Yes" : `<span style="color:#999;">No</span>`}</td>
         <td data-label="Free shipping" style="${td}">${v.forBlanks || v.freeShipping || v.noFreeShipping ? escapeHtml(vendorFreeShipLabel_(v)) : `<span style="color:#bbb;">—</span>`}</td>
         <td data-label="On records" style="${td}color:#666;">${escapeHtml(usedText(v)) || `<span style="color:#bbb;">none</span>`}</td>
@@ -25316,18 +25753,19 @@ function showVendorsModal_(onChange){
 }
 // A vendor row → what saveVendor takes (dollars, pieces), so a change to one field keeps the rest.
 function vendorFormValues_(v){
-  return { id: v.id, name: v.name, forBlanks: !!v.forBlanks, hidden: !!v.hidden, noFreeShipping: !!v.noFreeShipping,
+  return { id: v.id, name: v.name, forBlanks: !!v.forBlanks, forDigitizing: !!v.forDigitizing, hidden: !!v.hidden, noFreeShipping: !!v.noFreeShipping,
     over: v.freeShipOverCents == null ? "" : v.freeShipOverCents / 100, minQty: v.freeShipMinQty == null ? "" : v.freeShipMinQty };
 }
 // Add or edit one vendor: name, For blanks, free shipping (an amount — 0 = every order ships free — and / or a piece
 // count, or No free shipping), Hidden. onSaved(list, vendor).
 function showVendorFormModal_(vendor, onSaved){
   const isNew = !vendor;
-  const f = isNew ? { name: "", forBlanks: true, hidden: false, noFreeShipping: false, over: "", minQty: "" } : vendorFormValues_(vendor);
+  const f = isNew ? { name: "", forBlanks: true, forDigitizing: false, hidden: false, noFreeShipping: false, over: "", minQty: "" } : vendorFormValues_(vendor);
   const inp = "font-size:13px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
   const { ov, close } = inventoryModal_(isNew ? "New vendor" : `Edit vendor — ${escapeHtml(vendor.name)}`, `
     <label style="font-size:12px;font-weight:600;display:block;margin-bottom:10px;">Name<br><input id="vfmName" value="${escapeHtml(f.name)}" maxlength="100" placeholder="e.g. SanMar" style="${inp}width:100%;"></label>
     <label class="pick-row" style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:12px;"><input type="checkbox" id="vfmBlanks"${f.forBlanks ? " checked" : ""}> For blanks — offered when picking a blank's vendor and in Blanks to Order</label>
+    <label class="pick-row" style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:12px;"><input type="checkbox" id="vfmDigitizes"${f.forDigitizing ? " checked" : ""}> Digitizes designs — offered first when recording a design sent out to be digitized (on an order or a quote)</label>
     <fieldset id="vfmShip" style="border:1px solid #e5e7eb;border-radius:6px;padding:10px 12px;margin:0 0 12px;">
       <legend style="font-size:12px;font-weight:600;padding:0 4px;">Free shipping</legend>
       <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px;">
@@ -25350,7 +25788,7 @@ function showVendorFormModal_(vendor, onSaved){
   ov.querySelector("#vfmCancel").onclick = close;
   ov.querySelector("#vfmSave").onclick = async () => {
     const err = ov.querySelector("#vfmErr");
-    const payload = { id: f.id, name: ov.querySelector("#vfmName").value.trim(), forBlanks: ov.querySelector("#vfmBlanks").checked,
+    const payload = { id: f.id, name: ov.querySelector("#vfmName").value.trim(), forBlanks: ov.querySelector("#vfmBlanks").checked, forDigitizing: ov.querySelector("#vfmDigitizes").checked,
       noFreeShipping: none.checked, hidden: ov.querySelector("#vfmHidden").checked,
       over: none.checked ? "" : ov.querySelector("#vfmOver").value.trim(), minQty: none.checked ? "" : ov.querySelector("#vfmQty").value.trim() };
     if (!payload.name) { err.textContent = "Name the vendor."; return; }
@@ -25548,7 +25986,7 @@ async function renderGraphics(app, orgId){
       <tbody>${ordered.map((g, i) => (i === firstGlobal ? groupRow("🌐 Global — every shop") : "") + `<tr style="border-bottom:1px solid #eee;">
         <td style="padding:5px 6px;">${g.thumbUrl || g.imageUrl ? `<img src="${escapeHtml(g.thumbUrl || g.imageUrl)}" alt="" style="width:34px;height:34px;object-fit:cover;border:1px solid #ddd;border-radius:4px;">` : ""}</td>
         <td style="padding:5px 6px;font-weight:600;">${escapeHtml(g.name)}${g.visible ? "" : ` <span style="color:#b26a00;font-size:11px;">(hidden)</span>`}${g.isGlobal ? ` <span class="global-badge" title="Every shop can use it; changes apply everywhere">GLOBAL</span> <span style="font-weight:400;color:#666;font-size:11px;">home: ${escapeHtml(homeName(g.orgId))}</span>` : ""}</td>
-        <td style="padding:5px 6px;">${g.kind === "embroidery" ? "Embroidery" : "Transfer"}</td>
+        <td style="padding:5px 6px;">${graphicKindLabelHtml_(g)}</td>
         <td style="padding:5px 6px;">${g.tier ? TIER_LABEL_[g.tier] : "—"}</td>
         <td style="padding:5px 6px;color:#666;">${escapeHtml((g.inkColors || []).join(", "))}</td>
         <td style="padding:5px 6px;text-align:right;white-space:nowrap;">
@@ -25612,6 +26050,14 @@ function gfChecklist_(items, selected, cls){
       `<span>${escapeHtml(i.label)}${sub ? `<br><span style="color:#888;font-size:11px;">${sub}</span>` : ""}</span></label>`;
   }).join("");
 }
+// A graphic's type in the list: Embroidery, or the printed type it is made with (DTF unless it says otherwise); a type
+// switched off in Global settings → Decoration types is marked, never hidden.
+function graphicKindLabelHtml_(g){
+  const key = g.kind === "embroidery" ? "embroidery" : (g.decoration && g.decoration !== "embroidery" ? g.decoration : "dtf");
+  const label = key === "dtf" && g.kind !== "embroidery" ? "Transfer (DTF)" : (decorationLabel_(key) || "Transfer");
+  return escapeHtml(label) + (decorationIsOn_(key) ? "" : ` <span style="color:#b26a00;font-size:11px;">(switched off)</span>`);
+}
+const GRAPHIC_PRINTED_KEYS_ = ["dtf", "screenprint", "vinyl", "dtg", "sublimation"];
 function showGraphicFormModal_(graphic, orgId, ctx, onDone){
   const isNew = !graphic;
   const f = graphic || { name: "", kind: ctx.kind === "embroidery" ? "embroidery" : "transfer", designId: ctx.designId || null, transferId: null, tier: null, inkColors: [], imageUrl: "", thumbUrl: "", allowedLocations: [], allowedGarmentColors: [], visible: true };
@@ -25620,7 +26066,10 @@ function showGraphicFormModal_(graphic, orgId, ctx, onDone){
   const { ov, close } = inventoryModal_(isNew ? "New graphic" : "Edit graphic", `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
       <label style="font-size:12px;font-weight:600;grid-column:1/-1;">Name<br><input id="gfName" value="${escapeHtml(f.name)}" style="${inp}"></label>
-      <label style="font-size:12px;font-weight:600;">Kind<br><select id="gfKind" style="${inp}"><option value="transfer" ${f.kind !== "embroidery" ? "selected" : ""}>Transfer sheet</option><option value="embroidery" ${f.kind === "embroidery" ? "selected" : ""}>Embroidery</option></select></label>
+      <label style="font-size:12px;font-weight:600;">Kind<br><select id="gfKind" style="${inp}">${
+        (GRAPHIC_PRINTED_KEYS_.some(k => decorationIsOn_(k)) || f.kind !== "embroidery" ? `<option value="transfer" ${f.kind !== "embroidery" ? "selected" : ""}>Printed (transfer sheet)</option>` : "") +
+        (decorationIsOn_("embroidery") || f.kind === "embroidery" ? `<option value="embroidery" ${f.kind === "embroidery" ? "selected" : ""}>Embroidery${decorationIsOn_("embroidery") ? "" : " (switched off)"}</option>` : "")}</select></label>
+      <label style="font-size:12px;font-weight:600;" id="gfDecoWrap">Printed by<br><select id="gfDecoration" style="${inp}">${decorationOptionsHtml_(f.decoration && f.decoration !== "embroidery" ? f.decoration : "dtf", { includeKeys: GRAPHIC_PRINTED_KEYS_ })}</select></label>
       <label style="font-size:12px;font-weight:600;">Tier (add-on)<br><select id="gfTier" style="${inp}">${tierOpt()}</select></label>
       <label style="font-size:12px;font-weight:600;grid-column:1/-1;display:flex;align-items:flex-start;gap:6px;"><input type="checkbox" id="gfGlobal" ${f.isGlobal ? "checked" : ""} style="margin-top:2px;">
         <span>Global — every shop can use it <span style="font-weight:400;color:#666;">(kept in one place, like a global design; its design must be global too${f.isGlobal && f.orgId && f.orgId !== orgId ? ` · home shop: ${escapeHtml(((adminOrgs || []).find(o => o.orgId === f.orgId) || {}).name || f.orgId)} · changes apply to every shop` : ""})</span></span></label>
@@ -25652,11 +26101,14 @@ function showGraphicFormModal_(graphic, orgId, ctx, onDone){
   let imageUrl = f.imageUrl || "", thumbUrlV = f.thumbUrl || "";
   const syncKind = () => {
     const emb = ov.querySelector("#gfKind").value === "embroidery";
-    ov.querySelector("#gfTransferWrap").style.display = emb ? "none" : "";
+    // Transfer sheets (the inventory item a job uses up) are a DTF thing; the other printed types have none.
+    const dtf = (ov.querySelector("#gfDecoration").value || "dtf") === "dtf";
+    ov.querySelector("#gfDecoWrap").style.display = emb ? "none" : "";
+    ov.querySelector("#gfTransferWrap").style.display = emb || !dtf ? "none" : "";
     ov.querySelector("#gfDesignWrap").style.display = emb ? "" : "none";
     ov.querySelector("#gfInkWrap").style.display = emb ? "none" : "";
   };
-  ov.querySelector("#gfKind").onchange = syncKind; syncKind();
+  ov.querySelector("#gfKind").onchange = syncKind; ov.querySelector("#gfDecoration").onchange = syncKind; syncKind();
   // A global graphic may only use a global design and a transfer every shop can use (migrations/0078): the selects offer
   // only those while Global is ticked, and a pick that doesn't qualify is cleared with a note.
   let pickDesign = f.designId, pickTransfer = f.transferId;
@@ -25688,7 +26140,8 @@ function showGraphicFormModal_(graphic, orgId, ctx, onDone){
     const list = (id) => ov.querySelector(id).value.split(",").map(s => s.trim()).filter(Boolean);
     const payload = { id: f.id, name: ov.querySelector("#gfName").value.trim(), kind,
       tier: ov.querySelector("#gfTier").value || null,
-      transferId: kind === "transfer" ? (Number(ov.querySelector("#gfTransfer").value) || null) : null,
+      decoration: kind === "transfer" ? (ov.querySelector("#gfDecoration").value || "dtf") : "",
+      transferId: kind === "transfer" && (ov.querySelector("#gfDecoration").value || "dtf") === "dtf" ? (Number(ov.querySelector("#gfTransfer").value) || null) : null,
       designId: kind === "embroidery" ? (Number(ov.querySelector("#gfDesign").value) || null) : null,
       inkColors: kind === "transfer" ? list("#gfInk") : [],
       imageUrl, thumbUrl: thumbUrlV,
@@ -25709,7 +26162,7 @@ async function renderTransfers(app){
   app.innerHTML = `
     ${adminPageHead_("Transfers")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:900px;margin:8px auto 60px;">
-      <div style="font-size:13px;color:#666;margin-bottom:12px;">Transfer-sheet inventory (DTF / sublimation). The portion of a sheet a job uses is consumed like a blank and flows into COGS.</div>
+      <div style="font-size:13px;color:#666;margin-bottom:12px;">Transfer-sheet inventory (DTF / sublimation). The portion of a sheet a job uses is consumed like a blank and flows into COGS.${decorationIsOn_("dtf") ? "" : `<br><strong>DTF is switched off</strong> in Global settings → Decoration types, so this page is out of the menu; any sheets still on hand are listed below and can be used up or written off.`}</div>
       <div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;">
         <button type="button" class="admin-btn" id="trNewBtn" data-need="inventory.transfers:edit">+ New transfer</button>
         <button type="button" class="admin-btn" id="trReceiveBtn" data-need="inventory.transfers:edit">Receive sheet</button>
@@ -26113,69 +26566,111 @@ function rtTransferNote_(c) {
     : escapeHtml(s.name) + ` — ${s.free} free in stock, needs ${s.needed}`);
   return short.length ? line("#b26a00", "Transfers short: " + short.join("; ") + ".") : "";
 }
-async function renderRunTransfer(app){
-  adminSetHash("runtransfer");
-  document.title = adminTitle_("Run Transfer Sheets");
-  app.innerHTML = `
-    ${adminPageHead_("Run Transfer Sheets")}
-    <div class="admin-panel" style="--org-accent:var(--accent);max-width:1000px;margin:8px auto 60px;">
-      <div style="margin-bottom:10px;"><button type="button" class="admin-btn" id="rtGang">Gang sheet totals</button></div>
-      <div id="rtBody" style="color:#888;font-size:15px;">Loading…</div>
-    </div>`;
-  async function load(){
-    const body = document.getElementById("rtBody");
-    let data; try { data = await hoopApi_({ action: "getTransferQueue" }); } catch (e) { body.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
-    const card = (c, ready) => `<div style="border:1px solid ${ready ? "#2c6b2f" : "#ddd"};border-radius:10px;padding:14px;margin-bottom:12px;background:${ready ? "#f3f9f4" : "#fff"};">
-      <div style="font-weight:700;">${escapeHtml(c.orgName)} · ${escapeHtml(c.customerName)} · Qty ${c.qty}</div>
+// The old Run Transfer Sheets address (#runtransfer) is the Run order with the DTF filter on.
+async function renderRunTransfer(app){ return renderRunOrder(app, { type: "dtf" }); }
+
+// ---- Run order: one list for every type of work (getRunQueue) ------------------------------------
+// Embroidery cards (renderRunOrder's own), DTF cards (the old Run Transfer Sheets) and the cards of the other
+// printed types (screen print, vinyl, DTG, sublimation) share one page: a row of type buttons, an "Order by" select,
+// then the cards. The choices are kept on this computer (a convenience, never the only place anything lives).
+const RUN_TYPES_ = [["embroidery", "Embroidery"], ["dtf", "DTF"], ["screenprint", "Screen print"], ["vinyl", "Vinyl"], ["dtg", "DTG"], ["sublimation", "Sublimation"]];
+const RUN_SORTS_ = [["due", "Due date"], ["order", "Order date"], ["customer", "Customer / shop"], ["type", "Type"], ["blank", "Blank"]];
+function runTypeLabel_(key){ const t = RUN_TYPES_.find(x => x[0] === key); return t ? t[1] : String(key || ""); }
+// A small coloured chip naming a card's type; off = the type is switched off in Global settings but the work is still here.
+function runTypeChip_(key, off){
+  return `<span class="ro-chip ro-t-${escapeHtml(key)}">${escapeHtml(runTypeLabel_(key))}${off ? " (switched off)" : ""}</span>`;
+}
+function runPref_(name, allowed, dflt){
+  try { const v = localStorage.getItem("odd_runorder_" + name); return allowed.includes(v) ? v : dflt; } catch (e) { return dflt; }
+}
+function runPrefSet_(name, value){ try { localStorage.setItem("odd_runorder_" + name, value); } catch (e) { /* private window: this visit only */ } }
+// The pictures on a printed card: one tile per location (a graphic, or the customer's own file, which is private so a
+// signed link fills the picture in after the page draws).
+function runLocsHtml_(list){
+  return `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">${(list || []).map(t => t.custom
+    ? `<div style="text-align:center;font-size:11px;color:#555;">${t.fileKey ? `<img data-design-key="${escapeHtml(t.fileKey)}" alt="The customer's design" style="width:64px;height:64px;object-fit:contain;border:1px solid #ddd;border-radius:6px;display:block;background:#fff;">` : `<div style="width:64px;height:64px;border:1px dashed #ccc;border-radius:6px;"></div>`}<div style="max-width:90px;">${escapeHtml(t.location)}<br>Customer design${t.fileKey ? `<br><button type="button" class="admin-btn rtDl" data-key="${escapeHtml(t.fileKey)}" style="padding:1px 6px;font-size:11px;margin-top:2px;">Download</button>` : " — no file (Edit items → Files)"}</div></div>`
+    : `<div style="text-align:center;font-size:11px;color:#555;">${t.thumbUrl || t.imageUrl ? `<img src="${escapeHtml(t.thumbUrl || t.imageUrl)}" alt="" style="width:64px;height:64px;object-fit:cover;border:1px solid #ddd;border-radius:6px;display:block;">` : `<div style="width:64px;height:64px;border:1px dashed #ccc;border-radius:6px;"></div>`}<div style="max-width:72px;">${escapeHtml(t.location)}${t.auto ? " (QR)" : ""}<br>${escapeHtml(t.graphicName)}${t.ink ? " · " + escapeHtml(t.ink) : ""}</div></div>`).join("")}</div>`;
+}
+const runCardHead_ = (c, type, off) => `<div style="font-weight:700;">${runTypeChip_(type, off)} ${escapeHtml(c.orgName)} · ${escapeHtml(c.customerName)} · Qty ${c.qty}</div>
       ${dueBadge_(c.dueDate) ? `<div style="margin:2px 0;">${dueBadge_(c.dueDate)}</div>` : ""}
-      <div style="font-size:13px;color:#666;margin:2px 0 6px;">${escapeHtml(c.itemName)}${c.itemSize ? " (" + escapeHtml(c.itemSize) + ")" : ""}${c.garmentColor ? " · " + escapeHtml(c.garmentColor) : ""} · Blank: ${c.blank ? escapeHtml(c.blank.name + (c.blank.color ? " / " + c.blank.color : "")) : "— none linked —"}</div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">${c.transfers.map(t => t.custom
-        // The customer's own image (migrations/0054): private, so a signed link fills the picture in after the page draws.
-        ? `<div style="text-align:center;font-size:11px;color:#555;">${t.fileKey ? `<img data-design-key="${escapeHtml(t.fileKey)}" alt="The customer's design" style="width:64px;height:64px;object-fit:contain;border:1px solid #ddd;border-radius:6px;display:block;background:#fff;">` : `<div style="width:64px;height:64px;border:1px dashed #ccc;border-radius:6px;"></div>`}<div style="max-width:90px;">${escapeHtml(t.location)}<br>Customer design${t.fileKey ? `<br><button type="button" class="admin-btn rtDl" data-key="${escapeHtml(t.fileKey)}" style="padding:1px 6px;font-size:11px;margin-top:2px;">Download</button>` : " — no file (Edit items → Files)"}</div></div>`
-        : `<div style="text-align:center;font-size:11px;color:#555;">${t.thumbUrl || t.imageUrl ? `<img src="${escapeHtml(t.thumbUrl || t.imageUrl)}" alt="" style="width:64px;height:64px;object-fit:cover;border:1px solid #ddd;border-radius:6px;display:block;">` : `<div style="width:64px;height:64px;border:1px dashed #ccc;border-radius:6px;"></div>`}<div style="max-width:72px;">${escapeHtml(t.location)}${t.auto ? " (QR)" : ""}<br>${escapeHtml(t.graphicName)}${t.ink ? " · " + escapeHtml(t.ink) : ""}</div></div>`).join("")}</div>
-      ${c.hasEmbroidery ? `<div class="rt-emb" style="font-size:12px;margin-bottom:8px;color:${c.embroideryDone ? "#166534" : "#555"};">Also embroidered — ${c.embroideryDone ? "✓ embroidery done" : `embroidery still to run on <a href="#runorder" style="color:inherit;">Run Order</a>`}. Marking the transfers applied here doesn't make the piece; finishing the embroidery does.</div>` : ""}
+      <div style="font-size:13px;color:#666;margin:2px 0 6px;">${escapeHtml(c.itemName)}${c.itemSize ? " (" + escapeHtml(c.itemSize) + ")" : ""}${c.garmentColor ? " · " + escapeHtml(c.garmentColor) : ""} · Blank: ${c.blank ? escapeHtml(c.blank.name + (c.blank.color ? " / " + c.blank.color : "")) : "— none linked —"}</div>`;
+const runEmbNote_ = (c) => c.hasEmbroidery ? `<div class="rt-emb" style="font-size:12px;margin-bottom:8px;color:${c.embroideryDone ? "#166534" : "#555"};">Also embroidered — ${c.embroideryDone ? "✓ embroidery done" : "embroidery still to run (its Embroidery card is on this page)"}. Marking this ${c.type ? "decoration done" : "transfers applied"} here doesn't make the piece; finishing the embroidery does.</div>` : "";
+// A DTF card (the old Run Transfer Sheets card): ready = blank in hand and transfers in stock or marked received.
+function runDtfCardHtml_(c, ready, off){
+  const ids = `data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}"`;
+  const waits = ready ? [] : [!c.blankReceived ? "blank" : "", (c.transferShort || []).length || !c.transferReceived ? "transfers" : ""].filter(Boolean);
+  return `<div class="ro-card ro-card-dtf ${ready ? "ro-card-ready" : "ro-card-waiting"}" data-type="dtf" style="border:1px solid ${ready ? "#2c6b2f" : "#ddd"};border-radius:10px;padding:14px;margin-bottom:12px;background:${ready ? "#f3f9f4" : "#fff"};">
+      ${runCardHead_(c, "dtf", off)}
+      ${runLocsHtml_(c.transfers)}
+      ${runEmbNote_(Object.assign({}, c, { type: "" }))}
       ${rtTransferNote_(c)}
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        ${!c.blankReceived ? `<span style="font-size:12px;color:#b26a00;align-self:center;">Waiting on blank</span>` : ""}
-        ${!c.transferReceived ? `<button type="button" class="admin-btn rtRecv" data-need="transfer.mark:edit" data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}" style="padding:4px 12px;">Mark transfer received</button>` : ""}
-        ${ready && c.hasEmbroidery ? `<button type="button" class="admin-btn rtApply" data-need="transfer.mark:edit" data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}" style="padding:6px 16px;font-weight:700;background:var(--org-accent,#2c6b2f);color:#fff;">Mark transfers applied</button>` : ""}
-        ${ready && !c.hasEmbroidery ? `<button type="button" class="admin-btn rtMake" data-need="transfer.mark:edit" data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}" style="padding:6px 16px;font-weight:700;background:var(--org-accent,#2c6b2f);color:#fff;">Mark made</button>` : ""}
+        ${!ready ? `<span style="font-size:12px;color:#b26a00;align-self:center;">Waiting on ${waits.length ? waits.join(" and ") : "blank"}</span>` : ""}
+        ${!c.transferReceived ? `<button type="button" class="admin-btn rtRecv" data-need="transfer.mark:edit" ${ids} style="padding:4px 12px;">Mark transfer received</button>` : ""}
+        ${ready && c.hasEmbroidery ? `<button type="button" class="admin-btn rtApply" data-need="transfer.mark:edit" ${ids} style="padding:6px 16px;font-weight:700;background:var(--org-accent,#2c6b2f);color:#fff;">Mark transfers applied</button>` : ""}
+        ${ready && !c.hasEmbroidery ? `<button type="button" class="admin-btn rtMake" data-need="transfer.mark:edit" ${ids} style="padding:6px 16px;font-weight:700;background:var(--org-accent,#2c6b2f);color:#fff;">Mark made</button>` : ""}
       </div></div>`;
-    body.innerHTML = paidUnrunHtml_(data.paidUnrun || []) + `
-      <h2 style="font-size:17px;margin:4px 0 8px;">Ready to press (${data.ready.length})</h2>
-      ${data.ready.length ? data.ready.map(c => card(c, true)).join("") : `<div style="color:#888;padding:8px 0;">Nothing ready — needs the blank received and the transfers in stock (or marked received).</div>`}
-      <h2 style="font-size:17px;margin:20px 0 8px;">Waiting on blanks or transfer sheets (${data.waiting.length})</h2>
-      ${data.waiting.length ? data.waiting.map(c => card(c, false)).join("") : `<div style="color:#888;padding:8px 0;">Nothing waiting.</div>`}`;
-    fillDesignThumbs_(body);
-    body.querySelectorAll(".rtDl").forEach(b => b.onclick = () => downloadDesignFile_(b.dataset.key));
-    // Each step asks when it happened (default now).
-    body.querySelectorAll(".rtRecv").forEach(b => b.onclick = async () => {
-      const at = await askWhen_(`Mark the transfer for order ${b.dataset.order} received?`, { whenLabel: "When did it arrive?" }); if (!at) return;
-      try { await hoopApi_({ action: "setTransferReceived", itemId: Number(b.dataset.item), orderId: b.dataset.order, org: b.dataset.org, received: true, at }); showToast("Transfer received."); await load(); }
-      catch (e) { showToast(e.message, true); } });
-    body.querySelectorAll(".rtApply").forEach(b => b.onclick = async () => {
-      const at = await askWhen_(`Mark the transfers on order ${b.dataset.order} applied?`, { whenLabel: "When were they applied?" }); if (!at) return;
-      try { await hoopApi_({ action: "setTransfersApplied", orderId: b.dataset.order, itemId: Number(b.dataset.item), org: b.dataset.org, applied: true, at }); showToast("Transfers marked applied."); await load(); }
-      catch (e) { showToast(e.message, true); } });
-    body.querySelectorAll(".rtMake").forEach(b => b.onclick = async () => {
-      const at = await askWhen_("Mark this line made? Consumes the blank and the transfer applications.", { whenLabel: "When was it made?" });
-      if (!at) return;
-      try { const r = await hoopApi_({ action: "makeTransferLine", orderId: b.dataset.order, itemId: Number(b.dataset.item), org: b.dataset.org, at }); showToast(r.orderComplete ? "Order complete." : "Marked made."); await load(); }
-      catch (e) { showToast(e.message, true); } });
-  }
-  document.getElementById("rtGang").onclick = async () => {
-    let rows = []; try { rows = (await hoopApi_({ action: "getGangSheet" })).rows || []; } catch (e) { showToast(e.message, true); return; }
-    const gangNote = `<div style="font-size:12px;color:#666;margin-bottom:8px;">What still has to be printed — transfers already in stock, used or marked received are left out.</div>`;
-    inventoryModal_("Gang sheet totals", rows.length ? gangNote + `<div style="margin-bottom:10px;"><button type="button" class="admin-btn" id="rtGangCsv">Download CSV</button></div>
-      <div style="max-height:60vh;overflow:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">
-      <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:5px 6px;">Graphic</th><th style="padding:5px 6px;">Ink</th><th style="padding:5px 6px;">Size</th><th style="padding:5px 6px;">Count</th></tr></thead>
-      <tbody>${rows.map(r => `<tr style="border-bottom:1px solid #eee;"><td style="padding:5px 6px;">${escapeHtml(r.graphic)}</td><td style="padding:5px 6px;">${escapeHtml(r.ink)}</td><td style="padding:5px 6px;">${escapeHtml(r.size)}</td><td style="padding:5px 6px;font-weight:600;">${r.count}</td></tr>`).join("")}</tbody></table></div>`
-      : gangNote + `<div style="color:#888;">Nothing to print — every queued transfer is in stock or already in hand.</div>`, 520);
-    const csvBtn = document.getElementById("rtGangCsv");
-    if (csvBtn) csvBtn.onclick = () => downloadCsv_(`odd-gang-sheet-${localToday_()}.csv`, rows,
-      [["graphic", "Graphic"], ["ink", "Ink"], ["size", "Size"], ["count", "Count"]]);
-  };
-  await load();
+}
+// A card for screen print, vinyl, DTG or sublimation: Start (timestamps it) and Mark made (or Mark done when the
+// line is also embroidered, as for transfers).
+function runOtherCardHtml_(c, ready, off){
+  const ids = `data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}" data-type="${escapeHtml(c.type)}"`;
+  const doneWord = c.hasEmbroidery ? "Mark done" : "Mark made";
+  return `<div class="ro-card ro-card-other ${ready ? "ro-card-ready" : "ro-card-waiting"}" data-type="${escapeHtml(c.type)}" style="border:1px solid ${c.started ? "#2c6b2f" : ready ? "#2c6b2f" : "#ddd"};border-radius:10px;padding:14px;margin-bottom:12px;background:${ready ? "#f3f9f4" : "#fff"};">
+      ${runCardHead_(c, c.type, off)}
+      ${runLocsHtml_(c.locations)}
+      ${runEmbNote_(c)}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        ${!ready ? `<span style="font-size:12px;color:#b26a00;">Waiting on blank</span>` : ""}
+        ${c.started ? `<span class="ro-started" style="font-size:13px;font-weight:700;color:#2c6b2f;">● Started</span><button type="button" class="admin-btn roDecUndo" data-need="run.markMade:edit" ${ids} style="padding:4px 12px;">Undo</button>`
+          : ready ? `<button type="button" class="admin-btn roDecStart" data-need="run.markMade:edit" ${ids} style="padding:6px 16px;">Start</button>` : ""}
+        ${ready ? `<button type="button" class="admin-btn roDecMake" data-need="run.markMade:edit" ${ids} style="padding:6px 16px;font-weight:700;background:var(--org-accent,#2c6b2f);color:#fff;">${doneWord}</button>` : ""}
+      </div></div>`;
+}
+// What the DTF and other-type cards' buttons do. Each action refreshes the whole page in place afterwards.
+function wireRunCards_(body){
+  fillDesignThumbs_(body);
+  body.querySelectorAll(".rtDl").forEach(b => b.onclick = () => downloadDesignFile_(b.dataset.key));
+  const arg_ = (b) => ({ itemId: Number(b.dataset.item), orderId: b.dataset.order, org: b.dataset.org });
+  // Each step asks when it happened (default now).
+  body.querySelectorAll(".rtRecv").forEach(b => b.onclick = async () => {
+    const at = await askWhen_(`Mark the transfer for order ${b.dataset.order} received?`, { whenLabel: "When did it arrive?" }); if (!at) return;
+    try { await hoopApi_(Object.assign({ action: "setTransferReceived", received: true, at }, arg_(b))); showToast("Transfer received."); await refreshRunOrder_(); }
+    catch (e) { showToast(e.message, true); } });
+  body.querySelectorAll(".rtApply").forEach(b => b.onclick = async () => {
+    const at = await askWhen_(`Mark the transfers on order ${b.dataset.order} applied?`, { whenLabel: "When were they applied?" }); if (!at) return;
+    try { await hoopApi_(Object.assign({ action: "setTransfersApplied", applied: true, at }, arg_(b))); showToast("Transfers marked applied."); await refreshRunOrder_(); }
+    catch (e) { showToast(e.message, true); } });
+  body.querySelectorAll(".rtMake").forEach(b => b.onclick = async () => {
+    const at = await askWhen_("Mark this line made? Consumes the blank and the transfer applications.", { whenLabel: "When was it made?" });
+    if (!at) return;
+    try { const r = await hoopApi_(Object.assign({ action: "makeTransferLine", at }, arg_(b))); showToast(r.orderComplete ? "Order complete." : "Marked made."); await refreshRunOrder_(); }
+    catch (e) { showToast(e.message, true); } });
+  const startStop_ = (on) => async (ev) => {
+    const b = ev.currentTarget; b.disabled = true;
+    try { await hoopApi_(Object.assign({ action: "setDecorationStarted", on, at: new Date().toISOString() }, arg_(b))); showToast(on ? "Started." : "Start undone."); await refreshRunOrder_(); }
+    catch (e) { showToast(e.message, true); b.disabled = false; } };
+  body.querySelectorAll(".roDecStart").forEach(b => b.onclick = startStop_(true));
+  body.querySelectorAll(".roDecUndo").forEach(b => b.onclick = startStop_(false));
+  body.querySelectorAll(".roDecMake").forEach(b => b.onclick = async () => {
+    const also = /Mark done/.test(b.textContent);
+    const at = await askWhen_(also ? "Mark this decoration done? The piece is made when its embroidery is finished too." : "Mark this line made? Consumes the blanks.", { whenLabel: "When was it made?" });
+    if (!at) return;
+    try { const r = await hoopApi_(Object.assign({ action: "makeDecoratedLine", at }, arg_(b))); showToast(r.orderComplete ? "Order complete." : also ? "Marked done." : "Marked made."); await refreshRunOrder_(); }
+    catch (e) { showToast(e.message, true); } });
+}
+// The gang sheet: what still has to be printed (DTF), with its CSV.
+async function runGangSheet_(){
+  let rows = []; try { rows = (await hoopApi_({ action: "getGangSheet" })).rows || []; } catch (e) { showToast(e.message, true); return; }
+  const gangNote = `<div style="font-size:12px;color:#666;margin-bottom:8px;">What still has to be printed — transfers already in stock, used or marked received are left out.</div>`;
+  inventoryModal_("Gang sheet totals", rows.length ? gangNote + `<div style="margin-bottom:10px;"><button type="button" class="admin-btn" id="rtGangCsv">Download CSV</button></div>
+    <div style="max-height:60vh;overflow:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">
+    <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:5px 6px;">Graphic</th><th style="padding:5px 6px;">Ink</th><th style="padding:5px 6px;">Size</th><th style="padding:5px 6px;">Count</th></tr></thead>
+    <tbody>${rows.map(r => `<tr style="border-bottom:1px solid #eee;"><td style="padding:5px 6px;">${escapeHtml(r.graphic)}</td><td style="padding:5px 6px;">${escapeHtml(r.ink)}</td><td style="padding:5px 6px;">${escapeHtml(r.size)}</td><td style="padding:5px 6px;font-weight:600;">${r.count}</td></tr>`).join("")}</tbody></table></div>`
+    : gangNote + `<div style="color:#888;">Nothing to print — every queued transfer is in stock or already in hand.</div>`, 520);
+  const csvBtn = document.getElementById("rtGangCsv");
+  if (csvBtn) csvBtn.onclick = () => downloadCsv_(`odd-gang-sheet-${localToday_()}.csv`, rows,
+    [["graphic", "Graphic"], ["ink", "Ink"], ["size", "Size"], ["count", "Count"]]);
 }
 
 // ---- Designs (migrations/0024) — per-org: files, versions, thread map, required hoop -------
@@ -28168,8 +28663,7 @@ async function useBlanksFromStock_(orgId, orderId){
 async function paidUnrunUseStock_(btn){
   btn.disabled = true;
   if (await useBlanksFromStock_(btn.dataset.org, btn.dataset.order)) {
-    const app = document.getElementById("app");
-    if (/^#runtransfer/.test(location.hash)) await keepView_(() => renderRunTransfer(app)); else await refreshRunOrder_();
+    await refreshRunOrder_();
   } else btn.disabled = false;
 }
 function waitingOnBlanksHtml_(orders){
@@ -28201,6 +28695,7 @@ function waitingOnBlanksHtml_(orders){
 // Collapsible; starts open. Each row links to its shop's orders.
 function paidUnrunHtml_(orders){
   if (!orders || !orders.length) return "";
+  const typesOf = (o) => (o.types || []).map(k => runTypeChip_(k)).join(" ");
   const rows = orders.map(o => {
     const items = o.items.map(it => `${it.qty} × ${escapeHtml(it.name)}${it.size && it.size !== "OSFA" ? " · " + escapeHtml(it.size) : ""}`).join(", ");
     return `<tr style="border-bottom:1px solid #eee;">
@@ -28208,6 +28703,7 @@ function paidUnrunHtml_(orders){
       <td style="padding:5px 8px;white-space:nowrap;color:#777;">${escapeHtml(adminDate_(o.placedAt))}</td>
       <td style="padding:5px 8px;"><b>${escapeHtml(o.customerName)}</b> <a href="#orders/${encodeURIComponent(o.orgId)}" style="color:inherit;font-size:12px;">${escapeHtml(o.orderId)}</a><div style="font-size:12px;color:#777;">${escapeHtml(o.orgName)}</div></td>
       <td style="padding:5px 8px;font-size:13px;">${items}</td>
+      <td class="ro-paid-types" style="padding:5px 8px;">${typesOf(o)}</td>
       <td style="padding:5px 8px;white-space:nowrap;font-size:12px;">${o.needsBlanks === false ? (o.allFromStock ? `<span style="color:#166534;">From stock</span>` : `<span style="color:#666;">No blank needed</span>`) : o.blankReceived ? `<span style="color:#166534;">Blanks in</span>` : o.blankOrdered ? `<span style="color:#b45309;">Blanks ordered</span>`
         : o.blanksInStock ? `<span style="color:#166534;">In stock</span> <button type="button" class="admin-btn ro-use-stock" data-need="orders.stepsEarly:edit" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" data-admin-action="paidUnrunUseStock_" title="Take this order's blanks from stock on hand" style="padding:2px 8px;font-size:11px;margin-left:4px;">Use from stock</button>`
         : `<span style="color:#b03a2e;">Blanks not ordered yet</span>`}</td>
@@ -28215,7 +28711,7 @@ function paidUnrunHtml_(orders){
   }).join("");
   return `<details open style="margin:4px 0 16px;"><summary style="cursor:pointer;font-size:15px;font-weight:700;color:#1a1a1a;">Paid, not yet run — by due date (${orders.length})</summary>
     <div style="overflow:auto;border:1px solid #eee;border-radius:8px;margin-top:8px;"><table style="width:100%;border-collapse:collapse;font-size:13px;color:#1a1a1a;background:#fff;">
-      <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:5px 8px;">Due</th><th style="padding:5px 8px;">Placed</th><th style="padding:5px 8px;">Customer</th><th style="padding:5px 8px;">Items</th><th style="padding:5px 8px;">Blanks</th></tr></thead>
+      <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:5px 8px;">Due</th><th style="padding:5px 8px;">Placed</th><th style="padding:5px 8px;">Customer</th><th style="padding:5px 8px;">Items</th><th style="padding:5px 8px;">Type</th><th style="padding:5px 8px;">Blanks</th></tr></thead>
       <tbody>${rows}</tbody></table></div></details>`;
 }
 
@@ -28230,12 +28726,14 @@ function dueBadge_(dueDate){
 // opts.soft: after an action, refill the cards in place (no page rebuild, no "Loading…") — see refreshRunOrder_.
 async function renderRunOrder(app, opts){
   const soft = !!(opts && opts.soft && document.getElementById("roBody"));
+  if (opts && opts.type) runPrefSet_("type", opts.type);   // #runtransfer: the DTF filter on
   if (!soft) {
   adminSetHash("runorder");
   document.title = adminTitle_("Run Order");
   app.innerHTML = `
     ${adminPageHead_("Run Order")}
     <div class="admin-panel" style="--org-accent:var(--accent);max-width:1100px;margin:8px auto 60px;">
+      <div id="roBar" class="ro-bar"></div>
       <div id="roAgentStatus" style="font-size:12px;color:#888;margin-bottom:10px;">Checking send agent&hellip;</div>
       <div id="roBody" data-keep-scroll="runorder" style="color:#888;font-size:15px;max-height:72vh;overflow-y:auto;">Loading&hellip;</div>
     </div>`;
@@ -28246,13 +28744,20 @@ async function renderRunOrder(app, opts){
       : `<span style="color:#b03a2e;">● Send agent: not running</span> — ${machineAgentHelpHtml_('to enable "Send design to machine"')}`;
   });
   if (!adminKey) adminKey = (await adminLogin()) || ""; // resolve once before firing these in parallel
-  let queue = [], waiting = [], paidUnrun = [], machines = [], hoops = [], threads = [], activeRuns = [], abortReasons = [], needleSizes = [];
+  let queue = [], waiting = [], paidUnrun = [], machines = [], hoops = [], threads = [], activeRuns = [], abortReasons = [], needleSizes = [], rq = {};
   try {
-    const [q, m, h, t, ar, rsn] = await Promise.all([runOrderApi_({ action: "getProductionQueue" }), machineApi_({ action: "listMachines" }),
-      hoopApi_({ action: "listHoops" }), threadApi_({ action: "listThreads" }),
-      runOrderApi_({ action: "listActiveRuns" }), runOrderApi_({ action: "listAbortReasons" })]);
-    queue = q.queue || []; waiting = q.waitingOnBlanks || []; paidUnrun = q.paidUnrun || []; machines = m.machines || []; hoops = h.hoops || []; threads = t.threads || [];
-    activeRuns = ar.activeRuns || []; abortReasons = rsn.reasons || []; needleSizes = q.needleSizes || [];
+    // One call for every type of work. A role without run.queue gets no `embroidery`, one without transfer.queue no `transfers`.
+    rq = await runOrderApi_({ action: "getRunQueue" });
+    const emb = rq.embroidery;
+    queue = Array.isArray(emb) ? emb : (emb && emb.queue) || []; waiting = rq.waitingOnBlanks || []; paidUnrun = rq.paidUnrun || []; needleSizes = rq.needleSizes || [];
+    // The machines, hoops, threads and runs only the embroidery cards use.
+    if (emb) {
+      const [m, h, t, ar, rsn] = await Promise.all([machineApi_({ action: "listMachines" }),
+        hoopApi_({ action: "listHoops" }), threadApi_({ action: "listThreads" }),
+        runOrderApi_({ action: "listActiveRuns" }), runOrderApi_({ action: "listAbortReasons" })]);
+      machines = m.machines || []; hoops = h.hoops || []; threads = t.threads || [];
+      activeRuns = ar.activeRuns || []; abortReasons = rsn.reasons || [];
+    }
   } catch (e) { document.getElementById("roBody").innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; return; }
   // A running run marks its piece in progress AND its machine busy. Group running runs per line item.
   const busyMachineIds = new Set(activeRuns.map(r => r.machineId).filter(id => id != null));
@@ -28268,25 +28773,43 @@ async function renderRunOrder(app, opts){
   window._roCtx = { queue, machines, hoops, threads, hoopsById, selected: prevSelected, activeRuns, abortReasons, busyMachineIds };
 
   const body = document.getElementById("roBody");
-  if (!queue.length) {
-    body.innerHTML = paidUnrunHtml_(paidUnrun) +
-      `<div style="color:#888;padding:16px 0;">Nothing ready to run — every paid order with its blanks received and its design ready is already manufactured.</div>
-      ${waitingOnBlanksHtml_(waiting)}`;
-    return;
+  // Every card of every type as one entry, so one sort and one filter cover them all.
+  const typesOn = new Set(Array.isArray(rq.types) && rq.types.length ? rq.types : ["embroidery", "dtf"]);
+  const entry_ = (type, src, ready) => {
+    const blank = src.blank || null;
+    const noBlank = !!src.noBlankNeeded;
+    const typeKey = (blank && blank.productType) || (noBlank ? "No blank" : blank ? "Blanks" : "Unlinked");
+    return { type, src, ready, itemId: src.itemId, due: src.dueDate || "", placed: src.placedAt || "", org: src.orgName || "", cust: src.customerName || "",
+      groupKey: typeKey, blankKey: blank ? `${blank.name}${blank.color ? " — " + blank.color : ""}` : noBlank ? "No blank needed" : "No blank linked",
+      sizeKey: (blank && blank.size) || src.itemSize || "—" };
+  };
+  const entries = [];
+  const hasEmb = rq.embroidery != null, hasDtf = rq.transfers != null, hasOther = rq.other != null;
+  if (hasEmb) for (const job of queue) entries.push(entry_("embroidery", job, true));
+  if (hasDtf) {
+    for (const c of rq.transfers.ready || []) entries.push(entry_("dtf", c, true));
+    for (const c of rq.transfers.waiting || []) entries.push(entry_("dtf", c, false));
   }
+  if (hasOther) {
+    for (const c of rq.other.ready || []) entries.push(entry_(c.type, c, true));
+    for (const c of rq.other.waiting || []) entries.push(entry_(c.type, c, false));
+  }
+  const counts = {}; entries.forEach(e => { counts[e.type] = (counts[e.type] || 0) + 1; });
+  // A type that is switched off but still has cards stays as a button, marked; one that is on shows even when empty.
+  const visibleTypes = RUN_TYPES_.map(t => t[0]).filter(k => (typesOn.has(k) && (k === "embroidery" ? hasEmb : k === "dtf" ? hasDtf : hasOther)) || counts[k]);
 
-  // Group: blank productType -> blank name+size -> jobs. Items with no linked blank fall into
-  // a single "Unlinked" bucket so they're still visible, not silently dropped.
-  const groups = {};
-  for (const job of queue) {
-    const typeKey = (job.blank && job.blank.productType) || (job.noBlankNeeded ? "No blank" : "Unlinked");
-    const blankKey = job.blank ? `${job.blank.name}${job.blank.color ? " — " + job.blank.color : ""}` : job.noBlankNeeded ? "No blank needed" : "No blank linked";
-    groups[typeKey] = groups[typeKey] || {};
-    const sizeKey = (job.blank && job.blank.size) || job.itemSize || "—";
-    const key = blankKey + "|" + sizeKey;
-    groups[typeKey][key] = groups[typeKey][key] || { blankKey, sizeKey, jobs: [] };
-    groups[typeKey][key].jobs.push(job);
-  }
+  const cmpStr = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+  const byDue = (a, b) => cmpStr(a.due || "9999-99-99", b.due || "9999-99-99") || cmpStr(a.placed, b.placed) || (a.itemId - b.itemId);
+  const typeRank = (e) => RUN_TYPES_.findIndex(t => t[0] === e.type);
+  const SORTERS = {
+    due: byDue,
+    order: (a, b) => cmpStr(a.placed, b.placed) || byDue(a, b),
+    customer: (a, b) => cmpStr(a.org.toLowerCase(), b.org.toLowerCase()) || cmpStr(a.cust.toLowerCase(), b.cust.toLowerCase()) || byDue(a, b),
+    type: (a, b) => typeRank(a) - typeRank(b) || byDue(a, b),
+    blank: (a, b) => cmpStr(a.groupKey, b.groupKey) || cmpStr(a.blankKey + "|" + a.sizeKey, b.blankKey + "|" + b.sizeKey) || byDue(a, b),
+  };
+  // Waiting cards come after the ready ones, each in the chosen order.
+  const ordered_ = (list, sort) => list.slice().sort((a, b) => (a.ready === b.ready ? 0 : a.ready ? -1 : 1) || SORTERS[sort](a, b));
 
   // Per design colour: which machine needle it's on (→ Needle N), or load it from the rack.
   const needleBadge_ = (st) => {
@@ -28384,6 +28907,7 @@ async function renderRunOrder(app, opts){
           <div style="display:flex;gap:12px;align-items:flex-start;">
             ${step.machineFileKey && canPreviewStitch_(step.machineFileName || "") ? `<canvas class="run-job-canvas" data-pkey="${pkey}" width="150" height="150" title="Design preview" style="width:150px;height:150px;flex:0 0 auto;background:#faf9f6;border:1px solid #eee;border-radius:6px;"></canvas>` : ""}
             <div>
+            <div style="margin-bottom:3px;">${runTypeChip_("embroidery", !typesOn.has("embroidery"))}</div>
             ${stepCount > 1 ? `<div style="font-size:12px;font-weight:700;color:#2c6b2f;text-transform:uppercase;letter-spacing:.04em;">Hooping ${stepNo} of ${stepCount} · ${escapeHtml(step.label)}</div>` : ""}
             <div style="font-weight:700;font-size:16px;">${escapeHtml(step.designName || (step.designId ? "" : "No design linked") || "No design linked")}</div>
             ${step.staleDesign ? `<div style="font-size:13px;font-weight:600;color:#92400e;background:#fef3c7;border:1px solid #f59e0b;border-radius:5px;padding:4px 8px;margin-top:4px;">⚠ ${escapeHtml(step.staleDesign)}</div>` : ""}
@@ -28431,19 +28955,55 @@ async function renderRunOrder(app, opts){
     return out;
   };
 
-  body.innerHTML = paidUnrunHtml_(paidUnrun) + Object.keys(groups).sort().map(typeKey => `
+  // The type buttons, the "Order by" select and (for DTF) the gang sheet, then the one list.
+  const draw_ = () => {
+    window._roCtx.cards = {};
+    let type = runPref_("type", ["all"].concat(RUN_TYPES_.map(t => t[0])), "all");
+    if (type !== "all" && !visibleTypes.includes(type)) type = "all";
+    const sort = runPref_("sort", RUN_SORTS_.map(s => s[0]), "due");
+    const shown = entries.filter(e => type === "all" || e.type === type);
+    const bar = document.getElementById("roBar");
+    if (bar) {
+      const btn = (k, label, n, off) => `<button type="button" class="admin-btn ro-filter${type === k ? " on" : ""}" data-type="${k}" aria-pressed="${type === k}">${escapeHtml(label)}${off ? " (switched off)" : ""} (${n})</button>`;
+      const gang = hasDtf && (type === "all" || type === "dtf") && counts.dtf;
+      bar.innerHTML = `<div class="ro-filters" role="group" aria-label="Type of work">${btn("all", "All", entries.length, false)}${visibleTypes.map(k => btn(k, runTypeLabel_(k), counts[k] || 0, !typesOn.has(k))).join("")}</div>
+        <label class="ro-sort">Order by <select id="roSort">${RUN_SORTS_.map(s => `<option value="${s[0]}"${sort === s[0] ? " selected" : ""}>${escapeHtml(s[1])}</option>`).join("")}</select></label>
+        ${gang ? `<button type="button" class="admin-btn" id="rtGang" data-need="transfer.queue:read">Gang sheet totals</button>` : ""}`;
+      bar.querySelectorAll(".ro-filter").forEach(b => b.onclick = () => { runPrefSet_("type", b.dataset.type); draw_(); });
+      const sel = document.getElementById("roSort"); if (sel) sel.onchange = () => { runPrefSet_("sort", sel.value); draw_(); };
+      const g = document.getElementById("rtGang"); if (g) g.onclick = runGangSheet_;
+    }
+    const cardOf_ = (e) => e.type === "embroidery" ? pieceCards_(e.src)
+      : e.type === "dtf" ? runDtfCardHtml_(e.src, e.ready, !typesOn.has("dtf"))
+      : runOtherCardHtml_(e.src, e.ready, !typesOn.has(e.type));
+    let list;
+    if (!shown.length) list = `<div class="ro-empty" style="color:#888;padding:16px 0;">${type === "all" ? "Nothing to run — every paid order with its blanks received and its design ready is already made." : `Nothing to run for ${escapeHtml(runTypeLabel_(type))}.`}</div>`;
+    else if (sort === "blank") {
+      // Blank type → blank → size, as the embroidery list has always been grouped.
+      const groups = {};
+      for (const e of ordered_(shown, "blank")) {
+        const gr = groups[e.groupKey] = groups[e.groupKey] || {};
+        const k = e.blankKey + "|" + e.sizeKey;
+        (gr[k] = gr[k] || { blankKey: e.blankKey, sizeKey: e.sizeKey, list: [] }).list.push(e);
+      }
+      list = Object.keys(groups).sort().map(typeKey => `
     <div style="margin-bottom:28px;">
       <h2 style="font-size:18px;margin:0 0 10px;text-transform:capitalize;">${escapeHtml(typeKey)}</h2>
       ${Object.values(groups[typeKey]).map(g => `
         <div style="margin-bottom:16px;">
           <div style="font-size:14px;font-weight:600;color:#555;margin-bottom:8px;">${escapeHtml(g.blankKey)} — ${escapeHtml(g.sizeKey)}</div>
-          ${g.jobs.map(pieceCards_).join("")}
+          ${g.list.map(cardOf_).join("")}
         </div>`).join("")}
     </div>`).join("");
-
-  wireRunOrderHandlers_(body, queue);
-  renderRunPreviews_();
-  updateRunSendLabels_();
+    } else list = ordered_(shown, sort).map(cardOf_).join("");
+    const paid = type === "all" ? paidUnrun : paidUnrun.filter(o => !o.types || o.types.includes(type));
+    body.innerHTML = paidUnrunHtml_(paid) + list + waitingOnBlanksHtml_(waiting);
+    wireRunOrderHandlers_(body, queue);
+    wireRunCards_(body);
+    renderRunPreviews_();
+    updateRunSendLabels_();
+  };
+  draw_();
 }
 
 // After a Run Order action: reload the queue in place — the scroll and the other cards' machine picks stay — and

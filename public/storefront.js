@@ -22,6 +22,27 @@ function applyCountry_(c){ siteCountry = String(c || "").toUpperCase() === "OTHE
 let siteFeatures = {};
 function applyFeatures_(f){ siteFeatures = (f && typeof f === "object") ? f : {}; }
 function featureOn_(key){ return siteFeatures[key] !== false; }
+// Global settings → Decoration types: which kinds of decoration the shop offers (embroidery, dtf, screenprint, vinyl, dtg,
+// sublimation). Arrives with /api/catalog as `decorationTypes`; null = not known (an older answer, or the admin before its
+// settings load), and then every type counts as on, like featureOn_. Also called by the admin when Global settings are saved.
+let siteDecorations = null;
+function applyDecorationTypes_(list){ siteDecorations = Array.isArray(list) ? list.map(String) : null; }
+function decorationOn_(key){ return siteDecorations === null || siteDecorations.includes(String(key)); }
+// The words a product's decoration is shown with (the registry's made-labels, the top of functions/_lib/db.js).
+const DECORATION_MADE_LABELS_ = { embroidery: "Embroidered", dtf: "Printed (DTF)", screenprint: "Screen printed", vinyl: "Vinyl", dtg: "DTG printed", sublimation: "Sublimated" };
+// Whether a product is embroidered (so "Name to embroider" makes sense). Its stored type, when set, decides; a product
+// with none is worked out as before (any product may be embroidered). Embroidery switched off: never.
+function productEmbroidered_(p){
+  if(!decorationOn_("embroidery")) return false;
+  const t = String((p && (p.decorationType || "")) || "");
+  return !t || t === "embroidery";
+}
+// A printed (not embroidered) decoration type: the custom-design hints say "printed" for these.
+function printedDecoration_(p){
+  const t = String((p && p.decorationType) || "");
+  if(t && t !== "embroidery") return true;
+  return !!(p && p.customDesign && p.customDesign.kind === "transfer");
+}
 // "desktop" when the admin runs inside the desktop program (desktop/, /api/catalog's edition): the
 // admin then leaves out what needs the internet. Only the admin answer carries it, with the
 // program's version.
@@ -326,7 +347,7 @@ async function resolveCurrentOrg(){
     const qs = new URLSearchParams(window.location.search), pv = qs.get("preview"), pvShop = qs.get("shop");
     const res = await fetch("/api/catalog" + (pv ? "?preview=" + encodeURIComponent(pv) + (pvShop ? "&shop=" + encodeURIComponent(pvShop) : "") : ""));
     if(!res.ok){
-      try{ const d = await res.json(); applyBusiness_(d.business); applyCountry_(d.country); applyFeatures_(d.features); }catch(e){}
+      try{ const d = await res.json(); applyBusiness_(d.business); applyCountry_(d.country); applyFeatures_(d.features); applyDecorationTypes_(d.decorationTypes); }catch(e){}
       // 404 is the server's real "no shop at this address" answer. Anything else (a 5xx, a rate limit)
       // is a passing failure: say so and offer a retry, rather than telling the visitor (or the owner on
       // the admin address) that their link is probably mistyped.
@@ -336,6 +357,7 @@ async function resolveCurrentOrg(){
     applyBusiness_(data.business);
     applyCountry_(data.country);
     applyFeatures_(data.features);
+    applyDecorationTypes_(data.decorationTypes);
     if(data.status === "admin"){ applyEdition_(data.edition, data.desktopSuppliers, data.desktopEmail, data.version); applyAdminIcon_(); siteInfo_ = data.site || {};
       adminScriptVersion_ = typeof data.adminScript === "string" ? data.adminScript : ""; return {admin:true}; }
     // Global settings → Features → Storefront is off: no shop is served here (see catalog.js).
@@ -1133,10 +1155,10 @@ function renderGenericFallback(app){
   document.title = bizName_();
   app.innerHTML = `
     <div class="org-hero" style="--org-accent:var(--accent);">
-      <div class="org-eyebrow-lg">Custom embroidery &amp; apparel</div>
+      <div class="org-eyebrow-lg">Custom apparel</div>
       <h1>${escapeHtml(bizName_())}</h1>
       <div class="stitch stitch-thick"></div>
-      <p class="desc">${escapeHtml(business.tagline || "Custom embroidered and heat-transferred apparel for organizations, teams, and businesses.")}</p>
+      <p class="desc">${escapeHtml(business.tagline || "Custom decorated apparel for organizations, teams, and businesses.")}</p>
     </div>
     <div class="not-ready" style="--org-accent:var(--accent);">
       <div class="stitch"></div>
@@ -1355,9 +1377,11 @@ function renderOrgPage(app, orgId, org){
 // What decorates a product, in words — "Embroidered: Crest — Left chest" — so a customer knows what they get and where,
 // even when there's no picture of it (decorations from /api/catalog; every value escaped).
 function decorationsHtml_(p){
-  const list = (p && p.decorations) || [];
+  // A decoration whose type is switched off in Global settings isn't listed (the server leaves them out too; this covers a
+  // page loaded before the switch).
+  const list = ((p && p.decorations) || []).filter(d => !d.type || decorationOn_(d.type));
   if (!list.length) return "";
-  return `<ul class="product-decor" aria-label="Decoration">${list.map(d => `<li><span class="decor-kind">${escapeHtml(d.kind || "Decorated")}:</span> ${escapeHtml(d.name)}${d.location ? ` — ${escapeHtml(d.location)}` : ""}</li>`).join("")}</ul>`;
+  return `<ul class="product-decor" aria-label="Decoration">${list.map(d => `<li><span class="decor-kind">${escapeHtml((d.type && DECORATION_MADE_LABELS_[d.type]) || d.kind || "Decorated")}:</span> ${escapeHtml(d.name)}${d.location ? ` — ${escapeHtml(d.location)}` : ""}</li>`).join("")}</ul>`;
 }
 function productImages_(p, color){
   const ci = p.colorImages || {};
@@ -1384,7 +1408,7 @@ function imageRowHtml_(p, imgs){
 // text box for the name. Shared by plain and configurable products; the change handler shows/hides the field.
 function personalizeHtml_(p){
   const persPrice = (p.personalizationPrice != null) ? p.personalizationPrice : null;
-  if(persPrice == null) return "";
+  if(persPrice == null || !productEmbroidered_(p)) return "";   // typed names are embroidered
   const persOptions = (p.personalizationOptions && p.personalizationOptions.length) ? p.personalizationOptions : null;
   const persInput = persOptions
     ? `<select id="pers-name-${p.id}" aria-label="Personalization option for ${escapeHtml(p.name)}" style="margin-top:8px; width:100%; display:none;">
@@ -1517,6 +1541,7 @@ function cfgGraphics_(org){ return (org && org.graphics) || (activeCatalog && ac
 function cfgOptionsForLocation_(p, org, loc, color){
   const byId = {}; cfgGraphics_(org).forEach(g => { byId[g.id] = g; });
   return (loc.graphicIds || []).map(id => byId[id]).filter(Boolean)
+    .filter(g => !g.decoration || decorationOn_(g.decoration))   // its decoration type is switched off in Global settings
     .filter(g => (!g.allowedLocations || !g.allowedLocations.length || g.allowedLocations.includes(loc.key)))
     .filter(g => (!g.allowedGarmentColors || !g.allowedGarmentColors.length || !color || g.allowedGarmentColors.includes(color)))
     .filter(g => !(color && (p.blockedGraphicColors || []).some(b => Number(b.graphicId) === g.id && b.color === color)));   // this product doesn't offer it on this color
@@ -1736,7 +1761,7 @@ function customDesignBoxId_(pid, loc){ return "cd-" + pid + "-" + loc; }
 function customDesignHtml_(p, locKey, hidden){
   const st = customDesignUploads_[p.id + "|" + locKey] || null;
   const transfer = p.customDesign && p.customDesign.kind === "transfer";
-  const hint = transfer ? "Printed from your image — a sharp image about 3000 px across prints best at 10 inches."
+  const hint = (transfer || printedDecoration_(p)) ? "Printed from your image — a sharp image about 3000 px across prints best at 10 inches."
     : "A clear logo with solid colors works best — we'll email you a proof.";
   const head = locKey === CUSTOM_PLAIN_LOC ? "" : `<div class="cd-head">Your design</div>`;
   return `<div class="cd-box" id="${customDesignBoxId_(p.id, locKey)}" data-cd-pid="${escapeHtml(p.id)}" data-cd-loc="${escapeHtml(locKey)}"${hidden ? " hidden" : ""}>
@@ -1826,7 +1851,7 @@ async function handleCustomDesignFile_(input){
     if(customDesignUploads_[key] !== st) return;   // another file was chosen meanwhile
     if(!res.ok || !data || data.status !== "ok") return fail((data && data.message) || "That upload didn't work — please try again.");
     Object.assign(st, { status: "done", uploadId: data.uploadId, width: data.width, height: data.height, previewUrl: URL.createObjectURL(file),
-      warning: p.customDesign.kind === "transfer" && Math.max(data.width, data.height) < L.softTransferSide ? "it may print soft — about 3000 px is best for a 10-inch print." : "" });
+      warning: printedDecoration_(p) && Math.max(data.width, data.height) < L.softTransferSide ? "it may print soft — about 3000 px is best for a 10-inch print." : "" });
     const box2 = document.getElementById(customDesignBoxId_(pid, loc)); const ts = box2 && box2.querySelector(".cd-ts"); if(ts) ts.innerHTML = "";
     customDesignRedraw_(pid, loc);
   }catch(e){

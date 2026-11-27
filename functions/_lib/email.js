@@ -940,7 +940,7 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
       <td style="padding:6px 8px;vertical-align:top;white-space:nowrap">${escHtml(o.paymentMethod || "")}<br><span style="font-size:12px;color:${o.paid ? "#15803d" : "#b45309"}">${o.paid ? "Paid" : "Unpaid"}</span></td>
       <td style="padding:6px 8px;vertical-align:top;text-align:right;white-space:nowrap">${fmt$(o.total)}</td>
     </tr>`;
-  const KIND = { payment: "Payment", refund: "Refund", dispute: "Dispute", design: "Design", delivered: "Delivered", invoice: "Invoice", picked_up: "Picked up" };
+  const KIND = { payment: "Payment", refund: "Refund", dispute: "Dispute", design: "Design", delivered: "Delivered", invoice: "Invoice", picked_up: "Picked up", quote: "Quote", gift_card: "Gift card", po: "PO" };
   const noticeHtml = (x) => `
     <tr style="border-top:1px solid #e5e7eb">
       <td style="padding:6px 8px;vertical-align:top;white-space:nowrap;color:#666;font-size:12px">${escHtml(when(x.createdAt))}</td>
@@ -1607,8 +1607,8 @@ export function buildEstimateEmail({ estimate, items, totals, orgName, link, mes
 }
 
 // Queued for the owner's 6 AM roll-up when a customer answers a quote on its page (emailed at once only if
-// it can't be queued). Under the roll-up's Invoice heading: owner_notices.kind has no kind of its own for
-// quotes. Accepted with no `orderId` means the order couldn't be made — staff convert it on the Quotes page.
+// it can't be queued). Under the roll-up's Quote heading (owner_notices.kind "quote", migrations/0119); a real
+// invoice notice keeps "Invoice". Accepted with no `orderId` means the order couldn't be made — staff convert it on the Quotes page.
 export async function sendEstimateResponseNotification(env, { estimate, accepted, note, orderId, customerName }) {
   const e = estimate || {};
   const who = String(customerName || e.customerName || "").trim() || "The customer";
@@ -1619,7 +1619,7 @@ export async function sendEstimateResponseNotification(env, { estimate, accepted
   const detail = String(note || "").trim();
   const ref = orderId || number;
   const text = `${summary}\n${accepted && orderId ? "Order" : "Quote"}: ${ref} (${e.orgId || ""})${detail ? "\nTheir note: " + detail : ""}`;
-  return queueOwnerNotice_(env, { kind: "invoice", orderId: ref, orgId: e.orgId || "", summary, detail: detail ? "Their note: " + detail : "" },
+  return queueOwnerNotice_(env, { kind: "quote", orderId: ref, orgId: e.orgId || "", summary, detail: detail ? "Their note: " + detail : "" },
     { to: ORDER_NOTIFICATION_EMAIL, subject: `Quote ${accepted ? "accepted" : "changes asked for"} — ${e.orgId || ""} — ${number}`,
       html: `<div style="font-family:sans-serif"><p>${escHtml(summary)}</p>${detail ? `<p><strong>Their note:</strong> ${escHtml(detail).replace(/\n/g, "<br>")}</p>` : ""}</div>`, text });
 }

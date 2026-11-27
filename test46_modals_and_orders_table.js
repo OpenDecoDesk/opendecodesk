@@ -27,10 +27,10 @@ const { storefrontPage } = require("./testlib/storefront-page");
   console.log("Global settings is in the Settings menu, not a button on Manage catalog:",
     /label: "Settings", items: \[\s*\["settings", "Global settings"\]/.test(groups) && !/location\.hash='#catalog\/settings'/.test(src)
     && /raw === "settings" \|\| raw === "catalog\/settings"/.test(src));
-  console.log("Manage catalog is a top-level button (after Run Transfer Sheets), not in Tools:",
-    /const top = \[\["home", "Home"\], \["orders", "Orders"\], \["runorder", "Run Order"\], \["runtransfer", "Run Transfer Sheets"\], \["catalog", "Manage catalog"\]\]/.test(src) && !groups.includes('["catalog"'));
+  console.log("Manage catalog is a top-level button (after Run Order), not in Tools:",
+    /const top = \[\["home", "Home"\], \["orders", "Orders"\], \["runorder", "Run Order"\], \["catalog", "Manage catalog"\]\]/.test(src) && !groups.includes('["catalog"'));
   console.log("Run Order is a standalone top-level button, not in a dropdown:",
-    /const top = \[\["home", "Home"\], \["orders", "Orders"\], \["runorder", "Run Order"\], \["runtransfer", "Run Transfer Sheets"\], \["catalog", "Manage catalog"\]\]/.test(src) && !groups.includes('["runorder"'));
+    /const top = \[\["home", "Home"\], \["orders", "Orders"\], \["runorder", "Run Order"\], \["catalog", "Manage catalog"\]\]/.test(src) && !groups.includes('["runorder"'));
   console.log("the menu groups are Catalog / Production / Inventory / Finance / Reports / Settings, in that order:",
     groups.indexOf('label: "Catalog"') >= 0 && ["Catalog", "Production", "Inventory", "Finance", "Reports", "Settings"].every((l, i, a) => groups.includes('label: "' + l + '"') && (i === 0 || groups.indexOf('label: "' + a[i - 1] + '"') < groups.indexOf('label: "' + l + '"'))));
   console.log("Sign out lives in the Settings dropdown, not a top-level shops row:", /label: "Settings"[\s\S]*action: "navSignOut_"/.test(groups));

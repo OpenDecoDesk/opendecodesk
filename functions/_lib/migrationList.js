@@ -119,4 +119,6 @@ export const MIGRATIONS = [
   "0115_discount_codes.sql",
   "0116_discount_max.sql",
   "0117_email_campaigns.sql",
+  "0118_decoration_types.sql",
+  "0119_quote_notices.sql",
 ];

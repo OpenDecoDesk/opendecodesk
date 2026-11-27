@@ -10,7 +10,7 @@ import { makeShop } from "../lib/data.mjs";
 // The menu as public/admin.js draws it (ADMIN_NAV_GROUPS and the buttons before them): [hash, menu label, page label in
 // the menu, page title]. The title is "<business> — <page title> (Admin)"; a few pages name their shop after it.
 const TOP = [["home", "Home", "Home"], ["orders", "Orders", "Orders — "], ["runorder", "Run Order", "Run Order"],
-  ["runtransfer", "Run Transfer Sheets", "Run Transfer Sheets"], ["catalog", "Manage catalog", "Manage catalog"]];
+  ["catalog", "Manage catalog", "Manage catalog"]];
 const GROUPS = {
   Catalog: [["setup", "Shop setup", "shop setup"], ["designs", "Designs", "Designs — "], ["graphics", "Graphics", "Graphics"],
     ["categories", "Product categories", "Product categories"], ["locations", "Decoration locations", "Decoration locations"],

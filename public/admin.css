@@ -775,3 +775,24 @@
     .dc-indent{margin-left:12px;}
     .dc-uses-field{max-width:none;}
   }
+
+  /* ---- Run order (admin.js renderRunOrder): the type buttons, "Order by", the type chips and the waiting cards ---- */
+  .ro-bar{display:flex; flex-wrap:wrap; align-items:center; gap:10px 16px; margin-bottom:10px;}
+  .ro-filters{display:flex; flex-wrap:wrap; gap:6px;}
+  .ro-filter.on{background:var(--accent,#2c6b2f); color:#fff; border-color:var(--accent,#2c6b2f);}
+  .ro-sort{display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; color:#555;}
+  .ro-sort select{font-size:13px; padding:5px 8px; min-height:34px;}
+  .ro-chip{display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; font-weight:700; letter-spacing:.02em; background:#eee; color:#444; vertical-align:middle;}
+  .ro-t-embroidery{background:#ede9fe; color:#5b21b6;}
+  .ro-t-dtf{background:#e0f2fe; color:#075985;}
+  .ro-t-screenprint{background:#fef3c7; color:#92400e;}
+  .ro-t-vinyl{background:#ccfbf1; color:#115e59;}
+  .ro-t-dtg{background:#fce7f3; color:#9d174d;}
+  .ro-t-sublimation{background:#ecfccb; color:#3f6212;}
+  .ro-card-waiting{background:#f6f6f6 !important; color:#555;}
+  .ro-paid-types .ro-chip{margin:0 2px 2px 0;}
+  @media(max-width:760px){
+    .ro-bar{flex-direction:column; align-items:stretch;}
+    .ro-filter, .ro-bar .admin-btn{min-height:40px;}
+    .ro-sort select{flex:1;}
+  }

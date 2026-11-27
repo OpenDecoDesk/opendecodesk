@@ -8,7 +8,7 @@
  *  - getCatalogData(env) answers the META entry: the shop addresses
  *    (subdomainMap, each shop's PUBLISHED subdomain), the global settings
  *    (with sales tax and the rush fee), the business shown to visitors, the
- *    region, the features and the sections. Small, and no shop's products in
+ *    region, the features, the decoration types and the sections. Small, and no shop's products in
  *    it — what host classification and the feature switches need, which is
  *    what nearly every API call reads.
  *  - getCatalogShop(env, orgId) answers ONE shop's entry, built from that

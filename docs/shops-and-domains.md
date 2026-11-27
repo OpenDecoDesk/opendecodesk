@@ -209,6 +209,16 @@ picks, then the pick, then any personalization. Under the question, **What Run O
 those hoopings as last saved, worked out by the same code Run Order uses, so a pick that can't be run
 shows here first.
 
+The **Decoration** box says how the product is decorated: one of the types switched on in Global
+settings, or *Worked out from the design / transfers* (the default: a product with a design is
+embroidered, one with fixed transfers is DTF). Blocks that only belong to a type that is switched off
+and unused here (the designs and hoopings for embroidery, the fixed transfers for DTF) are hidden. For
+screen print, vinyl, DTG and sublimation a **Suggested decoration price** shows what the type's prices
+in Global settings come to; and when embroidery is priced by stitch count and the product's design has a
+stitch count, **By stitch count** shows the price per piece with a **Use this** button that puts it in
+the price box. Both are suggestions: the price box is still what the customer pays.
+See [Decoration types](#decoration-types-and-the-run-order).
+
 The catalog check also warns about settings that contradict each other:
 - designs stitched on top of the customer's pick;
 - a mockup graphic that repeats a pick, or that nothing stitches;
@@ -287,6 +297,10 @@ in one place with its home shop, like a global design. A global graphic can only
 and a transfer open to every shop, and it can't be made shop-only again while another shop's products
 use it. The Graphics list shows them under "🌐 Global — every shop", and graphic pickers mark them 🌐.
 
+A printed graphic has a **Printed by** box: DTF transfer (the default), Screen print, Vinyl / heat
+transfer, DTG or Sublimation, from the types switched on. It says which Run order cards an order using
+it makes, and the Graphics list shows it. Embroidery graphics are only offered while embroidery is on.
+
 ## Products without a blank
 
 Linking a product to a blank (Blank links on the product) is optional. Without one the product
@@ -313,7 +327,7 @@ are on the shelf for the color and size picked ("N ready to decorate") — what'
 aside. It's only a count: nothing is held for the customer. Finished stock ("N in stock") is shown
 instead when there is some.
 
-**Run Transfer Sheets** knows what's on the shelf too: a line whose transfers were already used, were
+**Run order's transfer cards** know what's on the shelf too: a line whose transfers were already used, were
 marked received, or are covered by transfer stock is ready to press, and the card says which (or what's
 short). Stock is shared out soonest due first, and the gang sheet counts only what still has to be
 printed. An order that has shipped, been delivered or been completed drops off the run pages and stops
@@ -570,12 +584,65 @@ shop rate (your pay and profit per hour), unless you type your own **Target effe
 
 A product can carry **Printed transfers (DTF)** at fixed locations — a crest on the back of an
 embroidered shirt. They're part of its price; the customer doesn't choose them. Every order line gets
-them, so Run Transfer Sheets, transfer stock and cost of goods handle them like the reorder QR.
+them, so the Run order's transfer cards, transfer stock and cost of goods handle them like the reorder QR.
 
 Mockups work for any product, not only configurable ones: the product form has a mockup table per
 location, with the graphics offered there and its printed transfers. A plain product's embroidery comes
 from its designs, which have no location, so **Embroidered graphics (for mockups)** names the
 embroidery graphic to picture at each location — for pictures only, never the order or the price.
+
+## Decoration types and the Run order
+
+**Settings → Global settings → Decoration types** is where the shop says what kinds of work it does:
+Embroidery, DTF transfer, Screen print, Vinyl / heat transfer, DTG and Sublimation. A new or existing
+install starts with Embroidery and DTF ticked, as before, and at least one must stay ticked. Under each
+ticked type are its prices ([configuration.md](configuration.md#global-settings-in-the-admin-stored-in-the-database)).
+Product and graphic pickers, the new-product wizard, the Run order's buttons, the menus (Transfers
+follows DTF; Machines, Threads, Hoops, Machine Files and the stitch tools follow Embroidery, as well as
+the Production feature) and the shop page's "Embroidered / Printed (DTF) / Screen printed / Vinyl /
+DTG printed / Sublimated" labels all follow what is ticked. A type switched off is hidden from choosing,
+never from what already exists: an old product, order line or graphic still shows it, marked
+"(switched off)".
+
+**The Run order** (Run order in the menu; an old bookmark to the transfers page opens it with the DTF
+button on) is one list of every piece of work still to do, each card tagged with its type:
+
+- **Quick buttons** at the top: **All (n)** and one button per type with its count. A type switched off
+  but with cards left still has a button, marked "(switched off)". The choice is remembered.
+- **Order by**: Due date (the default: soonest first, orders with no date last, then the order date),
+  Order date, Customer / shop, Type, or Blank (the blank's type, then the blank, colour and size, with
+  headings, as embroidery was always grouped). The choice is remembered. Cards still waiting on a blank
+  or transfers come after the ready ones and are greyed, with what they are waiting on.
+- **Embroidery** cards are the same job cards as before: piece by hooping, machine, needles, timed runs.
+- **DTF** cards are the same transfer cards as before, with **Mark transfer received**, **Mark transfers
+  applied** and **Mark made**; with the DTF or All button on and DTF cards to print, the toolbar shows
+  **Gang sheet totals** and its CSV.
+- **Screen print, vinyl, DTG and sublimation** cards show the garment, blank, locations with pictures,
+  quantity and due date. **Start** marks the work begun (with **Undo**) and **Mark made** marks every
+  piece made, using up the blanks as Mark manufactured does. A line that is also embroidered says
+  **Mark done** instead, and only records this part; the embroidery is finished on its own cards.
+- **Paid, not yet run** above the list now has a Type column.
+
+The page is part of the Production feature, and a role needs the Run order or Transfer permission to
+open it; it shows only the types that role can see. Start and Mark made need the Mark made permission.
+Every one is in the audit log.
+
+**Pricing by type.** *Embroidery by stitch count*: with **Price by stitch count** ticked, the price is
+the stitches (at least the minimum) × the price per 1,000, never less than the minimum price. On a quote
+line, **By stitches** asks for the count (filled in from the product's design when it has one) and sets
+the price each. *Screen print*: colours × the price per colour × locations each, plus a screen setup for
+every colour at every location (the lower reorder setup when it's a reorder). On a quote line **Screen
+print price** adds the per-piece price to the line and adds a **Screen setup** fee line. *DTF, vinyl, DTG
+and sublimation*: the price per location, once per location, and a setup fee. Cost per piece goes into
+Pricing analysis, which shows the decoration cost with the type's name.
+
+**Outside digitizing.** When a design is sent to a digitizing vendor, record it on the order (or, for a
+saved quote, under its fee lines): **Send to digitizer** takes a name, the vendor (those ticked
+**Digitizes designs** on the Vendors page come first), the date sent, the date it came back, the cost and
+a note. Tick **Record the cost as an expense** and an expense in a "Digitizing" category is made for the
+cost, tied to the order; that needs the Expenses permission and an open month. A record can be edited, and
+deleted once its expense is gone. It needs the digitizing permission (Admin and Manager full, Back office
+edit, Production read).
 
 ## Finished stock
 
@@ -674,14 +741,18 @@ customer's page lists their quotes. The list filters by status and shop, and sea
 A quote has a title, a **message** to the customer, an **internal note** they never see, an
 **expiry date** (the last day it can be accepted; leave it empty for none) and up to 100 lines:
 
-- **A product** from the shop, with its size, quantity (up to 5,000) and personalization, priced
+- **A product** from the shop — including a configurable one, with its colour and a graphic at each
+  location as in a local sale, shown under the line and on the emailed quote — with its size, quantity (up to 5,000) and personalization, priced
   as a local sale would be: quantity breaks count every product line on the quote
   ([Quantity breaks](#quantity-breaks)), and the line shows the list price, the break and the price
   each. A price of your own for the line needs the payments permission (payments, discounts and
-  refunds) at Edit.
+  refunds) at Edit. When embroidery is priced by stitch count, **By stitches** sets the price from a
+  stitch count, and with Screen print on, **Screen print price** does it from colours and locations
+  ([Decoration types](#decoration-types-and-the-run-order)).
 - **A custom line**: a description, quantity, price each, and whether it is taxable.
 - **A fee**: setup, digitizing, art or other, with a description and one amount, taxable or not. A
-  fee is charged once, whatever the quantity.
+  fee is charged once, whatever the quantity. A saved quote also lists the **digitizing** sent out for
+  it, with its vendor and cost.
 
 The totals follow each **Save**.
 
@@ -799,7 +870,7 @@ offers rush, and every change is in the audit log.
 - The fee is part of what's owed. A fee still to follow never holds up paying for the rest; collect it
   afterwards, for example with Send invoice.
 - **An unpaid rush fee doesn't hold up production.** An order paid for everything except the rush fee
-  goes on to Run Order, Run Transfer Sheets and Blanks to Order; marking it completed still needs it paid
+  goes on to the Run order and Blanks to Order; marking it completed still needs it paid
   in full.
 - With a full-payment date, the invoice email (its subject too), the order-received email and the
   invoice page say plainly that without full payment by then the rush delivery date can't be
@@ -818,7 +889,7 @@ own design**):
 - **Embroidery** — you digitize the customer's image and upload the stitch file for that line (Orders
   → Edit items → Files → Order design) before Digitizing complete. The customer approves the proof
   as for a typed-in name, and Run Order runs the stitch file you uploaded.
-- **Transfer** — the line goes to Run Transfer Sheets with the customer's image, printed as uploaded.
+- **Transfer** — the line goes to the Run order as a DTF transfer card with the customer's image, printed as uploaded.
 - **Add-on per piece** — added to the price, like a graphic's add-on. Blank means free. A
   configurable product can set its own add-on at each location (under the location, in the product's
   graphics); a location left blank uses the product's.

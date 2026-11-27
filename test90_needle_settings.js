@@ -18,7 +18,7 @@ const lib = new Function(dbSrc + `\nreturn { insertOrder, createHoop, createThre
   setBlankLink, createBlank, updateBlank, getAllBlanks, saveMachine, getProductionQueue, normThreadWeight,
   listNeedleSizes, saveNeedleSize, deleteNeedleSize, listNeedleTypes, saveNeedleType, deleteNeedleType };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test'; " + require("./testlib/roles").adminAs() + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +

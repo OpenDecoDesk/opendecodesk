@@ -8,7 +8,9 @@
 // A classic script like admin.js and admin-customers.js, so it uses admin.js's own helpers as they are (adminApi_,
 // adminSetHash, adminTitle_, adminPageHead_, inventoryModal_, askConfirm_, adminCan_, adminMoney_, adminDate_,
 // localToday_, adminLastShop_, customerSearchHtml_, wireCustomerSearch_, openOrderFromDashboard_) and storefront.js's
-// (escapeHtml, showToast, productSizes_). It adds one global, renderQuotes(app, id), which also carries
+// (escapeHtml, showToast, productSizes_). A saved quote also carries the outside-digitizing section of
+// admin-digitizing.js (digitizingSectionHtml_ / wireDigitizingSection_, used when that script is loaded). It adds one
+// global, renderQuotes(app, id), which also carries
 // renderQuotes.newForCustomer(customer) for the Customers page's "New quote for this customer".
 //
 // No data-admin-action here: the names those run are a fixed list at the top of admin.js. Each screen instead puts
@@ -50,6 +52,46 @@
   const canConvert = () => adminCan_(FN, "edit") && adminCan_("orders.details", "edit");
   const canOpenOrders = () => typeof openOrderFromDashboard_ === "function" && (typeof adminCanOpen_ !== "function" || adminCanOpen_("orders"));
   const canOpenCustomers = () => typeof adminCanCustomers_ !== "function" || adminCanCustomers_();
+
+  // ---- What the shop sells and prices (Global settings → Decoration types) ------------------------------------
+  // The stitch-count and screen-print helpers show only where that pricing is on; the picker for a configurable
+  // product leaves out graphics whose decoration is switched off. Asked once per quote opened; a server without the
+  // setting (or a role that can't read it) answers nothing, and the quote then has no helpers.
+  let decoAsked = null;
+  function decoSettings() {
+    if (!decoAsked) {
+      decoAsked = adminApi_({ action: "getDecorationSettings" })
+        .then(d => ({ types: Array.isArray(d.types) ? d.types : [], pricing: d.pricing || {} }))
+        .catch(() => null);
+    }
+    return decoAsked;
+  }
+  const stitchPricingOn = (s) => !!(s && s.types.includes("embroidery") && s.pricing && s.pricing.embroidery && s.pricing.embroidery.stitchPricing);
+  const screenPrintOn = (s) => !!(s && s.types.includes("screenprint"));
+  // The server's answer for one decoration's price: { unitCents, setupCents, note }.
+  const priceDeco = (type, params) => adminApi_({ action: "priceDecoration", type, params });
+  const centsToDollars = (c) => ((Number(c) || 0) / 100).toFixed(2);
+  const dollarsToCents = (d) => Math.round(Number(d) * 100);
+
+  // A configurable line's picks as plain text: "Navy · Front: Lockup (White)". Mirrors admin.js cfgSummary_ (the
+  // invisible reorder-QR application and auto-added entries are left out); "" when the line has no picks.
+  function cfgText(it) {
+    let c = it && it.config;
+    if (!c && it && it.configJson) { try { c = JSON.parse(it.configJson); } catch (e) { c = null; } }
+    if (!c || !Array.isArray(c.locations)) return "";
+    const parts = c.locations.filter(l => !l.auto && !l.fixed && l.location !== "reorderqr")
+      .map(l => `${l.label || l.location}: ${l.graphicName || (l.custom ? "Customer's own design" : "")}${l.ink ? " (" + l.ink + ")" : ""}`);
+    return [c.garmentColor, ...parts].filter(Boolean).join(" · ");
+  }
+  // The shop's graphics and their add-on prices, asked once per shop while the admin stays on the Quotes pages.
+  const graphicsByOrg = {};
+  async function shopGraphics(orgId) {
+    if (!graphicsByOrg[orgId]) {
+      const g = await adminApi_({ action: "listGraphics", org: orgId });
+      graphicsByOrg[orgId] = { graphics: g.graphics || [], tiersCents: g.tiersCents || {} };
+    }
+    return graphicsByOrg[orgId];
+  }
 
   // ---- The list: #quotes ------------------------------------------------------------------------------------
   async function renderList(app) {
@@ -235,6 +277,7 @@
     const hash = "quotes/" + id;
     adminSetHash(hash);
     document.title = adminTitle_("Quote");
+    decoAsked = null;   // the settings may have changed since the last quote was opened
     const crumbs = (label) => ({ crumbs: [{ label: "Quotes", hash: "quotes" }, { label }] });
     app.innerHTML = `${adminPageHead_("Quote", crumbs("Quote"))}
       <div class="admin-panel cust-page qt-page" id="qtPage" style="--org-accent:var(--accent);">${backLink()}<div class="cust-note">Loading…</div></div>`;
@@ -315,6 +358,7 @@
           ${fieldsEditable ? `<div class="cust-form-actions"><button type="submit" class="admin-btn" id="qtSave">${e0.status === "changes" ? "Revise" : "Save"}</button>
             <span class="cust-count" id="qtSaved" role="status"></span></div>` : ""}
         </form>
+        <div id="qtDigitizing"></div>
       </div>`;
 
     const root = document.getElementById("qtPage");
@@ -322,6 +366,20 @@
     if (!fieldsEditable) form.querySelectorAll("input, textarea, select").forEach(f => { f.disabled = true; });
     else if (noteOnly) ["#qtTitle", "#qtExpires", "#qtMessage"].forEach(sel => { root.querySelector(sel).disabled = true; });
     const reload = () => { if (stillOn(hash)) renderOne(app, id); };
+    // The price helpers' settings are asked for as the quote opens, so a line's window doesn't wait for them.
+    if (editable) decoSettings();
+    // Digitizing sent to an outside vendor for this quote's digitizing fee: under the fee lines, for any saved quote,
+    // to a role that may see it (its own permission; admin-digitizing.js).
+    if (typeof ensureDigitizingUi_ === "function" && adminCan_("production.digitizing", "read")) {
+      ensureDigitizingUi_().then(() => {
+        if (!stillOn(hash)) return;
+        const dg = root.querySelector("#qtDigitizing");
+        if (!dg || !dg.isConnected) return;
+        const dctx = { estimateId: e0.id, canEdit: adminCan_("production.digitizing", "edit"), canExpense: adminCan_("finance.expenses", "edit") };
+        dg.innerHTML = digitizingSectionHtml_(dctx);
+        wireDigitizingSection_(dg, dctx);
+      }).catch(() => {});
+    }
 
     function lineRow(it, i) {
       const qtyCell = it.kind === "fee" ? "1" : editable
@@ -332,6 +390,7 @@
       const what = it.kind === "fee" ? feeLabel(it.feeKind) + (it.name && it.name !== feeLabel(it.feeKind) ? " — " + it.name : "") : it.name || "";
       const sub = [
         it.kind === "product" && it.size && it.size !== "OSFA" ? "Size " + it.size : "",
+        it.kind === "product" ? cfgText(it) : "",
         Number(it.personalized) ? "Personalized" + (it.persName ? ": " + it.persName : "") + (Number(it.personalizationFee) > 0 ? " (+" + adminMoney_(it.personalizationFee) + " each)" : "") : "",
         it.kind === "product" && Number(it.customPrice) ? "Price set by hand" : "",
         it.kind === "custom" ? "Custom line" : "",
@@ -450,9 +509,11 @@
       }
       const lineDialog = (kind, i) => {
         const item = i == null ? null : (state.items || [])[i];
-        const done = async (line) => {
-          if (i == null && lines.length >= MAX_LINES) return `A quote can have at most ${MAX_LINES} lines.`;
-          const next = i == null ? lines.concat([line]) : lines.map((l, j) => j === i ? line : l);
+        // `extra`: lines a helper in the window adds beside this one (the screen print setup fee).
+        const done = async (line, extra) => {
+          const more = extra || [];
+          const next = (i == null ? lines.concat([line]) : lines.map((l, j) => j === i ? line : l)).concat(more);
+          if (next.length > MAX_LINES) return `A quote can have at most ${MAX_LINES} lines.`;
           return persist(next);
         };
         if (kind === "product") return showProductLine(state.estimate.orgId, item, done);
@@ -485,10 +546,130 @@
     });
   }
 
-  // Add or change a catalog line: the shop's products (not the ones with a garment color and graphics to choose —
-  // those are quoted as a custom line), size, quantity and personalization, and a price typed by hand for a role that
-  // may set one (as on a Local sale). The price shown here is the catalog's; the server works out the quantity break
-  // over the whole quote once the line is saved. done(line) saves; it answers "" or the problem to show.
+  // The price helpers under a line's price (product line and custom line alike): "By stitches" (embroidery priced by
+  // its stitch count) and "Screen print price" (colors, locations, reorder), each where the shop has that pricing on.
+  // The server works the price out (priceDecoration: the shop's own settings); this only asks and fills the field.
+  //   box        an empty element in the window the helpers are drawn into (it stays hidden when neither is on)
+  //   o.getPrice()   the price per piece now, in dollars (NaN when there isn't one yet)
+  //   o.setPrice(d)  puts a price in dollars into the line's field
+  //   o.catalog()    the product's catalog price in dollars, or null on a custom line
+  //   o.stitches()   Promise of the product's design's latest stitch count, or null
+  // Returns { extra(), prefill() }: extra() is the fee lines to save with the line (the screen print setup), prefill()
+  // asks again for the stitch count to start from (after the product changed).
+  function decoTools(box, deco, o) {
+    const none = { extra: () => [], prefill: () => {} };
+    const stitchOn = stitchPricingOn(deco), screenOn = screenPrintOn(deco);
+    if (!box || (!stitchOn && !screenOn)) return none;
+    const maxColors = Math.max(1, Math.min(12, Number(deco.pricing.screenprint && deco.pricing.screenprint.maxColors) || 6));
+    box.hidden = false;
+    box.innerHTML = `<div class="qt-deco">
+      <div class="qt-deco-buttons" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 6px;">
+        ${stitchOn ? `<button type="button" class="admin-btn admin-btn-secondary admin-btn-sm" data-qt-deco="stitch" aria-expanded="false">By stitches</button>` : ""}
+        ${screenOn ? `<button type="button" class="admin-btn admin-btn-secondary admin-btn-sm" data-qt-deco="screen" aria-expanded="false">Screen print price</button>` : ""}
+      </div>
+      ${stitchOn ? `<div class="qt-deco-pane" data-qt-pane="stitch" style="margin:6px 0;" hidden>
+        <label class="cust-field"><span>Stitches</span><input type="number" min="1" step="1" inputmode="numeric" data-qt-f="stitches" placeholder="8500"></label>
+        ${o.catalog ? `<label class="cust-check"><input type="checkbox" data-qt-f="addCatalog" checked> <span>Add the product's catalog price</span></label>` : ""}
+        <button type="button" class="admin-btn admin-btn-sm" data-qt-go="stitch">Work out the price</button>
+      </div>` : ""}
+      ${screenOn ? `<div class="qt-deco-pane" data-qt-pane="screen" style="margin:6px 0;" hidden>
+        <div class="cust-grid">
+          <label class="cust-field"><span>Colors</span><select data-qt-f="colors">${Array.from({ length: maxColors }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join("")}</select></label>
+          <label class="cust-field"><span>Locations</span><input type="number" min="1" max="10" step="1" value="1" data-qt-f="locations"></label>
+        </div>
+        <label class="cust-check"><input type="checkbox" data-qt-f="reorder"> <span>A reorder (the screens already exist)</span></label>
+        <button type="button" class="admin-btn admin-btn-sm" data-qt-go="screen">Add to the price</button>
+      </div>` : ""}
+      <div class="qt-muted" data-qt-note role="status" aria-live="polite" style="font-size:13px;margin-bottom:8px;"></div>
+    </div>`;
+    const $ = (s) => box.querySelector(s);
+    const f = (name) => box.querySelector(`[data-qt-f="${name}"]`);
+    const note = (t, bad) => { const n = $("[data-qt-note]"); n.textContent = t; n.style.color = bad ? "#b03a2e" : ""; };
+    let setup = null;          // { cents, name } the screen print helper adds as a fee line
+    let spCents = 0;           // what the screen print helper put in the price, so pressing it again replaces it
+    let touched = false;       // a stitch count typed by hand is not overwritten by the design's
+    if (f("stitches")) f("stitches").addEventListener("input", () => { touched = true; });
+    box.addEventListener("click", async (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      if (b.dataset.qtDeco) {
+        const pane = $(`[data-qt-pane="${b.dataset.qtDeco}"]`);
+        pane.hidden = !pane.hidden;
+        b.setAttribute("aria-expanded", String(!pane.hidden));
+        if (!pane.hidden) { const first = pane.querySelector("input, select"); if (first) first.focus(); }
+        return;
+      }
+      if (b.dataset.qtGo === "stitch") {
+        const n = wholeNum(f("stitches").value);
+        if (!(n >= 1)) { note("Enter the number of stitches (a whole number, like 8500).", true); f("stitches").focus(); return; }
+        b.disabled = true; note("");
+        try {
+          const d = await priceDeco("embroidery", { stitches: n });
+          if (!box.isConnected) return;
+          if (!(Number(d.unitCents) > 0)) { note((d.note || "No price worked out.") + " Set the stitch price under Global settings → Decoration types.", true); return; }
+          const add = f("addCatalog") && f("addCatalog").checked && o.catalog ? Math.round((Number(o.catalog()) || 0) * 100) : 0;
+          o.setPrice(centsToDollars(Number(d.unitCents) + add));
+          spCents = 0;
+          note(`${d.note || "Embroidery"}: ${adminMoney_(Number(d.unitCents) / 100)}${add ? " + catalog price " + adminMoney_(add / 100) : ""} each.`);
+        } catch (ex) { note(ex.message || "Couldn't work out the price.", true); }
+        finally { b.disabled = false; }
+        return;
+      }
+      if (b.dataset.qtGo === "screen") {
+        const colors = Number(f("colors").value), locs = wholeNum(f("locations").value), reorder = f("reorder").checked;
+        if (!(locs >= 1 && locs <= 10)) { note("Enter how many locations (1 to 10).", true); f("locations").focus(); return; }
+        b.disabled = true; note("");
+        try {
+          const d = await priceDeco("screenprint", { colors, locations: locs, reorder });
+          if (!box.isConnected) return;
+          const unit = Number(d.unitCents) || 0, set = Number(d.setupCents) || 0;
+          const was = o.getPrice();
+          const base = (isNaN(was) ? 0 : Math.round(was * 100)) - spCents;
+          o.setPrice(centsToDollars(Math.max(0, base) + unit));
+          spCents = unit;
+          setup = set > 0 ? { cents: set, name: `Screen setup — ${plural(colors, "color")}${locs > 1 ? ", " + plural(locs, "location") : ""}${reorder ? " (reorder)" : ""}` } : null;
+          note(`Screen print adds ${adminMoney_(unit / 100)} to each piece${setup ? `; a ${adminMoney_(set / 100)} screen setup fee is added as its own line when you save` : ""}.`);
+        } catch (ex) { note(ex.message || "Couldn't work out the price.", true); }
+        finally { b.disabled = false; }
+      }
+    });
+    // Enter in a helper's field works the helper out; it must not save the whole line.
+    box.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || !e.target.matches("input, select")) return;
+      e.preventDefault();
+      const pane = e.target.closest("[data-qt-pane]");
+      const go = pane && pane.querySelector("[data-qt-go]");
+      if (go) go.click();
+    });
+    return {
+      extra: () => setup ? [{ kind: "fee", feeKind: "setup", name: setup.name, amount: setup.cents / 100, taxable: true }] : [],
+      prefill: async () => {
+        if (!f("stitches") || touched || !o.stitches) return;
+        let n = null;
+        try { n = await o.stitches(); } catch (ex) { n = null; }
+        if (n && box.isConnected && !touched) f("stitches").value = String(n);
+      },
+    };
+  }
+  // The latest stitch count of a design (a design's newest version that has one), or null.
+  const designStitchCache = {};
+  async function designStitches(designId) {
+    if (designId == null) return null;
+    if (!(designId in designStitchCache)) {
+      try {
+        const d = await adminApi_({ action: "getDesign", id: designId });
+        const v = (d.versions || []).find(x => Number(x.stitchCount) > 0);
+        designStitchCache[designId] = v ? Number(v.stitchCount) : null;
+      } catch (ex) { designStitchCache[designId] = null; }
+    }
+    return designStitchCache[designId];
+  }
+
+  // Add or change a catalog line: the shop's products, size, quantity and personalization, and for a product with
+  // choices (a garment color and a graphic at each location) the same picks as a Local sale; a price typed by hand
+  // for a role that may set one (as on a Local sale), or worked out by stitch count / screen print. The price shown
+  // here is the catalog's; the server works out the quantity break over the whole quote once the line is saved.
+  // done(line, extraLines) saves; it answers "" or the problem to show.
   const productsByOrg = {};
   async function showProductLine(orgId, item, done) {
     let products = productsByOrg[orgId];
@@ -497,16 +678,49 @@
       catch (ex) { showToast("Couldn't load the shop's products: " + ex.message, true); return; }
       productsByOrg[orgId] = products;
     }
-    const usable = products.filter(p => !p.configurable);
+    // A product with choices needs the shop's graphics (and their add-on prices) to pick from.
+    let gData = { graphics: [], tiersCents: {} }, gFailed = false;
+    if (products.some(p => p.configurable)) {
+      try { gData = await shopGraphics(orgId); }
+      catch (ex) { gFailed = true; showToast("Couldn't load the shop's graphics: " + (ex.message || "unknown error") + " Products with choices can't be quoted until they load.", true); }
+    }
+    const deco = await decoSettings();
+    const usable = products.filter(p => !(p.configurable && gFailed));
     if (!usable.length) { showToast("This shop has no products to quote. Add a custom line instead.", true); return; }
     const isSized = (p) => !!p && p.pricingMode !== "flat" && p.sizePricing && Object.keys(p.sizePricing).length > 0;
     const sizes = (p) => typeof productSizes_ === "function" ? productSizes_(p.sizePricing) : Object.keys(p.sizePricing || {});
     const canPrice = adminCan_("orders.payments", "edit");
     const was = item ? toRequest(item) : null;
+    // ---- The shop page's choices, as the Local sale draws them (admin.js drawCfg / cfgConfig_ / catalogUnit_ / basePrice_) ----
+    const gById = {}; (gData.graphics || []).forEach(g => { gById[g.id] = g; });
+    const addOnCents = (g) => (g && g.tier ? Number((gData.tiersCents || {})[g.tier]) || 0 : 0);
+    const isCfg = (p) => !!(p && p.configurable);
+    // A graphic stays pickable when its decoration was switched off since, only if this line already has it.
+    const wasPicks = new Set(((was && was.config && was.config.locations) || []).map(l => Number(l.graphicId)).filter(Boolean));
+    const decoOff = (g) => !!(deco && g.decoration && !deco.types.includes(g.decoration) && !wasPicks.has(Number(g.id)));
+    const cfgOpts = (p, loc, color) => (loc.graphicIds || []).map(id => gById[id]).filter(Boolean)
+      .filter(g => g.visible !== false && !decoOff(g))
+      .filter(g => !(g.allowedLocations && g.allowedLocations.length) || g.allowedLocations.includes(loc.key))
+      .filter(g => !(g.allowedGarmentColors && g.allowedGarmentColors.length) || !color || g.allowedGarmentColors.includes(color))
+      .filter(g => !(color && (p.blockedGraphicColors || []).some(b => Number(b.graphicId) === Number(g.id) && b.color === color)));
+    // The price before add-ons: the color's price group, else the product's own.
+    const basePrice = (p, color, size) => {
+      const grp = color ? (p.colorGroups || []).find(x => (x.colors || []).includes(color)) : null;
+      if (isSized(p)) { const v = grp && grp.sizePricing ? grp.sizePricing[size] : undefined; return typeof v === "number" ? v : Number((p.sizePricing || {})[size] || 0); }
+      return grp && typeof grp.flatPrice === "number" ? grp.flatPrice : Number(p.flatPrice || 0);
+    };
+    const customPrice = (p, loc) => loc && loc.customDesignPriceCents != null && loc.customDesignPriceCents !== "" && Number.isFinite(Number(loc.customDesignPriceCents))
+      ? Number(loc.customDesignPriceCents) / 100 : Number(p.customDesignPrice) || 0;
+    const plus = (v) => v > 0 ? ` (+${adminMoney_(v)})` : "";
+
     const { ov, close } = inventoryModal_(item ? "Change product line" : "Add a product", `
       <form id="qtProdForm" class="cust-form" novalidate>
         <label class="cust-field"><span>Product</span>
           <select id="qtProd">${usable.map(p => `<option value="${escapeHtml(p.productId)}"${was && was.productId === p.productId ? " selected" : ""}>${escapeHtml(p.name)}${p.versionGroup && p.versionLabel ? " — " + escapeHtml(p.versionLabel) : ""}${p.visible === false || p.visible === 0 || p.visible === "N" ? " (hidden)" : ""}</option>`).join("")}</select></label>
+        <div id="qtProdCfg" hidden>
+          <label class="cust-field" id="qtProdColorWrap"><span>Garment color</span><select id="qtProdColor"></select></label>
+          <div id="qtProdLocs"></div>
+        </div>
         <div class="cust-grid">
           <label class="cust-field" id="qtProdSizeWrap"><span>Size</span><select id="qtProdSize"></select></label>
           <label class="cust-field"><span>Quantity</span><input type="number" id="qtProdQty" min="1" max="${MAX_QTY}" step="1" value="${escapeHtml(was ? was.qty : 1)}"></label>
@@ -519,7 +733,8 @@
           </div>
         </div>
         ${canPrice ? `<label class="cust-check"><input type="checkbox" id="qtProdOwn"${was && was.customUnitPrice != null ? " checked" : ""}> Set the price per piece by hand (no quantity price)</label>
-        <label class="cust-field" id="qtProdOwnWrap" hidden><span>Price per piece ($)</span><input type="number" id="qtProdOwnPrice" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(was && was.customUnitPrice != null ? Number(was.customUnitPrice).toFixed(2) : "")}"></label>` : ""}
+        <label class="cust-field" id="qtProdOwnWrap" hidden><span>Price per piece ($)</span><input type="number" id="qtProdOwnPrice" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(was && was.customUnitPrice != null ? Number(was.customUnitPrice).toFixed(2) : "")}"></label>
+        <div id="qtProdDeco" hidden></div>` : ""}
         <div class="qt-preview" id="qtProdPreview" role="status"></div>
         <div class="cust-err" id="qtProdErr" role="alert"></div>
         <div class="cust-dialog-actions">
@@ -530,21 +745,105 @@
     const $ = (s) => ov.querySelector(s);
     const err = $("#qtProdErr");
     const cur = () => usable.find(p => p.productId === $("#qtProd").value) || usable[0];
+    const locSel = (key) => [...ov.querySelectorAll('select[data-qt-loc]')].find(s => s.dataset.qtLoc === key);
+    const inkSel = (key) => [...ov.querySelectorAll('select[data-qt-ink]')].find(s => s.dataset.qtInk === key);
+    const colorOf = (p) => (p.garmentColors || []).length ? $("#qtProdColor").value : "";
+    // Draws a product's color and per-location lists. `from`: where the picks to show come from — "dom" (what is
+    // drawn now, kept where it is still offered), "was" (this line as it was saved) or "none".
+    function drawCfg(from) {
+      const p = cur();
+      const box = $("#qtProdCfg");
+      if (!isCfg(p)) { box.hidden = true; $("#qtProdLocs").innerHTML = ""; return; }
+      box.hidden = false;
+      const colors = p.garmentColors || [];
+      const seed = from === "was" && was && was.productId === p.productId && was.config ? was.config : null;
+      $("#qtProdColorWrap").hidden = !colors.length;
+      if (from !== "dom") {
+        $("#qtProdColor").innerHTML = colors.map(c => `<option value="${escapeHtml(c)}"${seed && seed.garmentColor === c ? " selected" : ""}>${escapeHtml(c)}</option>`).join("");
+      }
+      const color = colorOf(p);
+      const prev = {}, prevInk = {};
+      if (from === "dom") for (const loc of (p.locations || [])) { const s = locSel(loc.key), k = inkSel(loc.key); if (s) prev[loc.key] = s.value; if (k) prevInk[loc.key] = k.value; }
+      if (seed) for (const l of (seed.locations || [])) { if (l.auto || l.fixed || l.location === "reorderqr") continue; prev[l.location] = l.custom || l.graphicId === "custom" ? "custom" : String(l.graphicId == null ? "" : l.graphicId); prevInk[l.location] = l.ink || ""; }
+      const locs = p.locations || [];
+      const fixed = (p.fixedTransfers || []).length > 0;
+      $("#qtProdLocs").innerHTML = locs.map((loc, i) => {
+        const options = cfgOpts(p, loc, color);
+        const custom = !!p.customDesign;
+        // One location and nothing fixed: there's nothing to leave blank, so no None and the first is picked.
+        const onlyLoc = locs.length === 1 && (options.length > 0 || custom) && !fixed;
+        const ids = [...options.map(g => String(g.id)), ...(custom ? ["custom"] : [])];
+        const value = prev[loc.key] != null && (prev[loc.key] === "" ? !onlyLoc : ids.includes(prev[loc.key])) ? prev[loc.key] : (onlyLoc ? (ids[0] || "") : "");
+        const g = value && value !== "custom" ? gById[value] : null;
+        const inks = g && Array.isArray(g.inkColors) && g.inkColors.length > 1 ? g.inkColors : [];
+        const ink = inks.includes(prevInk[loc.key]) ? prevInk[loc.key] : (inks[0] || "");
+        return `<label class="cust-field"><span>${escapeHtml(loc.label || loc.key)}</span>
+          <select data-qt-loc="${escapeHtml(loc.key)}" id="qtProdLoc${i}">
+            ${onlyLoc ? "" : `<option value=""${value === "" ? " selected" : ""}>None</option>`}
+            ${options.map(o => `<option value="${o.id}"${String(o.id) === value ? " selected" : ""}>${escapeHtml(o.name)}${plus(addOnCents(o) / 100)}</option>`).join("")}
+            ${custom ? `<option value="custom"${value === "custom" ? " selected" : ""}>Customer's own design${plus(customPrice(p, loc))}</option>` : ""}
+          </select></label>
+          <label class="cust-field"${inks.length ? "" : " hidden"}><span class="qt-sr">Thread color for ${escapeHtml(loc.label || loc.key)}</span>
+            <select data-qt-ink="${escapeHtml(loc.key)}" aria-label="Thread color for ${escapeHtml(loc.label || loc.key)}">
+              ${inks.map(c => `<option value="${escapeHtml(c)}"${c === ink ? " selected" : ""}>${escapeHtml(c)}</option>`).join("")}
+            </select></label>`;
+      }).join("");
+    }
+    // The line's choices as the shop's page sends them: { garmentColor, locations: [{location, graphicId, ink} | {location, custom: true}] }.
+    function cfgConfig(p) {
+      const locations = [];
+      for (const loc of (p.locations || [])) {
+        const v = (locSel(loc.key) || {}).value || "";
+        if (!v) continue;
+        if (v === "custom") { locations.push({ location: loc.key, custom: true }); continue; }
+        const g = gById[v], k = inkSel(loc.key);
+        const ink = k && !k.closest("label").hidden ? k.value : (g && Array.isArray(g.inkColors) && g.inkColors.length === 1 ? g.inkColors[0] : "");
+        locations.push({ location: loc.key, graphicId: Number(v), ink });
+      }
+      return { garmentColor: colorOf(p), locations };
+    }
+    // What one piece costs before personalization: the color's price (or the size's) plus the add-ons.
+    function catalogUnit(p) {
+      const size = isSized(p) ? $("#qtProdSize").value : "";
+      if (isCfg(p)) {
+        const c = cfgConfig(p);
+        let u = basePrice(p, c.garmentColor, size);
+        for (const l of c.locations) u += l.custom ? customPrice(p, (p.locations || []).find(x => x.key === l.location)) : addOnCents(gById[l.graphicId]) / 100;
+        return u;
+      }
+      return isSized(p) ? Number((p.sizePricing || {})[size]) || 0 : Number(p.flatPrice) || 0;
+    }
+    // The size list, priced for the color chosen; the size picked stays picked.
+    function drawSizes(p, keepSize) {
+      const sel = $("#qtProdSize"), before = keepSize || sel.value;
+      const color = isCfg(p) ? colorOf(p) : "";
+      sel.innerHTML = sizes(p).map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)} — ${adminMoney_(basePrice(p, color, s))}</option>`).join("");
+      if (before && [...sel.options].some(o => o.value === before)) sel.value = before;
+    }
     function preview() {
       const p = cur(); if (!p) return;
-      const list = isSized(p) ? Number((p.sizePricing || {})[$("#qtProdSize").value]) || 0 : Number(p.flatPrice) || 0;
+      const list = catalogUnit(p);
       const own = $("#qtProdOwn") && $("#qtProdOwn").checked;
       const pers = p.personalizationPrice != null && $("#qtProdPers").checked ? Number(p.personalizationPrice) || 0 : 0;
       const breaks = Array.isArray(p.qtyBreaks) ? p.qtyBreaks.filter(b => Number(b.minQty) > 1 && Number(b.off) > 0) : [];
-      const parts = [own ? "Price set by hand." : `Catalog price ${adminMoney_(list)} each${pers ? " + " + adminMoney_(pers) + " personalization" : ""}.`];
+      const parts = [own ? "Price set by hand." : `Catalog price ${adminMoney_(list)} each${isCfg(p) ? " with the choices above" : ""}${pers ? " + " + adminMoney_(pers) + " personalization" : ""}.`];
       if (!own && breaks.length) parts.push("Quantity prices: " + breaks.map(b => `${Number(b.minQty)}+ pieces, ${adminMoney_(b.off)} off each`).join("; ") + " — counted across every line of this product on the quote.");
       $("#qtProdPreview").textContent = parts.filter(Boolean).join(" ");
     }
+    const tools = decoTools($("#qtProdDeco"), deco, {
+      // What a piece costs now: the price typed by hand, else the catalog's with the choices.
+      getPrice: () => { const own = $("#qtProdOwn").checked ? dollars($("#qtProdOwnPrice").value) : NaN; return isNaN(own) ? catalogUnit(cur()) : own; },
+      setPrice: (v) => { const c = $("#qtProdOwn"); c.checked = true; $("#qtProdOwnPrice").value = v; ownToggle(); $("#qtProdOwnPrice").dispatchEvent(new Event("input", { bubbles: true })); },
+      catalog: () => catalogUnit(cur()),
+      stitches: () => designStitches(cur().designId),
+    });
     function forProduct(keep) {
       const p = cur(); if (!p) return;
       const sized = isSized(p);
+      drawCfg(keep ? "was" : "none");
       $("#qtProdSizeWrap").hidden = !sized;
-      $("#qtProdSize").innerHTML = sized ? sizes(p).map(s => `<option value="${escapeHtml(s)}"${keep && was && was.size === s ? " selected" : ""}>${escapeHtml(s)} — ${adminMoney_(Number(p.sizePricing[s]) || 0)}</option>`).join("") : "";
+      $("#qtProdSize").innerHTML = "";
+      if (sized) drawSizes(p, keep && was ? was.size : "");
       const hasPers = p.personalizationPrice != null;
       $("#qtProdPersWrap").hidden = !hasPers;
       $("#qtProdPersPrice").textContent = hasPers ? "(+" + adminMoney_(Number(p.personalizationPrice) || 0) + " each)" : "";
@@ -559,11 +858,16 @@
         else $("#qtProdPersName").value = was.persName || "";
       } else $("#qtProdPersName").value = "";
       preview();
+      tools.prefill();
     }
-    const ownToggle = () => { if ($("#qtProdOwn")) $("#qtProdOwnWrap").hidden = !$("#qtProdOwn").checked; preview(); };
+    function ownToggle() { if ($("#qtProdOwn")) $("#qtProdOwnWrap").hidden = !$("#qtProdOwn").checked; preview(); }
     forProduct(true); ownToggle();
     $("#qtProd").addEventListener("change", () => forProduct(false));
     $("#qtProdSize").addEventListener("change", preview);
+    // A color changes the graphics offered and the price of every size; what is still offered stays picked.
+    $("#qtProdColor").addEventListener("change", () => { const p = cur(); drawCfg("dom"); if (isSized(p)) drawSizes(p); preview(); });
+    // A graphic changes its thread colors and the price (its add-on).
+    $("#qtProdLocs").addEventListener("change", () => { drawCfg("dom"); preview(); });
     $("#qtProdPers").addEventListener("change", () => { $("#qtProdPersFields").hidden = !$("#qtProdPers").checked; preview(); });
     if ($("#qtProdOwn")) $("#qtProdOwn").addEventListener("change", ownToggle);
     $("#qtProdCancel").onclick = () => ov.querySelector("[data-modal-close]").click();
@@ -574,6 +878,7 @@
       const qty = wholeNum($("#qtProdQty").value);
       if (!(qty >= 1 && qty <= MAX_QTY)) { err.textContent = `Enter a quantity from 1 to ${MAX_QTY.toLocaleString("en-US")}.`; $("#qtProdQty").focus(); return; }
       const line = { kind: "product", productId: p.productId, size: isSized(p) ? $("#qtProdSize").value : "OSFA", qty, personalized: false, persName: "" };
+      if (isCfg(p)) line.config = cfgConfig(p);
       if (p.personalizationPrice != null && $("#qtProdPers").checked) {
         line.personalized = true;
         line.persName = $("#qtProdPersName").value.trim() || (!$("#qtProdPersOptWrap").hidden ? $("#qtProdPersOpt").value : "");
@@ -587,18 +892,19 @@
         line.customUnitPrice = was.customUnitPrice;
       }
       $("#qtProdSave").disabled = true; err.textContent = "";
-      const problem = await done(line);
+      const problem = await done(line, tools.extra());
       if (!ov.isConnected) return;
       if (problem) { err.textContent = problem; $("#qtProdSave").disabled = false; return; }
       close();
     });
   }
 
-  // Add or change a custom line (a description, quantity and price per piece) or a fee (setup, digitizing, art or
-  // other: a one-time amount). Either can be taxed or not — sales tax on a fee depends on where the shop is.
-  function showOtherLine(kind, item, done) {
+  // Add or change a custom line (a description, quantity and price per piece, which the stitch-count and screen print
+  // helpers can work out) or a fee (setup, digitizing, art or other: a one-time amount). Either can be taxed or not — sales tax on a fee depends on where the shop is.
+  async function showOtherLine(kind, item, done) {
     const fee = kind === "fee";
     const was = item ? toRequest(item) : null;
+    const deco = fee ? null : await decoSettings();
     const { ov, close } = inventoryModal_(fee ? (item ? "Change fee" : "Add a fee") : (item ? "Change custom line" : "Add a custom line"), `
       <form id="qtOtherForm" class="cust-form" novalidate>
         ${fee ? `<label class="cust-field"><span>Kind of fee</span><select id="qtOtherKind">${FEE_KINDS.map(([k, l]) => `<option value="${k}"${was && was.feeKind === k ? " selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}
@@ -607,6 +913,7 @@
           ${fee ? "" : `<label class="cust-field"><span>Quantity</span><input type="number" id="qtOtherQty" min="1" max="${MAX_QTY}" step="1" value="${escapeHtml(was ? was.qty : 1)}"></label>`}
           <label class="cust-field"><span>${fee ? "Amount ($)" : "Price per piece ($)"}</span><input type="number" id="qtOtherPrice" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(was ? Number(fee ? was.amount : was.unitPrice).toFixed(2) : "")}"></label>
         </div>
+        ${fee ? "" : `<div id="qtOtherDeco" hidden></div>`}
         <label class="cust-check"><input type="checkbox" id="qtOtherTax"${!was || was.taxable ? " checked" : ""}> Subject to sales tax</label>
         <div class="cust-err" id="qtOtherErr" role="alert"></div>
         <div class="cust-dialog-actions">
@@ -616,6 +923,10 @@
       </form>`, 480, { guard: true });
     const $ = (s) => ov.querySelector(s);
     const err = $("#qtOtherErr");
+    const tools = fee ? { extra: () => [] } : decoTools($("#qtOtherDeco"), deco, {
+      getPrice: () => dollars($("#qtOtherPrice").value),
+      setPrice: (v) => { $("#qtOtherPrice").value = v; $("#qtOtherPrice").dispatchEvent(new Event("input", { bubbles: true })); },
+    });
     $("#qtOtherCancel").onclick = () => ov.querySelector("[data-modal-close]").click();
     (fee ? $("#qtOtherKind") : $("#qtOtherName")).focus();
     $("#qtOtherForm").addEventListener("submit", async (e) => {
@@ -634,7 +945,7 @@
         line = { kind: "custom", name, qty, unitPrice: price, taxable: $("#qtOtherTax").checked };
       }
       $("#qtOtherSave").disabled = true; err.textContent = "";
-      const problem = await done(line);
+      const problem = await done(line, tools.extra());
       if (!ov.isConnected) return;
       if (problem) { err.textContent = problem; $("#qtOtherSave").disabled = false; return; }
       close();

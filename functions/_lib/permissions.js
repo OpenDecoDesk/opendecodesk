@@ -39,8 +39,8 @@ export const PERMISSION_AREAS = [
     { hash: "discounts", label: "Discount codes", fns: [["discounts.codes", "Discount codes"], ["discounts.campaigns", "Email campaigns"]] } ] },
   { key: "runorder", label: "Run Order", items: [
     { hash: "runorder", label: "Run Order", fns: [["run.queue", "Production queue"], ["run.runs", "Start, finish and abort runs"], ["run.markMade", "Mark pieces made"]] } ] },
-  { key: "runtransfer", label: "Run Transfer Sheets", items: [
-    { hash: "runtransfer", label: "Run Transfer Sheets", fns: [["transfer.queue", "Transfer queue and gang sheets"], ["transfer.mark", "Mark received, applied and made"]] } ] },
+  { key: "runtransfer", label: "Run Order: DTF transfers", items: [
+    { hash: "runtransfer", label: "DTF transfers on Run Order", fns: [["transfer.queue", "Transfer queue and gang sheets"], ["transfer.mark", "Mark received, applied and made"]] } ] },
   { key: "catalog", label: "Catalog", items: [
     { hash: "catalog", label: "Manage catalog", fns: [["catalog.products", "Products"], ["catalog.productFiles", "Digital product files"]] },
     { hash: "setup", label: "Shop setup", fns: [["catalog.shops", "Shops, domains and publishing"]] },
@@ -56,7 +56,8 @@ export const PERMISSION_AREAS = [
     { hash: "machinefiles", label: "Machine files", fns: [["production.machinefiles", "Machine files"]] },
     { hash: "hoops", label: "Hoops", fns: [["production.hoops", "Hoops"]] },
     { hash: "threads", label: "Threads", fns: [["production.threads", "Threads, spools and needles"]] },
-    { hash: "abortreasons", label: "Abort reasons", fns: [["production.abortreasons", "Abort reasons"]] } ] },
+    { hash: "abortreasons", label: "Abort reasons", fns: [["production.abortreasons", "Abort reasons"]] },
+    { hash: "digitizing", label: "Outside digitizing", fns: [["production.digitizing", "Designs sent to an outside digitizer, and their cost"]] } ] },
   { key: "inventory", label: "Inventory", items: [
     { hash: "inventory", label: "Blanks", fns: [["inventory.blanks", "Blank stock"]] },
     { hash: "blankorder", label: "Blanks to order", fns: [["inventory.blankorder", "Blanks to order and restocks"], ["inventory.supplierOrders", "Order from suppliers"]] },
@@ -150,9 +151,12 @@ const BY_FN = {
     read: ["getCampaignStatus", "listCampaigns", "getCampaign", "previewAudience"],
     edit: ["saveCampaign", "copyCampaign", "sendCampaignTest", "runCampaignQueue"],
     full: ["scheduleCampaign", "cancelCampaign", "deleteCampaign"] },
-  "run.queue": { read: ["getProductionQueue", "listActiveRuns", "getRunStats", "getBlankReadyCounts"] },
+  // The one Run order (phase 5) shows every decoration type's work: getRunQueue opens for either half (run.queue, or
+  // transfer.queue through ALSO below) and leaves out the half a role has none of. Starting and finishing a line that
+  // is screen printed, vinyl, DTG or sublimated is Mark made's, as embroidery's pieces are.
+  "run.queue": { read: ["getProductionQueue", "getRunQueue", "listActiveRuns", "getRunStats", "getBlankReadyCounts"] },
   "run.runs": { edit: ["startRun", "completeRun", "abortRun", "markHoopingDone"] },
-  "run.markMade": { edit: ["markManufacturedOnMachine"] },
+  "run.markMade": { edit: ["markManufacturedOnMachine", "setDecorationStarted", "makeDecoratedLine"] },
   "transfer.queue": { read: ["getTransferQueue", "getGangSheet"] },
   "transfer.mark": { edit: ["setTransferReceived", "setTransfersApplied", "makeTransferLine"] },
   "catalog.products": {
@@ -184,6 +188,9 @@ const BY_FN = {
     edit: ["saveThread", "importThreadChart", "saveSpoolSize", "saveThreadInventory", "saveNeedleSize", "saveNeedleType"],
     full: ["deleteThread", "deleteSpoolSize", "deleteThreadInventory", "deleteNeedleSize", "deleteNeedleType"] },
   "production.abortreasons": { read: ["listAbortReasons"], edit: ["saveAbortReason"], full: ["deleteAbortReason"] },
+  // Designs sent out to be digitized (migrations/0118): who it went to, when, what it cost. Recording its cost as an
+  // expense also needs Expenses Edit (saveDigitizingJob asks for it itself). Deleting a record is Full's.
+  "production.digitizing": { read: ["listDigitizingJobs"], edit: ["saveDigitizingJob"], full: ["deleteDigitizingJob"] },
   "inventory.blanks": {
     read: ["getInventory", "getBlanks", "getBlankMovements", "getBlankVendorPriceHistory", "getBlankLinks", "getReadyToShip", "getFinishedGoodsMovements",
       "previewBlankCatchUp", "previewVendorBlanks", "suggestColorGroups", "listVendorConnections", "fetchVendorProducts"],
@@ -228,10 +235,10 @@ const BY_FN = {
   "reports.taxpacket": { read: ["getTaxPacketExtras"] },
   "settings.global": {
     read: ["getGlobalSettings", "getFeatures", "getBusinessProfile", "getLocaleSettings", "getSalesTaxSettings", "getShipFromAddress", "getSetupStatus",
-      "getRushSettings", "getEmailSettings", "getDigitalSettings", "previewCustomerEmail", "samplePdf", "getAccountingSettings"],
+      "getRushSettings", "getEmailSettings", "getDecorationSettings", "getDigitalSettings", "previewCustomerEmail", "samplePdf", "getAccountingSettings"],
     edit: ["saveGlobalSettingsAll", "updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "updateLocaleSettings", "updateSalesTaxSettings", "updateShipFromAddress",
       "updateAccountingSettings", "updateMachineSettings", "updatePricingSettings", "updateRushSettings", "updateEmailSettings",
-      "sendSampleEmail", "sendTestEmail", "checkMailbox", "updateDigitalSettings", "getCloudflareSetup", "connectCloudflare", "backfillStripeFees"] },
+      "updateDecorationSettings", "sendSampleEmail", "sendTestEmail", "checkMailbox", "updateDigitalSettings", "getCloudflareSetup", "connectCloudflare", "backfillStripeFees"] },
   "settings.vendors": {
     read: ["vendorDirectorySearch", "vendorDirectoryEndpoints"],
     edit: ["saveVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks"],
@@ -273,6 +280,17 @@ const ALSO = {
   getBlanks: [["orders.stepsEarly", "read"], ["run.queue", "read"]],
   getBlankLinks: [["orders.details", "read"]],   // an order row says which blanks it uses
   getProductionQueue: [["transfer.queue", "read"]],
+  getRunQueue: [["transfer.queue", "read"]],
+  // Decoration types (Global settings → Decoration types): every screen that offers or labels a type reads the list —
+  // the product and graphic forms, quotes, the Local sale, the Run order, the Transfers and Vendors pages.
+  getDecorationSettings: [["catalog.products", "read"], ["catalog.graphics", "read"], ["orders.details", "read"], ["quotes.estimates", "read"],
+    ["run.queue", "read"], ["transfer.queue", "read"], ["inventory.transfers", "read"], ["inventory.blankorder", "read"], ["production.machines", "read"]],
+  // What a decoration costs the customer (stitch count, screen print colours, a printed transfer): the quote editor,
+  // the Local sale and a product's form ask for it. Prices only; costs never come back from it.
+  priceDecoration: [["quotes.estimates", "read"], ["orders.details", "edit"], ["catalog.products", "read"]],
+  // An order's or a quote's digitizing jobs show where they are used; the form picks the vendor from the vendor list.
+  listDigitizingJobs: [["orders.details", "read"], ["quotes.estimates", "read"]],
+  listVendors: [["production.digitizing", "edit"]],
 };
 
 // action → [[fn, level], ...] (any one is enough), or "*" (anyone signed in).
@@ -298,6 +316,7 @@ const STAFF_FNS = only_({
   "orders.details": "edit", "orders.stepsEarly": "edit", "orders.stepsLate": "edit", "orders.shipping": "edit", "orders.payments": "edit", "orders.invoices": "edit",
   "customers.records": "edit", "quotes.estimates": "edit", "discounts.codes": "read",
   "run.queue": "read", "run.runs": "edit", "run.markMade": "edit", "transfer.queue": "read", "transfer.mark": "edit",
+  "production.digitizing": "edit",
   "catalog.products": "edit", "catalog.designs": "edit", "catalog.graphics": "edit", "catalog.categories": "edit", "catalog.locations": "edit",
   "production.machines": "edit", "production.maintenance": "edit", "production.maintenanceLog": "edit", "production.machinefiles": "edit",
   "production.hoops": "edit", "production.threads": "edit", "production.abortreasons": "edit",
@@ -310,7 +329,7 @@ const PRODUCTION_FNS = only_({
   "customers.records": "read",
   "run.queue": "read", "run.runs": "edit", "run.markMade": "edit", "transfer.queue": "read", "transfer.mark": "edit",
   "production.machines": "read", "production.maintenance": "read", "production.maintenanceLog": "edit", "production.machinefiles": "read",
-  "production.hoops": "read", "production.threads": "read", "production.abortreasons": "read",
+  "production.hoops": "read", "production.threads": "read", "production.abortreasons": "read", "production.digitizing": "read",
 });
 // rank: who may change whom (admin-users.js): only a higher rank lowers, raises or edits a lower one.
 export const DEFAULT_ROLES = {

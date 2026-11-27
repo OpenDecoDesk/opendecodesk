@@ -61,6 +61,7 @@ public/storefront.js      the storefront page's script
 public/admin.js           the admin panel (loaded only on the admin host)
 public/admin-customers.js the admin's Customers page (loaded by admin.js the first time it is opened)
 public/admin-quotes.js    the admin's Quotes page (loaded the same way)
+public/admin-digitizing.js  the outside-digitizing records on an order and a quote (loaded the same way)
 public/admin.css          the admin panel's styles (loaded with admin.js)
 public/_headers           security headers and cache rules for every response
 public/vendor/pdfjs-5.6.205/  Mozilla's pdf.js, vendored, for reading vendor invoices
@@ -89,6 +90,8 @@ functions/api/            one file per endpoint
 
 functions/_lib/           shared code
   db.js                     every database query, and all money arithmetic
+  (db.js also holds)        the decoration types (the registry), their price rules, and what a graphic or
+                            order line is decorated with: pure, no database
   hostConfig.js             which host is this (admin / shop / root / unknown)
   catalogCache.js           the cached catalog
   adminAuth.js, access.js, totp.js   sign-in, sessions, Cloudflare Access, two-step codes
@@ -158,11 +161,32 @@ About fifty tables (`schema.sql`). The main groups:
 - **Inventory** — `blanks`, `blank_colors`, `blank_sizes`, `inventory_movements`; `transfers`,
   `transfer_movements`.
 - **Production** — `threads`, `hoops`, `designs`, `design_versions`, `machines`, `production_runs`.
+- **Decoration types** (migration 0118) — which types the shop does and their prices are two
+  `global_settings` values, `decorationTypes` (a list of keys) and `decorationPricing` (an object); the
+  types themselves are in code, not a table (`functions/_lib/db.js`: embroidery, dtf,
+  screenprint, vinyl, dtg, sublimation). `graphics.decoration` says what a transfer graphic is printed
+  by (empty means DTF), `products.decorationType` is a product's choice (empty means worked out from its
+  design and transfers: `productDecoration_` in `db.js`), and each location of an order line's saved
+  `config` carries its `decoration` (`locationDecoration_` reads old lines that have none).
+  `order_items.decStartedAt` and `decMadeAt` are the Start and Mark made of a screen print, vinyl, DTG or
+  sublimation line (embroidered lines use the run's own tracking, DTF lines `transfersAppliedAt`).
+  **The Run order** is one call, `getRunQueue` in `db.js`: the embroidery queue and the DTF transfer queue
+  exactly as `getProductionQueue` and `getTransferQueue` answer them, plus an `other` list of cards for
+  the remaining types and a count per type. The page sorts and filters those lists in the browser.
+  A card is shown while its line is cleared for work and still to do; a switched-off type's cards stay
+  until the work is done. Prices come from `priceDecoration` (pure, whole cents), which the
+  `priceDecoration` admin action serves to the quote editor and the product form.
+- **Outside digitizing** (migration 0118) — `digitizing_jobs` (what was sent, to which vendor, sent and
+  returned dates, the cost in cents, the order, line, design or quote it is for, and the expense recorded
+  for its cost). Deleting one sets `deletedAt`; a job whose expense still exists can't be deleted until
+  that expense is. `vendors.forDigitizing` marks the vendors offered first, and `expenses.orderId` ties
+  an expense to the order it was for.
 - **Bookkeeping** — `expenses`, `expense_categories`, `accounts`, `account_transfers`,
   `other_income`, `owner_transactions`, `statement_lines`, `statement_matches`, `reconciliations`,
   `closed_periods`.
 - **Platform** — `global_settings`, `admin_sessions`, `rate_limits`, `audit_log`, `stripe_events`,
-  `owner_notices`.
+  `owner_notices` (its `kind` list includes `quote`, which the morning roll-up shows as "Quote";
+  migration 0119).
 
 Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code keeps them):
 

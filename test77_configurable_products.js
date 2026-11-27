@@ -15,7 +15,7 @@ const lib = new Function(dbSrc + `\nreturn { insertOrder, priceItem, createProdu
   createTransfer, receiveTransferSheet, createGraphic, setTierPrices, setOrgReorderQr, getOrderById, setOrderPaid,
   createHoop, saveDesign, addDesignVersion, getProductionQueue, pricingError_ };`)();
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'test';\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'test'; " + require("./testlib/roles").adminAs() + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +
@@ -172,8 +172,8 @@ const near = (a, b) => Math.abs(a - b) < 0.005;
 
   console.log("\n=== admin.js + storefront wiring ===");
   const a = read("public/admin.js");
-  ok("admin nav + routes: Transfers, Run Transfer Sheets, Graphics",
-    /\["transfers", "Transfers"\]/.test(a) && /\["runtransfer", "Run Transfer Sheets"\]/.test(a) && /raw === "transfers"/.test(a) &&
+  ok("admin nav + routes: Transfers, Run Order, Graphics",
+    /\["transfers", "Transfers"\]/.test(a) && /\["runorder", "Run Order"\]/.test(a) && /raw === "transfers"/.test(a) &&
     /raw === "runtransfer"/.test(a) && /graphicsMatch/.test(a) && /location\.hash='#graphics\/'/.test(a));
   ok("admin screens exist", /async function renderTransfers/.test(a) && /async function renderGraphics/.test(a) &&
     /async function renderRunTransfer/.test(a) && /function showReceiveTransferModal_/.test(a) && /function loadProductConfigSection/.test(a) && /function loadOrgTierBox_/.test(a));

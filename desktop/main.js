@@ -196,6 +196,13 @@ function startTrackingChecks() {
   };
   setTimeout(run, 60 * 1000);
   setInterval(run, TRACKING_EVERY_MS);
+  // Email campaigns: every minute while email is set up (and the program is open), the queue sends its next few. A
+  // campaign scheduled while the program was closed starts at the first run after it opens.
+  setInterval(async () => {
+    if (!server || busy || !server.emailSettings() || typeof server.runCampaigns !== "function") return;
+    try { await server.runCampaigns(); }
+    catch (e) { log("Email campaigns run failed: " + ((e && e.stack) || e)); }
+  }, 60 * 1000);
 }
 
 async function backUp() {

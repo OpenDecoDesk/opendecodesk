@@ -29,15 +29,15 @@ const OFF = "Discount codes is turned off. Turn it on under Settings → Global 
 const LOCKED = "This code has been used — you can change its expiry, uses, note or switch it off.";
 const USED_NO_DELETE = "This code has been used, so it can't be deleted — switch it off instead.";
 const NOT_READY_DB = "Discount codes need the latest database update. Apply the migrations, then try again.";
-const CODE_KEYS = "active,amount,code,createdAt,createdBy,email,expiresOn,id,kind,label,maxUses,note,oncePerEmail,orgId,orgName,percent,status,used";
+const CODE_KEYS = "active,amount,code,createdAt,createdBy,email,expiresOn,id,kind,label,maxDiscount,maxUses,note,oncePerEmail,orgId,orgName,percent,status,used";
 const ordersJs = read("functions/api/orders.js");
 
 (async () => {
   console.log("=== The permission (functions/_lib/permissions.js) and orders.js's lists ===");
   {
     const at = roles.PERMISSION_AREAS.findIndex(a => a.key === "discounts");
-    ok("there is a Discount codes area with one page (#discounts) and one function, discounts.codes \"Discount codes\"",
-      at >= 0 && same(roles.PERMISSION_AREAS[at], { key: "discounts", label: "Discount codes", items: [{ hash: "discounts", label: "Discount codes", fns: [["discounts.codes", "Discount codes"]] }] }));
+    ok("there is a Discount codes area with one page (#discounts): discounts.codes \"Discount codes\", and its Email campaigns tab's discounts.campaigns (migrations/0117)",
+      at >= 0 && same(roles.PERMISSION_AREAS[at], { key: "discounts", label: "Discount codes", items: [{ hash: "discounts", label: "Discount codes", fns: [["discounts.codes", "Discount codes"], ["discounts.campaigns", "Email campaigns"]] }] }));
     ok("…placed right after Quotes", at > 0 && roles.PERMISSION_AREAS[at - 1].key === "quotes");
     ok("the function is on the Roles screen's list once", roles.PERM_FUNCTIONS.filter(f => f === "discounts.codes").length === 1);
     const perm = (a) => roles.ACTION_PERM[a];
@@ -57,7 +57,7 @@ const ordersJs = read("functions/api/orders.js");
       stored.fns["discounts.codes"] === "none" && SIX.every(a => !P.roleAllows({ key: "r_old", permissions: stored }, P.ACTION_PERM[a])));
     const featureLists = {};
     for (const m of ordersJs.match(/const FEATURE_ACTIONS = \{([\s\S]*?)\n\};/)[1].matchAll(/\n  (\w+): \[([\s\S]*?)\],/g)) featureLists[m[1]] = [...m[2].matchAll(/"(\w+)"/g)].map(x => x[1]);
-    ok("the six actions, and only they, are listed under the discounts feature switch", same([...(featureLists.discounts || [])].sort(), [...SIX].sort()));
+    ok("the six actions, and the Local sale's code check, are listed under the discounts feature switch", same([...(featureLists.discounts || [])].sort(), [...SIX, "checkLocalSaleCode"].sort()));
     ok("…and under no other switch", Object.entries(featureLists).filter(([k]) => k !== "discounts").every(([, l]) => SIX.every(a => !l.includes(a))));
     const noMonth = [...ordersJs.match(/const NO_MONTH_ACTIONS = new Set\(\[([\s\S]*?)\]\);/)[1].matchAll(/"(\w+)"/g)].map(m => m[1]);
     ok("the four writes change no month's numbers (NO_MONTH_ACTIONS): a code is no sale", WRITES.every(a => noMonth.includes(a)));
@@ -198,7 +198,7 @@ const ordersJs = read("functions/api/orders.js");
     ok("…made by the signed-in person", save10.createdBy === "olive@example.com" && /^\d{4}-\d{2}-\d{2}T/.test(save10.createdAt));
     ok("…one audit row discount_code.created, no shop, no order, with the code's settings and never its uses",
       r.rows.length === 1 && r.rows[0].action === "discount_code.created" && r.rows[0].orgId === null && r.rows[0].orderId === null &&
-      same(r.rows[0].detail, { id: save10.id, code: "SAVE10", kind: "percent", percent: 10, amount: null, orgId: null, email: "", maxUses: 50, oncePerEmail: true,
+      same(r.rows[0].detail, { id: save10.id, code: "SAVE10", kind: "percent", percent: 10, amount: null, maxDiscount: null, orgId: null, email: "", maxUses: 50, oncePerEmail: true,
         expiresOn: null, active: true, note: "Spring sale" }));
 
     r = await logged({ action: "saveDiscountCode", code: { code: "PAT5", kind: "amount", amount: 5, orgId: "acme", email: " Pat@Example.com ", maxUses: 40, oncePerEmail: true, expiresOn: "2099-06-30" } }, manager);
@@ -427,7 +427,7 @@ const ordersJs = read("functions/api/orders.js");
       r.status === 200 && same(r.body, { status: "ok" }) && codeRow("PAT5") === null);
     ok("…one audit row discount_code.deleted for its shop, with what the code was",
       r.rows.length === 1 && r.rows[0].action === "discount_code.deleted" && r.rows[0].orgId === "acme" &&
-      same(r.rows[0].detail, { id: pat5.id, code: "PAT5", kind: "amount", percent: null, amount: 6, orgId: "acme", email: "pat@example.com", maxUses: 1,
+      same(r.rows[0].detail, { id: pat5.id, code: "PAT5", kind: "amount", percent: null, amount: 6, maxDiscount: null, orgId: "acme", email: "pat@example.com", maxUses: 1,
         oncePerEmail: false, expiresOn: null, active: true, note: "" }));
     ok("deleting it again: 404", refused(await call({ action: "deleteDiscountCode", id: pat5.id }, manager), 404, NOT_FOUND));
 

@@ -181,7 +181,7 @@ const hits = (re, s) => (s.match(re) || []);
   const sfActions = [...new Set([...sf.matchAll(/data-action="([^"$]+)"/g)].map(m => m[1]))];
   const sfChanges = [...new Set([...sf.matchAll(/data-change="([^"$]+)"/g)].map(m => m[1]))];
   ok("every data-action in storefront.js is handled by its click listener", sfActions.length >= 10 && sfActions.every(a => sf.includes(`a === "${a}"`)));
-  ok("every data-change in storefront.js is handled by its change listener", sfChanges.length === 4 && sfChanges.every(a => sf.includes(`ch === "${a}"`)));
+  ok("every data-change in storefront.js is handled by its change listener", sfChanges.length === 5 && sfChanges.every(a => sf.includes(`ch === "${a}"`)));
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

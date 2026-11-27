@@ -147,6 +147,8 @@ import {
 import { verifyQuote, canonicalItems } from "../_lib/quoteToken.js";
 import { selectBox } from "../_lib/boxSize.js";
 import { verifyTurnstile } from "../_lib/turnstile.js";
+import { setMarketingChoice, getMarketingChoice, campaignAudience, listCampaigns, getCampaign, saveCampaign, copyCampaign, deleteCampaign, scheduleCampaign,
+  cancelCampaign, sendCampaignTest, runCampaignQueue, cleanDiscount, AUDIENCE_MAX, CAMPAIGNS_NOT_READY } from "../_lib/campaigns.js";
 // Payments, refunds and money integrity (kept apart from the long list above).
 import { expireCheckoutSession, createCheckoutSession, CHECKOUT_LINK_SECONDS, listCacheVersions_, readCachedList_, refreshCachedLists_, peekCachedList_, blankListDelta_ } from "../_lib/db.js";
 
@@ -565,6 +567,9 @@ const NO_MONTH_ACTIONS = new Set([
   "createEstimate", "saveEstimate", "sendEstimate", "cancelEstimate",
   // Discount codes (migrations/0115): a code is no sale. What one takes off is booked on the order it was used on.
   "saveDiscountCode", "createDiscountCodes", "setDiscountCodeActive", "deleteDiscountCode",
+  "checkLocalSaleCode",   // only checks a code for the Local sale window (the sale itself is createLocalSale's)
+  // Email campaigns (migrations/0117): marketing email is no sale; a code a campaign makes is booked where it is used.
+  "saveCampaign", "copyCampaign", "deleteCampaign", "sendCampaignTest", "scheduleCampaign", "cancelCampaign", "runCampaignQueue", "setMarketingOptOut",
   // Run Order and transfer sheets
   "startRun", "completeRun", "abortRun", "markManufacturedOnMachine", "setTransferReceived", "setTransfersApplied",
   // Catalog and shops
@@ -694,6 +699,12 @@ const FEATURE_ACTIONS = {
   // switch themselves (they are the customer's side, not admin actions).
   discounts: [
     "listDiscountCodes", "getDiscountCode", "saveDiscountCode", "createDiscountCodes", "setDiscountCodeActive", "deleteDiscountCode",
+    "checkLocalSaleCode",
+  ],
+  // Email campaigns (migrations/0117). The checkout's and Local sale's box check the same switch themselves.
+  emailCampaigns: [
+    "getCampaignStatus", "listCampaigns", "getCampaign", "previewAudience", "saveCampaign", "copyCampaign", "deleteCampaign",
+    "sendCampaignTest", "scheduleCampaign", "cancelCampaign", "runCampaignQueue", "setMarketingOptOut",
   ],
 };
 const ACTION_FEATURE = {};
@@ -710,7 +721,7 @@ const DESKTOP_REFUSED_ACTIONS = new Set([
 const DESKTOP_REFUSED_MSG = "This needs the internet, so it isn't part of the desktop version.";
 // …and sending email: refused until the owner sets up their mailbox in the program (hostConfig.js
 // desktopEmailOn). An invoice is then the email itself, with no page to pay on (sendInvoice below).
-const DESKTOP_EMAIL_ACTIONS = new Set(["sendTestEmail", "resendEmail", "sendInvoice"]);
+const DESKTOP_EMAIL_ACTIONS = new Set(["sendTestEmail", "resendEmail", "sendInvoice", "sendCampaignTest", "scheduleCampaign", "runCampaignQueue"]);
 const DESKTOP_EMAIL_OFF_MSG = "Email isn't set up. Add your mailbox under Global settings → Email.";
 // …and supplier connections (PromoStandards: the directory, a supplier's live product data, ordering,
 // shipment tracking) and fetching a supplier's pictures from the web: refused until the owner turns
@@ -3024,6 +3035,33 @@ async function handleOrdersPost_(context, listBefore = null) {
     return jsonResponse({ status: "ok", updated: orderIds.length });
   }
 
+  // A discount code on a Local sale (web and desktop): the email it is checked against — the picked customer's, else
+  // the contact typed when it is an email address ("" when neither: a code for one person then can't be used).
+  const localSaleCodeEmail_ = async (b) => {
+    const cid = customerIdOf_(b.customerId);
+    if (cid) {
+      const got = await getCustomer(env.DB, cid);
+      if (got && got.customer && got.customer.email) return String(got.customer.email).trim().toLowerCase();
+    }
+    const contact = String(b.contact == null ? "" : b.contact).trim().toLowerCase();
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact) ? contact.slice(0, 200) : "";
+  };
+
+  // ---- checkLocalSaleCode — the Local sale window's Apply: is this code good for these goods (and customer)? ----
+  // The window shows the answer only; createLocalSale checks the code again against the goods as it prices them.
+  if (body.action === "checkLocalSaleCode") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    if (!body.org || typeof body.org !== "string") return jsonResponse({ status: "error", message: "Missing org" }, 400);
+    if (typeof body.code !== "string" || !body.code.trim() || body.code.length > 64) return jsonResponse({ status: "error", message: "Enter a code." }, 400);
+    if (customerIdOf_(body.customerId) === false) return jsonResponse({ status: "error", message: "That customer isn't valid. Pick one from the list." }, 400);
+    const subtotal = Number(body.subtotal);
+    if (!Number.isFinite(subtotal) || subtotal < 0 || subtotal > 10000000) return jsonResponse({ status: "error", message: "Add the items first." }, 400);
+    const r = await checkDiscountCode(env.DB, { code: body.code.trim(), orgId: body.org, email: await localSaleCodeEmail_(body), subtotal, today: await localToday(env) });
+    if (!r || r.notReady) return jsonResponse({ status: "error", message: "Discount codes need the latest database update. Apply the migrations, then try again." }, 503);
+    return jsonResponse(r.ok ? { status: "ok", ok: true, code: r.code, discount: r.discount } : { status: "ok", ok: false, reason: r.reason });
+  }
+
   // ---- createLocalSale — admin records an in-person / local sale -------------
   if (body.action === "createLocalSale") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
@@ -3164,17 +3202,51 @@ async function handleOrdersPost_(context, listBefore = null) {
       order.total = subtotal + cost;
     }
 
+    // A discount code (migrations/0115), as at the storefront's checkout: checked again against the goods as priced
+    // above and the customer's email, then one use claimed for this order id just before the insert, and given back
+    // if the insert fails. Booked like a manual discount (order.discount).
+    let discountUse = null;
+    if (body.discountCode != null && body.discountCode !== "") {
+      if (typeof body.discountCode !== "string" || body.discountCode.length > 64) return jsonResponse({ status: "error", message: "This code isn't valid." }, 400);
+      const wanted = body.discountCode.trim();
+      if (wanted) {
+        if (!featureOn("discounts")) return featureOffResponse("discounts", featureLabel_("discounts"));
+        const codeEmail = await localSaleCodeEmail_(body);
+        const chk = await checkDiscountCode(env.DB, { code: wanted, orgId: org, email: codeEmail, subtotal, today: await localToday(env) });
+        if (!chk || chk.notReady) return jsonResponse({ status: "error", message: "Discount codes need the latest database update. Apply the migrations, then try again." }, 503);
+        if (!chk.ok) return jsonResponse({ status: "error", message: chk.reason || "This code isn't valid." }, 400);
+        discountUse = { codeId: chk.code.id, code: chk.code.code, email: codeEmail, cents: Math.max(0, Math.round(Number(chk.discount) * 100) || 0) };
+        const claim = await claimDiscountCode(env.DB, { codeId: discountUse.codeId, orderId, email: codeEmail, amountCents: discountUse.cents, now: new Date().toISOString() });
+        if (!claim || !claim.ok) {
+          if (saleKey && await madeAlready()) return jsonResponse({ status: "ok", orderId, repeated: true });
+          return jsonResponse({ status: "error", message: (claim && claim.reason) || "This code has reached its limit." }, 400);
+        }
+        discountUse.claimedHere = !claim.already;
+        order.discount = { cents: discountUse.cents, note: "Code " + discountUse.code };
+      }
+    }
+
     // Lines for stocked products come out of the shop's finished stock (migrations/0060) — handed over
     // now, so they're pulled at once.
     try {
       await insertOrder(env.DB, order, pricedItems, { fillFromStock: true, ...(saleCustomerId ? { customerId: saleCustomerId } : {}) });
     } catch (e) {
       // Two requests with the same key at the same moment: the order and its lines go in as one batch, so the
-      // second fails whole on the order number and the first one's order is the sale.
+      // second fails whole on the order number and the first one's order is the sale (and the code's use is its).
       if (saleKey && await madeAlready()) return jsonResponse({ status: "ok", orderId, repeated: true });
+      if (discountUse && discountUse.claimedHere) {
+        try { await releaseDiscountCodeUse(env.DB, orderId, new Date().toISOString()); }
+        catch (re) { console.error("Giving back a discount code's use failed for", orderId, re); }
+      }
       throw e;
     }
     await pullStockLines(env.DB, orderId, placedAt);
+
+    // Shop news and discounts (migrations/0117): the Local sale's box, for the customer's email (picked or typed).
+    if (typeof body.marketingOptIn === "boolean" && featureOn("emailCampaigns")) {
+      try { const em = await localSaleCodeEmail_(body); if (em) await setMarketingChoice(env.DB, em, body.marketingOptIn, "checkout"); }
+      catch (e) { console.error("Saving the marketing choice failed for", orderId, e); }
+    }
 
     if (body.paid)      await settleOrderBalance(env.DB, orderId,
                           "Local sale" + (order.paymentMethod ? " (" + order.paymentMethod + ")" : ""), placedAt, saleKey);
@@ -3182,7 +3254,8 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (body.delivered) await setFulfillmentStage(env.DB, orderId, "delivered", { at: placedAt });
 
     audit({ orgId: org, orderId, action: "order.created_local_sale",
-      detail: { customerName: order.customerName, total: subtotal, paid: !!body.paid, payOnDelivery: !!body.payOnDelivery, items: pricedItems.length, ...(saleCustomerId ? { customerId: saleCustomerId } : {}) } });
+      detail: { customerName: order.customerName, total: subtotal, paid: !!body.paid, payOnDelivery: !!body.payOnDelivery, items: pricedItems.length, ...(saleCustomerId ? { customerId: saleCustomerId } : {}),
+        ...(discountUse ? { discountCode: discountUse.code, discount: discountUse.cents / 100 } : {}) } });
     return jsonResponse({ status: "ok", orderId });
   }
 
@@ -3226,7 +3299,11 @@ async function handleOrdersPost_(context, listBefore = null) {
     return customersReady_(async () => {
       const got = await getCustomer(env.DB, id);
       if (!got) return customerNotFound_();
-      return jsonResponse({ status: "ok", customer: got.customer, orders: got.orders, totals: got.totals });
+      // Whether they asked for no marketing email (migrations/0117), for the customer page's tick.
+      let marketing = { optedOut: false };
+      try { if (got.customer && got.customer.email && typeof getMarketingChoice === "function") marketing = await getMarketingChoice(env.DB, got.customer.email); }
+      catch (e) { marketing = { optedOut: false }; }
+      return jsonResponse({ status: "ok", customer: got.customer, orders: got.orders, totals: got.totals, marketing });
     });
   }
 
@@ -3694,7 +3771,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     return (await getOrgById(env.DB, raw)) ? { orgId: raw } : { error: jsonResponse({ status: "error", message: "Unknown shop" }, 404) };
   };
   // What the audit log keeps of a code (its value, who and when; never its uses).
-  const discountAuditOf_ = (c) => c ? { code: c.code, kind: c.kind, percent: c.percent, amount: c.amount, orgId: c.orgId || null, email: c.email || "",
+  const discountAuditOf_ = (c) => c ? { code: c.code, kind: c.kind, percent: c.percent, amount: c.amount, maxDiscount: c.maxDiscount == null ? null : c.maxDiscount, orgId: c.orgId || null, email: c.email || "",
     maxUses: c.maxUses, oncePerEmail: !!c.oncePerEmail, expiresOn: c.expiresOn || null, active: !!c.active, note: c.note || "" } : null;
 
   // ---- listDiscountCodes — the page's list: search, shop, status, paging ----
@@ -3773,7 +3850,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     const shop = await discountOrg_(body.org);
     if (shop.error) return shop.error;
     const args = { emails: list, prefix: typeof body.prefix === "string" ? body.prefix : "", kind: body.kind, percent: body.percent, amount: body.amount,
-      orgId: shop.orgId, expiresOn: body.expiresOn, note: body.note };
+      maxDiscount: body.kind === "percent" ? body.maxDiscount : null, orgId: shop.orgId, expiresOn: body.expiresOn, note: body.note };
     const r = await createDiscountCodesForEmails(env.DB, args, { actor: String(adminActor(request) || "").slice(0, 200), now: new Date().toISOString() });
     if (r && r.notReady) return discountsNotReady_(r);
     if (!r || r.error) return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't make the codes. Try again." }, 400);
@@ -3818,6 +3895,118 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (!r || r.error) return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't delete the code. Try again." }, 409);
     audit({ orgId: before.orgId || null, orderId: null, action: "discount_code.deleted", detail: { id, ...discountAuditOf_(before) } });
     return jsonResponse({ status: "ok" });
+  }
+
+  // ---- Email campaigns (migrations/0117): the Discount codes page's Email campaigns tab ----------------------------
+  // functions/_lib/campaigns.js does the work. Every action needs the Email campaigns feature (FEATURE_ACTIONS); the
+  // ones that send need email set up (on the desktop, DESKTOP_EMAIL_ACTIONS). The audit log keeps what was sent and to
+  // how many, never the addresses.
+  const campaignIdOf_ = (v) => { const n = Number(v); return Number.isSafeInteger(n) && n > 0 ? n : 0; };
+  const campaignNotFound_ = () => jsonResponse({ status: "error", message: "Campaign not found." }, 404);
+  const campaignsNotReady_ = () => jsonResponse({ status: "error", message: CAMPAIGNS_NOT_READY }, 503);
+  const CAMPAIGN_ACTIONS_ = ["getCampaignStatus", "listCampaigns", "getCampaign", "previewAudience", "saveCampaign", "copyCampaign", "deleteCampaign",
+    "sendCampaignTest", "scheduleCampaign", "cancelCampaign", "runCampaignQueue", "setMarketingOptOut"];
+  if (CAMPAIGN_ACTIONS_.includes(body.action)) {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const actor = String(adminActor(request) || "").slice(0, 200);
+
+    // Whether the tab can work here: email set up (the tab shows only then), and the desktop or the web.
+    if (body.action === "getCampaignStatus") {
+      let emailReady = false;
+      try { emailReady = await emailCanSend(env); } catch (_) { emailReady = false; }
+      return jsonResponse({ status: "ok", emailReady, desktop: isDesktopEdition(env) });
+    }
+    if (body.action === "listCampaigns") {
+      const r = await listCampaigns(env.DB, { status: typeof body.filter === "string" ? body.filter : "", limit: body.limit, offset: body.offset });
+      if (r.notReady) return campaignsNotReady_();
+      return jsonResponse({ status: "ok", campaigns: r.campaigns, total: r.total });
+    }
+    if (body.action === "getCampaign") {
+      const c = await getCampaign(env.DB, campaignIdOf_(body.id));
+      return c ? jsonResponse({ status: "ok", campaign: c }) : campaignNotFound_();
+    }
+    // Who matches (the count, and the first 200 for "See the list"), without saving anything.
+    if (body.action === "previewAudience") {
+      const r = await campaignAudience(env.DB, body.audience, { now: new Date(), timeZone: await resolveTimeZone(env).catch(() => "UTC"), limit: 200 });
+      if (r.notReady) return campaignsNotReady_();
+      if (r.error) return jsonResponse({ status: "error", message: r.error }, 400);
+      return jsonResponse({ status: "ok", count: r.count, people: r.people, fromCustomers: r.fromCustomers, typed: r.typed, optedOut: r.optedOut, bad: r.bad, tooMany: r.tooMany, max: AUDIENCE_MAX });
+    }
+    if (body.action === "saveCampaign") {
+      const input = body.campaign;
+      if (!input || typeof input !== "object" || Array.isArray(input)) return jsonResponse({ status: "error", message: "That campaign isn't valid." }, 400);
+      const isNew = input.id == null || input.id === "";
+      if (!isNew && !campaignIdOf_(input.id)) return campaignNotFound_();
+      const r = await saveCampaign(env.DB, input, { actor });
+      if (r.notReady) return campaignsNotReady_();
+      if (r.error) return jsonResponse({ status: "error", message: r.error }, r.error === "Campaign not found." ? 404 : 409);
+      if (isNew) audit({ orgId: null, orderId: null, action: "campaign.created", detail: { id: r.campaign.id, name: r.campaign.name, subject: r.campaign.subject } });
+      return jsonResponse({ status: "ok", campaign: r.campaign });
+    }
+    if (body.action === "copyCampaign") {
+      const r = await copyCampaign(env.DB, campaignIdOf_(body.id), { actor });
+      if (r.notReady) return campaignsNotReady_();
+      if (r.error) return jsonResponse({ status: "error", message: r.error }, r.error === "Campaign not found." ? 404 : 409);
+      audit({ orgId: null, orderId: null, action: "campaign.created", detail: { id: r.campaign.id, copiedFrom: campaignIdOf_(body.id), name: r.campaign.name } });
+      return jsonResponse({ status: "ok", campaign: r.campaign });
+    }
+    if (body.action === "deleteCampaign") {
+      const id = campaignIdOf_(body.id);
+      const before = await getCampaign(env.DB, id);
+      if (!before) return campaignNotFound_();
+      const r = await deleteCampaign(env.DB, id);
+      if (r.error) return jsonResponse({ status: "error", message: r.error }, 409);
+      audit({ orgId: null, orderId: null, action: "campaign.deleted", detail: { id, name: before.name, subject: before.subject } });
+      return jsonResponse({ status: "ok" });
+    }
+    // A test of the campaign as it is on the page (saved or not), to one address.
+    if (body.action === "sendCampaignTest") {
+      const input = body.campaign && typeof body.campaign === "object" ? body.campaign : null;
+      if (!input) return jsonResponse({ status: "error", message: "That campaign isn't valid." }, 400);
+      const c = { subject: String(input.subject || "").slice(0, 200) || "(no subject)", preheader: String(input.preheader || "").slice(0, 200),
+        theme: String(input.theme || "plain"), design: globalThis.OddCampaignRender.normalizeDesign(input.design), discount: cleanDiscount(input.discount) };
+      const r = await sendCampaignTest(env, c, body.to);
+      if (r.error) return jsonResponse({ status: "error", message: r.error }, 400);
+      return jsonResponse({ status: "ok", sentTo: r.sentTo });
+    }
+    // Send now (at empty) or at a time. Sending now starts it: the recipient list is made (and each person's code),
+    // then the first few emails go at once; the rest go as the queue runs.
+    if (body.action === "scheduleCampaign") {
+      const id = campaignIdOf_(body.id);
+      if (!(await emailCanSend(env).catch(() => false))) return jsonResponse({ status: "error", message: "Email isn't set up yet, so nothing can be sent." }, 409);
+      const at = body.at == null || body.at === "" ? null : String(body.at);
+      const r = await scheduleCampaign(env, id, at);
+      if (r.error) return jsonResponse({ status: "error", message: r.error }, r.error === "Campaign not found." ? 404 : 409);
+      let run = null;
+      if (!at) { try { run = await runCampaignQueue(env, { campaignId: id, limit: 10 }); } catch (e) { console.error("Campaign queue failed:", e); } }
+      const c = run ? await getCampaign(env.DB, id) : r.campaign;
+      audit({ orgId: null, orderId: null, action: at ? "campaign.scheduled" : "campaign.started",
+        detail: { id, name: c.name, subject: c.subject, ...(at ? { at: c.scheduledAt } : { recipients: c.counts.total }), discount: c.discount.mode } });
+      return jsonResponse({ status: "ok", campaign: c });
+    }
+    if (body.action === "cancelCampaign") {
+      const r = await cancelCampaign(env.DB, campaignIdOf_(body.id));
+      if (r.notReady) return campaignsNotReady_();
+      if (r.error) return jsonResponse({ status: "error", message: r.error }, r.error === "Campaign not found." ? 404 : 409);
+      audit({ orgId: null, orderId: null, action: "campaign.canceled", detail: { id: r.campaign.id, name: r.campaign.name, sent: r.campaign.counts.sent } });
+      return jsonResponse({ status: "ok", campaign: r.campaign });
+    }
+    // The page, while it shows a campaign that is sending, asks for the next few to go (the hourly run and the desktop
+    // program's timer do the same when no one is watching).
+    if (body.action === "runCampaignQueue") {
+      const id = campaignIdOf_(body.id) || null;
+      const r = await runCampaignQueue(env, { campaignId: id, limit: 15 });
+      return jsonResponse({ status: "ok", ...r, ...(id ? { campaign: await getCampaign(env.DB, id) } : {}) });
+    }
+    // The customer page's "No marketing email" tick (and recording a reply asking to stop).
+    if (body.action === "setMarketingOptOut") {
+      const r = await setMarketingChoice(env.DB, body.email, !body.optedOut, body.optedOut && body.reply ? "reply" : "admin");
+      if (r.notReady) return campaignsNotReady_();
+      if (!r.ok) return jsonResponse({ status: "error", message: "That email address doesn't look right." }, 400);
+      audit({ orgId: null, orderId: null, action: body.optedOut ? "marketing.opted_out" : "marketing.opted_in", detail: { by: "admin" } });
+      return jsonResponse({ status: "ok", marketing: await getMarketingChoice(env.DB, body.email) });
+    }
   }
 
   // ---- importOrders — Orders → Import orders (migrations/0087) ----------------
@@ -8648,6 +8837,13 @@ async function handleOrdersPost_(context, listBefore = null) {
       return jsonResponse({ status: "error", message: "This order has already been received." }, 409);
     }
     throw e;
+  }
+
+  // Shop news and discounts (migrations/0117): the box at checkout, sent only when it was shown. A failure here
+  // never fails the order.
+  if (typeof body.marketingOptIn === "boolean" && featureOn("emailCampaigns") && typeof setMarketingChoice === "function") {
+    try { await setMarketingChoice(env.DB, contact, body.marketingOptIn, "checkout"); }
+    catch (e) { console.error("Saving the marketing choice failed for", orderId, e); }
   }
 
   // The customer's "order received" email goes out AFTER the response: sending can take a second

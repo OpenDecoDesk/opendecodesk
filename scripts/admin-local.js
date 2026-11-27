@@ -80,6 +80,11 @@ const buildHandler = () => new Function("sendTestEmail",
   strip(read("functions/_lib/setupStatus.js")) + "\n" +
   // Digital products (migrations/0086): granting and the "Your downloads" email, which isn't sent locally (no provider).
   "const sendDownloadsEmail = async () => false;\n" +
+  // Email campaigns (migrations/0117): "email is set up" here, and every campaign email goes to a local outbox — printed
+  // in this terminal (to, subject), never sent. The campaign code and its renderer are the real ones.
+  "const emailCanSend = async () => true;\n" +
+  "const sendCampaignEmail = async (env, m) => { console.log('[local outbox] ' + m.to + ': ' + m.subject); return true; };\n" +
+  read("public/campaign-render.js") + "\n" + strip(read("functions/_lib/campaigns.js").replace(/^import "[^"\n]+";\n/m, "")) + "\n" +
   strip(read("functions/_lib/db.js")) + "\n" + strip(read("functions/_lib/digital.js")) + "\n" + strip(read("functions/api/orders.js")) + "\nreturn onRequestPost;")(buildTestEmail());
 // The shop page's catalog (functions/api/catalog.js) on the published catalog, as demo.example.com sees it.
 const buildCatalog = () => new Function(

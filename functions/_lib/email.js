@@ -88,6 +88,8 @@ async function send_(env, msg) {
   if (!msg || !msg.to) return false;
   if (desktopEmail_(env) === "off") return false;
   const id = await mailIdentity_(env);
+  // A marketing email (email campaigns) goes to one customer each: no copy to the receipts inbox.
+  if (msg.noBcc) id.bcc = "";
   msg = fillTemplate_(msg, id);
   if (!String(msg.to).includes("@")) return false;
   // A non-production install can mark every subject (EMAIL_SUBJECT_TAG, e.g. "[TEST]") so its emails
@@ -118,13 +120,13 @@ async function send_(env, msg) {
 // The desktop program's mailbox (desktop/mailer.js, over its MAILER binding): the program sends from
 // the mailbox's own address (EMAIL_FROM) under the business's name. Returns true or false; `report`
 // as for Resend, with the mail server's answer.
-async function sendViaMailer_(env, { to, subject, html, text, attachments, pdf }, id, report) {
+async function sendViaMailer_(env, { to, subject, html, text, attachments, pdf, listUnsubscribe }, id, report) {
   const bcc = id.bcc && id.bcc.toLowerCase() !== String(to).trim().toLowerCase() ? [id.bcc] : [];
   try {
     const res = await env.MAILER.fetch("https://mailer.desktop.invalid/send", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ to, fromName: id.name, replyTo: id.owner, bcc, subject, html: html || undefined, text: text || "(no plain-text body)",
-        ...((attachments || []).length ? { attachments } : {}), ...(pdf ? { pdf } : {}) }),
+        ...((attachments || []).length ? { attachments } : {}), ...(pdf ? { pdf } : {}), ...(listUnsubscribe ? { listUnsubscribe } : {}) }),
     });
     const data = await res.json().catch(() => ({}));
     if (report) Object.assign(report, { httpStatus: res.status, providerMessage: String(data.message || "").slice(0, 500) });
@@ -140,7 +142,7 @@ async function sendViaMailer_(env, { to, subject, html, text, attachments, pdf }
 // A cloud install's own mailbox (smtp.js): sent from the mailbox's own address under the business's
 // name, reply-to the owner, BCC the receipts inbox. The password is decrypted here, only to sign in.
 // Returns true or false; `report` as for Resend, with the mail server's answer.
-async function sendViaSmtp_(env, { to, subject, html, text, attachments }, id, report, mailbox) {
+async function sendViaSmtp_(env, { to, subject, html, text, attachments, listUnsubscribe }, id, report, mailbox) {
   const m = mailbox || await webMailbox_(env);
   const fail = (why) => { console.error("Mailbox (SMTP) send failed:", why.slice(0, 300)); if (report) report.providerMessage = why.slice(0, 500); return false; };
   if (!m) return fail("No mailbox is set up.");
@@ -149,7 +151,7 @@ async function sendViaSmtp_(env, { to, subject, html, text, attachments }, id, r
   catch (e) { return fail(String((e && e.message) || e).replace(/vendor login/g, "mailbox password")); }
   if (!password) return fail("The mailbox's password isn't saved. Enter it under Global settings → Email.");
   const bcc = id.bcc && id.bcc.toLowerCase() !== String(to).trim().toLowerCase() ? [id.bcc] : [];
-  const r = await smtpSend(m, password, { to, fromName: id.name, replyTo: id.owner, bcc, subject, html, text, attachments: mailAttachments_(attachments) },
+  const r = await smtpSend(m, password, { to, fromName: id.name, replyTo: id.owner, bcc, subject, html, text, attachments: mailAttachments_(attachments), ...(listUnsubscribe ? { listUnsubscribe } : {}) },
     { connect: env && env.__SMTP_CONNECT_FOR_TESTS });
   if (report) report.providerMessage = String(r.message || "").slice(0, 500);
   if (!r.ok) { console.error("Mailbox (SMTP) send failed:", String(r.message).slice(0, 300)); return false; }
@@ -161,7 +163,7 @@ async function sendViaSmtp_(env, { to, subject, html, text, attachments }, id, r
 // the sender is still EMAIL_FROM. Returns true (accepted) or false. Unlike Cloudflare's API, Resend
 // reports a bounce later (by webhook), so a permanently bouncing address isn't detected here.
 // `report` (optional, the test send on the Communications page): filled with what the provider said.
-async function sendViaResend_(env, { to, subject, html, text, attachments }, id, report) {
+async function sendViaResend_(env, { to, subject, html, text, attachments, listUnsubscribe }, id, report) {
   const from = String(env.EMAIL_FROM || ("orders@" + siteRoot_(env))).trim();
   const bcc = id.bcc && id.bcc.toLowerCase() !== String(to).trim().toLowerCase() ? [id.bcc] : [];
   try {
@@ -171,6 +173,7 @@ async function sendViaResend_(env, { to, subject, html, text, attachments }, id,
       body: JSON.stringify({
         from: `${String(id.name).replace(/[<>"\r\n]/g, "")} <${from}>`, to: [to], reply_to: id.owner,
         ...(bcc.length ? { bcc } : {}), subject, html: html || undefined, text: text || "(no plain-text body)",
+        ...(listUnsubscribe ? { headers: { "List-Unsubscribe": listUnsubscribe } } : {}),
         ...(mailAttachments_(attachments).length ? { attachments: mailAttachments_(attachments).map(x => ({ filename: x.filename, content: x.contentBase64, content_type: x.contentType })) } : {}),
       }),
     });
@@ -257,6 +260,15 @@ async function sendViaCloudflare_(env, { to, subject, html, text, attachments },
 // Secrets are never returned: a key is described (set or not, its length, whether it looks right).
 // Whether this install can send email at all (a provider is set up), for pages that would otherwise promise one —
 // the order confirmation's "We'll email a copy to …". Not whether a given email will arrive.
+// One marketing email (email campaigns, functions/_lib/campaigns.js): to one customer, with no copy to the receipts
+// inbox, and a List-Unsubscribe header where the provider takes one (the desktop's mailbox, a cloud mailbox, Resend).
+// msg: { to, subject, html, text, attachments?, listUnsubscribe? }. true when the provider accepted it.
+export async function sendCampaignEmail(env, msg) {
+  if (!msg || !msg.to) return false;
+  const lu = String(msg.listUnsubscribe || "").replace(/[\r\n]+/g, " ").slice(0, 900);
+  return send_(env, { to: msg.to, subject: msg.subject, html: msg.html, text: msg.text, noBcc: true,
+    ...(Array.isArray(msg.attachments) && msg.attachments.length ? { attachments: msg.attachments } : {}), ...(lu ? { listUnsubscribe: lu } : {}) });
+}
 export async function emailCanSend(env) {
   const desktop = desktopEmail_(env);
   if (desktop === "on") return true;

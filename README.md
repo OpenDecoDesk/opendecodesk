@@ -197,8 +197,8 @@ without it.
 
 ## Feature switches
 
-Eight parts of the site are optional. Each has a switch in the admin under Settings → Global settings →
-Features. **All eight are on by default.** Turning one off hides its pages in the admin menu (opening one
+Nine parts of the site are optional. Each has a switch in the admin under Settings → Global settings →
+Features. **All nine are on by default.** Turning one off hides its pages in the admin menu (opening one
 of them directly shows a "this feature is turned off" page), and the server refuses its actions. Nothing
 is deleted — every table and row stays — so turning it back on brings everything back as it was. Each
 change is written to the audit log.
@@ -242,6 +242,10 @@ change is written to the audit log.
   them (see docs/operations.md). Off: the page is hidden, the checkout shows no code box, and an order
   sent with a code is refused ("Discount codes aren't available right now."). Orders that already used
   a code keep their discount.
+- **Email campaigns** — marketing emails to your customers, on the Discount codes page's Email campaigns
+  tab (shown once email is set up), and the box at checkout and on a Local sale where customers say yes
+  to shop news and discounts (see docs/operations.md). Off: the tab and the box are hidden, and nothing
+  scheduled is sent.
 
 **Inventory is always on.** Stock of blanks and transfers, and cost of goods, are part of making an order
 (marking it manufactured uses the blanks), so there is no switch for them in this release.

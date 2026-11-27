@@ -3761,6 +3761,8 @@ export const FEATURES = [
     description: "Quotes for a customer — products at their quantity-break prices, custom lines and setup or digitizing fees — emailed as a link the customer opens to accept or ask for changes; an accepted quote becomes an order. Off: the Quotes page is hidden and quote links already sent say quotes aren't available. Quantity breaks on products still apply." },
   { key: "discounts", label: "Discount codes",
     description: "Codes customers type at checkout for a percent or an amount off: one person's single-use code, or a code anyone can use a set number of times, for every shop or one, with an optional last day. Off: the Discount codes page is hidden, the checkout has no code box and codes already sent don't work. A discount typed on an order by hand still applies." },
+  { key: "emailCampaigns", label: "Email campaigns",
+    description: "Marketing emails to your customers from the Discount codes page: pick who gets one (shops, when they last ordered, how many orders, or addresses you type), start from a holiday theme, add a discount code, and send now or later. The checkout and Local sale get a box, ticked by default, for customers to say yes to shop news and discounts, and every email has a way to unsubscribe. The tab shows once email is set up. Off: the tab and the box are hidden and nothing is sent." },
 ];
 const FEATURE_KEYS_ = FEATURES.map(f => f.key);
 // { production: true, … } from whatever was saved: only an explicit false turns a feature off.
@@ -11815,10 +11817,14 @@ export function generateDiscountCode_(prefix = "") {
   // 256 is a multiple of the alphabet's 32, so every character is equally likely.
   return p + Array.from(bytes, (b) => DISCOUNT_CODE_ALPHABET_[b % DISCOUNT_CODE_ALPHABET_.length]).join("");
 }
-// "10% off" / "12.5% off" / "$5.00 off".
-function discountCodeLabel_(kind, percentBps, amountCents) {
-  if (kind === "percent") return String(Number((Number(percentBps) / 100).toFixed(2))) + "% off";
-  return "$" + fromCents(amountCents).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " off";
+// "10% off" / "12.5% off" / "20% off, up to $25.00" / "$5.00 off".
+const discountDollars_ = (cents) => "$" + fromCents(cents).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function discountCodeLabel_(kind, percentBps, amountCents, maxDiscountCents) {
+  if (kind === "percent") {
+    const pct = String(Number((Number(percentBps) / 100).toFixed(2))) + "% off";
+    return Number(maxDiscountCents) > 0 ? pct + ", up to " + discountDollars_(maxDiscountCents) : pct;
+  }
+  return discountDollars_(amountCents) + " off";
 }
 const discountToday_ = (today) => CUSTOMER_DATE_RE_.test(String(today || "")) ? String(today) : dateInTimeZone(new Date(), _shopTimeZone_);
 // A real calendar date YYYY-MM-DD (not 2027-02-30). Month 13 or day 32 is no Date at all: checked before toISOString,
@@ -11834,10 +11840,11 @@ function parseDiscountCode_(row, today) {
     id: Number(row.id), code: row.code, kind: row.kind,
     percent: row.kind === "percent" ? Number(row.percentBps) / 100 : null,
     amount: row.kind === "amount" ? fromCents(row.amountCents) : null,
+    maxDiscount: row.kind === "percent" && Number(row.maxDiscountCents) > 0 ? fromCents(row.maxDiscountCents) : null,
     orgId: row.orgId || null, orgName: row.orgId ? (row.orgName_ || row.orgId) : "",
     email: row.email || "", maxUses, oncePerEmail: !!Number(row.oncePerEmail), expiresOn, active,
     note: row.note || "", createdAt: row.createdAt || "", createdBy: row.createdBy || "",
-    used, status, label: discountCodeLabel_(row.kind, row.percentBps, row.amountCents),
+    used, status, label: discountCodeLabel_(row.kind, row.percentBps, row.amountCents, row.maxDiscountCents),
   };
 }
 const DISCOUNT_CODE_SELECT_ = `SELECT c.*, ${DISCOUNT_USED_SQL_} AS used_, o.name AS orgName_ FROM discount_codes c LEFT JOIN orgs o ON o.orgId = c.orgId`;
@@ -11851,13 +11858,22 @@ export function normalizeDiscountCodeInput_(input) {
   if (rawCode && !code) return { error: "A code is 3 to 32 letters, digits, - or _ (no spaces)." };
   const kind = p.kind === "percent" || p.kind === "amount" ? p.kind : "";
   if (!kind) return { error: "Choose percent off or an amount off." };
-  let percentBps = null, amountCents = null;
+  let percentBps = null, amountCents = null, maxDiscountCents = null;
   if (kind === "percent") {
     const n = Number(p.percent);
     if (p.percent === "" || p.percent == null || typeof p.percent === "boolean" || !Number.isFinite(n)) return { error: "Enter the percent off." };
     percentBps = Math.round(n * 100);
     if (Math.abs(n * 100 - percentBps) > 1e-6) return { error: "The percent off can have at most two decimals." };
     if (percentBps < 1 || percentBps > 10000) return { error: "The percent off must be from 0.01 to 100." };
+    // The most it takes off (migrations/0116): blank = no limit.
+    const rawMax = p.maxDiscount;
+    if (!(rawMax === "" || rawMax == null || rawMax === false)) {
+      const m = Number(rawMax);
+      if (typeof rawMax === "boolean" || !Number.isFinite(m)) return { error: "The max discount must be an amount, or left blank for no limit." };
+      maxDiscountCents = toCents(m);
+      if (Math.abs(m * 100 - maxDiscountCents) > 1e-6) return { error: "The max discount can't have fractions of a cent." };
+      if (maxDiscountCents < 1 || maxDiscountCents > 1000000) return { error: "The max discount must be from $0.01 to $10,000." };
+    }
   } else {
     const n = Number(p.amount);
     if (p.amount === "" || p.amount == null || typeof p.amount === "boolean" || !Number.isFinite(n)) return { error: "Enter the amount off." };
@@ -11884,7 +11900,7 @@ export function normalizeDiscountCodeInput_(input) {
   if (note.length > 200) return { error: "The note can be at most 200 characters." };
   // Left out = unchanged on an edit, on for a new code.
   const active = p.active === undefined || p.active === null ? undefined : !(p.active === false || p.active === 0 || p.active === "0" || p.active === "false");
-  return { value: { code, kind, percentBps, amountCents, orgId, email, maxUses, oncePerEmail, expiresOn: exp || null, note, active } };
+  return { value: { code, kind, percentBps, amountCents, maxDiscountCents, orgId, email, maxUses, oncePerEmail, expiresOn: exp || null, note, active } };
 }
 
 // The Discount codes page's list, newest first. q matches the code, the email or the note; orgId = the codes that
@@ -11965,9 +11981,9 @@ export async function saveDiscountCode(db, input, { actor = "", now = new Date()
       for (let attempt = 0; attempt < 5; attempt++) {
         const code = v.code || generateDiscountCode_();
         try {
-          const r = await db.prepare(`INSERT INTO discount_codes (code, kind, percentBps, amountCents, orgId, email, maxUses, oncePerEmail, expiresOn, active, note, createdAt, createdBy)
-                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-            .bind(code, v.kind, v.percentBps, v.amountCents, v.orgId, v.email, v.maxUses, v.oncePerEmail, v.expiresOn, v.active === false ? 0 : 1, v.note, now, String(actor || "").slice(0, 200)).run();
+          const r = await db.prepare(`INSERT INTO discount_codes (code, kind, percentBps, amountCents, maxDiscountCents, orgId, email, maxUses, oncePerEmail, expiresOn, active, note, createdAt, createdBy)
+                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .bind(code, v.kind, v.percentBps, v.amountCents, v.maxDiscountCents, v.orgId, v.email, v.maxUses, v.oncePerEmail, v.expiresOn, v.active === false ? 0 : 1, v.note, now, String(actor || "").slice(0, 200)).run();
           return { code: await getDiscountCode(db, r.meta.last_row_id, today) };
         } catch (e) {
           if (!isUniqueError_(e)) throw e;
@@ -11981,7 +11997,9 @@ export async function saveDiscountCode(db, input, { actor = "", now = new Date()
     const code = v.code || before.code;
     const beforeBps = before.kind === "percent" ? Math.round(before.percent * 100) : null;
     const beforeCents = before.kind === "amount" ? toCents(before.amount) : null;
+    const beforeMax = before.maxDiscount != null ? toCents(before.maxDiscount) : null;
     const fixedChanged = code !== before.code || v.kind !== before.kind || v.percentBps !== beforeBps || v.amountCents !== beforeCents
+      || v.maxDiscountCents !== beforeMax
       || (v.orgId || null) !== (before.orgId || null) || v.email !== before.email || (!v.email && !!v.oncePerEmail !== before.oncePerEmail);
     if (fixedChanged && before.used > 0) return { error: DISCOUNT_CODE_LOCKED_ };
     if (v.maxUses < before.used) return { error: `This code has been used ${before.used} times, so it needs at least ${before.used} uses in all.` };
@@ -11989,10 +12007,10 @@ export async function saveDiscountCode(db, input, { actor = "", now = new Date()
     // Guarded by the uses as they are NOW, so a checkout claiming a use meanwhile can't be undercut.
     let r;
     try {
-      r = await db.prepare(`UPDATE discount_codes SET code=?, kind=?, percentBps=?, amountCents=?, orgId=?, email=?, maxUses=?, oncePerEmail=?, expiresOn=?, active=?, note=?
+      r = await db.prepare(`UPDATE discount_codes SET code=?, kind=?, percentBps=?, amountCents=?, maxDiscountCents=?, orgId=?, email=?, maxUses=?, oncePerEmail=?, expiresOn=?, active=?, note=?
                              WHERE id = ? AND (? = 0 OR NOT EXISTS (SELECT 1 FROM discount_code_uses u WHERE u.codeId = discount_codes.id AND u.releasedAt IS NULL))
                                AND ? >= (SELECT count(*) FROM discount_code_uses u WHERE u.codeId = discount_codes.id AND u.releasedAt IS NULL)`)
-        .bind(code, v.kind, v.percentBps, v.amountCents, v.orgId, v.email, v.maxUses, v.oncePerEmail, v.expiresOn, active, v.note,
+        .bind(code, v.kind, v.percentBps, v.amountCents, v.maxDiscountCents, v.orgId, v.email, v.maxUses, v.oncePerEmail, v.expiresOn, active, v.note,
           id, fixedChanged ? 1 : 0, v.maxUses).run();
     } catch (e) { if (isUniqueError_(e)) return discountCodeTaken_(code); throw e; }
     if (!(r && r.meta && Number(r.meta.changes) > 0)) {
@@ -12013,7 +12031,7 @@ export async function createDiscountCodesForEmails(db, p, { actor = "", now = ne
   p = p && typeof p === "object" ? p : {};
   const prefix = String(p.prefix == null ? "" : p.prefix).trim().toUpperCase();
   if (prefix && !/^[A-Z0-9_-]{1,12}$/.test(prefix)) return { error: "A prefix can be up to 12 letters, digits, - or _." };
-  const checked = normalizeDiscountCodeInput_({ kind: p.kind, percent: p.percent, amount: p.amount, orgId: p.orgId, expiresOn: p.expiresOn, note: p.note, maxUses: 1 });
+  const checked = normalizeDiscountCodeInput_({ kind: p.kind, percent: p.percent, amount: p.amount, maxDiscount: p.maxDiscount, orgId: p.orgId, expiresOn: p.expiresOn, note: p.note, maxUses: 1 });
   if (checked.error) return checked;
   const v = checked.value;
   const raw = (Array.isArray(p.emails) ? p.emails.map(e => String(e == null ? "" : e)) : String(p.emails == null ? "" : p.emails).split(/[\s,;]+/))
@@ -12040,9 +12058,9 @@ export async function createDiscountCodesForEmails(db, p, { actor = "", now = ne
       });
       // OR IGNORE: a code taken already (by another code, or one made meanwhile) inserts nothing — changes 0 — and
       // that address gets a new code in the next round, rather than the whole list failing.
-      const results = await db.batch(tries.map(t => db.prepare(`INSERT OR IGNORE INTO discount_codes (code, kind, percentBps, amountCents, orgId, email, maxUses, oncePerEmail, expiresOn, active, note, createdAt, createdBy)
-                                                                VALUES (?,?,?,?,?,?,1,0,?,1,?,?,?)`)
-        .bind(t.code, v.kind, v.percentBps, v.amountCents, v.orgId, t.email, v.expiresOn, v.note, now, by)));
+      const results = await db.batch(tries.map(t => db.prepare(`INSERT OR IGNORE INTO discount_codes (code, kind, percentBps, amountCents, maxDiscountCents, orgId, email, maxUses, oncePerEmail, expiresOn, active, note, createdAt, createdBy)
+                                                                VALUES (?,?,?,?,?,?,?,1,0,?,1,?,?,?)`)
+        .bind(t.code, v.kind, v.percentBps, v.amountCents, v.maxDiscountCents, v.orgId, t.email, v.expiresOn, v.note, now, by)));
       pending = [];
       tries.forEach((t, i) => { if (Number(results[i] && results[i].meta && results[i].meta.changes) > 0) made.set(t.email, t.code); else pending.push(t.email); });
     }
@@ -12081,14 +12099,17 @@ export async function deleteDiscountCode(db, id) {
   } catch (e) { if (noDiscountCodesYet_(e)) return { error: DISCOUNT_CODES_NOT_READY_, notReady: true }; throw e; }
 }
 
-// What a code takes off goods of subtotalCents, in cents: a percent rounded to the cent, an amount no more than the
-// goods. `code` is a discount_codes row (percentBps / amountCents) or a parsed code (percent / amount).
+// What a code takes off goods of subtotalCents, in cents: a percent rounded to the cent (and no more than its max
+// discount, when it has one), an amount no more than the goods. `code` is a discount_codes row (percentBps /
+// amountCents / maxDiscountCents) or a parsed code (percent / amount / maxDiscount).
 export function discountForCode_(code, subtotalCents) {
   const sub = Math.max(0, Math.round(Number(subtotalCents) || 0));
   if (!code) return 0;
   if (code.kind === "percent") {
     const bps = code.percentBps != null ? Number(code.percentBps) : Math.round(Number(code.percent) * 100);
-    return Math.min(sub, Math.max(0, Math.round(sub * (Number(bps) || 0) / 10000)));
+    const off = Math.min(sub, Math.max(0, Math.round(sub * (Number(bps) || 0) / 10000)));
+    const cap = code.maxDiscountCents != null ? Number(code.maxDiscountCents) : code.maxDiscount != null ? toCents(code.maxDiscount) : 0;
+    return cap > 0 ? Math.min(off, cap) : off;
   }
   const cents = code.amountCents != null ? Number(code.amountCents) : toCents(code.amount);
   return Math.min(sub, Math.max(0, Number(cents) || 0));
@@ -12127,7 +12148,7 @@ export async function checkDiscountCode(db, { code, orgId, email, subtotal, toda
   const reason = discountRefusal_(row, { orgId, email: em, today });
   if (reason) return { ok: false, reason };
   const p = parseDiscountCode_(row, today);
-  return { ok: true, code: { id: p.id, code: p.code, label: p.label, kind: p.kind, percent: p.percent, amount: p.amount },
+  return { ok: true, code: { id: p.id, code: p.code, label: p.label, kind: p.kind, percent: p.percent, amount: p.amount, maxDiscount: p.maxDiscount },
     discount: fromCents(discountForCode_(row, toCents(subtotal))) };
 }
 

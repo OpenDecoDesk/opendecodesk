@@ -515,7 +515,8 @@ after Quotes). Each code is either:
 - **For anyone** — it works a set number of times in all (1 to 100,000), by whoever has it. Tick
   **Once per email address** to stop the same email using it twice.
 
-Either kind takes a **percent off** (0.01% to 100%) or an **amount off** ($0.01 to $10,000), works at
+Either kind takes a **percent off** (0.01% to 100%) — with an optional **max discount**, the most it
+takes off one order (20% off, up to $25) — or an **amount off** ($0.01 to $10,000), works at
 **all shops or one**, and can have a **last day** (it works through the end of that day, in the
 business's time zone — Global settings → Region), and a private note. Leave the code blank and one is
 made for you; codes are letters, digits, `-` and `_`, 3 to 32 characters, and read the same in any case.
@@ -554,6 +555,55 @@ switching and deleting codes are in the audit log (for a list of emails, only ho
 page also needs the **Discount codes** feature (Global settings → Features), on unless you turned it
 off: off, the page is hidden, the checkout has no code box and an order sent with a code is refused.
 
-**Not included:** codes on a local sale, an invoice or a quote (type a discount on the order instead);
-gift cards or store credit; a minimum order; free-shipping codes; more than one code on an order; and
-emailing codes to customers.
+**On a Local sale.** The Local sale window has a **Discount code** box (web and desktop): **Apply**
+checks the code against the items, the shop and the customer (a code for one person must be the
+picked customer's, or the email typed under Customer info) and shows the discount in the price line.
+**Record sale** checks it again and books it exactly as at checkout.
+
+**Not included:** codes on an invoice or a quote (type a discount on the order instead); gift cards or
+store credit; a minimum order; free-shipping codes; and more than one code on an order.
+
+## Email campaigns
+
+Marketing emails to your customers, on the **Discount codes** page's **Email campaigns** tab. The tab
+shows once email is set up (Global settings → Email on the website; the mailbox in the desktop
+program), for a role with the **Email campaigns** permission (Admin and Manager by default: read sees
+campaigns, edit writes them and sends tests, full sends, schedules, cancels and deletes). The feature
+switch is **Email campaigns** (Global settings → Features).
+
+**Who gets it.** Any mix of: the **shops** they ordered from; when they **last ordered** (more than or
+less than N days or months ago, or before a date); **how many orders** (at least, at most, exactly);
+and addresses you **type** (tick **Only these addresses** to send to just those). Test and voided
+orders don't count. The count updates as you change it; **See the list** shows who. Anyone who
+unsubscribed is always left out, and one campaign goes to at most 5,000 people.
+
+**The email.** Pick a **theme** (Black Friday, Cyber Monday, Christmas, Hanukkah, New Year,
+Valentine's Day, Halloween, Thanksgiving, Back to school, Summer or Plain): it fills in a banner
+picture, sample words, colours and a button. Then add, move, copy or remove **blocks** — banner,
+heading, text (bold, italic, underline, links, colours), discount code, button, up to four products,
+a picture, a divider, space — and see it as on a desktop or a phone. Fill-ins: {first name}, {name},
+{code}, {shop}, {expires}. The **HTML** tab shows the email as HTML; change it there and it is
+edited as HTML from then on. Undo and redo go back 50 steps. A draft saves itself as you go.
+
+**The discount.** None; **one code for everyone** (an existing, usable code); or **a code for each
+person** — single use, tied to their email, made when the campaign starts (with a percent and an
+optional max, or an amount, an expiry, a shop and a prefix). The campaign's codes appear on the Codes
+tab, and the campaign list shows how many were used. **Email this code** on a code starts a campaign
+with it.
+
+**Sending.** **Send me a test** first. Then **Send now**, or **Schedule** a time. Emails go a few at a
+time: the website sends with its hourly run and while the campaign's page is open; the desktop program
+sends every minute while it's open (a time that passes while it's closed sends when it next opens). A
+campaign that is sending can be stopped; the emails not yet sent are skipped. A sent campaign can be
+copied to start a new one.
+
+**Saying yes, and unsubscribing.** The checkout and the Local sale window have a box, ticked to start
+with, **Email me shop news and discounts**, with the note that the customer's information is never
+sold or shared. Unticked, the address goes on the no-marketing list; ticked later at checkout takes
+it off again (but never undoes an unsubscribe). Every campaign email says how to stop: a one-click
+**Unsubscribe** link on the website; in the desktop program, "reply with UNSUBSCRIBE" — then press
+**Stop marketing email** on the customer's page. The customer page shows whether they're subscribed,
+and **Subscribe again** if they ask. Receipts, invoices and other order emails always go.
+
+**Audit log.** Campaigns made, started, scheduled, canceled and deleted (with how many people, never
+the addresses), and marketing choices changed from the admin.

@@ -145,7 +145,16 @@ About fifty tables (`schema.sql`). The main groups:
   number of uses, once-per-email, last day, on/off and note) and `discount_code_uses` (one row per order
   that used a code: the order, email and amount). A void or delete sets the use's `releasedAt` rather
   than removing it, and a released use no longer counts. The order itself keeps the discount in
-  `orders.discountCents` / `discountNote` like any other discount.
+  `orders.discountCents` / `discountNote` like any other discount. `maxDiscountCents` (migrations/0116)
+  is the most a percent code takes off.
+- **Email campaigns** (migrations/0117) — `marketing_optouts` (one row per address that asked for no
+  marketing email, and why: checkout, unsubscribe, reply or admin), `email_campaigns` (subject, theme,
+  the design as blocks or HTML, who it's for, its discount, and draft → scheduled → sending → sent or
+  canceled) and `email_campaign_recipients` (who it went to, each person's own code, and whether it was
+  sent). `functions/_lib/campaigns.js` does the work; `public/campaign-render.js` makes the email for
+  both the editor's preview and the send. A recipient row is taken by one conditional UPDATE before its
+  email goes, so two runners never send it twice. The hourly cron, the desktop program's one-minute
+  timer and the admin page (while it shows a sending campaign) each send the next few.
 - **Inventory** — `blanks`, `blank_colors`, `blank_sizes`, `inventory_movements`; `transfers`,
   `transfer_movements`.
 - **Production** — `threads`, `hoops`, `designs`, `design_versions`, `machines`, `production_runs`.

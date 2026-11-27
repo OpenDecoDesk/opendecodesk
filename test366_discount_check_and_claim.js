@@ -119,7 +119,7 @@ const ORDER_HAS_CODE = "This order already has a discount code.";
 
   let r = await check("SAVE10");
   ok("a good percent code answers ok with its id, code, label, kind, percent and amount",
-    r.ok === true && same(r.code, { id: save10, code: "SAVE10", label: "10% off", kind: "percent", percent: 10, amount: null }));
+    r.ok === true && same(r.code, { id: save10, code: "SAVE10", label: "10% off", kind: "percent", percent: 10, amount: null, maxDiscount: null }));
   ok("its discount is in dollars: 10% of $19.95 is $2.00", r.discount === 2);
   ok("the answer never carries the email, the uses or the limit", !("email" in r.code) && !("used" in r.code) && !("maxUses" in r.code) && !("email" in r));
   r = await check("FIVE-OFF", { subtotal: 3.5 });

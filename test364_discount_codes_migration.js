@@ -163,8 +163,11 @@ const addCode = (d1, cols) => {
   ok("an order placed before it is left exactly as it was (its row and its lines)",
     JSON.stringify(before.q("SELECT * FROM orders ORDER BY orderId")) === ordersBefore && JSON.stringify(before.q("SELECT * FROM order_items ORDER BY id")) === linesBefore);
   ok("the new tables start empty", before.q("SELECT count(*) AS n FROM discount_codes")[0].n === 0 && before.q("SELECT count(*) AS n FROM discount_code_uses")[0].n === 0);
-  ok("the tables it makes are the ones schema.sql makes",
-    shape(before, "discount_codes") === shape(fresh, "discount_codes") && shape(before, "discount_code_uses") === shape(fresh, "discount_code_uses"));
+  ok("the tables it makes are schema.sql's (discount_codes but for 0116's max discount, added after it)",
+    shape(before, "discount_code_uses") === shape(fresh, "discount_code_uses") && !!shape(before, "discount_codes"));
+  const before16 = await makeDb();
+  ok("with 0116 on top, discount_codes is schema.sql's too",
+    shape(before16, "discount_codes") === shape(fresh, "discount_codes") && shape(before, "discount_code_uses") === shape(fresh, "discount_code_uses"));
   ok("and the order made before it reads with no discount code", (await lib.getOrderById(before, "OLD-1")).discountCode === "");
   ok("running it a second time is harmless (IF NOT EXISTS) and changes nothing",
     (() => { try { before.execFile(read("migrations/" + MIGRATION)); return true; } catch (e) { return false; } })() && same(objects(before), objectsAfter));

@@ -455,7 +455,8 @@ CREATE INDEX IF NOT EXISTS idx_estimate_items_estimate ON estimate_items(estimat
 -- Discount codes (migrations/0115): a code a customer types at checkout, a percent (percentBps) or an amount
 -- (amountCents) off the goods, for every shop (orgId NULL) or one. email '' = anyone, up to maxUses times in all
 -- (oncePerEmail: once per address); else that one address (lower-case), once. expiresOn = the last day it works.
--- The discount itself is stored on the order like a manual one (discountNote "Code SAVE10").
+-- The discount itself is stored on the order like a manual one (discountNote "Code SAVE10"). maxDiscountCents
+-- (migrations/0116, an ALTER, so it sits after createdBy just as SQLite writes it): the most a percent code takes off.
 CREATE TABLE IF NOT EXISTS discount_codes (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   code         TEXT NOT NULL,
@@ -471,6 +472,7 @@ CREATE TABLE IF NOT EXISTS discount_codes (
   note         TEXT NOT NULL DEFAULT '',
   createdAt    TEXT NOT NULL,
   createdBy    TEXT NOT NULL DEFAULT '',
+  maxDiscountCents INTEGER CHECK (maxDiscountCents IS NULL OR maxDiscountCents BETWEEN 1 AND 1000000),
   CHECK ((kind = 'percent' AND percentBps IS NOT NULL AND percentBps BETWEEN 1 AND 10000 AND amountCents IS NULL)
       OR (kind = 'amount' AND amountCents IS NOT NULL AND amountCents BETWEEN 1 AND 1000000 AND percentBps IS NULL))
 );
@@ -488,6 +490,44 @@ CREATE TABLE IF NOT EXISTS discount_code_uses (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_discount_uses_order ON discount_code_uses(orderId);
 CREATE INDEX IF NOT EXISTS idx_discount_uses_code ON discount_code_uses(codeId) WHERE releasedAt IS NULL;
+
+-- Email campaigns (migrations/0117): addresses that asked for no marketing email, the campaigns, and who each
+-- one went to. See the migration for the rules.
+CREATE TABLE IF NOT EXISTS marketing_optouts (
+  email        TEXT PRIMARY KEY,
+  optedOutAt   TEXT NOT NULL,
+  source       TEXT NOT NULL CHECK (source IN ('checkout','unsubscribe','reply','admin'))
+);
+CREATE TABLE IF NOT EXISTS email_campaigns (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT NOT NULL DEFAULT '',
+  subject      TEXT NOT NULL DEFAULT '',
+  preheader    TEXT NOT NULL DEFAULT '',
+  theme        TEXT NOT NULL DEFAULT 'plain',
+  designJson   TEXT NOT NULL DEFAULT '{}',
+  audienceJson TEXT NOT NULL DEFAULT '{}',
+  discountJson TEXT NOT NULL DEFAULT '{}',
+  status       TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','scheduled','sending','sent','canceled')),
+  scheduledAt  TEXT,
+  startedAt    TEXT,
+  sentAt       TEXT,
+  createdAt    TEXT NOT NULL,
+  createdBy    TEXT NOT NULL DEFAULT '',
+  updatedAt    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_email_campaigns_status ON email_campaigns(status, scheduledAt);
+CREATE TABLE IF NOT EXISTS email_campaign_recipients (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaignId   INTEGER NOT NULL REFERENCES email_campaigns(id),
+  email        TEXT NOT NULL,
+  name         TEXT NOT NULL DEFAULT '',
+  code         TEXT NOT NULL DEFAULT '',
+  status       TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','sending','sent','failed','skipped')),
+  sentAt       TEXT,
+  error        TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_recipients_email ON email_campaign_recipients(campaignId, email);
+CREATE INDEX IF NOT EXISTS idx_campaign_recipients_queue ON email_campaign_recipients(status, campaignId);
 
 -- Legacy inventory table (superseded by blanks/blank_sizes — kept for existing data)
 CREATE TABLE IF NOT EXISTS inventory (

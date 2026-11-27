@@ -46,6 +46,24 @@ export function verifyOrderToken(env, orderId, token){
     }));
 }
 
+// ---- A marketing email's unsubscribe link (email campaigns, migrations/0117) ------------------------------------
+// /api/unsubscribe?e=<email>&t=<token>: an HMAC of the address under the install's signing secret. It never expires
+// (an old email's link must keep working) and only ever turns marketing email off for that one address.
+export function unsubscribeToken(env, email){
+  const secret = orderTokenSecret_(env), e = String(email == null ? "" : email).trim().toLowerCase();
+  if(!secret || !e) return Promise.resolve("");
+  return orderTokenMac_(secret, e, "odd-unsubscribe-v1:");
+}
+export function verifyUnsubscribeToken(env, email, token){
+  if(typeof token !== "string" || !/^[0-9a-f]{64}$/.test(token)) return Promise.resolve(false);
+  return unsubscribeToken(env, email).then(expected => {
+    if(!expected) return false;
+    let diff = 0;
+    for(let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ token.charCodeAt(i);
+    return diff === 0;
+  });
+}
+
 // ---- A paid order's download link (digital products, migrations/0086) ------------------------------
 // /api/download?o=<orderId>&t=<token>: the token is an HMAC of the order id and the order's own random salt
 // (orders.downloadSalt) under the install's signing secret, so it can be made again whenever it's needed and

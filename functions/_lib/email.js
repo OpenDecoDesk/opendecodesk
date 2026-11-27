@@ -996,7 +996,7 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
     urgent.length > pickedUrgent ? `⚠️ ${plural(urgent.length - pickedUrgent, "dispute")} filed` : "",
     pickedUrgent ? `⚠️ ${plural(pickedUrgent, "shipped email")} not sent` : "",
     n ? `${plural(n, "new order")} (${fmt$(total)})` : "",
-    kindCount("payment", "payment"), kindCount("refund", "refund"), kindCount("gift_card", "gift card sold"),
+    kindCount("payment", "payment"), kindCount("refund", "refund"), (k => k ? `${plural(k, "gift card")} sold` : "")(giftsSold.length),
     (k => k ? plural(k, "dispute update") : "")(activity.filter(x => x.kind === "dispute").length),
     kindCount("design", "design response"),
     delivered.length ? `${delivered.length} ${delivered.length === 1 ? "delivery" : "deliveries"}` : "",

@@ -449,7 +449,7 @@
       const keep = box.querySelector("#qtCodeMsg") ? box.querySelector("#qtCodeMsg").textContent : "";
       box.innerHTML = `<h3 class="cust-h">Discount codes</h3>
         ${codes.length ? `<ul class="qt-code-list">${codes.map((c, i) => `<li><span class="cust-tag">${escapeHtml(c)}</span>${editable
-          ? ` <button type="button" class="admin-btn admin-btn-secondary admin-btn-sm" data-qt-code-remove="${i}" aria-label="Take off code ${escapeHtml(c)}">×</button>` : ""}</li>`).join("")}</ul>` : `<div class="cust-note">${editable ? "No discount code on this quote." : "None."}</div>`}
+          ? ` <button type="button" class="admin-btn admin-btn-secondary admin-btn-sm" data-qt-code-remove="${i}" aria-label="Take off code ${escapeHtml(c)}">×</button>` : ""}</li>`).join("")}</ul>` : `<div class="cust-note">No discount code on this quote.</div>`}
         ${canAdd ? `<div class="qt-code-add"><div class="cust-field"><label for="qtCode">${codes.length ? "Add another code" : "Discount code"}</label>
           <input type="text" id="qtCode" maxlength="64" autocomplete="off" autocapitalize="characters" spellcheck="false"></div>
           <button type="button" class="admin-btn admin-btn-secondary" id="qtCodeAdd">Apply</button></div>`
@@ -458,14 +458,13 @@
     }
     async function codeRule() {
       // Readable with Quotes (permissions.js lets the screens with a code box read it), not only with Global settings.
-      if (codeRules) return;
       try { const r = await adminApi_({ action: "getDiscountRules" }); const v = r && (r.discountRules || r.rules || r); codeRules = { multiple: !!(v && v.multiple) }; }
       catch (ex) { codeRules = null; }
       if (stillOn(hash, root)) paintCodes();
     }
     // Saves the codes (and nothing else): the quote's lines are sent too, so the server prices them with the codes on.
     async function saveCodes(next) {
-      const problem = await persist(editable ? lines : undefined, { discountCodes: next });
+      const problem = await persist(lines, { discountCodes: next });   // (only an editable quote has a code box to change)
       if (!problem) codes = Array.isArray(state.estimate && state.estimate.discountCodes) ? state.estimate.discountCodes.map(String) : next;
       paintCodes(); paintLines();
       return problem;

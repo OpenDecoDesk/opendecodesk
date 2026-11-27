@@ -13627,6 +13627,7 @@ async function catalogShopFromRows_(db, rows, rushSettings, pre, liveOrgRow) {
   const { tiersCents } = pre ? tierPricesFromRow_(pre.liveOrgs[org.orgId]) : await getTierPrices(db, org.orgId);
   const graphics = (pre ? pre.graphicsFor(org.orgId) : await listGraphics(db, org.orgId)).filter(g => g.visible).map(g => ({
     id: g.id, name: g.name, kind: g.kind, tier: g.tier, addOnCents: g.tier ? (tiersCents[g.tier] || 0) : 0,
+    decoration: g.decoration,   // what makes it (migrations/0118): the shop page leaves out a switched-off type's graphics
     inkColors: g.inkColors, imageUrl: g.imageUrl, thumbUrl: g.thumbUrl,
     allowedLocations: g.allowedLocations, allowedGarmentColors: g.allowedGarmentColors,
   }));

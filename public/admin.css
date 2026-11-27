@@ -666,7 +666,7 @@
   .qt-sum .qt-sum-total th, .qt-sum .qt-sum-total td{font-weight:700; font-size:16px; color:var(--ink,#1a1a1a); border-top:1px solid var(--card-line,#ddd);}
   .qt-picked{display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:13px; padding:8px 10px; border:1px solid #bae6fd; border-radius:5px; background:#f0f9ff; overflow-wrap:anywhere;}
   /* A .cust-field is display:flex, which would otherwise win over the hidden attribute. */
-  .qt-picked[hidden], .qt-page [hidden], .cust-form [hidden]{display:none;}
+  .qt-picked[hidden], .qt-page [hidden], .cust-form [hidden], .cust-form[hidden]{display:none;}
   .qt-preview{font-size:13px; color:var(--ink-soft,#555); line-height:1.5; min-height:18px;}
   .qt-muted{font-weight:400; color:var(--ink-soft,#888);}
   .qt-sr{position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap;}

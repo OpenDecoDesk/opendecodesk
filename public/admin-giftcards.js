@@ -234,7 +234,9 @@
           <div class="cust-dialog-actions"><button type="button" class="admin-btn" id="gcIssuedDone">Done</button></div>
         </div>`;
         if (code) $("#gcCopy").onclick = () => copyText(code, "Card number copied.");
-        $("#gcIssuedDone").onclick = () => $("[data-modal-close]").click();
+        // Saved: Done and ✕ close it without asking to discard what was typed (the card is made).
+        $("[data-modal-close]").onclick = close;
+        $("#gcIssuedDone").onclick = close;
         showToast("Gift card " + cardName(card) + " issued.");
         if (onChanged) onChanged();
       } catch (ex) { err.textContent = ex.message; save.disabled = false; }

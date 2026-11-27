@@ -16694,6 +16694,8 @@ function parsePayment_(row) {
     fromStripe: /^(pi_|re_|dp_|cs_)/.test(row.externalRef || ""), // real Stripe movement: refund in Stripe, don't void
     accountId: row.accountId == null ? null : Number(row.accountId),
     shipping: fromCents(row.shippingCents || 0),  // refunds: how much of it was shipping (untaxed, 0035)
+    // A gift-card payment or its refund (migrations/0120): the card it came from, so the Payments window shows it as one.
+    ...(row.giftCardId != null ? { giftCardId: Number(row.giftCardId) } : {}),
   };
 }
 

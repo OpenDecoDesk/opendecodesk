@@ -125,7 +125,7 @@ import {
   getBrandRules, setBrandRules, DEFAULT_BRAND_RULES, brandRuleFor_, listBrandApprovals, addBrandApproval, revokeBrandApproval, getBrandApproval,
   nextSupplierPoNumber, insertSupplierOrder, claimSupplierOrderRetry, setSupplierOrderResult, getSupplierOrder, listSupplierOrders, markItemsBlankOrdered, cancelSupplierOrder, getInventoryValuation, getInventoryValuations, getCogsReport, planBlankCatchUp, applyBlankCatchUp, planTransferCatchUp, applyTransferCatchUp, voidInventoryMovement, getInventoryMovementById, restoreInventoryMovement, getInventoryRestoreBlocker, removeBlankColorImages, analyzePricing, planProductPreview, getPricingSettingsView, pricingBelowTargetForBlanks, setPricingSettings, getShopRate, computeShopRate, setShopRate,
   voidOrder, voidPayment, getClosedPeriods, isMonthClosed, closePeriod, reopenPeriod, monthOf,
-  orderMonth, itemOrderMonth, paymentMonth, movementMonth, getCashReport, getAccountantExport,
+  orderMonth, itemOrderMonth, paymentMonth, movementMonth, getCashReport, getAccountantExport, getTaxPacketExtras,
   bumpCatalogVersion, listStockPurchases,
   getAccountRegister, getReceiptRecords, receiptTargets, getRecordReceipt, setReceiptFile, receiptAccountBlockers, setReceiptAccount,
   lineQty, QTY_MESSAGE, zipStates, SHIPPING_QUOTE_PENDING, byId_,
@@ -662,7 +662,7 @@ const FEATURE_ACTIONS = {
     "setMachineStitchCount", "listMaintenanceTasks", "saveMaintenanceTask", "deleteMaintenanceTask", "recordMaintenance", "getMaintenanceLog", "setDesignVersionStitches", "fillDesignStitchCounts",
   ],
   bookkeeping: [
-    "listClosedPeriods", "closePeriod", "reopenPeriod", "getAccountantExport",
+    "listClosedPeriods", "closePeriod", "reopenPeriod", "getAccountantExport", "getTaxPacketExtras",
     "getReconciliation", "importStatement", "autoMatchStatement", "matchStatementLine", "unmatchStatementLine",
     "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth", "listCashoutPayments",
     "listAccounts", "saveAccount", "saveMoneyDefaults", "listMoney", "saveMoneyEntry", "deleteMoneyEntry", "setPaymentAccount",
@@ -2324,6 +2324,19 @@ async function handleOrdersPost_(context, listBefore = null) {
     }
     const data = await getAccountantExport(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z");
     audit({ orgId: null, orderId: null, action: "report.accountant_export", detail: { dateFrom, dateTo } });
+    return jsonResponse({ status: "ok", dateFrom, dateTo, ...data });
+  }
+
+  // ---- getTaxPacketExtras — the lists only the printable tax packet needs (db.js getTaxPacketExtras) ----
+  if (body.action === "getTaxPacketExtras") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const dateFrom = String(body.dateFrom || "").trim(), dateTo = String(body.dateTo || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+      return jsonResponse({ status: "error", message: "Invalid date range — expected YYYY-MM-DD" }, 400);
+    }
+    const data = await getTaxPacketExtras(env.DB, dateFrom + "T00:00:00.000Z", dateTo + "T23:59:59.999Z");
+    audit({ orgId: null, orderId: null, action: "report.tax_packet", detail: { dateFrom, dateTo } });
     return jsonResponse({ status: "ok", dateFrom, dateTo, ...data });
   }
 

@@ -291,6 +291,7 @@ accepted, so the check catches a clearly wrong state, not every possible mismatc
 | [docs/shops-and-domains.md](docs/shops-and-domains.md) | The admin address, a shop per subdomain, adding a shop, Publish |
 | [docs/email.md](docs/email.md) | Cloudflare email or Resend, verifying your domain, which inbox gets what |
 | [docs/sales-tax.md](docs/sales-tax.md) | The rate and home state, prices with or without tax, what is taxed, the reports |
+| [docs/tax-packet.md](docs/tax-packet.md) | The printable packet for your accountant: expenses by Schedule C line, sales & use tax, revenue, cost of goods, first-year decisions |
 | [docs/operations.md](docs/operations.md) | The morning roll-up, backups and restoring, migrations, upgrading |
 | [docs/desktop.md](docs/desktop.md) | The desktop version: what it leaves out, where its data is, backups, building it |
 | [docs/architecture.md](docs/architecture.md) | How a request flows, the files, the data, the security model |

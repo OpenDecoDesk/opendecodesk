@@ -99,6 +99,7 @@ const shares = (r) => r.perCode.map(p => [p.goodsOffCents, p.shippingOffCents]);
     idx_discount_uses_order: "CREATE INDEX idx_discount_uses_order ON discount_code_uses(orderId)",
     idx_gift_cards_code: "CREATE UNIQUE INDEX idx_gift_cards_code ON gift_cards(code)",
     idx_gift_cards_source: "CREATE UNIQUE INDEX idx_gift_cards_source ON gift_cards(sourceOrderId) WHERE sourceOrderId <> ''",
+    idx_gift_cards_request: "CREATE UNIQUE INDEX idx_gift_cards_request ON gift_cards(requestKey) WHERE requestKey IS NOT NULL",
     idx_gift_card_ledger_card: "CREATE INDEX idx_gift_card_ledger_card ON gift_card_ledger(cardId, id)",
     idx_order_payments_giftcard: "CREATE INDEX idx_order_payments_giftcard ON order_payments(giftCardId) WHERE giftCardId IS NOT NULL",
   };
@@ -158,6 +159,9 @@ const shares = (r) => r.perCode.map(p => [p.goodsOffCents, p.shippingOffCents]);
     ok(`the same card number twice is refused (UNIQUE code), ${built}`, /UNIQUE constraint failed: gift_cards\.code/.test(card({ code: "ABCDEFGHJKLMNPQR" })));
     ok(`two staff cards (sourceOrderId '') are fine, but one order can't make two cards, ${built}`,
       card({}) === "" && card({ sourceOrderId: "CLUB-GC-1" }) === "" && /UNIQUE constraint failed: gift_cards\.sourceOrderId/.test(card({ sourceOrderId: "CLUB-GC-1" })));
+    ok(`a card's requestKey is unset (NULL) by default, and one Issue window's key can't make two cards, ${built}`,
+      card({}) === "" && card({}) === "" && card({ requestKey: "giftcard:win387aa" }) === "" && /UNIQUE constraint failed: gift_cards\.requestKey/.test(card({ requestKey: "giftcard:win387aa" })) &&
+      d1.q("SELECT count(*) AS n FROM gift_cards WHERE requestKey IS NULL")[0].n >= 2);
     ok(`a card needs its code, last4, amounts and when it was made (NOT NULL), ${built}`,
       ["code", "last4", "initialCents", "balanceCents", "createdAt"].every(k => new RegExp("NOT NULL constraint failed: gift_cards\\." + k).test(card({ [k]: null }))));
     const led = (extra) => insertRow(d1, "gift_card_ledger", Object.assign({ cardId: gc.id, kind: "issue", deltaCents: 5000, at: "t0" }, extra));
@@ -189,8 +193,8 @@ const shares = (r) => r.perCode.map(p => [p.goodsOffCents, p.shippingOffCents]);
   ok("0120 applies on top of every migration before it", (() => { try { before.execFile(read("migrations/" + MIGRATION)); return true; } catch (e) { return false; } })());
   const objectsAfter = objects(before);
   const added = objectsAfter.filter(o => !objectsBefore.some(b => b.name === o.name)).map(o => o.type + " " + o.name).sort();
-  ok("it adds exactly the two gift card tables and five new indexes",
-    same(added, ["index idx_discount_uses_order_code", "index idx_gift_card_ledger_card", "index idx_gift_cards_code", "index idx_gift_cards_source",
+  ok("it adds exactly the two gift card tables and six new indexes",
+    same(added, ["index idx_discount_uses_order_code", "index idx_gift_card_ledger_card", "index idx_gift_cards_code", "index idx_gift_cards_request", "index idx_gift_cards_source",
       "index idx_order_payments_giftcard", "table gift_card_ledger", "table gift_cards"]));
   ok("it keeps the name idx_discount_uses_order, now a plain (not unique) index on the order",
     indexSql(before, "idx_discount_uses_order") === "CREATE INDEX idx_discount_uses_order ON discount_code_uses(orderId)");
@@ -473,6 +477,13 @@ const shares = (r) => r.perCode.map(p => [p.goodsOffCents, p.shippingOffCents]);
     ok("10% with 15% already applied is taken", r.ok === true);
     ok("…this code's own discount is $10.00, and together they take $25.00 (25%)", r.discount === 10 && r.combined.goodsOffCents === 2500 && same(r.combinedOff, { goods: 25, shipping: 0 }));
     ok("…the shares are listed with the codes already applied first, then this one", same(r.combined.perCode.map(p => [p.code, p.goodsOffCents]), [["TEAM15", 1500], ["SAVE10", 1000]]));
+    await mk({ code: "SIXTYA", kind: "percent", percent: 60 });
+    await mk({ code: "SIXTYB", kind: "percent", percent: 60 });
+    r = await chk("SIXTYB", { others: ["SIXTYA"] });
+    ok("60% with another 60% already applied on $100: together all $100, and this code's discount is its share, $40.00 (not the $60.00 it takes alone)",
+      r.ok === true && r.combined.goodsOffCents === 10000 && r.discount === 40 && same(r.combined.perCode.map(p => [p.code, p.goodsOffCents]), [["SIXTYA", 6000], ["SIXTYB", 4000]]));
+    ok("…while alone it is its own $60.00", (await chk("SIXTYB")).discount === 60);
+    ok("…and with an applied code that no longer works (expired), its share is all of its own again", (await chk("SIXTYB", { others: ["GONE"] })).discount === 60);
     ok(`the same code twice is still refused: "${SAMEC}"`, (await chk("SAVE10", { others: ["TEAM15", "save10"] })).reason === SAMEC);
     r = await chk("FIVE", { others: ["SAVE10", "SHIPIT"], subtotal: 40 });
     ok("$5.00 with 10% and free shipping on $40.00: $4.00 + $5.00 off the goods, the $8.00 shipping off",

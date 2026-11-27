@@ -420,10 +420,12 @@
       const inclusive = t.taxMode !== "exclusive";
       // What the discount codes took off the goods (each code's share when the server says it) and free shipping.
       const num = (v) => Number(v) > 0 ? Number(v) : 0;
-      const per = (Array.isArray(t.discounts) ? t.discounts : Array.isArray(t.perCode) ? t.perCode : []).filter(x => x && num(x.amount != null ? x.amount : x.goodsOff) > 0);
-      const discount = num(t.discount != null ? t.discount : t.discountAmount) || per.reduce((a, x) => a + num(x.amount != null ? x.amount : x.goodsOff), 0);
+      // getEstimate's totals.discountCodes [{code, discount, freeShipping, label}]: each code's share of the goods off.
+      const share = (x) => num(x.discount != null ? x.discount : x.amount != null ? x.amount : x.goodsOff);
+      const per = (Array.isArray(t.discountCodes) ? t.discountCodes : Array.isArray(t.discounts) ? t.discounts : Array.isArray(t.perCode) ? t.perCode : []).filter(x => x && share(x) > 0);
+      const discount = num(t.discount != null ? t.discount : t.discountAmount) || per.reduce((a, x) => a + share(x), 0);
       const shipOff = num(t.shippingOff != null ? t.shippingOff : t.shippingDiscount);
-      const discRows = (per.length > 1 ? per.map(x => `<tr class="qt-sum-disc"><th>Discount (${escapeHtml(x.code || "")})</th><td>−${adminMoney_(num(x.amount != null ? x.amount : x.goodsOff))}</td></tr>`).join("")
+      const discRows = (per.length > 1 ? per.map(x => `<tr class="qt-sum-disc"><th>Discount (${escapeHtml(x.code || "")})</th><td>−${adminMoney_(share(x))}</td></tr>`).join("")
         : discount > 0 ? `<tr class="qt-sum-disc"><th>Discount${codes.length ? " (" + escapeHtml(codes.join(", ")) + ")" : ""}</th><td>−${adminMoney_(discount)}</td></tr>` : "")
         + (shipOff > 0 ? `<tr class="qt-sum-disc"><th>Free shipping</th><td>−${adminMoney_(shipOff)}</td></tr>` : "");
       root.querySelector("#qtTotals").innerHTML = items.length ? `<table class="qt-sum">

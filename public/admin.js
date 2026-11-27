@@ -26060,7 +26060,7 @@ function graphicKindLabelHtml_(g){
 const GRAPHIC_PRINTED_KEYS_ = ["dtf", "screenprint", "vinyl", "dtg", "sublimation"];
 function showGraphicFormModal_(graphic, orgId, ctx, onDone){
   const isNew = !graphic;
-  const f = graphic || { name: "", kind: ctx.kind === "embroidery" ? "embroidery" : "transfer", designId: ctx.designId || null, transferId: null, tier: null, inkColors: [], imageUrl: "", thumbUrl: "", allowedLocations: [], allowedGarmentColors: [], visible: true };
+  const f = graphic || { name: "", kind: ctx.kind === "embroidery" || (!ctx.kind && decorationIsOn_("embroidery") && !GRAPHIC_PRINTED_KEYS_.some(k => decorationIsOn_(k))) ? "embroidery" : "transfer", designId: ctx.designId || null, transferId: null, tier: null, inkColors: [], imageUrl: "", thumbUrl: "", allowedLocations: [], allowedGarmentColors: [], visible: true };
   const inp = "font-size:13px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;width:100%;box-sizing:border-box;";
   const tierOpt = (v) => ["", "small", "medium", "large"].map(t => `<option value="${t}" ${(f.tier || "") === t ? "selected" : ""}>${t ? TIER_LABEL_[t] + " (+" + (((ctx.tiers || {})[t] || 0) / 100).toFixed(2) + ")" : "— included ($0) —"}</option>`).join("");
   const { ov, close } = inventoryModal_(isNew ? "New graphic" : "Edit graphic", `
@@ -26069,7 +26069,7 @@ function showGraphicFormModal_(graphic, orgId, ctx, onDone){
       <label style="font-size:12px;font-weight:600;">Kind<br><select id="gfKind" style="${inp}">${
         (GRAPHIC_PRINTED_KEYS_.some(k => decorationIsOn_(k)) || f.kind !== "embroidery" ? `<option value="transfer" ${f.kind !== "embroidery" ? "selected" : ""}>Printed (transfer sheet)</option>` : "") +
         (decorationIsOn_("embroidery") || f.kind === "embroidery" ? `<option value="embroidery" ${f.kind === "embroidery" ? "selected" : ""}>Embroidery${decorationIsOn_("embroidery") ? "" : " (switched off)"}</option>` : "")}</select></label>
-      <label style="font-size:12px;font-weight:600;" id="gfDecoWrap">Printed by<br><select id="gfDecoration" style="${inp}">${decorationOptionsHtml_(f.decoration && f.decoration !== "embroidery" ? f.decoration : "dtf", { includeKeys: GRAPHIC_PRINTED_KEYS_ })}</select></label>
+      <label style="font-size:12px;font-weight:600;" id="gfDecoWrap">Printed by<br><select id="gfDecoration" style="${inp}">${decorationOptionsHtml_(f.decoration && f.decoration !== "embroidery" ? f.decoration : (decorationIsOn_("dtf") ? "dtf" : (GRAPHIC_PRINTED_KEYS_.find(k => decorationIsOn_(k)) || "dtf")), { includeKeys: GRAPHIC_PRINTED_KEYS_ })}</select></label>
       <label style="font-size:12px;font-weight:600;">Tier (add-on)<br><select id="gfTier" style="${inp}">${tierOpt()}</select></label>
       <label style="font-size:12px;font-weight:600;grid-column:1/-1;display:flex;align-items:flex-start;gap:6px;"><input type="checkbox" id="gfGlobal" ${f.isGlobal ? "checked" : ""} style="margin-top:2px;">
         <span>Global — every shop can use it <span style="font-weight:400;color:#666;">(kept in one place, like a global design; its design must be global too${f.isGlobal && f.orgId && f.orgId !== orgId ? ` · home shop: ${escapeHtml(((adminOrgs || []).find(o => o.orgId === f.orgId) || {}).name || f.orgId)} · changes apply to every shop` : ""})</span></span></label>

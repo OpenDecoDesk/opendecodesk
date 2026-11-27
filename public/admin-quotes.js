@@ -295,6 +295,8 @@
     let state = d;                         // the server's latest answer: { estimate, items, customer, totals }
     let lines = (d.items || []).map(toRequest);
     let busy = false, headDirty = false;
+    let codes = Array.isArray(d.estimate && d.estimate.discountCodes) ? d.estimate.discountCodes.map(String) : [];   // typed on the quote
+    let codeRules = null;   // { multiple } from Global settings, asked when the box is first drawn (null = unknown)
     const e0 = d.estimate, cust = d.customer || { id: e0.customerId };
     const number = e0.number || "Quote " + e0.id;
     // Lines, title, note to the customer and expiry change while it's a draft or the customer asked for changes. Once
@@ -351,6 +353,7 @@
             <button type="button" class="admin-btn admin-btn-secondary" id="qtAddCustom">+ Custom line</button>
             <button type="button" class="admin-btn admin-btn-secondary" id="qtAddFee">+ Fee</button>
           </div>` : ""}
+          <div id="qtCodes" class="qt-codes"></div>
           <div id="qtTotals" class="qt-totals" aria-live="polite"></div>
 
           <div class="cust-err" id="qtErr" role="alert"></div>
@@ -415,13 +418,81 @@
         : `<div class="cust-note">${editable ? "No lines yet. Add a product, a custom line or a fee." : "No lines."}</div>`;
       const t = state.totals || {};
       const inclusive = t.taxMode !== "exclusive";
+      // What the discount codes took off the goods (each code's share when the server says it) and free shipping.
+      const num = (v) => Number(v) > 0 ? Number(v) : 0;
+      const per = (Array.isArray(t.discounts) ? t.discounts : Array.isArray(t.perCode) ? t.perCode : []).filter(x => x && num(x.amount != null ? x.amount : x.goodsOff) > 0);
+      const discount = num(t.discount != null ? t.discount : t.discountAmount) || per.reduce((a, x) => a + num(x.amount != null ? x.amount : x.goodsOff), 0);
+      const shipOff = num(t.shippingOff != null ? t.shippingOff : t.shippingDiscount);
+      const discRows = (per.length > 1 ? per.map(x => `<tr class="qt-sum-disc"><th>Discount (${escapeHtml(x.code || "")})</th><td>−${adminMoney_(num(x.amount != null ? x.amount : x.goodsOff))}</td></tr>`).join("")
+        : discount > 0 ? `<tr class="qt-sum-disc"><th>Discount${codes.length ? " (" + escapeHtml(codes.join(", ")) + ")" : ""}</th><td>−${adminMoney_(discount)}</td></tr>` : "")
+        + (shipOff > 0 ? `<tr class="qt-sum-disc"><th>Free shipping</th><td>−${adminMoney_(shipOff)}</td></tr>` : "");
       root.querySelector("#qtTotals").innerHTML = items.length ? `<table class="qt-sum">
-        ${inclusive ? "" : `<tr><th>Subtotal</th><td>${adminMoneyOr_(t.subtotal)}</td></tr><tr><th>Sales tax</th><td>${adminMoneyOr_(t.tax)}</td></tr>`}
+        ${inclusive && !discRows ? "" : `<tr><th>Subtotal</th><td>${adminMoneyOr_(t.subtotal)}</td></tr>`}${discRows}${inclusive ? "" : `<tr><th>Sales tax</th><td>${adminMoneyOr_(t.tax)}</td></tr>`}
         <tr class="qt-sum-total"><th>Total</th><td>${adminMoneyOr_(t.total)}</td></tr>
         ${inclusive && Number(t.tax) > 0 ? `<tr><th>Includes sales tax</th><td>${adminMoneyOr_(t.tax)}</td></tr>` : ""}
       </table>${state.estimate && state.estimate.status === "draft" ? `<div class="cust-note">Prices follow the catalog until the quote is sent; from then on they are fixed.</div>` : ""}` : "";
     }
+    // The Discount codes box under the lines: the codes on this quote (each with a ×) and a field to add one. A code is
+    // checked the way the Local sale window checks one — against this quote's goods, its shop and its customer's email
+    // (checkLocalSaleCode, with the codes already on it so one-code shops refuse a second) — and then saved with the
+    // quote (saveEstimate discountCodes). The server checks them all again when the quote is sent and when it is
+    // converted, so this is only to say sooner.
+    const codesOn = () => (typeof adminFeatureOn_ !== "function" || adminFeatureOn_("discounts")) && (editable || codes.length > 0);
+    function paintCodes() {
+      const box = root.querySelector("#qtCodes");
+      if (!box) return;
+      if (!codesOn()) { box.innerHTML = ""; return; }
+      const multiple = !!(codeRules && codeRules.multiple);
+      const canAdd = editable && (multiple || !codes.length) && codes.length < 5;
+      const keep = box.querySelector("#qtCodeMsg") ? box.querySelector("#qtCodeMsg").textContent : "";
+      box.innerHTML = `<h3 class="cust-h">Discount codes</h3>
+        ${codes.length ? `<ul class="qt-code-list">${codes.map((c, i) => `<li><span class="cust-tag">${escapeHtml(c)}</span>${editable
+          ? ` <button type="button" class="admin-btn admin-btn-secondary admin-btn-sm" data-qt-code-remove="${i}" aria-label="Take off code ${escapeHtml(c)}">×</button>` : ""}</li>`).join("")}</ul>` : `<div class="cust-note">${editable ? "No discount code on this quote." : "None."}</div>`}
+        ${canAdd ? `<div class="qt-code-add"><div class="cust-field"><label for="qtCode">${codes.length ? "Add another code" : "Discount code"}</label>
+          <input type="text" id="qtCode" maxlength="64" autocomplete="off" autocapitalize="characters" spellcheck="false"></div>
+          <button type="button" class="admin-btn admin-btn-secondary" id="qtCodeAdd">Apply</button></div>`
+          : editable && codes.length && !multiple ? `<div class="cust-note">Only one discount code can be used at a time (Global settings → Discount codes). Take this one off to use another.</div>` : ""}
+        <div class="cust-note" id="qtCodeMsg" role="status">${escapeHtml(keep)}</div>`;
+    }
+    async function codeRule() {
+      if (codeRules || !adminCan_("settings.global", "read")) return;
+      try { const r = await adminApi_({ action: "getDiscountRules" }); codeRules = { multiple: !!(r && (r.multiple != null ? r.multiple : r.rules && r.rules.multiple)) }; }
+      catch (ex) { codeRules = null; }
+      if (stillOn(hash, root)) paintCodes();
+    }
+    // Saves the codes (and nothing else): the quote's lines are sent too, so the server prices them with the codes on.
+    async function saveCodes(next) {
+      const problem = await persist(editable ? lines : undefined, { discountCodes: next });
+      if (!problem) codes = Array.isArray(state.estimate && state.estimate.discountCodes) ? state.estimate.discountCodes.map(String) : next;
+      paintCodes(); paintLines();
+      return problem;
+    }
+    async function addCode() {
+      const input = root.querySelector("#qtCode"), msg = root.querySelector("#qtCodeMsg"), btn = root.querySelector("#qtCodeAdd");
+      if (!input || !msg) return;
+      const typed = input.value.trim().toUpperCase();
+      msg.textContent = "";
+      if (!typed) { msg.textContent = "Enter a code first."; input.focus(); return; }
+      if (codes.includes(typed)) { msg.textContent = "That code is already on this quote."; return; }
+      if (!(state.items || []).some(it => it.kind !== "fee")) { msg.textContent = "Add the items first."; return; }
+      if (headDirty && fieldsEditable) { const bad = await persist(lines); if (bad) { msg.textContent = bad; return; } }
+      const goods = (state.items || []).filter(it => it.kind !== "fee").reduce((a, it) => a + (Number(it.lineTotal) || 0), 0);
+      if (btn) btn.disabled = true;
+      try {
+        const r = await adminApi_({ action: "checkLocalSaleCode", org: state.estimate.orgId, code: typed, subtotal: Math.round(goods * 100) / 100, others: codes,
+          ...(cust && cust.email ? { contact: cust.email } : {}), ...(cust && cust.id != null ? { customerId: cust.id } : {}) });
+        if (!r || !r.ok) { msg.textContent = (r && r.reason) || "This code isn't valid."; return; }
+        const real = (r.code && r.code.code) || typed;
+        const problem = await saveCodes(codes.concat([String(real).toUpperCase()]));
+        const again = root.querySelector("#qtCodeMsg");
+        if (again) again.textContent = problem || "";
+        if (!problem) showToast("Code " + real + " added.");
+      } catch (ex) { msg.textContent = (ex && ex.message) || "Couldn't check the code."; }
+      finally { const b = root.querySelector("#qtCodeAdd"); if (b) b.disabled = false; }
+    }
     paintLines();
+    paintCodes();
+    if (editable) codeRule();
 
     const headFields = () => {
       const v = (fid) => root.querySelector("#" + fid).value;
@@ -433,13 +504,13 @@
     // the server that prices the lines (quantity breaks across the whole quote, tax). `next` undefined saves the fields
     // alone (a sent quote). Answers "" or the problem.
     const STILL_SAVING = "Still saving — try again in a moment.";
-    async function persist(next) {
+    async function persist(next, extra) {
       if (busy) return STILL_SAVING;
       const head = headFields();
       if (head.expiresOn && head.expiresOn < localToday_() && head.expiresOn !== (state.estimate.expiresOn || null)) return "The last day to accept can't be in the past.";
       busy = true; errEl.textContent = "";
       try {
-        const a = await adminApi_(Object.assign({ action: "saveEstimate", id }, head, next === undefined ? {} : { items: next }));
+        const a = await adminApi_(Object.assign({ action: "saveEstimate", id }, head, next === undefined ? {} : { items: next }, extra || {}));
         if (!stillOn(hash, root)) return "";
         if (a && a.estimate) state = a;
         lines = (state.items || []).map(toRequest);
@@ -458,7 +529,7 @@
     }
 
     form.addEventListener("input", (e) => {
-      if (e.target.closest("#qtLines")) return;
+      if (e.target.closest("#qtLines, #qtCodes")) return;
       headDirty = true;
       const saved = root.querySelector("#qtSaved"); if (saved) saved.textContent = "";
     });
@@ -487,6 +558,8 @@
     form.addEventListener("keydown", (e) => {
       // Enter in a quantity saves that quantity, not the whole form (the change event above does it).
       if (e.key === "Enter" && e.target.matches("input[data-qt-qty]")) { e.preventDefault(); e.target.blur(); }
+      // Enter in the code field applies the code, not the whole form.
+      if (e.key === "Enter" && e.target.id === "qtCode") { e.preventDefault(); addCode(); }
     });
 
     root.addEventListener("click", async (e) => {
@@ -519,6 +592,13 @@
         return showOtherLine(kind, item, done);
       };
       if (at("qtEdit") != null) { const it = (state.items || [])[at("qtEdit")]; if (it) lineDialog(it.kind, at("qtEdit")); return; }
+      if (btn.id === "qtCodeAdd") { addCode(); return; }
+      if (btn.dataset.qtCodeRemove != null) {
+        const i = Number(btn.dataset.qtCodeRemove);
+        const problem = await saveCodes(codes.filter((_, j) => j !== i));
+        const m = root.querySelector("#qtCodeMsg"); if (m) m.textContent = problem || "";
+        return;
+      }
       if (btn.id === "qtAddProduct") { lineDialog("product", null); return; }
       if (btn.id === "qtAddCustom") { lineDialog("custom", null); return; }
       if (btn.id === "qtAddFee") { lineDialog("fee", null); return; }

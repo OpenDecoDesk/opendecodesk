@@ -461,19 +461,35 @@ function receiptLines_(order) {
   const discountTaxCents = order.discountTax != null && order.discountTax !== "" ? rcCents_(order.discountTax)
     : (!exclusive && known && order.salesTax != null ? Math.max(0, Math.min(discountCents, lineTaxCents + rushTaxCents - rcCents_(order.salesTax))) : 0);
   const taxCents = order.salesTax != null && order.salesTax !== "" ? rcCents_(order.salesTax) : Math.max(0, lineTaxCents - discountTaxCents + rushTaxCents);
+  // Free shipping from a code (migrations/0120): shipping stays at its full price on the receipt and its own
+  // line takes it off, so a customer sees what the code saved. orderAmounts already subtracts it from the total.
+  const shipOffCents = shippingOffCents_(order, shippingCents);
   const rushShown = beforeTax && !exclusive ? rushCents - rushTaxCents : rushCents;
   const discountShown = beforeTax && !exclusive ? discountCents - discountTaxCents : discountCents;
   const tbd = !!(order.manualShipping || order.shippingPending);
   const totalCents = order.effectiveTotal != null && order.effectiveTotal !== "" ? rcCents_(order.effectiveTotal)
     : order.total != null && order.total !== "" ? rcCents_(order.total)
-    : subtotalCents + shippingCents + rushShown - discountShown + (beforeTax ? taxCents : 0);
+    : subtotalCents + shippingCents - shipOffCents + rushShown - discountShown + (beforeTax ? taxCents : 0);
   const rows = [{ label: "Subtotal", value: fmtCents_(subtotalCents) }];
   if (tbd) rows.push({ label: "Shipping", value: "TBD", muted: true });
   else if (shippingCents > 0) rows.push({ label: deliveryLabel_(order), value: fmtCents_(shippingCents) });
   else if (deliveryIsCustom_(order)) rows.push({ label: deliveryLabel_(order), value: "Free" });
   if (rushPending) rows.push({ label: "Rush fee", value: RUSH_FOLLOW_TEXT_, muted: true });
   else if (rushCents > 0) rows.push({ label: "Rush fee", value: fmtCents_(rushShown) });
-  if (discountCents > 0) rows.push({ label: "Discount" + discountLabelNote_(order), value: "−" + fmtCents_(discountShown), green: true });
+  if (shipOffCents > 0) rows.push({ label: "Free shipping" + (codeNames_(order, true) ? " (" + codeNames_(order, true) + ")" : ""), value: "−" + fmtCents_(shipOffCents), green: true });
+  if (discountCents > 0) {
+    // One line per code when the order knows what each took off (discountCodes as { code, amount }); the one
+    // combined line otherwise, which also names every code of a list of plain strings.
+    const per = codeAmounts_(order);
+    if (per.length > 1 && per.reduce((t, c) => t + c.cents, 0) === discountCents) {
+      let left = discountShown;
+      per.forEach((c, i) => {
+        const share = i === per.length - 1 ? left : Math.min(left, beforeTax && !exclusive && discountCents ? Math.round(c.cents * discountShown / discountCents) : c.cents);
+        left -= share;
+        rows.push({ label: "Discount (" + c.code + ")", value: "−" + fmtCents_(share), green: true });
+      });
+    } else rows.push({ label: "Discount" + discountLabelNote_(order), value: "−" + fmtCents_(discountShown), green: true });
+  }
   const taxLabel = "Sales tax" + (order.taxRate ? ` (${order.taxRate}%)` : "");
   if (order.taxExempt) rows.push({ label: "Sales tax", value: "Tax-exempt", muted: true });
   else if (beforeTax && taxCents > 0) rows.push({ label: taxLabel, value: fmtCents_(taxCents) });
@@ -488,18 +504,72 @@ function receiptLines_(order) {
 // " (SAVE10)" after "Discount": a discount code's own text (migrations/0115 — discountCode, the code of the order's live
 // use) rather than its stored note "Code SAVE10", plus anything the owner added to the note since ("SAVE10; Balance
 // waived"). Without a code, the manual discount's note as before; nothing when neither is set.
+// What free-shipping codes took off shipping, in cents: shippingDiscountCents or shippingDiscount (dollars) on the
+// order, never more than the shipping itself.
+function shippingOffCents_(order, shippingCents) {
+  const c = order.shippingDiscountCents != null && order.shippingDiscountCents !== "" ? Math.round(Number(order.shippingDiscountCents))
+    : order.shippingDiscount != null && order.shippingDiscount !== "" ? rcCents_(order.shippingDiscount) : 0;
+  return Math.max(0, Math.min(c || 0, shippingCents));
+}
+// The order's codes: `discountCodes` is a list of "SAVE10" or { code, amount, freeShipping }; `discountCode` the joined text.
+function codeList_(order) {
+  const list = Array.isArray(order.discountCodes) ? order.discountCodes : String(order.discountCode || "").split(",");
+  return list.map(c => c && typeof c === "object" ? { code: String(c.code || "").trim(), amount: c.amount, freeShipping: !!c.freeShipping } : { code: String(c || "").trim() })
+    .filter(c => c.code);
+}
+function codeNames_(order, shippingOnly) {
+  const all = codeList_(order), ship = all.filter(c => c.freeShipping);
+  // Which code gave free shipping is only known when the order's codes say so ({ code, freeShipping }); a list of
+  // plain names would name codes that didn't, so the line then says just "Free shipping".
+  return (shippingOnly ? ship : all).map(c => c.code).join(", ");
+}
+function codeAmounts_(order) {
+  return codeList_(order).filter(c => c.amount != null && c.amount !== "").map(c => ({ code: c.code, cents: rcCents_(c.amount) }));
+}
 function discountLabelNote_(order) {
-  const code = String(order.discountCode || "").trim();
+  const code = codeNames_(order).trim();
   const note = String(order.discountNote || "").trim();
   if (!code) return note ? " (" + note + ")" : "";
-  const rest = note.replace(new RegExp("^Code " + code.replace(/[^A-Za-z0-9_-]/g, "") + "(?![A-Za-z0-9_-])(;\\s*)?", "i"), "").trim();
+  const rest = note.replace(new RegExp("^Codes? " + code.replace(/[^A-Za-z0-9_, -]/g, "").replace(/[, ]+/g, "[,; ]+") + "(?![A-Za-z0-9_-])(;\\s*)?", "i"), "").trim();
   return " (" + code + (rest ? "; " + rest : "") + ")";
 }
 // Paid so far / balance due under the totals (the invoice and the payment-received email).
+// A gift card is a payment (migrations/0120: an order_payments row with giftCardId, reference "Gift card ••1234"),
+// so it is listed here as "Paid by gift card ••1234" and what other money came in stays as "Paid".
+function giftCardPayments_(order) {
+  const out = [];
+  for (const p of order.payments || []) {
+    if (!p || p.voidedAt || (p.kind && p.kind !== "payment")) continue;
+    if (!(p.giftCardId != null || /^Gift card/i.test(String(p.reference || "")))) continue;
+    const cents = rcCents_(p.amount);
+    if (cents > 0) out.push({ cents, label: /^Gift card/i.test(String(p.reference || "")) ? String(p.reference).replace(/^Gift card/i, "gift card") : "gift card" });
+  }
+  return out;
+}
+// An order that sold a gift card online (its line has productId "__giftcard__"): the card is made and emailed to the
+// recipient once the order is paid, so the receipt says where it goes. { recipientName, recipientEmail } from the
+// line's config, "" when the order has no such line.
+function giftCardOrderNote_(order) {
+  const line = (order.items || []).find(it => it && !it.cancelDate && it.productId === "__giftcard__");
+  if (!line) return null;
+  let cfg = line.config;
+  if (!cfg && line.configJson) { try { cfg = JSON.parse(line.configJson); } catch (e) { cfg = null; } }
+  const g = (cfg && cfg.giftCard) || {};
+  const who = String(g.recipientName || "").trim(), to = String(g.recipientEmail || "").trim();
+  const paid = !!order.paid || Math.max(0, rcCents_(order.balanceDue)) <= 0;
+  const text = paid
+    ? `Your gift card is on its way to ${who || to || "the person you chose"}${who && to ? " (" + to + ")" : ""} by email. It never expires.`
+    : `Once this is paid, your gift card is emailed to ${who || to || "the person you chose"}${who && to ? " (" + to + ")" : ""}. It never expires.`;
+  return { text, html: `<p style="background:#f0fdf4;border:1px solid #86efac;border-radius:4px;padding:10px 14px;font-size:14px">${escHtml(text)}</p>` };
+}
 function paymentRows_(order) {
   const received = rcCents_(order.amountReceived), due = Math.max(0, rcCents_(order.balanceDue));
   if (!(received > 0)) return [];
-  return [{ label: "Paid", value: "−" + fmtCents_(received), green: true }, { label: due > 0 ? "Balance due" : "Balance due", value: fmtCents_(due), strong: true }];
+  const cards = giftCardPayments_(order), cardTotal = Math.min(received, cards.reduce((t, c) => t + c.cents, 0));
+  const rows = cards.map(c => ({ label: "Paid by " + c.label, value: "−" + fmtCents_(c.cents), green: true }));
+  if (received - cardTotal > 0) rows.push({ label: "Paid", value: "−" + fmtCents_(received - cardTotal), green: true });
+  rows.push({ label: "Balance due", value: fmtCents_(due), strong: true });
+  return rows;
 }
 function itemsTableHtml_(r) {
   const td = "padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top";
@@ -723,6 +793,8 @@ export async function orderPdf(env, order, { kind = "", orgName = "", message = 
     y += x.strong ? 18 : 15;
   }
   y += 6;
+  const gcNote = giftCardOrderNote_(order);
+  if (gcNote) { for (const l of pdfWrap(gcNote.text, R - M, 10)) { ensure(14); doc.text(M, y, l, { size: 10 }); y += 13; } y += 8; }
   if (isReceipt) {
     ensure(34);
     doc.rect(M, y, R - M, 26, { stroke: "#15803d", width: 1.5 });
@@ -783,6 +855,7 @@ export async function buildOrderReceivedEmail(env, order, { pdf = true } = {}) {
        </p>`
     : "";
   const paidNow = due <= 0 && !r.tbd;
+  const gcNote = giftCardOrderNote_(order);
   const attachedLine = paidNow ? " Your receipt is attached as a PDF." : " Your invoice is attached as a PDF.";
   const html = `<div style="font-family:sans-serif;max-width:600px;margin:auto">
     <h2 style="color:#1d4ed8">Order received${paidNow ? " — paid" : ""}</h2>
@@ -792,12 +865,13 @@ export async function buildOrderReceivedEmail(env, order, { pdf = true } = {}) {
     ${itemsTableHtml_(r)}
     ${totalsHtml_(r.rows)}
     ${manualShippingNote}
+    ${gcNote ? gcNote.html : ""}
     ${pay && pay.any ? pay.html : ""}
     ${biz.html}
   </div>`;
   const text = `Order received${paidNow ? " — paid" : ""} — ${order.orderId}\n\nHi ${order.customerName},\nThank you — we received your order${paidNow ? " and your payment" : ""}.${attachment ? attachedLine : ""}\n${rushNotice ? "\n" + rushNotice.text + "\n" : ""}` +
     `\nOrder number: ${order.orderId}${order.paymentMethod ? "\nPayment: " + order.paymentMethod : ""}\n\n${itemsText_(r)}\n\n${totalsText_(r, r.rows)}\n` +
-    (pay && pay.any ? "\n" + pay.text + "\n" : "") + `\n${biz.text}`;
+    (gcNote ? "\n" + gcNote.text + "\n" : "") + (pay && pay.any ? "\n" + pay.text + "\n" : "") + `\n${biz.text}`;
   return { to: order.contact, subject, html, text, ...(attachment ? { attachments: [attachment] } : {}) };
 }
 export async function sendOrderReceivedEmail(env, order) {
@@ -903,6 +977,8 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
   const pickedAll = notices.filter(x => x.kind === "picked_up");
   const pickedUp = pickedAll.filter(x => !x.urgent), pickedUrgent = pickedAll.length - pickedUp.length;
   const activity = notices.filter(x => !x.urgent && x.kind !== "delivered" && x.kind !== "picked_up");
+  const giftsSold = activity.filter(x => x.kind === "gift_card");
+  const giftsLine = giftsSold.length ? `Gift cards sold: ${giftsSold.length}` : "";
   const n = orders.length;
   const plural = (k, word) => `${k} ${word}${k === 1 ? "" : "s"}`;
   more = Math.max(0, Number(more) || 0);
@@ -920,7 +996,7 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
     urgent.length > pickedUrgent ? `⚠️ ${plural(urgent.length - pickedUrgent, "dispute")} filed` : "",
     pickedUrgent ? `⚠️ ${plural(pickedUrgent, "shipped email")} not sent` : "",
     n ? `${plural(n, "new order")} (${fmt$(total)})` : "",
-    kindCount("payment", "payment"), kindCount("refund", "refund"),
+    kindCount("payment", "payment"), kindCount("refund", "refund"), kindCount("gift_card", "gift card sold"),
     (k => k ? plural(k, "dispute update") : "")(activity.filter(x => x.kind === "dispute").length),
     kindCount("design", "design response"),
     delivered.length ? `${delivered.length} ${delivered.length === 1 ? "delivery" : "deliveries"}` : "",
@@ -1008,7 +1084,7 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
           <td style="padding:6px 8px;vertical-align:top;white-space:nowrap;color:#666">${escHtml(x.orderedDate || "")}</td>
           <td style="padding:6px 8px;vertical-align:top;${x.overdue ? "color:#b03a2e;font-weight:600" : "color:#555"}">${escHtml(x.statusLabel || "")}${(x.shipments || []).map(s => `<div style="font-size:12px;color:#555;margin-top:2px;font-weight:400">📦 ${escHtml(s.carrier || "")} ${(u => u ? `<a href="${escHtml(u)}">${escHtml(s.trackingNumber)}</a>` : escHtml(s.trackingNumber))(trackingUrl(s.carrier, s.trackingNumber))}${s.status ? ` — ${escHtml(blankStatusText_(s))}` : ""}${s.statusDate ? " (" + escHtml(when(s.statusDate)) + ")" : ""}</div>`).join("")}</td>
         </tr>`).join("")}</tbody></table>` : ""}
-    ${activity.length ? `<h3 style="margin:22px 0 6px;font-size:17px">Payments, refunds &amp; customer responses</h3>${noticeTable(activity)}` : ""}
+    ${activity.length ? `<h3 style="margin:22px 0 6px;font-size:17px">Payments, refunds &amp; customer responses</h3>${giftsLine ? `<p style="margin:0 0 6px;font-size:14px"><strong>🎁 ${escHtml(giftsLine)}</strong></p>` : ""}${noticeTable(activity)}` : ""}
     ${pr ? priceReminderHtml_(pr, orgName, tz) : ""}
     ${belowTarget.length ? `<h3 style="margin:22px 0 6px;font-size:17px">📉 Products now below your price targets — ${belowTarget.length}</h3>
     <p style="margin:0 0 6px;color:#555;font-size:13px">A blank's cost, a fee or a target changed since the last roll-up. The product's Pricing panel shows what each item costs and leaves.</p>
@@ -1045,7 +1121,7 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
     awaitingBlanks.length ? `BLANKS ORDERED, NOT YET RECEIVED — ${awaitingBlanks.length}\n` + awaitingBlanks.map(x =>
       ((main) => main + (x.shipments || []).map(s => `\n      📦 ${s.carrier || ""} ${s.trackingNumber}${s.status ? " — " + blankStatusText_(s) : ""} ${trackingUrl(s.carrier, s.trackingNumber)}`).join(""))(
       `  ${x.orderId} (${orgName(x.orgId)})  ${x.customerName || ""}  ${[x.blankVendor, x.blankVendorOrderId && "#" + x.blankVendorOrderId].filter(Boolean).join(" ")}  ordered ${x.orderedDate || "?"}  — ${x.statusLabel || ""}`)).join("\n") : "",
-    activity.length ? "Payments, refunds & customer responses\n" + activity.map(noticeText).join("\n") : "",
+    activity.length ? "Payments, refunds & customer responses\n" + (giftsLine ? "  " + giftsLine + "\n" : "") + activity.map(noticeText).join("\n") : "",
     pr ? priceReminderText_(pr, orgName, tz) : "",
     belowTarget.length ? `PRODUCTS NOW BELOW YOUR PRICE TARGETS — ${belowTarget.length}\n` + belowTarget.map(p => `  ${p.name} (${orgName(p.orgId)})\n` + (p.problems || []).map(x => "    " + x).join("\n")).join("\n") : "",
     rushToSet.length ? `RUSH FEES TO SET — ${rushToSet.length}\n` + rushToSet.map(x => `  ${x.orderId} (${orgName(x.orgId)})  ${x.customerName}${x.dueDate ? "  needed by " + x.dueDate : ""}`).join("\n") : "",
@@ -1121,17 +1197,19 @@ export async function buildPaymentReceivedEmail(env, order, paidAt, { pdf = true
   const what = `We received your payment${received > 0 ? " of " + fmt$(received) : ""}${order.paymentMethod ? " by " + order.paymentMethod : ""}${paidDate ? " on " + paidDate : ""}.`;
   const status = due > 0 ? `${fmt$(due)} is still due.` : "Your order is paid in full. Thank you!";
   const rows = [...r.rows, ...paymentRows_(order)];
+  const gcNote = giftCardOrderNote_(order);
   const html = `<div style="font-family:sans-serif;max-width:600px;margin:auto">
     <h2 style="color:#15803d">Payment received</h2>
     <p>Hi ${escHtml(order.customerName)}, ${escHtml(what)} ${escHtml(status)}${attachment ? " Your receipt is attached as a PDF." : ""}</p>
     <p><strong>Order number:</strong> ${escHtml(order.orderId)}</p>
     ${itemsTableHtml_(r)}
     ${totalsHtml_(rows)}
+    ${gcNote ? gcNote.html : ""}
     ${pay && pay.any ? pay.html : ""}
     ${biz.html}
   </div>`;
   const text = `Payment received — ${order.orderId}\n\nHi ${order.customerName},\n${what} ${status}\n\nOrder number: ${order.orderId}\n\n${itemsText_(r)}\n\n${totalsText_(r, rows)}\n` +
-    (pay && pay.any ? "\n" + pay.text + "\n" : "") + `\n${biz.text}`;
+    (gcNote ? "\n" + gcNote.text + "\n" : "") + (pay && pay.any ? "\n" + pay.text + "\n" : "") + `\n${biz.text}`;
   return { to: order.contact, subject, html, text, ...(attachment ? { attachments: [attachment] } : {}) };
 }
 export async function sendPaymentConfirmedEmail(env, order, paidAt) {
@@ -1524,11 +1602,32 @@ export function estimateLinesView(items) {
 // Subtotal / tax / total as rows (totalsHtml_ / totalsText_). Tax is the snapshot taken when the quote was
 // sent: added on top it is its own line; included in the prices it is noted under the Total, as receipts do
 // when a line's tax isn't split out.
-function estimateTotalsRows_(totals) {
+// The discount codes on a quote (phase 6): `discounts` is [{ code, amount }] (what each took off the goods, dollars),
+// `shippingOff` what a free-shipping code took off. Shown under the Subtotal, then the lower Total.
+// The discount part of a quote's totals, whatever the totals call it: the codes (["SAVE10"], or on the quote's own
+// `discountCodes`), what they took off the goods in all and per code, and what a free-shipping code took off.
+export function estimateDiscountView(totals, codes) {
   const t = totals || {};
+  const list = (Array.isArray(codes) && codes.length ? codes : Array.isArray(t.discountCodes) ? t.discountCodes : [])
+    .map(c => String(c && typeof c === "object" ? c.code : c || "").trim()).filter(Boolean);
+  const num = (...v) => { for (const x of v) if (x != null && x !== "" && !isNaN(Number(x))) return Number(x); return 0; };
+  // (db.js getEstimate's totals list each code as discountCodes [{ code, discount, freeShipping, label }].)
+  const perSrc = Array.isArray(t.discounts) ? t.discounts : Array.isArray(t.perCode) ? t.perCode
+    : Array.isArray(t.discountCodes) && t.discountCodes.some(d => d && typeof d === "object") ? t.discountCodes : [];
+  const per = perSrc
+    .map(d => ({ code: String(d && d.code || "").trim(), amount: num(d && d.amount, d && d.goodsOff, d && d.discount) })).filter(d => d.amount > 0);
+  const discount = num(t.discount, t.discountAmount, per.reduce((a, d) => a + d.amount, 0));
+  return { codes: list, discount, per, shippingOff: num(t.shippingOff, t.shippingDiscount) };
+}
+function estimateTotalsRows_(totals, codes) {
+  const t = totals || {};
+  const dv = estimateDiscountView(t, codes);
   const tax = Number(t.tax) || 0, rate = (Number(t.taxRateBps) || 0) / 100;
   const label = "Sales tax" + (rate ? ` (${rate}%)` : "");
   const rows = [{ label: "Subtotal", value: fmt$(Number(t.subtotal) || 0) }];
+  if (dv.per.length > 1) for (const d of dv.per) rows.push({ label: "Discount" + (d.code ? " (" + d.code + ")" : ""), value: "−" + fmt$(d.amount), green: true });
+  else if (dv.discount > 0) rows.push({ label: "Discount" + (dv.codes.length ? " (" + dv.codes.join(", ") + ")" : ""), value: "−" + fmt$(dv.discount), green: true });
+  if (dv.shippingOff > 0) rows.push({ label: "Free shipping", value: "−" + fmt$(dv.shippingOff), green: true });
   if (t.taxMode === "exclusive" && tax > 0) rows.push({ label, value: fmt$(tax) });
   rows.push({ label: "Total", value: fmt$(Number(t.total) || 0), strong: true, rule: true });
   if (t.taxMode !== "exclusive" && tax > 0) rows.push({ label: "Includes " + label.toLowerCase(), value: fmt$(tax), muted: true, small: true });
@@ -1592,7 +1691,7 @@ export function buildEstimateEmail({ estimate, items, totals, orgName, link, mes
     ${notes.map(noteHtml).join("")}
     <p><strong>Quote:</strong> ${escHtml(number)}${title ? ` · ${escHtml(title)}` : ""}</p>
     ${estimateTableHtml_(view, taxed)}
-    ${totalsHtml_(estimateTotalsRows_(totals))}
+    ${totalsHtml_(estimateTotalsRows_(totals, e.discountCodes))}
     ${until ? `<p style="font-size:14px">${escHtml(until)}</p>` : ""}
     ${link ? `<div style="margin:24px 0;text-align:center">
       <a href="${escHtml(link)}" style="display:inline-block;background:#1d4ed8;color:#fff;font-size:16px;font-weight:bold;padding:14px 32px;border-radius:6px;text-decoration:none">View &amp; accept quote &rarr;</a>
@@ -1601,9 +1700,71 @@ export function buildEstimateEmail({ estimate, items, totals, orgName, link, mes
     %%FOOTER_HTML%%
   </div>`;
   const text = `Quote ${number}${title ? " — " + title : ""}\n\n${hello} ${lead}\n${notes.length ? "\n" + notes.join("\n\n") + "\n" : ""}\n` +
-    `${estimateItemsText_(view, taxed)}\n\n${totalsText_(null, estimateTotalsRows_(totals))}\n` +
+    `${estimateItemsText_(view, taxed)}\n\n${totalsText_(null, estimateTotalsRows_(totals, e.discountCodes))}\n` +
     (until ? `${until}\n` : "") + (link ? `\nView and accept: ${link}\n` : "") + `\n%%FOOTER_TEXT%%`;
   return { to: String(to || e.sentTo || "").trim(), subject, html, text };
+}
+
+// ---- Gift cards (phase 6) ----------------------------------------------------------------------------------
+// "You've got a gift card from <buyer>" to the recipient: the amount, the number grouped XXXX-XXXX-XXXX-XXXX, the
+// message, and how to spend it (at checkout, on any of the business's shops). It never expires. `card` is a parsed
+// gift card (getGiftCard: initial / balance in dollars, recipientName, recipientEmail, buyerName, message) and `code`
+// the full number (only the admin and the webhook that just made it ever hold it). `business` is the name (or the
+// Business profile); `shopName` names the shop it was bought in. A staff-issued card without a buyer is "from <business>".
+function giftCardGroups_(code) {
+  const c = String(code || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return c.length === 16 ? c.replace(/(.{4})(?=.)/g, "$1-") : String(code || "");
+}
+export function buildGiftCardEmail({ card, code, business, shopName, to, giftUrl } = {}) {
+  const c = card || {};
+  const biz = String((business && typeof business === "object" ? business.name : business) || shopName || "").trim() || "our shop";
+  const buyer = String(c.buyerName || "").trim();
+  const from = buyer || biz;
+  const amount = Number(c.initial != null ? c.initial : c.balance) || 0;
+  const number = giftCardGroups_(code);
+  const hello = String(c.recipientName || "").trim() ? `Hi ${String(c.recipientName).trim()},` : "Hello,";
+  const message = String(c.message || "").trim();
+  const subject = `You've got a gift card from ${from}`;
+  const how = "To use it, enter the number in the Gift card box at checkout on any of " + (buyer ? biz + "'s" : "our") + " shops. It can be spent over more than one order until the balance runs out, and it never expires.";
+  const html = `<div style="font-family:sans-serif;max-width:600px;margin:auto">
+    <h2 style="color:#15803d">You've got a gift card</h2>
+    <p>${escHtml(hello)} ${escHtml(from)} sent you a ${escHtml(fmt$(amount))} gift card${buyer && biz !== buyer ? " for " + escHtml(biz) : ""}.</p>
+    ${message ? `<p style="background:#f8fafc;border-left:3px solid #15803d;padding:10px 14px;white-space:pre-wrap">${escHtml(message)}</p>` : ""}
+    <div style="margin:20px 0;border:2px dashed #15803d;border-radius:8px;padding:16px;text-align:center">
+      <div style="font-size:28px;font-weight:bold">${escHtml(fmt$(amount))}</div>
+      <div style="font-family:monospace;font-size:20px;letter-spacing:1px;margin-top:6px">${escHtml(number)}</div>
+    </div>
+    <p style="font-size:14px">${escHtml(how)}</p>
+    ${giftUrl ? `<p style="font-size:14px"><a href="${escHtml(giftUrl)}">${escHtml(giftUrl)}</a></p>` : ""}
+    <p style="font-size:13px;color:#555">Keep this email: the number is the only record of the card.</p>
+    %%FOOTER_HTML%%
+  </div>`;
+  const text = `You've got a gift card from ${from}\n\n${hello} ${from} sent you a ${fmt$(amount)} gift card${buyer && biz !== buyer ? " for " + biz : ""}.\n` +
+    (message ? "\n" + message + "\n" : "") + `\nAmount: ${fmt$(amount)}\nGift card number: ${number}\n\n${how}\n${giftUrl ? "\n" + giftUrl + "\n" : ""}\nKeep this email: the number is the only record of the card.\n\n%%FOOTER_TEXT%%`;
+  return { to: String(to || c.recipientEmail || "").trim(), subject, html, text };
+}
+export async function sendGiftCardEmail(env, args) {
+  return send_(env, buildGiftCardEmail(args || {}));
+}
+// The buyer's note that the card went out (an online sale): a line they can keep with their receipt.
+export async function sendGiftCardSentReceipt(env, { card, to, business } = {}) {
+  const c = card || {}, addr = String(to || c.buyerEmail || "").trim();
+  if (!addr.includes("@")) return false;
+  const amount = Number(c.initial != null ? c.initial : c.balance) || 0;
+  const who = String(c.recipientName || c.recipientEmail || "your recipient").trim();
+  const biz = String((business && typeof business === "object" ? business.name : business) || "").trim();
+  const line = `Your ${fmt$(amount)} gift card${biz ? " from " + biz : ""} was emailed to ${who}${c.recipientName && c.recipientEmail ? " (" + c.recipientEmail + ")" : ""}. It never expires.`;
+  const name = String(c.buyerName || "").trim();
+  return send_(env, { to: addr, subject: "Your gift card was sent", html: `<div style="font-family:sans-serif;max-width:600px;margin:auto"><h2 style="color:#15803d">Your gift card was sent</h2><p>${escHtml((name ? `Hi ${name}, ` : "") + line)}</p>%%FOOTER_HTML%%</div>`,
+    text: `Your gift card was sent\n\n${name ? `Hi ${name}, ` : ""}${line}\n\n%%FOOTER_TEXT%%` });
+}
+// Queued for the morning roll-up (owner_notices.kind "gift_card", migrations/0119) when a gift card is sold online:
+// "Gift card $50 for Pat — order X". Emailed at once only if it can't be queued, like the other owner notices.
+export async function queueGiftCardSoldNotice(env, { orderId, orgId, amount, recipientName } = {}) {
+  const who = String(recipientName || "").trim();
+  const summary = `Gift card ${fmt$(Number(amount) || 0)}${who ? " for " + who : ""} — order ${orderId}`;
+  return queueOwnerNotice_(env, { kind: "gift_card", orderId, orgId: orgId || "", summary },
+    { to: ORDER_NOTIFICATION_EMAIL, subject: `Gift card sold — ${orderId}`, html: `<p>${escHtml(summary)}</p>`, text: summary });
 }
 
 // Queued for the owner's 6 AM roll-up when a customer answers a quote on its page (emailed at once only if

@@ -195,6 +195,23 @@ const DISCOUNT_BOX_SQL_ = `SELECT 1 AS ok FROM discount_codes d
   LIMIT 1`;
 function discountBoxSince_(now){ return new Date(now.getTime() - 86400000).toISOString().slice(0, 10); }
 
+// The two global rules the checkout needs (migrations/0120), read fresh with the discount box's yes/no so a change in
+// Global settings shows at once, with no Publish: discountRules { multiple } (more than one code on an order) and
+// giftCards { sellOnline, amounts (cents), minCents, maxCents } (the "Gift cards" button on the shop page). Missing
+// rows or a database without them: one code, and no online gift cards.
+const CHECKOUT_RULES_SQL_ = "SELECT key, value FROM global_settings WHERE key IN ('discountRules', 'giftCards')";
+function parseJson_(v){ try{ return JSON.parse(v); }catch(_){ return null; } }
+function checkoutRules_(rows){
+  const by = {};
+  for(const r of rows || []) by[r.key] = parseJson_(r.value);
+  const dr = by.discountRules && typeof by.discountRules === "object" ? by.discountRules : {};
+  const gc = by.giftCards && typeof by.giftCards === "object" ? by.giftCards : {};
+  const amounts = (Array.isArray(gc.amounts) ? gc.amounts : [2500, 5000, 10000]).map(Number).filter(n => Number.isSafeInteger(n) && n >= 100 && n <= 100000000).slice(0, 6);
+  const minCents = Number.isSafeInteger(Number(gc.minCents)) && Number(gc.minCents) >= 100 ? Number(gc.minCents) : 500;
+  const maxCents = Number.isSafeInteger(Number(gc.maxCents)) && Number(gc.maxCents) >= minCents ? Number(gc.maxCents) : 50000;
+  return { multiple: dr.multiple === true, sellOnline: gc.sellOnline === true, amounts, minCents, maxCents };
+}
+
 // Maps a stored product (productId/pricingMode/flatPrice/sizePricing) to the
 // shape storefront.js's rendering expects (id, and sizePricing OR flatPrice —
 // no pricingMode field).
@@ -416,15 +433,26 @@ export async function onRequestGet(context){
   // The discount box's yes/no (DISCOUNT_BOX_SQL_): read fresh, not with the stock block, so a code saved a moment ago
   // shows its box at once; read at the same time, and only while the Discount codes feature is on.
   const wantDiscounts = !!(env.DB && features.discounts !== false);
+  // The global rules for codes and gift cards (CHECKOUT_RULES_SQL_): needed while either feature is on.
+  const wantRules = !!(env.DB && (features.discounts !== false || features.giftCards !== false));
   const settle = (read) => Promise.resolve().then(read).then(v => ({ v }), e => ({ e }));
-  const [{ stockRead, filesRead, blankRead }, discountRead] = await Promise.all([
+  const [{ stockRead, filesRead, blankRead }, discountRead, rulesRead] = await Promise.all([
     env.DB
       ? readShopStock_(env, orgId, { host: url.host, wantFiles, fresh: preview, waitUntil: context.waitUntil?.bind(context) })
       : { stockRead: null, filesRead: null, blankRead: null },
     wantDiscounts ? settle(() => env.DB.prepare(DISCOUNT_BOX_SQL_).bind(orgId, discountBoxSince_(new Date())).first()) : null,
+    wantRules ? settle(() => env.DB.prepare(CHECKOUT_RULES_SQL_).all()) : null,
   ]);
   const discountCodes = !!(discountRead && !discountRead.e && discountRead.v);
   if(discountRead && discountRead.e && !/no such table/i.test(String(discountRead.e.message))) console.error("discount code check failed:", discountRead.e);
+  // A failed read of the rules is the safe default (one code at a time, no online gift cards), never an error page.
+  const rules = checkoutRules_(rulesRead && !rulesRead.e && rulesRead.v ? rulesRead.v.results : []);
+  if(rulesRead && rulesRead.e && !/no such table/i.test(String(rulesRead.e.message))) console.error("checkout rules read failed:", rulesRead.e);
+  // Gift cards (migrations/0120): spendable at checkout while the Gift cards feature is on and the method isn't switched off
+  // (globally or for this shop); sold online only when the owner turned that on AND this shop takes cards (the sale is a card order).
+  const giftCardsOn = features.giftCards !== false;
+  const giftCardPay = giftCardsOn && ((catalogData.globalSettings || {}).enabledPayments || {}).giftCard !== false && ((org && org.enabledPayments) || {}).giftCard !== false;
+  const giftCardSell = giftCardsOn && rules.sellOnline && enabledPayments.includes("Card") && rules.amounts.length > 0;
 
   // Ready-to-ship stock (up to 30 seconds old; an order is still filled from stock only if the database has the pieces).
   // stock: {size: n} for a product with no choices; stockVariants: {combination key: {size: n}} for one with
@@ -520,6 +548,13 @@ export async function onRequestGet(context){
       // The checkout's "Discount code" box: true only when a code could work here now (DISCOUNT_BOX_SQL_). The server
       // checks the code itself, and decides the discount, when it's applied and again when the order is placed.
       discountCodes,
+      // Whether more than one code can be used on an order (Global settings → Discount codes), in dollars where money.
+      discountRules: { multiple: features.discounts !== false && rules.multiple },
+      // Gift cards: spendable at this checkout (giftCardPay), and the "Gift cards" button on the shop page with its
+      // amount buttons and limits in dollars (giftCards.sellOnline). The server checks every number again.
+      giftCardPay,
+      giftCards: { sellOnline: giftCardSell, amounts: giftCardSell ? rules.amounts.map(c => c / 100) : [],
+        min: rules.minCents / 100, max: rules.maxCents / 100 },
       // Public Turnstile site key (not secret) — only when server-side
       // verification is actually on, so the widget never renders for nothing.
       turnstileSiteKey: (env.TURNSTILE_SECRET_KEY && env.TURNSTILE_SITE_KEY) ? env.TURNSTILE_SITE_KEY : null

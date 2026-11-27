@@ -190,7 +190,7 @@ const codeRow = (d1, id) => d1.q("SELECT * FROM discount_codes WHERE id = ?", id
     ok("active false, 0, \"0\", \"false\" are off", [false, 0, "0", "false"].every(x => val({ active: x }).active === false));
     ok("active true, 1, \"1\" are on", [true, 1, "1"].every(x => val({ active: x }).active === true));
     ok("the value is exactly the stored shape", same(val({ code: "save10", note: "x", expiresOn: "2027-07-01", orgId: "club" }),
-      { code: "SAVE10", kind: "percent", percentBps: 1000, amountCents: null, maxDiscountCents: null, orgId: "club", email: "", maxUses: 5, oncePerEmail: 0, expiresOn: "2027-07-01", note: "x", active: undefined }));
+      { code: "SAVE10", kind: "percent", percentBps: 1000, amountCents: null, maxDiscountCents: null, minOrderCents: null, freeShipping: 0, goodsOff: 1, orgId: "club", email: "", maxUses: 5, oncePerEmail: 0, expiresOn: "2027-07-01", note: "x", active: undefined }));
   }
 
   // ---- saveDiscountCode: create ------------------------------------------------------------------------------------
@@ -201,7 +201,7 @@ const codeRow = (d1, id) => d1.q("SELECT * FROM discount_codes WHERE id = ?", id
     const c = r.code;
     ok("a new code is saved upper-case", c && c.code === "SAVE10" && codeRow(d1, c.id).code === "SAVE10");
     ok("a new code answers the reader's shape", same(Object.keys(c).sort(), ["active", "amount", "code", "createdAt", "createdBy", "email", "expiresOn", "id", "kind",
-      "label", "maxDiscount", "maxUses", "note", "oncePerEmail", "orgId", "orgName", "percent", "status", "used", "uses", "usesTotal"].sort()));
+      "label", "maxDiscount", "maxUses", "minOrder", "freeShipping", "note", "oncePerEmail", "orgId", "orgName", "percent", "status", "used", "uses", "usesTotal"].sort()));
     ok("a new code: 10% off, every shop, anyone, 50 uses, none used, active", c.percent === 10 && c.amount === null && c.label === "10% off"
       && c.orgId === null && c.orgName === "" && c.email === "" && c.maxUses === 50 && c.used === 0 && c.active === true && c.status === "active");
     ok("a new code records who and when", c.createdBy === "owner@example.com" && c.createdAt === "2027-06-15T10:00:00.000Z");
@@ -377,7 +377,7 @@ const codeRow = (d1, id) => d1.q("SELECT * FROM discount_codes WHERE id = ?", id
     ok("percent and amount in their units", by.OLDCODE.percent === 12.5 && by.OLDCODE.amount === null && by.OFFCODE.amount === 1234.5 && by.OFFCODE.percent === null);
     ok("the shop's name, or \"\" for every shop", by.CLUB5.orgName === "Example Club" && by.FAIR.orgName === "Example Band" && by.ANYONE10.orgName === "" && by.ANYONE10.orgId === null);
     ok("each code has the reader's shape (no uses list)", same(Object.keys(by.FAIR).sort(), ["active", "amount", "code", "createdAt", "createdBy", "email", "expiresOn", "id", "kind",
-      "label", "maxDiscount", "maxUses", "note", "oncePerEmail", "orgId", "orgName", "percent", "status", "used"]));
+      "label", "maxDiscount", "maxUses", "minOrder", "note", "oncePerEmail", "orgId", "orgName", "percent", "status", "used"].concat("freeShipping").sort()));
     ok("the reader's values for a code for anyone, once per email", by.FAIR.email === "" && by.FAIR.maxUses === 2 && by.FAIR.oncePerEmail === true && by.FAIR.note === "Spring Fair handout"
       && by.FAIR.expiresOn === null && by.FAIR.active === true && by.FAIR.createdBy === "owner@example.com" && by.FAIR.id === fair.id);
     const st = async (s, extra = {}) => ids(await lib.listDiscountCodes(d1, { status: s, today: TODAY, ...extra }));

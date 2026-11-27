@@ -109,10 +109,50 @@ import { jsonResponse, fetchWithTimeout } from "../_lib/http.js";
 import {
   setOrderRefunded, setOrderDisputeStatus, addShippingPayment, addOrderPayment, isShippingPayment, recordStripePayout,
   getOrderCheckoutState, hasProcessedStripeEvent, recordStripeEvent, recordSystemIssue,
-  setCardFeeByRef
+  setCardFeeByRef, issueGiftCard, getGiftCard, getBusinessProfile
 } from "../_lib/db.js";
-import { sendStripePaymentNotification, sendRefundNotification, sendDisputeNotification, sendPaymentProblemNotification } from "../_lib/email.js";
+import { sendStripePaymentNotification, sendRefundNotification, sendDisputeNotification, sendPaymentProblemNotification,
+  sendGiftCardEmail, sendGiftCardSentReceipt, queueGiftCardSoldNotice } from "../_lib/email.js";
 import { deliverOrderDownloads } from "../_lib/digital.js";
+
+// A gift card sold online (phase 6, migrations/0120): the order has a line with productId "__giftcard__" (orders.js
+// buyGiftCard) and, once the payments ledger covers what is owed, the card is made and emailed to the recipient — never
+// before. Idempotent three ways: the card is keyed by its order (db.js issueGiftCard returns the existing one, and the
+// unique index settles two deliveries at once), and the emails and the owner's notice go out only when THIS call made
+// the card. It runs on every delivery of a paying event, not only the first, so a retry after a crash between the payment
+// and the card still makes it. A failure to make the card throws (Stripe retries); a failure to email it is recorded for
+// the morning roll-up (the card stands: Resend on the Gift cards page sends it again).
+async function issueSoldGiftCard_(env, orderId, orgId){
+  const line = await env.DB.prepare("SELECT lineTotalCents, configJson FROM order_items WHERE orderId = ? AND productId = '__giftcard__' LIMIT 1").bind(orderId).first()
+    .catch((e) => { if(/no such (table|column)/i.test(String(e && e.message))) return null; throw e; });
+  if(!line) return;
+  const state = await getOrderCheckoutState(env.DB, orderId);
+  if(!state || state.voided || !state.paid) return;
+  const amountCents = Number(line.lineTotalCents) || 0;
+  if(!(amountCents >= 100)) return;
+  let cfg = null;
+  try{ cfg = JSON.parse(line.configJson || "{}"); }catch(e){ cfg = null; }
+  const gift = (cfg && cfg.giftCard) || {};
+  const order = (await env.DB.prepare("SELECT customerName, contact FROM orders WHERE orderId = ?").bind(orderId).first()) || {};
+  const existed = !!(await env.DB.prepare("SELECT 1 AS x FROM gift_cards WHERE sourceOrderId = ?").bind(orderId).first());
+  const made = await issueGiftCard(env.DB, { amountCents, recipientName: String(gift.recipientName || ""), recipientEmail: String(gift.recipientEmail || ""),
+    buyerName: String(order.customerName || ""), buyerEmail: String(order.contact || ""), message: String(gift.message || ""), note: "",
+    sourceOrderId: orderId, by: "stripe", now: new Date().toISOString() });
+  if(!made || made.error || !made.id) throw new Error("Could not make the gift card for " + orderId);
+  const created = made.created !== undefined ? !!made.created : !existed;
+  if(!created) return;
+  const card = await getGiftCard(env.DB, { id: made.id });
+  const business = await getBusinessProfile(env.DB).catch(() => null);
+  let sent = false;
+  try{
+    sent = !!(await sendGiftCardEmail(env, { card, code: made.code, business, to: String(gift.recipientEmail || "") }));
+    // The buyer's note that it went out (a line to keep with their receipt); its failure matters less.
+    await sendGiftCardSentReceipt(env, { card, to: String(order.contact || ""), business }).catch((e) => console.error("Gift card sent-receipt failed for", orderId, e));
+  }catch(e){ console.error("Emailing the gift card failed for", orderId, e); }
+  if(!sent) await recordSystemIssue(env.DB, "gift_card_email_failed", "order " + orderId + ": the gift card was made but its email to the recipient didn't send — use Resend on the Gift cards page");
+  await queueGiftCardSoldNotice(env, { orderId, orgId, amount: amountCents / 100, recipientName: String(gift.recipientName || "") })
+    .catch((e) => console.error("Gift card sold notice failed for", orderId, e));
+}
 
 // Stripe's webhook signature verification — pure Web Crypto, no SDK needed.
 // Spec: https://stripe.com/docs/webhooks/signatures
@@ -380,6 +420,11 @@ export async function onRequestPost(context){
             await recordSystemIssue(env.DB, "payment_needs_review", "order " + orderId + ": $" + amountPaid.toFixed(2) + " — " + problem);
             await sendPaymentProblemNotification(env, orderId, orgId, amountPaid, problem);
           }else if(inserted) await sendStripePaymentNotification(env, orderId, orgId, amountPaid);
+          // A gift card sold online: made and emailed to its recipient now that it is paid (see issueSoldGiftCard_). On a
+          // replay too (not only when `inserted`), so a crash between the payment and the card heals on Stripe's retry.
+          // (It looks the order up again and makes a card only for a paid, unvoided order that sold one.)
+          // (Like the downloads below: a test that loads this file without db.js's gift card functions skips it.)
+          if(typeof issueGiftCard === "function") await issueSoldGiftCard_(env, orderId, orgId);
           // Digital products (migrations/0086): paid now, so the files are granted and emailed — after the response,
           // like the fee lookup; the download page the customer lands on grants them too if this hasn't run yet.
           if(inserted && typeof deliverOrderDownloads === "function"){

@@ -194,6 +194,9 @@
     const canFull = adminCan_(CUST_FN, "full");
     // A role that isn't shown money gets the customer without it (the server leaves the fields out).
     const showMoney = totals.totalSpent != null || totals.balanceDue != null || orders.some(o => o.total != null);
+    // Reorder (migrations/0120): a new Local sale filled from a past order, for the customer of this page. Not on an archived
+    // customer (as New sale) and not for a role that can't record a sale; the sale window checks again.
+    const canReorder = !c.archived && typeof adminReorderOrder_ === "function" && typeof adminCan_ === "function" && adminCan_("orders.details", "edit");
     const linkOrders = typeof openOrderFromDashboard_ === "function" && (typeof adminCanOpen_ !== "function" || adminCanOpen_("orders"));
     const a = c.address || {};
     const expired = !!(c.taxExempt && c.taxExemptExpires && c.taxExemptExpires < localToday_());
@@ -271,7 +274,8 @@
             <td>${escapeHtml(shopName(o.orgId))}</td>
             <td>${escapeHtml(adminDate_(o.placedAt))}</td>
             ${showMoney ? `<td class="cust-num">${adminMoneyOr_(o.total)}</td><td class="cust-num">${adminMoneyOr_(o.paidAmount)}</td><td class="cust-num">${adminMoneyOr_(o.balanceDue)}</td>` : ""}
-            <td>${[o.voided ? `<span class="cust-tag cust-tag-warn">Voided</span>` : "", o.isTest ? `<span class="cust-tag">Test</span>` : "", o.completed ? `<span class="cust-tag">Completed</span>` : ""].join(" ")}</td>
+            <td>${[o.voided ? `<span class="cust-tag cust-tag-warn">Voided</span>` : "", o.isTest ? `<span class="cust-tag">Test</span>` : "", o.completed ? `<span class="cust-tag">Completed</span>` : "",
+              canReorder && !o.voided ? `<button type="button" class="admin-btn admin-btn-secondary admin-btn-sm" data-cust-reorder="${i}" data-need="orders.details:edit" title="Start a new Local sale with this order's items">Reorder</button>` : ""].join(" ")}</td>
           </tr>`).join("")}</tbody></table></div>
           ${orders.length >= ORDERS_SHOWN_MAX ? `<div class="cust-note">The ${ORDERS_SHOWN_MAX} most recent orders are listed. The totals above count every order.</div>` : ""}
           ${orders.some(o => o.voided || o.isTest) ? `<div class="cust-note">Voided and test orders are listed but not counted in the totals.</div>` : ""}`
@@ -337,6 +341,11 @@
       }
       const btn = e.target.closest("button");
       if (!btn) return;
+      if (btn.dataset.custReorder != null) {
+        const o = orders[Number(btn.dataset.custReorder)];
+        if (o && typeof adminReorderOrder_ === "function") adminReorderOrder_(o.orgId, o.orderId, c);
+        return;
+      }
       if (btn.id === "custNewSale") {
         if (typeof adminNewSaleForCustomer_ === "function") adminNewSaleForCustomer_(c);
         return;

@@ -139,8 +139,8 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   r = await check({ code: "save10", email: "", items: TWELVE });
   ok("a good code answers ok with the code as stored, its label and what it takes off: 10% of 12 tees at the 12+ break (12 × $18.00 = $216.00) is $21.60",
     r.status === 200 && r.body.status === "ok" && r.body.code === "SAVE10" && r.body.label === "10% off" && r.body.discount === 21.6);
-  ok("…the answer is exactly status, code, label and discount: never who a code is for, how many uses it has or has had",
-    keys(r.body) === "code,discount,label,status" && !/maxUses|used|uses|email|@/.test(JSON.stringify(r.body)));
+  ok("…the answer is exactly status, code, label, discount, freeShipping and combined (the codes together, phase 6): never who a code is for, how many uses it has or has had",
+    keys(r.body) === "code,combined,discount,freeShipping,label,status" && !/maxUses|used|uses|email|@/.test(JSON.stringify(r.body)));
   ok("…and the check is counted in its own rate-limit bucket, discount_check, at 30", globalThis.__rl333.join(" ") === "discount_check/30");
   ok("…and nothing is claimed or written by a check", q1("SELECT count(*) AS n FROM discount_code_uses").n === 0 && orderCount() === 0);
   r = await check({ code: " SAVE10 ", items: [{ productId: "tee", size: "S", qty: 6, unitPrice: 0.01, lineTotal: 0.06 }, { productId: "tee", size: "M", qty: 5, unitPrice: 0.01 }], subtotal: 1, total: 1 });
@@ -229,7 +229,7 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
     r.status === 400 && r.body.message === INVALID_EMAIL && !/pat@/.test(JSON.stringify(r.body)) && keys(r.body) === "message,status");
   r = await check({ code: "PATONLY", email: " Pat@Example.COM ", items: mugs });
   ok("…with its own email (any case, spaces around): it works, and still says nothing of who it is for",
-    r.status === 200 && r.body.discount === 5 && keys(r.body) === "code,discount,label,status" && !/pat@/i.test(JSON.stringify(r.body)));
+    r.status === 200 && r.body.discount === 5 && keys(r.body) === "code,combined,discount,freeShipping,label,status" && !/pat@/i.test(JSON.stringify(r.body)));
   r = await check({ code: "PATONLY", email: "x".repeat(300) + "@example.com", items: mugs });
   ok("an email longer than an address can be counts as none typed: not this person's code (\"Enter your email address first …\")", r.status === 400 && r.body.message === "Enter your email address first — this code is for one person.");
 

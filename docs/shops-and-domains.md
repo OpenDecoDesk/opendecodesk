@@ -837,8 +837,21 @@ code (or one switched off) shows at once, without [Publish](#publish).
 The customer types the code and presses **Apply**; the totals show the discount ("Discount (SAVE10)
 −$4.00") and the total less it. A code for one person needs the email typed first. Changing the cart
 checks the code again. The order is checked once more when it is placed, and the confirmation and the
-order-received email show the discount. Making codes is on the Discount codes page
-([operations.md](operations.md#discount-codes)).
+order-received email show the discount. With more than one code allowed (Global settings → Discount codes)
+there is an **Add another code** link, each code has a ×, and a free-shipping code shows as "Free shipping
+(CODE)". Making codes is on the Discount codes page ([operations.md](operations.md#discount-codes)).
+
+## Gift cards at checkout
+
+When the site's payment methods include Gift card (on to start) and the Gift cards feature is on, the
+checkout shows **Have a gift card?**: the customer types the number, **Check** shows the balance, **Apply**
+puts it on the order (up to three). The totals show "Gift card ••1234 −$x" and what is still to pay. Cards
+come off after discounts, delivery and tax, and always work with a code. When they cover everything the card
+step is skipped. If **Sell gift cards online** is on (Global settings → Gift cards), each shop page also has
+a **Gift cards** button: pick $25, $50, $100 or a custom amount, say who it's for and write a message, and
+pay by card; the card is emailed to the recipient once the payment goes through
+([operations.md](operations.md#gift-cards)). The customer's invoice page also takes a discount code and a
+gift card before they pay the balance.
 
 ## Rush orders
 

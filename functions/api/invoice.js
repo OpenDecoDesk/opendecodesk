@@ -10,6 +10,8 @@
  *   GET  /api/invoice?token=…            → what they owe, how they can get it, how they can pay
  *   POST /api/invoice {token, action:"setDelivery", …} → the customer's delivery choice, written to
  *                                          the order (fee, method, ship-to address, sales tax)
+ *   POST /api/invoice {token, action:"applyCode", code}     → a discount code on this order (migrations/0120)
+ *   POST /api/invoice {token, action:"applyGiftCard", code} → a gift card pays what is still owed on this order
  *
  * Paying by card goes through the existing /api/checkout (it charges the order's balance due and
  * takes `invoiceToken` only to bring the customer back to this page afterwards).
@@ -22,6 +24,14 @@
  * only as a signed quote (functions/_lib/quoteToken.js) for this shop, these items and this ZIP —
  * the same rules as placing an order on the storefront.
  *
+ * ---- CODES AND GIFT CARDS (migrations/0120) ----
+ * Before paying the balance the customer can type a discount code and/or a gift card number. Both only for THIS
+ * invoice's order and only while it still has a balance due and isn't paid; the work is db.js's
+ * (applyOrderDiscountCode, redeemGiftCard — the same functions the order page uses), so the rules are the shop's:
+ * a code works only when the order has no discount of its own, and more than one only when Global settings allows it;
+ * a gift card pays up to its balance, never more than is owed. Each is rate limited per address (a number or code can't be
+ * guessed here), and a wrong one is answered the same whatever it was — never anything about whose it is.
+ *
  * ---- WHAT IT SHOWS ----
  * One order: its lines, totals, what's been paid, and the ship-to address the customer entered.
  * Never anything about another order or another shop. The token is 122 random bits and stops
@@ -30,7 +40,8 @@
 
 import { getOrderInvoice, invoiceExpired, markInvoiceViewed, markInvoiceDeliveryChosen, getOrderById, getOrgById,
   getGlobalSettings, getProductsByOrg, productShipWeightOz, cleanShippingAddress, updateOrderShipping, isMonthClosed, insertAuditLog,
-  getLocaleSettings, getFeatures, getSalesTaxSettings, getBoxPresets, getCategoryPackMap, rushPayByMissed, localToday } from "../_lib/db.js";
+  getLocaleSettings, getFeatures, getSalesTaxSettings, getBoxPresets, getCategoryPackMap, rushPayByMissed, localToday,
+  getDiscountRules, applyOrderDiscountCode, redeemGiftCard } from "../_lib/db.js";
 import { selectBox } from "../_lib/boxSize.js";
 import { sendInvoiceDeliveryNotification, lineDetailText } from "../_lib/email.js";
 import { verifyQuote, canonicalItems } from "../_lib/quoteToken.js";
@@ -45,6 +56,37 @@ function paymentMethods_(org, globalSettings, stripeConfigured) {
   const g = (globalSettings && globalSettings.enabledPayments) || {}, o = (org && org.enabledPayments) || {};
   const on = (k) => g[k] !== false && o[k] !== false;
   return [on("card") && stripeConfigured ? "Card" : "", on("venmo") ? "Venmo" : "", on("zelle") ? "Zelle" : "", on("check") ? "Check" : ""].filter(Boolean);
+}
+
+// Whether this shop has a discount code that could work now (the checkout's rule: on, not used up, not past its last day) —
+// so the box only shows where there is something to type. Same query as catalog.js's checkout box, with its day of slack.
+const INVOICE_CODE_BOX_SQL_ = `SELECT 1 AS ok FROM discount_codes d
+  WHERE d.active = 1 AND (d.orgId IS NULL OR d.orgId = ?) AND (d.expiresOn IS NULL OR d.expiresOn >= ?)
+    AND (SELECT COUNT(*) FROM discount_code_uses u WHERE u.codeId = d.id AND u.releasedAt IS NULL) < d.maxUses
+  LIMIT 1`;
+const INVOICE_MAX_CODES_ = 5;
+
+// What the customer may add to this invoice right now: { code, giftCard, multiple }. Nothing once it's paid or there is
+// no balance; a code only with the Discount codes feature on, a usable code at the shop, no discount typed in by the
+// shop's staff (a code and a manual discount don't mix) and room under the rules; a gift card only with the Gift cards
+// feature on and the method not switched off for the shop. Any failure to find out is "no".
+async function addOns_(env, order, org, globalSettings) {
+  const none = { code: false, giftCard: false, multiple: false };
+  const owing = !order.voidedAt && !order.completedAt && !(order.paid && Number(order.balanceDue) <= 0) && Number(order.balanceDue) > 0;
+  if (!owing) return none;
+  const features = await getFeatures(env.DB).catch(() => ({}));
+  const g = (globalSettings && globalSettings.enabledPayments) || {}, o = (org && org.enabledPayments) || {};
+  const giftCard = features.giftCards !== false && g.giftCard !== false && o.giftCard !== false;
+  const rules = await Promise.resolve().then(() => getDiscountRules(env.DB)).catch(() => ({ multiple: false }));
+  const multiple = !!(rules && rules.multiple);
+  const codes = Array.isArray(order.discountCodes) ? order.discountCodes : (order.discountCode ? [String(order.discountCode)] : []);
+  const manual = Number(order.discountAmount) > 0 && !codes.length;
+  let code = false;
+  if (features.discounts !== false && !manual && codes.length < (multiple ? INVOICE_MAX_CODES_ : 1)) {
+    const since = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    code = !!(await Promise.resolve().then(() => env.DB.prepare(INVOICE_CODE_BOX_SQL_).bind(order.orgId, since).first()).catch(() => null));
+  }
+  return { code, giftCard, multiple };
 }
 
 // What the shop offers: its saved list, or — for a shop that never saved one — local pickup, plus
@@ -100,6 +142,9 @@ async function invoiceView_(env, inv, order, org) {
     items: items.map(it => ({ productId: it.productId, name: it.name, size: it.size && it.size !== "OSFA" ? it.size : "", qty: it.qty,
       detail: lineDetailText(it), unitPrice: it.unitPrice, lineTotal: it.lineTotal })),
     subtotal: Number(order.itemsSubtotal) || 0, discount: Number(order.discountAmount) || 0, discountNote: order.discountNote || "",
+    // The codes on the order (migrations/0120) and what free-shipping codes took off its shipping (shown as "Free shipping").
+    discountCodes: Array.isArray(order.discountCodes) ? order.discountCodes.map(String) : (order.discountCode ? [String(order.discountCode)] : []),
+    shippingDiscount: Number(order.shippingDiscount) || 0,
     shipping: Number(order.shippingCost) || 0, total: Number(order.effectiveTotal) || 0,
     // Rush (migrations/0082): the fee, or still to follow — which doesn't stop paying the rest.
     rushRequested: !!order.rushRequested, rushFee: Number(order.rushFee) || 0, rushFeePending: !!order.rushFeePending,
@@ -118,6 +163,10 @@ async function invoiceView_(env, inv, order, org) {
       address: addr && addr.zip ? { name: addr.name || "", line1: addr.line1 || "", line2: addr.line2 || "", city: addr.city || "", state: addr.state || "", zip: addr.zip || "" } : null,
     },
     payments: paymentMethods_(org, settings, !!env.STRIPE_SECRET_KEY),
+    // Paid by gift card so far (a payment, listed as "Paid by gift card ••1234"), and what can still be added.
+    giftCardPaid: (order.payments || []).filter(p => !p.voidedAt && /^Gift card/i.test(String(p.reference || "")) && Number(p.amount) > 0)
+      .map(p => ({ label: String(p.reference).slice(0, 40), amount: Number(p.amount) || 0 })),
+    addOns: await addOns_(env, order, org, settings),
   };
 }
 
@@ -149,6 +198,66 @@ export async function onRequestGet(context) {
   return jsonResponse({ status: "ok", invoice: await invoiceView_(env, got.inv, got.order, got.org) });
 }
 
+// The fresh answer after a code or a card was added.
+async function freshInvoice_(env, token, orderId, org) {
+  const fresh = await getOrderById(env.DB, orderId);
+  const freshInv = await getOrderInvoice(env.DB, token);
+  return jsonResponse({ status: "ok", invoice: await invoiceView_(env, freshInv, fresh, org) });
+}
+const INVOICE_CHANGE_CLOSED_ = "This order can no longer be changed online — contact us.";
+
+// A discount code typed on the invoice: the same db function the order page uses, for this order only.
+async function applyCode_(context, body, got, token) {
+  const { request, env } = context;
+  const { order, org } = got;
+  const rl = await rateLimited(env, "invoice_code", request, 10);
+  if (rl.blocked) return rateLimitResponse(rl.retryAfter);
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+  if (!code) return jsonResponse({ status: "error", message: "Enter a discount code." }, 400);
+  if (code.length > 64) return jsonResponse({ status: "error", message: "This code isn't valid." }, 400);
+  const add = await addOns_(env, order, org, await getGlobalSettings(env.DB).catch(() => ({})));
+  if (!add.code) return jsonResponse({ status: "error", message: "A discount code can't be added to this order now." }, 409);
+  if (order.placedAt && await isMonthClosed(env.DB, String(order.placedAt).slice(0, 7))) return jsonResponse({ status: "error", message: INVOICE_CHANGE_CLOSED_ }, 409);
+  let r;
+  try { r = await applyOrderDiscountCode(env.DB, { orderId: order.orderId, code, today: await localToday(env), by: "customer-invoice" }); }
+  catch (e) { console.error("A discount code on an invoice failed:", order.orderId, e); return jsonResponse({ status: "error", message: "We couldn't check that code just now. Please try again." }, 500); }
+  if (!r || r.ok === false) return jsonResponse({ status: "error", message: String((r && (r.reason || r.message)) || "This code isn't valid.") }, 400);
+  const record = insertAuditLog(env.DB, { orgId: order.orgId, orderId: order.orderId, action: "order.invoice_code_applied",
+    detail: { code: code.toUpperCase().slice(0, 64) }, actor: "customer-invoice", ip: request.headers.get("CF-Connecting-IP") || null })
+    .catch((e) => console.error("Invoice code applied, but recording it failed:", order.orderId, e));
+  if (typeof context.waitUntil === "function") context.waitUntil(record); else await record;
+  return freshInvoice_(env, token, order.orderId, org);
+}
+
+// A gift card typed on the invoice: it pays up to its balance of what is owed (redeemGiftCard takes the smallest of the
+// amount asked, the balance and the balance due, in one conditional step). Only the last four digits are ever kept in a log.
+async function applyGiftCard_(context, body, got, token) {
+  const { request, env } = context;
+  const { order, org } = got;
+  const rl = await rateLimited(env, "invoice_giftcard", request, 10);
+  if (rl.blocked) return rateLimitResponse(rl.retryAfter);
+  const typed = String(typeof body.code === "string" ? body.code : "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!typed) return jsonResponse({ status: "error", message: "Enter your gift card number." }, 400);
+  if (typed.length !== 16) return jsonResponse({ status: "error", message: "That gift card number isn't right." }, 400);
+  const add = await addOns_(env, order, org, await getGlobalSettings(env.DB).catch(() => ({})));
+  if (!add.giftCard) return jsonResponse({ status: "error", message: "A gift card can't be used on this order now." }, 409);
+  const today = await localToday(env);
+  if (await isMonthClosed(env.DB, String(today).slice(0, 7))) return jsonResponse({ status: "error", message: INVOICE_CHANGE_CLOSED_ }, 409);
+  const dueCents = Math.round(Number(order.balanceDue) * 100);
+  const last4 = typed.slice(-4);
+  let r;
+  try {
+    r = await redeemGiftCard(env.DB, { code: typed, orderId: order.orderId, amountCents: dueCents, by: "customer-invoice",
+      requestKey: "invgc:" + order.orderId + ":" + last4 + ":" + dueCents });
+  } catch (e) { console.error("A gift card on an invoice failed:", order.orderId, e); return jsonResponse({ status: "error", message: "We couldn't use that gift card just now. Please try again." }, 500); }
+  if (!r || r.ok === false) return jsonResponse({ status: "error", message: String((r && (r.reason || r.message)) || "That gift card number isn't right.") }, 400);
+  const record = insertAuditLog(env.DB, { orgId: order.orgId, orderId: order.orderId, action: "order.invoice_gift_card_used",
+    detail: { card: "••" + last4, takenCents: Number(r.takenCents) || 0 }, actor: "customer-invoice", ip: request.headers.get("CF-Connecting-IP") || null })
+    .catch((e) => console.error("Invoice gift card used, but recording it failed:", order.orderId, e));
+  if (typeof context.waitUntil === "function") context.waitUntil(record); else await record;
+  return freshInvoice_(env, token, order.orderId, org);
+}
+
 export async function onRequestPost(context) {
   const { request, env } = context;
   if (!env.DB) return jsonResponse({ status: "error", message: "Server misconfigured" }, 500);
@@ -161,6 +270,8 @@ export async function onRequestPost(context) {
   const got = await loadInvoice_(env, token);
   if (got.error) return got.error;
   const { inv, order, org } = got;
+  if (body.action === "applyCode") return applyCode_(context, body, got, token);
+  if (body.action === "applyGiftCard") return applyGiftCard_(context, body, got, token);
   if (body.action !== "setDelivery") return jsonResponse({ status: "error", message: "Unknown action" }, 400);
 
   const lock = await deliveryLock_(env.DB, inv, order);

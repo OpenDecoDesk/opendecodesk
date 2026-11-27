@@ -151,6 +151,14 @@ import { selectBox } from "../_lib/boxSize.js";
 import { verifyTurnstile } from "../_lib/turnstile.js";
 import { setMarketingChoice, getMarketingChoice, campaignAudience, listCampaigns, getCampaign, saveCampaign, copyCampaign, deleteCampaign, scheduleCampaign,
   cancelCampaign, sendCampaignTest, runCampaignQueue, cleanDiscount, AUDIENCE_MAX, CAMPAIGNS_NOT_READY } from "../_lib/campaigns.js";
+// Phase 6 (migrations/0120): more than one discount code, gift cards, reorder — kept apart from the long lists above.
+import {
+  planDiscountCodes, claimDiscountCodes, applyOrderDiscountCode, removeOrderDiscountCode, getDiscountRules, buildDiscountRules, setDiscountRules, setEstimateDiscountCodes,
+  getGiftCardSettings, buildGiftCardSettings, setGiftCardSettings,
+  normalizeGiftCardCode_, formatGiftCardCode_, issueGiftCard, getGiftCard, revealGiftCardCode, listGiftCards, giftCardLedger, checkGiftCard, redeemGiftCard,
+  refundToGiftCard, adjustGiftCard, voidGiftCard, giftCardTotals, orderForReorder_,
+} from "../_lib/db.js";
+import { sendGiftCardEmail } from "../_lib/email.js";
 // Payments, refunds and money integrity (kept apart from the long list above).
 import { DECORATION_TYPES, DECORATION_KEYS, DEFAULT_DECORATION_PRICING, normalizeDecorationTypes, normalizeDecorationPricing, priceDecoration } from "../_lib/db.js";
 import { expireCheckoutSession, createCheckoutSession, CHECKOUT_LINK_SECONDS, listCacheVersions_, readCachedList_, refreshCachedLists_, peekCachedList_, blankListDelta_ } from "../_lib/db.js";
@@ -184,6 +192,143 @@ function customerChanges_(before, after, fields) {
   const out = {};
   for (const f of fields) if (JSON.stringify(before[f] ?? null) !== JSON.stringify(after[f] ?? null)) out[f] = { from: before[f] ?? null, to: after[f] ?? null };
   return out;
+}
+// ---- More than one discount code, and gift cards (phase 6, migrations/0120) ----------------------------------------------
+// A gift card is a PAYMENT, never a discount: the codes come off the goods (and shipping), the tax follows, and the cards
+// then pay part or all of what is owed — so a code and a card always work together, whatever the one-code rule says.
+const CODES_PER_ORDER_MAX_ = 5;
+const GIFT_CARDS_PER_ORDER_MAX_ = 3;
+// The most others a code check is told about (the codes already applied).
+const CODE_OTHERS_MAX_ = CODES_PER_ORDER_MAX_ - 1;
+const ORDER_HAS_CODE_MSG_ = "This order has a discount code; take the code off first.";
+const GIFT_CARDS_OFF_MSG_ = "Gift cards aren't available right now.";
+// The codes a request names, once each: `discountCodes` (a list) and/or the older single `discountCode` → { codes } or { error }.
+function discountCodesOf_(b) {
+  let raw = [];
+  if (b.discountCodes != null) {
+    if (!Array.isArray(b.discountCodes)) return { error: "This code isn't valid." };
+    raw = raw.concat(b.discountCodes);
+  }
+  if (b.discountCode != null && b.discountCode !== "") raw.push(b.discountCode);
+  const codes = [];
+  for (const c of raw) {
+    if (c == null || c === "") continue;
+    if (typeof c !== "string" || c.length > 64) return { error: "This code isn't valid." };
+    const t = c.trim();
+    if (t && !codes.some(x => x.toLowerCase() === t.toLowerCase())) codes.push(t);
+  }
+  if (codes.length > CODES_PER_ORDER_MAX_) return { error: `At most ${CODES_PER_ORDER_MAX_} discount codes can be used on an order.` };
+  return { codes };
+}
+// What an order's discount note says of its codes: "Code SAVE10", or "Codes SAVE10, TEAM5" (as db.js writes it when
+// a code is put on an existing order).
+const discountNoteOf_ = (names) => (names.length === 1 ? "Code " : "Codes ") + names.join(", ");
+// Checks the codes typed on one cart or order and works out what they take off TOGETHER: db.js planDiscountCodes checks
+// each in turn (the ones before it as `others`: a second code is refused while the shop takes one at a time, and the
+// same code twice), then combines them (percent codes add up, amounts come off what is left, shipping once). goodsCents /
+// shippingCents: the goods as priced and the shipping charge. → { uses: [{ codeId, code, amountCents }], goodsOffCents,
+// shippingOffCents, names, note } or { error } (a reason the customer reads).
+async function resolveDiscountCodes_(db, { codes, orgId, email, goodsCents, shippingCents = 0, today }) {
+  const r = await planDiscountCodes(db, { codes, goodsCents, shippingCents, orgId, email, today });
+  if (!r || !r.ok) {
+    // Before the discount codes migration there are no codes to check: planDiscountCodes only says the reason a
+    // customer reads, so the refused code is asked once more to learn whether that is why.
+    const probe = r && r.code ? await checkDiscountCode(db, { code: r.code, orgId, email, subtotal: goodsCents / 100, today }).catch(() => null) : null;
+    if (probe && probe.notReady) return { notReady: true };
+    return { error: (r && r.reason) || "This code isn't valid." };
+  }
+  return { uses: r.uses, names: r.uses.map(u => u.code), note: r.note, goodsOffCents: Math.max(0, Math.round(Number(r.goodsOffCents) || 0)),
+    shippingOffCents: Math.max(0, Math.round(Number(r.shippingOffCents) || 0)) };
+}
+// One use of each code for the order, just before it is inserted (db.js claimDiscountCodes: all or none). `already` in
+// the answer: every one of these codes already held a live use of THIS order id before the call (the same order sent
+// twice at once — the first try's uses are not ours to give back if our insert fails).
+async function claimResolvedCodes_(db, orderId, email, r) {
+  let held = new Set();
+  try {
+    const { results } = await db.prepare("SELECT codeId FROM discount_code_uses WHERE orderId = ? AND releasedAt IS NULL").bind(String(orderId)).all();
+    held = new Set((results || []).map(x => Number(x.codeId)));
+  } catch (e) { held = new Set(); }   // no discount tables yet: nothing is held
+  const claim = await claimDiscountCodes(db, { orderId, email: String(email || "").trim().toLowerCase(),
+    uses: r.uses.map(u => ({ codeId: u.codeId, amountCents: u.amountCents })), now: new Date().toISOString() });
+  return claim && claim.ok ? { ...claim, already: !!claim.already || (r.uses.length > 0 && r.uses.every(u => held.has(Number(u.codeId)))) } : claim;
+}
+// The answer of a code check (the storefront's Apply and the Local sale's): this code's discount in dollars, and — when
+// other codes are applied with it — what they take off together (`combined`, from db.js checkDiscountCode), so the page
+// can show the total and "Free shipping". Never says who a code is for, its uses or anything about a code that was refused.
+function codeCheckAnswer_(r, extra = {}) {
+  const c = r.code || {}, comb = r.combined || null;
+  const per = comb && Array.isArray(comb.perCode) ? comb.perCode : [];
+  const mine = per.find(x => x && Number(x.id) === Number(c.id));
+  const free = c.kind === "shipping" || !!c.freeShipping;
+  const dollars = (cents) => Math.max(0, Math.round(Number(cents) || 0)) / 100;
+  return { status: "ok", code: c.code, label: c.label, freeShipping: free,
+    discount: mine ? dollars(mine.goodsOffCents) : (Number(r.discount) || 0),
+    combined: comb ? { discount: dollars(comb.goodsOffCents), freeShipping: per.some(x => x && Number(x.shippingOffCents) > 0) || free,
+      codes: per.map(x => ({ code: x.code, discount: dollars(x.goodsOffCents), freeShipping: Number(x.shippingOffCents) > 0 })) } : null, ...extra };
+}
+// The others a check is told about: [] or up to CODE_OTHERS_MAX_ strings, or null when what was sent isn't that.
+function codeOthersOf_(v) {
+  if (v == null || v === "") return [];
+  if (!Array.isArray(v) || v.length > CODE_OTHERS_MAX_) return null;
+  const out = [];
+  for (const x of v) { if (typeof x !== "string" || x.length > 64) return null; if (x.trim()) out.push(x.trim()); }
+  return out;
+}
+// Gift card settings (Global settings → Gift cards): { sellOnline, amounts (cents, 1–6, each $1–$10,000), minCents, maxCents }.
+// → { value } or { error }.
+function giftCardSettingsInput_(b) {
+  b = b || {};
+  const whole = (v) => (typeof v === "number" || (typeof v === "string" && v.trim() !== "")) && Number.isInteger(Number(v)) ? Number(v) : NaN;
+  if (typeof b.sellOnline !== "boolean") return { error: "Say whether gift cards are sold online." };
+  if (!Array.isArray(b.amounts) || b.amounts.length < 1 || b.amounts.length > 6) return { error: "Give 1 to 6 amounts for the buttons." };
+  const amounts = [];
+  for (const a of b.amounts) {
+    const n = whole(a);
+    if (!(n >= 100 && n <= 1000000)) return { error: "Each amount must be between $1 and $10,000." };
+    if (!amounts.includes(n)) amounts.push(n);
+  }
+  const minCents = whole(b.minCents), maxCents = whole(b.maxCents);
+  if (!(minCents >= 100 && minCents <= 1000000) || !(maxCents >= 100 && maxCents <= 1000000)) return { error: "The smallest and largest amount must be between $1 and $10,000." };
+  if (minCents > maxCents) return { error: "The smallest amount can't be more than the largest." };
+  return { value: { sellOnline: b.sellOnline, amounts, minCents, maxCents } };
+}
+// Spends the gift cards a customer (or staff, on a Local sale) typed on an order that is now saved, in order, each up
+// to its amount (all it can, when none was given) and never more than is still owed: db.js redeemGiftCard takes the
+// least of the three with ONE conditional update, and records the payment. A card that is refused is reported and the
+// rest still go through — it never fails the order. → [{ ok, last4?, taken (dollars), balance (dollars), reason? }].
+async function redeemOrderGiftCards_(db, { orderId, cards, by, now = new Date().toISOString() }) {
+  const out = [];
+  for (let n = 0; n < cards.length; n++) {
+    const c = cards[n];
+    try {
+      const chk = await checkGiftCard(db, c.code);
+      if (!chk || !chk.ok) { out.push({ ok: false, taken: 0, reason: (chk && chk.reason) || "That gift card number isn't right." }); continue; }
+      const r = await redeemGiftCard(db, { code: c.code, orderId, amountCents: c.amountCents, by, now, requestKey: "gc:" + orderId + ":" + n });
+      if (r && r.ok) out.push({ ok: true, last4: chk.card.last4, taken: (Number(r.takenCents) || 0) / 100, balance: (Number(r.balanceCents) || 0) / 100 });
+      else out.push({ ok: false, last4: chk.card.last4, taken: 0, reason: (r && (r.reason || r.error)) || "That gift card can't be used now." });
+    } catch (e) {
+      console.error("Spending a gift card failed for", orderId, e);
+      out.push({ ok: false, taken: 0, reason: "That gift card can't be used right now." });
+    }
+  }
+  return out;
+}
+// The gift cards a request names: [{ code, amountCents }] (amountCents 0 = as much as it can), or { error }.
+function giftCardsOf_(b) {
+  if (b.giftCards == null) return { cards: [] };
+  if (!Array.isArray(b.giftCards) || b.giftCards.length > GIFT_CARDS_PER_ORDER_MAX_) return { error: `At most ${GIFT_CARDS_PER_ORDER_MAX_} gift cards can be used on an order.` };
+  const cards = [], seen = new Set();
+  for (const g of b.giftCards) {
+    if (!g || typeof g !== "object" || typeof g.code !== "string" || !g.code.trim() || g.code.length > 64) return { error: "That gift card number isn't right." };
+    const amount = g.amount == null || g.amount === "" ? 0 : Number(g.amount);
+    if (!Number.isFinite(amount) || amount < 0 || amount > 1000000) return { error: "That gift card amount isn't valid." };
+    const key = (typeof normalizeGiftCardCode_ === "function" ? normalizeGiftCardCode_(g.code) : "") || g.code.trim().toUpperCase();
+    if (seen.has(key)) continue;   // the same card typed twice is spent once
+    seen.add(key);
+    cards.push({ code: g.code.trim(), amountCents: Math.round(amount * 100) || 100000000 });
+  }
+  return { cards };
 }
 // ---- Quotes (migrations/0109) — "estimates" in code, since a "quote" there is a signed shipping rate (quoteToken.js) ----
 // The words a fee line's order line starts with ("Setup fee — Club crest").
@@ -267,6 +412,26 @@ export async function convertEstimateToOrder_(env, estimate, { actor = "", ip = 
   // if the rate or an exemption changed since. A quote still being worked on (a draft, or one sent back for changes)
   // is taxed by today's settings, as it shows.
   const frozenTax = !!est.sentAt && !["draft", "changes"].includes(est.status);
+  // The quote's discount codes (phase 6): checked once more against the goods and the customer, worked out together, and
+  // one use of each claimed for this order just before it is inserted (all or none) — given back if the insert fails. A
+  // code that can no longer be used stops the conversion with its reason (answered as an error, so staff see it on the
+  // Quotes page and the customer's Accept says it couldn't be made into an order yet).
+  let codeUse = null;
+  const quoteCodes = (Array.isArray(est.discountCodes) ? est.discountCodes : []).map(c => String(c).trim()).filter(Boolean);
+  if (quoteCodes.length) {
+    const email = String(customer.email || "").trim().toLowerCase();
+    const got2 = await resolveDiscountCodes_(env.DB, { codes: quoteCodes, orgId: est.orgId, email, goodsCents: Math.round((Number(totals.subtotal) || 0) * 100),
+      shippingCents: 0, today: await localToday(env) });
+    if (got2.notReady) return { error: "Discount codes need the latest database update. Apply the migrations, then try again.", status: 503 };
+    if (got2.error) return { error: got2.error, status: 409 };
+    const claim = await claimResolvedCodes_(env.DB, orderId, email, got2);
+    if (!claim || !claim.ok) {
+      if (await madeAlready()) return linked(true);
+      return { error: (claim && claim.reason) || "A discount code on this quote has reached its limit.", status: 409 };
+    }
+    codeUse = { ...got2, claimedHere: !claim.already };
+    order.discount = { cents: got2.goodsOffCents, note: got2.note, ...(got2.shippingOffCents ? { shippingCents: got2.shippingOffCents } : {}) };
+  }
   // As a Local sale: a stocked product's lines come out of finished stock when there is enough. They aren't pulled
   // now (pullStockLines) — nothing is handed over yet; they go when the order ships, as a storefront order's do.
   try {
@@ -276,11 +441,16 @@ export async function convertEstimateToOrder_(env, estimate, { actor = "", ip = 
     // Two calls at the same moment: the order and its lines go in as one batch, so the second fails whole on the
     // order number and the first one's order is the quote's.
     if (await madeAlready()) return linked(true);
+    if (codeUse && codeUse.claimedHere) {
+      try { await releaseDiscountCodeUse(env.DB, orderId, new Date().toISOString()); }
+      catch (re) { console.error("Giving back a quote's discount codes failed for", orderId, re); }
+    }
     throw e;
   }
   await markConverted();
   await insertAuditLog(env.DB, { orgId: est.orgId, orderId, action: "estimate.converted", actor: actor || null, ip: ip || null,
-    detail: { estimateId: id, number: est.number || "", customerId: Number(est.customerId) || null, total: Number(totals.total) || 0, items: pricedItems.length } })
+    detail: { estimateId: id, number: est.number || "", customerId: Number(est.customerId) || null, total: Number(totals.total) || 0, items: pricedItems.length,
+      ...(codeUse ? { discountCodes: codeUse.names, discount: codeUse.goodsOffCents / 100 } : {}) } })
     .catch((e) => console.error("AUDIT WRITE FAILED:", "estimate.converted", orderId, e));
 
   // The invoice, when asked for: the order is made whatever happens to the email, so a failure here is logged and
@@ -405,6 +575,8 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "getDigitalSettings", "updateDigitalSettings", "listProductFiles", "deleteProductFile", "addProductFileFromDesign",
   "getOrderDownloads", "resendDownloads", "resetDownloads", "revokeDownloads",
   "getEmailSettings", "updateEmailSettings", "checkMailbox", "previewCustomerEmail", "samplePdf", "sendSampleEmail",
+  // Phase 6: whether more than one discount code can be used on an order, and gift cards (sell online, amounts).
+  "getDiscountRules", "updateDiscountRules", "getGiftCardSettings", "updateGiftCardSettings",
   "getSalesTaxSettings", "updateSalesTaxSettings",
   "getAccountingSettings", "updateAccountingSettings",
   "saveGlobalSettingsAll",   // Global settings → Save: every section above in one request, all or nothing
@@ -526,6 +698,8 @@ const GLOBAL_SETTINGS_SECTIONS_ = {
   pricing: { action: "updatePricingSettings", label: "Pricing" },
   rush: { action: "updateRushSettings", label: "Rush fee" },
   decoration: { action: "updateDecorationSettings", label: "Decoration types" },
+  discountRules: { action: "updateDiscountRules", label: "Discount codes" },
+  giftCards: { action: "updateGiftCardSettings", label: "Gift cards" },
 };
 
 // A product's price must be entered: a flat price, or at least one size's (a blank box used to save as $0).
@@ -577,6 +751,12 @@ const NO_MONTH_ACTIONS = new Set([
   // Discount codes (migrations/0115): a code is no sale. What one takes off is booked on the order it was used on.
   "saveDiscountCode", "createDiscountCodes", "setDiscountCodeActive", "deleteDiscountCode",
   "checkLocalSaleCode",   // only checks a code for the Local sale window (the sale itself is createLocalSale's)
+  // Gift cards (migrations/0120): a card is money held for a customer, no sale. What one pays on an order is a payment,
+  // booked in the month it is spent (redeemGiftCard and refundToGiftCard are in periodGuard's rules); issuing, adjusting,
+  // voiding and showing or resending a card, and the two rules in Global settings, touch no month's numbers.
+  "issueGiftCard", "adjustGiftCard", "voidGiftCard", "resendGiftCard", "revealGiftCardCode", "updateDiscountRules", "updateGiftCardSettings",
+  // Reads that the screens with a code box or a payment form may also make (permissions.js ALSO): they change nothing.
+  "getDiscountRules", "getGiftCardSettings", "getOrderForReorder",   // (…and a read made at Edit: it starts a Local sale)
   // Email campaigns (migrations/0117): marketing email is no sale; a code a campaign makes is booked where it is used.
   "saveCampaign", "copyCampaign", "deleteCampaign", "sendCampaignTest", "scheduleCampaign", "cancelCampaign", "runCampaignQueue", "setMarketingOptOut",
   // Run Order and transfer sheets
@@ -716,6 +896,14 @@ const FEATURE_ACTIONS = {
   discounts: [
     "listDiscountCodes", "getDiscountCode", "saveDiscountCode", "createDiscountCodes", "setDiscountCodeActive", "deleteDiscountCode",
     "checkLocalSaleCode",
+    // Codes on an existing order (phase 6): the order page's "Add code" and the code's ×.
+    "applyOrderDiscountCode", "removeOrderDiscountCode",
+  ],
+  // Gift cards (migrations/0120). The customer's side (checkGiftCard, buyGiftCard and the cards on an order) checks the
+  // same switch itself. The two rules in Global settings stay available when it is off, as the other settings do.
+  giftCards: [
+    "listGiftCards", "getGiftCard", "revealGiftCardCode", "issueGiftCard", "adjustGiftCard", "voidGiftCard", "resendGiftCard", "giftCardTotals",
+    "redeemGiftCard", "refundToGiftCard",
   ],
   // Email campaigns (migrations/0117). The checkout's and Local sale's box check the same switch themselves.
   emailCampaigns: [
@@ -1050,7 +1238,7 @@ async function handleOrdersPost_(context, listBefore = null) {
   const periodGuard = async (b) => {
     const months = [];
     const a = b.action;
-    if (["addPayment", "recordRefund", "markPaidManual", "createLocalSale", "createTestTransaction", "convertEstimate"].includes(a)) months.push(nowMonth());
+    if (["addPayment", "recordRefund", "markPaidManual", "createLocalSale", "createTestTransaction", "convertEstimate", "redeemGiftCard", "refundToGiftCard"].includes(a)) months.push(nowMonth());
     // A cancelled line's refund paid back other than by card goes into the ledger, dated when it was refunded.
     if (a === "setLineItemRefund" && b.method && String(b.method).toLowerCase() !== "card") { const t = actionTime(b); months.push(t && t.at ? t.at.slice(0, 7) : nowMonth()); }
     // A local sale dated into a closed month changes that month's sales (it was only checked against this month).
@@ -1086,7 +1274,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (a === "writeOffBlanks" && /^\d{4}-\d{2}-\d{2}$/.test(String(b.occurredAt || ""))) months.push(String(b.occurredAt).slice(0, 7));
     if (["receiveTransferSheet", "writeOffTransfers"].includes(a) && /^\d{4}-\d{2}-\d{2}/.test(String(b.receivedAt || b.occurredAt || ""))) months.push(String(b.receivedAt || b.occurredAt).slice(0, 7));
     if (a === "createFromStatementLine" && b.lineId) { const l = await getStatementLine(env.DB, b.lineId); if (l) months.push(String(l.lineDate).slice(0, 7)); }
-    if (["setDiscount", "editOrder", "setShippingInfo", "setShippingPaidAmount", "voidOrder", "deleteOrder", "updateOrderDate", "setRushFee"].includes(a) && b.orderId) months.push(await orderMonth(env.DB, String(b.orderId)));
+    if (["setDiscount", "applyOrderDiscountCode", "removeOrderDiscountCode", "editOrder", "setShippingInfo", "setShippingPaidAmount", "voidOrder", "deleteOrder", "updateOrderDate", "setRushFee"].includes(a) && b.orderId) months.push(await orderMonth(env.DB, String(b.orderId)));
     // A payment that waives the rest of the balance as a discount changes the ORDER's month (its sales and sales
     // tax), like setDiscount above. (A plain payment only touches the month it's received in.)
     if (a === "addPayment" && b.discountRemainder && b.orderId) months.push(await orderMonth(env.DB, String(b.orderId)));
@@ -1255,6 +1443,18 @@ async function handleOrdersPost_(context, listBefore = null) {
     return jsonResponse({ status: "error", code: "desktop", message: DESKTOP_REFUSED_ACTIONS.has(body.action) ? DESKTOP_REFUSED_MSG
       : DESKTOP_EMAIL_ACTIONS.has(body.action) ? DESKTOP_EMAIL_OFF_MSG : DESKTOP_SUPPLIERS_OFF_MSG }, 403);
   }
+
+  // Gift cards (migrations/0120) can be spent and sold only while the Gift cards feature is on and the gift card payment
+  // method is not switched off (Global settings → Payment methods, and the shop's own, when it names it). `orgRow`: the
+  // shop as published, when the request is for one.
+  const giftCardsAvailable_ = async (orgRow) => {
+    if (!featureOn("giftCards")) return false;
+    try {
+      const ep = ((await getGlobalSettings(env.DB)) || {}).enabledPayments || {};
+      if (ep.giftCard === false) return false;
+    } catch (_) { /* settings unreadable: the feature switch above is the answer */ }
+    return !(orgRow && orgRow.enabledPayments && orgRow.enabledPayments.giftCard === false);
+  };
 
   // ---- listOrgs — admin org picker -------------------------------------------
   if (body.action === "listOrgs") {
@@ -2599,6 +2799,9 @@ async function handleOrdersPost_(context, listBefore = null) {
     const note = String(body.note || "").trim().slice(0, 500);
     const before = await getOrderById(env.DB, orderId);
     if (!before) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    // Waiving the rest as a discount is a manual discount, which can't sit with a code on the order (phase 6): refused
+    // before the payment is recorded, so nothing is half done.
+    if (body.discountRemainder && before.discountCode) return jsonResponse({ status: "error", message: ORDER_HAS_CODE_MSG_ }, 409);
     const method = body.method ? String(body.method).toLowerCase() : methodFromPaymentMethod(before.paymentMethod);
     if (!PAYMENT_METHODS.includes(method)) {
       return jsonResponse({ status: "error", message: "Payment method must be one of: " + PAYMENT_METHODS.join(", ") }, 400);
@@ -2931,10 +3134,13 @@ async function handleOrdersPost_(context, listBefore = null) {
     const note = String(body.note || "").trim().slice(0, 500);
     const before = await getOrderById(env.DB, orderId);
     if (!before) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    // A manual discount and discount codes don't mix (phase 6): the codes' discount is worked out from the codes, so a
+    // typed one would overwrite it. Take the code off first (removeOrderDiscountCode).
+    if (before.discountCode) return jsonResponse({ status: "error", message: ORDER_HAS_CODE_MSG_ }, 409);
     const auditErr = await auditStrict({ orgId: before.orgId, orderId, action: "order.discount_set",
       detail: { from: { amount: before.discountAmount, note: before.discountNote }, to: { amount, note } } });
     if (auditErr) return auditErr;
-    await setOrderDiscount(env.DB, orderId, amount, note);
+    { const r = await setOrderDiscount(env.DB, orderId, amount, note); if (r && r.error) return jsonResponse({ status: "error", message: r.error }, 409); }
     const updated = await getOrderById(env.DB, orderId);
     return jsonResponse({ status: "ok", orderId,
       discountAmount: updated.discountAmount, discountNote: updated.discountNote,
@@ -3081,9 +3287,17 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (customerIdOf_(body.customerId) === false) return jsonResponse({ status: "error", message: "That customer isn't valid. Pick one from the list." }, 400);
     const subtotal = Number(body.subtotal);
     if (!Number.isFinite(subtotal) || subtotal < 0 || subtotal > 10000000) return jsonResponse({ status: "error", message: "Add the items first." }, 400);
-    const r = await checkDiscountCode(env.DB, { code: body.code.trim(), orgId: body.org, email: await localSaleCodeEmail_(body), subtotal, today: await localToday(env) });
+    // `others`: the codes already applied to this sale (phase 6) — the shop's rule (one code, or several) and the same
+    // code twice are checked against them, and the answer's `combined` is what they all take off together.
+    const others = codeOthersOf_(body.others);
+    if (others === null) return jsonResponse({ status: "error", message: "Those codes aren't valid." }, 400);
+    // `shipping` (dollars, optional): the sale's shipping charge, so a free-shipping code can say what it takes off.
+    const shipping = body.shipping == null || body.shipping === "" ? 0 : Number(body.shipping);
+    if (!Number.isFinite(shipping) || shipping < 0 || shipping > 10000) return jsonResponse({ status: "error", message: "The shipping charge must be between $0 and $10,000." }, 400);
+    const r = await checkDiscountCode(env.DB, { code: body.code.trim(), orgId: body.org, email: await localSaleCodeEmail_(body), subtotal, shipping, today: await localToday(env), others });
     if (!r || r.notReady) return jsonResponse({ status: "error", message: "Discount codes need the latest database update. Apply the migrations, then try again." }, 503);
-    return jsonResponse(r.ok ? { status: "ok", ok: true, code: r.code, discount: r.discount } : { status: "ok", ok: false, reason: r.reason });
+    // (`code` stays the code's object, as the Local sale window reads it; the storefront's answer has its text.)
+    return jsonResponse(r.ok ? { ...codeCheckAnswer_(r), ok: true, code: r.code } : { status: "ok", ok: false, reason: r.reason });
   }
 
   // ---- createLocalSale — admin records an in-person / local sale -------------
@@ -3226,28 +3440,46 @@ async function handleOrdersPost_(context, listBefore = null) {
       order.total = subtotal + cost;
     }
 
-    // A discount code (migrations/0115), as at the storefront's checkout: checked again against the goods as priced
-    // above and the customer's email, then one use claimed for this order id just before the insert, and given back
-    // if the insert fails. Booked like a manual discount (order.discount).
+    // Reorder (phase 6): the order this sale copies (the window was filled from getOrderForReorder). Kept on the new
+    // order (orders.reorderOf) so the two are linked; it has to be one of this shop's.
+    if (body.reorderOf != null && body.reorderOf !== "") {
+      const from = typeof body.reorderOf === "string" ? body.reorderOf.trim() : "";
+      if (!ORDER_ID_RE.test(from)) return jsonResponse({ status: "error", message: "That order can't be copied." }, 400);
+      const was = await env.DB.prepare("SELECT orgId FROM orders WHERE orderId = ?").bind(from).first();
+      if (!was || was.orgId !== org) return jsonResponse({ status: "error", message: "That order can't be copied." }, 400);
+      order.reorderOf = from;
+    }
+
+    // Gift cards (migrations/0120) are payments: asked for here and checked before anything is claimed, spent right after
+    // the order is saved (below), up to what is owed.
+    const wantedCards = giftCardsOf_(body);
+    if (wantedCards.error) return jsonResponse({ status: "error", message: wantedCards.error }, 400);
+    if (wantedCards.cards.length) {
+      if (!can_("orders.payments", "edit")) return forbidden_("Your role can't record payments. Ask an admin.");
+      if (!(await giftCardsAvailable_(null))) return jsonResponse({ status: "error", message: GIFT_CARDS_OFF_MSG_ }, 400);
+    }
+
+    // Discount codes (migrations/0115; several since phase 6), as at the storefront's checkout: each checked again against
+    // the goods as priced above and the customer's email, then together (percents add up, amounts come off what is left,
+    // free shipping once: db.js planDiscountCodes), then one use of each claimed for this order id just before the
+    // insert — all or none — and given back if the insert fails. Booked like a manual discount (order.discount).
     let discountUse = null;
-    if (body.discountCode != null && body.discountCode !== "") {
-      if (typeof body.discountCode !== "string" || body.discountCode.length > 64) return jsonResponse({ status: "error", message: "This code isn't valid." }, 400);
-      const wanted = body.discountCode.trim();
-      if (wanted) {
-        if (!featureOn("discounts")) return featureOffResponse("discounts", featureLabel_("discounts"));
-        const codeEmail = await localSaleCodeEmail_(body);
-        const chk = await checkDiscountCode(env.DB, { code: wanted, orgId: org, email: codeEmail, subtotal, today: await localToday(env) });
-        if (!chk || chk.notReady) return jsonResponse({ status: "error", message: "Discount codes need the latest database update. Apply the migrations, then try again." }, 503);
-        if (!chk.ok) return jsonResponse({ status: "error", message: chk.reason || "This code isn't valid." }, 400);
-        discountUse = { codeId: chk.code.id, code: chk.code.code, email: codeEmail, cents: Math.max(0, Math.round(Number(chk.discount) * 100) || 0) };
-        const claim = await claimDiscountCode(env.DB, { codeId: discountUse.codeId, orderId, email: codeEmail, amountCents: discountUse.cents, now: new Date().toISOString() });
-        if (!claim || !claim.ok) {
-          if (saleKey && await madeAlready()) return jsonResponse({ status: "ok", orderId, repeated: true });
-          return jsonResponse({ status: "error", message: (claim && claim.reason) || "This code has reached its limit." }, 400);
-        }
-        discountUse.claimedHere = !claim.already;
-        order.discount = { cents: discountUse.cents, note: "Code " + discountUse.code };
+    const wantedCodes = discountCodesOf_(body);
+    if (wantedCodes.error) return jsonResponse({ status: "error", message: wantedCodes.error }, 400);
+    if (wantedCodes.codes.length) {
+      if (!featureOn("discounts")) return featureOffResponse("discounts", featureLabel_("discounts"));
+      const codeEmail = await localSaleCodeEmail_(body);
+      const got = await resolveDiscountCodes_(env.DB, { codes: wantedCodes.codes, orgId: org, email: codeEmail, goodsCents: Math.round(subtotal * 100),
+        shippingCents: Math.round((Number(order.shippingCost) || 0) * 100), today: await localToday(env) });
+      if (got.notReady) return jsonResponse({ status: "error", message: "Discount codes need the latest database update. Apply the migrations, then try again." }, 503);
+      if (got.error) return jsonResponse({ status: "error", message: got.error }, 400);
+      const claim = await claimResolvedCodes_(env.DB, orderId, codeEmail, got);
+      if (!claim || !claim.ok) {
+        if (saleKey && await madeAlready()) return jsonResponse({ status: "ok", orderId, repeated: true });
+        return jsonResponse({ status: "error", message: (claim && claim.reason) || "This code has reached its limit." }, 400);
       }
+      discountUse = { ...got, claimedHere: !claim.already };
+      order.discount = { cents: got.goodsOffCents, note: got.note, ...(got.shippingOffCents ? { shippingCents: got.shippingOffCents } : {}) };
     }
 
     // Lines for stocked products come out of the shop's finished stock (migrations/0060) — handed over
@@ -3266,6 +3498,11 @@ async function handleOrdersPost_(context, listBefore = null) {
     }
     await pullStockLines(env.DB, orderId, placedAt);
 
+    // Gift cards typed in the window pay part or all of what is owed (after the codes, the shipping and the tax); the
+    // rest is settled by Paid below, if ticked. A card that is refused is reported and the sale still stands.
+    let cardResults = [];
+    if (wantedCards.cards.length) cardResults = await redeemOrderGiftCards_(env.DB, { orderId, cards: wantedCards.cards, by: String(adminActor(request) || "").slice(0, 200) });
+
     // Shop news and discounts (migrations/0117): the Local sale's box, for the customer's email (picked or typed).
     if (typeof body.marketingOptIn === "boolean" && featureOn("emailCampaigns")) {
       try { const em = await localSaleCodeEmail_(body); if (em) await setMarketingChoice(env.DB, em, body.marketingOptIn, "checkout"); }
@@ -3279,8 +3516,11 @@ async function handleOrdersPost_(context, listBefore = null) {
 
     audit({ orgId: org, orderId, action: "order.created_local_sale",
       detail: { customerName: order.customerName, total: subtotal, paid: !!body.paid, payOnDelivery: !!body.payOnDelivery, items: pricedItems.length, ...(saleCustomerId ? { customerId: saleCustomerId } : {}),
-        ...(discountUse ? { discountCode: discountUse.code, discount: discountUse.cents / 100 } : {}) } });
-    return jsonResponse({ status: "ok", orderId });
+        ...(discountUse ? { discountCode: discountUse.names.join(", "), discountCodes: discountUse.names, discount: discountUse.goodsOffCents / 100,
+          ...(discountUse.shippingOffCents ? { shippingDiscount: discountUse.shippingOffCents / 100 } : {}) } : {}),
+        ...(order.reorderOf ? { reorderOf: order.reorderOf } : {}),
+        ...(cardResults.some(c => c.ok) ? { giftCards: cardResults.filter(c => c.ok).map(c => ({ last4: c.last4, amount: c.taken })) } : {}) } });
+    return jsonResponse({ status: "ok", orderId, ...(cardResults.length ? { giftCards: cardResults } : {}) });
   }
 
   // ---- Customer records (migrations/0108): the Customers page, the Local sale picker, an order's customer ----
@@ -3638,10 +3878,23 @@ async function handleOrdersPost_(context, listBefore = null) {
     const withItems = body.items !== undefined;
     const f = estimateFieldsOf_(body);
     if (f.error) return jsonResponse({ status: "error", message: f.error }, 400);
+    // The discount codes typed on the quote (phase 6): a list, each checked when it is sent and claimed when it becomes an
+    // order. Only the format and the shop's one-or-several rule are checked here; the page checked each against the goods
+    // (checkLocalSaleCode) as it was added. `discountCode` (one) is taken as a list of one.
+    let quoteCodes = null;
+    if (body.discountCodes !== undefined || body.discountCode !== undefined) {
+      const listed = discountCodesOf_({ discountCodes: body.discountCodes === undefined ? [] : body.discountCodes, discountCode: body.discountCode });
+      if (listed.error) return jsonResponse({ status: "error", message: listed.error }, 400);
+      quoteCodes = listed.codes;
+      if (quoteCodes.length && !featureOn("discounts")) return featureOffResponse("discounts", featureLabel_("discounts"));
+      if (quoteCodes.length > 1 && !(await getDiscountRules(env.DB)).multiple) return jsonResponse({ status: "error", message: "Only one discount code can be used on an order." }, 400);
+    }
     return estimatesReady_(async () => {
       const got = await getEstimate(env.DB, id);
       if (!got) return estimateNotFound_();
       const est = got.estimate;
+      const codesBefore = (Array.isArray(est.discountCodes) ? est.discountCodes : []).map(c => String(c).toUpperCase());
+      const codesChange = quoteCodes !== null && JSON.stringify(quoteCodes.map(c => c.toUpperCase())) !== JSON.stringify(codesBefore);
       // A price typed over the catalog's is a discount: what a custom price needs elsewhere (Payments). Only a NEW or
       // CHANGED one: the page sends every hand-priced line back with each save (a quantity, another line removed), and a
       // price someone allowed set stays the quote's — each stored hand price (product and amount) covers one line sent.
@@ -3656,7 +3909,7 @@ async function handleOrdersPost_(context, listBefore = null) {
         });
         if (newPrice) return forbidden_("Your role can't set a custom price. Ask an admin.");
       }
-      if (!estimateEditable_(est) && !(est.status === "sent" && !withItems)) {
+      if (!estimateEditable_(est) && (codesChange || !(est.status === "sent" && !withItems))) {
         return jsonResponse({ status: "error", message: est.status === "sent" ? "This quote was sent: its lines can't change unless the customer asks for changes. Cancel it and make a new one instead."
           : est.status === "converted" ? "This quote is already an order." : est.status === "cancelled" ? "This quote was cancelled." : "The customer accepted this quote: it can't change now." }, 409);
       }
@@ -3677,6 +3930,11 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (priced) {
         const r = await saveEstimateItems(env.DB, id, priced.items);
         if (r && r.error) return jsonResponse({ status: "error", message: r.error }, 409);
+      }
+      if (codesChange) {
+        const r = await setEstimateDiscountCodes(env.DB, id, quoteCodes);
+        if (r && r.error) return jsonResponse({ status: "error", message: r.error }, 409);
+        changes.discountCodes = { from: codesBefore, to: quoteCodes.map(c => c.toUpperCase()) };
       }
       const after = await getEstimate(env.DB, id);
       if (Object.keys(changes).length || priced) audit({ orgId: est.orgId, orderId: null, action: "estimate.saved",
@@ -3705,6 +3963,16 @@ async function handleOrdersPost_(context, listBefore = null) {
       const typedEmail = String(body.email || "").trim().slice(0, 200);
       const email = typedEmail || String((got.customer && got.customer.email) || "").trim();
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return jsonResponse({ status: "error", message: "Enter the customer's email address to send the quote to" }, 400);
+      // The codes on the quote are checked again (phase 6) against the goods and the customer as the quote now stands: a
+      // code that has since expired, run out or isn't this customer's stops the send with its reason, so the price the
+      // customer is quoted is one the order can still be made at.
+      const sendCodes = (Array.isArray(est.discountCodes) ? est.discountCodes : []).map(c => String(c).trim()).filter(Boolean);
+      if (sendCodes.length) {
+        const chk = await resolveDiscountCodes_(env.DB, { codes: sendCodes, orgId: est.orgId, email: email.toLowerCase(),
+          goodsCents: Math.round((Number(got.totals && got.totals.subtotal) || 0) * 100), shippingCents: 0, today: await localToday(env) });
+        if (chk.notReady) return jsonResponse({ status: "error", message: "Discount codes need the latest database update. Apply the migrations, then try again." }, 503);
+        if (chk.error) return jsonResponse({ status: "error", message: chk.error }, 409);
+      }
       const org = await getOrgById(env.DB, est.orgId);
       if (!org) return jsonResponse({ status: "error", message: "Unknown org" }, 404);
       // A note typed in the Send window is the quote's note to the customer from now on (the page shows it too).
@@ -3796,6 +4064,8 @@ async function handleOrdersPost_(context, listBefore = null) {
   };
   // What the audit log keeps of a code (its value, who and when; never its uses).
   const discountAuditOf_ = (c) => c ? { code: c.code, kind: c.kind, percent: c.percent, amount: c.amount, maxDiscount: c.maxDiscount == null ? null : c.maxDiscount, orgId: c.orgId || null, email: c.email || "",
+    // Phase 6: a minimum order, and free shipping (a code of kind "shipping" is free shipping only).
+    minOrder: c.minOrder == null ? null : c.minOrder, freeShipping: !!c.freeShipping,
     maxUses: c.maxUses, oncePerEmail: !!c.oncePerEmail, expiresOn: c.expiresOn || null, active: !!c.active, note: c.note || "" } : null;
 
   // ---- listDiscountCodes — the page's list: search, shop, status, paging ----
@@ -3874,13 +4144,15 @@ async function handleOrdersPost_(context, listBefore = null) {
     const shop = await discountOrg_(body.org);
     if (shop.error) return shop.error;
     const args = { emails: list, prefix: typeof body.prefix === "string" ? body.prefix : "", kind: body.kind, percent: body.percent, amount: body.amount,
-      maxDiscount: body.kind === "percent" ? body.maxDiscount : null, orgId: shop.orgId, expiresOn: body.expiresOn, note: body.note };
+      maxDiscount: body.kind === "percent" ? body.maxDiscount : null, orgId: shop.orgId, expiresOn: body.expiresOn, note: body.note,
+      minOrder: body.minOrder, freeShipping: body.freeShipping };
     const r = await createDiscountCodesForEmails(env.DB, args, { actor: String(adminActor(request) || "").slice(0, 200), now: new Date().toISOString() });
     if (r && r.notReady) return discountsNotReady_(r);
     if (!r || r.error) return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't make the codes. Try again." }, 400);
     const codes = r.codes || [], skipped = r.skipped || [];
     if (codes.length) audit({ orgId: shop.orgId, orderId: null, action: "discount_code.bulk_created", detail: { count: codes.length, skipped: skipped.length,
       kind: body.kind, percent: body.kind === "percent" ? body.percent : null, amount: body.kind === "amount" ? body.amount : null,
+      minOrder: body.minOrder == null || body.minOrder === "" ? null : body.minOrder, freeShipping: body.freeShipping === true,
       orgId: shop.orgId, expiresOn: body.expiresOn || null, prefix: args.prefix } });
     return jsonResponse({ status: "ok", codes, skipped });
   }
@@ -3919,6 +4191,290 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (!r || r.error) return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't delete the code. Try again." }, 409);
     audit({ orgId: before.orgId || null, orderId: null, action: "discount_code.deleted", detail: { id, ...discountAuditOf_(before) } });
     return jsonResponse({ status: "ok" });
+  }
+
+  // ---- Codes on an existing order (phase 6): the order page's "Add code" and a code's × ----
+  // db.js does the work: checks the code against the order's goods, shop and customer (and the codes already on it, by
+  // the shop's one-or-several rule), claims its use, and works the order's discount, note, tax and free shipping out
+  // again from ALL its codes, then refreshes paid. A void, completed or fully refunded order takes none. A discount typed
+  // by hand and a code don't mix (setDiscount refuses while a code is on). Removing one is audited first, with what the
+  // order's discount was; applying one after, with the code and what it took off.
+  if (body.action === "applyOrderDiscountCode" || body.action === "removeOrderDiscountCode") {
+    const removing = body.action === "removeOrderDiscountCode";
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    { const locked = await periodGuard(body); if (locked) return locked; }
+    const orderId = String(body.orderId || "").trim();
+    if (!orderId || !ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
+    if (typeof body.code !== "string" || !body.code.trim() || body.code.length > 64) return jsonResponse({ status: "error", message: "Enter a code." }, 400);
+    const code = body.code.trim();
+    const before = await getOrderById(env.DB, orderId);
+    if (!before || (body.org && before.orgId !== body.org)) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    const names = (Array.isArray(before.discountCodes) ? before.discountCodes : String(before.discountCode || "").split(",")).map(c => String(c).trim()).filter(Boolean);
+    const sameCode = (c) => c.toUpperCase() === code.toUpperCase();
+    const by = String(adminActor(request) || "").slice(0, 200);
+    let r;
+    if (removing) {
+      if (!names.some(sameCode)) return jsonResponse({ status: "error", message: "That code isn't on this order." }, 404);
+      const auditErr = await auditStrict({ orgId: before.orgId, orderId, action: "order.discount_code_removed",
+        detail: { code, from: { amount: before.discountAmount, note: before.discountNote, codes: names } } });
+      if (auditErr) return auditErr;
+      r = await removeOrderDiscountCode(env.DB, { orderId, code, by });
+    } else {
+      r = await applyOrderDiscountCode(env.DB, { orderId, code, today: await localToday(env), by });
+    }
+    if (r && r.notReady) return jsonResponse({ status: "error", message: "Discount codes need the latest database update. Apply the migrations, then try again." }, 503);
+    if (!r || r.ok === false || r.error) {
+      const why = (r && (r.reason || r.error)) || "Couldn't change the codes on this order. Try again.";
+      return jsonResponse({ status: "error", message: why }, /can't take a code now/i.test(why) ? 409 : 400);
+    }
+    const updated = await getOrderById(env.DB, orderId);
+    if (!removing) audit({ orgId: before.orgId, orderId, action: "order.discount_code_applied",
+      detail: { code, discount: { from: before.discountAmount, to: updated.discountAmount }, note: updated.discountNote, codes: updated.discountCodes || [] } });
+    if (updated && updated.paid && !before.paid) await deliverDigital_(orderId);
+    return jsonResponse({ status: "ok", orderId, order: orderCostsFor_([updated])[0],
+      discountAmount: updated.discountAmount, discountNote: updated.discountNote, discountCode: updated.discountCode || "", discountCodes: updated.discountCodes || [],
+      ...(updated.shippingDiscount != null ? { shippingDiscount: updated.shippingDiscount } : updated.shippingDiscountCents != null ? { shippingDiscount: Number(updated.shippingDiscountCents) / 100 } : {}),
+      effectiveTotal: updated.effectiveTotal, balanceDue: updated.balanceDue, salesTax: updated.salesTax, ...paidState_(updated) });
+  }
+
+  // ---- getOrderForReorder — a past order as the Local sale window's starting point (phase 6) ----
+  // Needs orders.details Edit (ACTION_PERM): it reads the order to start a Local sale, which is Edit's (createLocalSale). Cancelled lines, gift card lines and fee lines are left out (db.js orderForReorder_); the lines
+  // carry what they cost then (`priceThen`) so the window can say which prices changed. The customer's record is only
+  // named for a role that may pick a customer for a sale.
+  if (body.action === "getOrderForReorder") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const orderId = String(body.orderId || "").trim();
+    if (!orderId || !ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
+    const got = await orderForReorder_(env.DB, orderId);
+    if (!got || (body.org && got.orgId !== body.org)) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    if (got.error) return jsonResponse({ status: "error", message: got.error }, 409);
+    const reorder = can_("customers.records", "read") ? got : (({ customerId, ...rest }) => rest)(got);
+    return jsonResponse({ status: "ok", ...reorder, reorder });
+  }
+
+  // ---- Gift cards (phase 6, migrations/0120): the Gift cards page, and spending a card on an order ----
+  // db.js does the work (the card's balance moves with ONE conditional update, batched with its ledger row). The full
+  // number is only ever sent by revealGiftCardCode (audited first), issueGiftCard (once, as the card is made) and the
+  // email; every other answer carries the masked number. Taking money off a card (adjust, void) is audited first.
+  const giftCardNotFound_ = () => jsonResponse({ status: "error", message: "Gift card not found" }, 404);
+  const giftCardAnswer_ = async (id) => { const card = await getGiftCard(env.DB, { id }); return card ? { card, ledger: await giftCardLedger(env.DB, id) } : null; };
+  const giftEmailOk_ = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(v || "")) && String(v).length <= 200;
+  // The number as the person reads it (XXXX-XXXX-XXXX-XXXX).
+  const giftCodeShown_ = (code) => formatGiftCardCode_(normalizeGiftCardCode_(String(code || "")) || String(code || ""));
+  const giftActor_ = () => String(adminActor(request) || "").slice(0, 200);
+  // Sends the card's email to its recipient: the full number, from the card the db just made or read back.
+  const emailGiftCard_ = async (card, code, to) => {
+    try {
+      const business = await getBusinessProfile(env.DB).catch(() => null);
+      return !!(await sendGiftCardEmail(env, { card, code: giftCodeShown_(code), business, to }));
+    } catch (e) { console.error("Emailing a gift card failed for card", card && card.id, e); return false; }
+  };
+  const giftGuard_ = async (idRaw) => {
+    const id = discountIdOf_(idRaw);
+    if (!id) return { bad: jsonResponse({ status: "error", message: "That gift card isn't valid." }, 400) };
+    const card = await getGiftCard(env.DB, { id });
+    return card ? { id, card } : { bad: giftCardNotFound_() };
+  };
+
+  // ---- listGiftCards — the page's list: search (last 4, names, emails, source order), status, paging ----
+  if (body.action === "listGiftCards") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const whole = (v, min, dflt) => Number.isInteger(Number(v)) && Number(v) >= min && v !== "" && v != null && typeof v !== "boolean" ? Number(v) : dflt;
+    if (body.status != null && body.status !== "" && !["active", "empty", "void", "all"].includes(body.status)) return jsonResponse({ status: "error", message: "That status isn't one a gift card has." }, 400);
+    const args = { limit: Math.min(200, whole(body.limit, 1, 50)), offset: whole(body.offset, 0, 0), status: body.status || "all" };
+    if (typeof body.q === "string" && body.q.trim()) args.q = body.q.trim().slice(0, 200);
+    const got = await listGiftCards(env.DB, args);
+    const cards = Array.isArray(got) ? got : (got && got.cards) || [];
+    return jsonResponse({ status: "ok", cards, total: got && got.total != null ? got.total : cards.length });
+  }
+
+  // ---- getGiftCard — one card and its ledger (every issue, spend, refund, adjustment) ----
+  if (body.action === "getGiftCard") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const g = await giftGuard_(body.id);
+    if (g.bad) return g.bad;
+    return jsonResponse({ status: "ok", card: g.card, ledger: await giftCardLedger(env.DB, g.id) });
+  }
+
+  // ---- revealGiftCardCode — "Show": the card's full number. Anyone who has it can spend it, so it is audited FIRST. ----
+  if (body.action === "revealGiftCardCode") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const g = await giftGuard_(body.id);
+    if (g.bad) return g.bad;
+    const auditErr = await auditStrict({ orgId: null, orderId: g.card.sourceOrderId || null, action: "giftcard.code_shown", detail: { cardId: g.id, last4: g.card.last4 } });
+    if (auditErr) return auditErr;
+    const shown = await revealGiftCardCode(env.DB, g.id);
+    const code = shown && typeof shown === "object" ? shown.code : shown;
+    if (!code) return giftCardNotFound_();
+    return jsonResponse({ status: "ok", code: giftCodeShown_(code) });
+  }
+
+  // ---- issueGiftCard — staff make a card (a gift, a store credit): its number comes back ONCE, and may be emailed ----
+  if (body.action === "issueGiftCard") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const amountCents = Number(body.amountCents);
+    if (!Number.isInteger(amountCents) || amountCents < 100 || amountCents > 100000000) return jsonResponse({ status: "error", message: "A gift card is for $1 to $1,000,000." }, 400);
+    const text = (v, max) => String(v == null ? "" : v).replace(/\s+/g, " ").trim().slice(0, max);
+    const recipientName = text(body.recipientName, 100), recipientEmail = text(body.recipientEmail, 200).toLowerCase();
+    if (recipientEmail && !giftEmailOk_(recipientEmail)) return jsonResponse({ status: "error", message: "The recipient's email address isn't valid." }, 400);
+    const message = String(body.message == null ? "" : body.message).trim().slice(0, 300), note = text(body.note, 500);
+    const sendEmail = body.sendEmail === true;
+    if (sendEmail) {
+      if (!recipientEmail) return jsonResponse({ status: "error", message: "Enter the recipient's email address to email the card." }, 400);
+      if (isDesktopEdition(env) && !desktopEmailOn(env)) return jsonResponse({ status: "error", code: "desktop", message: DESKTOP_EMAIL_OFF_MSG }, 403);
+    }
+    const by = giftActor_();
+    // The same card saved twice (a double click, a retry of the same Save — it carries the form's requestId): the first
+    // one's card is the answer; its number is shown with Show on the card.
+    if (requestKeyOf(body, "giftcard")) {
+      const dup = await env.DB.prepare("SELECT id FROM gift_cards WHERE sourceOrderId = '' AND createdBy = ? AND initialCents = ? AND recipientEmail = ? AND recipientName = ? AND note = ? AND createdAt > ? ORDER BY id DESC LIMIT 1")
+        .bind(by, amountCents, recipientEmail, recipientName, note, new Date(Date.now() - 60000).toISOString()).first().catch(() => null);
+      if (dup) return jsonResponse({ status: "ok", duplicate: true, card: await getGiftCard(env.DB, { id: dup.id }) });
+    }
+    const made = await issueGiftCard(env.DB, { amountCents, recipientName, recipientEmail, buyerName: "", buyerEmail: "", message, note, sourceOrderId: "", by, now: new Date().toISOString() });
+    if (!made || made.error) return jsonResponse({ status: "error", message: (made && made.error) || "Couldn't make the gift card. Try again." }, 400);
+    const card = await getGiftCard(env.DB, { id: made.id });
+    const emailSent = sendEmail ? await emailGiftCard_(card, made.code, recipientEmail) : false;
+    audit({ orgId: null, orderId: null, action: "giftcard.issued", detail: { cardId: made.id, last4: made.last4, amount: amountCents / 100, recipientEmail, emailed: emailSent, note } });
+    return jsonResponse({ status: "ok", card, code: giftCodeShown_(made.code), emailSent });
+  }
+
+  // ---- adjustGiftCard — put money on a card or take it off (a note says why); the balance can't go below $0 ----
+  if (body.action === "adjustGiftCard") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const g = await giftGuard_(body.id);
+    if (g.bad) return g.bad;
+    const deltaCents = Number(body.deltaCents);
+    if (!Number.isInteger(deltaCents) || deltaCents === 0 || Math.abs(deltaCents) > 100000000) return jsonResponse({ status: "error", message: "Enter how much to add or take off." }, 400);
+    const note = String(body.note == null ? "" : body.note).replace(/\s+/g, " ").trim().slice(0, 500);
+    if (!note) return jsonResponse({ status: "error", message: "Say why the balance is changing." }, 400);
+    if (g.card.status === "void") return jsonResponse({ status: "error", message: "This gift card was voided." }, 409);
+    if (Math.round(Number(g.card.balance) * 100) + deltaCents < 0) return jsonResponse({ status: "error", message: "The balance can't go below $0." }, 400);
+    const auditErr = await auditStrict({ orgId: null, orderId: g.card.sourceOrderId || null, action: "giftcard.adjusted",
+      detail: { cardId: g.id, last4: g.card.last4, from: g.card.balance, delta: deltaCents / 100, note } });
+    if (auditErr) return auditErr;
+    const r = await adjustGiftCard(env.DB, { id: g.id, deltaCents, note, by: giftActor_() });
+    if (!r || r.ok === false || r.error) return jsonResponse({ status: "error", message: (r && (r.reason || r.error)) || "Couldn't change the balance. Try again." }, 409);
+    return jsonResponse({ status: "ok", ...(await giftCardAnswer_(g.id)) });
+  }
+
+  // ---- voidGiftCard — the card is cancelled and its balance goes to $0 (the ledger keeps what it was) ----
+  if (body.action === "voidGiftCard") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const g = await giftGuard_(body.id);
+    if (g.bad) return g.bad;
+    const note = String(body.note == null ? "" : body.note).replace(/\s+/g, " ").trim().slice(0, 500);
+    if (!note) return jsonResponse({ status: "error", message: "Say why the card is being voided." }, 400);
+    if (g.card.status === "void") return jsonResponse({ status: "error", message: "This gift card is already voided." }, 409);
+    const auditErr = await auditStrict({ orgId: null, orderId: g.card.sourceOrderId || null, action: "giftcard.voided",
+      detail: { cardId: g.id, last4: g.card.last4, balance: g.card.balance, note } });
+    if (auditErr) return auditErr;
+    const r = await voidGiftCard(env.DB, { id: g.id, note, by: giftActor_() });
+    if (!r || r.ok === false || r.error) return jsonResponse({ status: "error", message: (r && (r.reason || r.error)) || "Couldn't void the card. Try again." }, 409);
+    return jsonResponse({ status: "ok", ...(await giftCardAnswer_(g.id)) });
+  }
+
+  // ---- resendGiftCard — email the card again, to its recipient or to another address typed now ----
+  if (body.action === "resendGiftCard") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    // Email: on the desktop only once the mailbox is set up (as DESKTOP_EMAIL_ACTIONS refuses the others).
+    if (isDesktopEdition(env) && !desktopEmailOn(env)) return jsonResponse({ status: "error", code: "desktop", message: DESKTOP_EMAIL_OFF_MSG }, 403);
+    const g = await giftGuard_(body.id);
+    if (g.bad) return g.bad;
+    if (g.card.status === "void") return jsonResponse({ status: "error", message: "This gift card was voided." }, 409);
+    const to = String(body.email == null || body.email === "" ? g.card.recipientEmail : body.email).trim();
+    if (!giftEmailOk_(to)) return jsonResponse({ status: "error", message: "Enter the email address to send the card to." }, 400);
+    const auditErr = await auditStrict({ orgId: null, orderId: g.card.sourceOrderId || null, action: "giftcard.resent", detail: { cardId: g.id, last4: g.card.last4, to } });
+    if (auditErr) return auditErr;
+    const shown = await revealGiftCardCode(env.DB, g.id);
+    const code = shown && typeof shown === "object" ? shown.code : shown;
+    if (!code) return giftCardNotFound_();
+    const emailSent = await emailGiftCard_(g.card, code, to);
+    return jsonResponse({ status: "ok", emailSent, sentTo: to });
+  }
+
+  // ---- giftCardTotals — sold, spent and adjusted in a date range, and what is outstanding now (money held for customers) ----
+  if (body.action === "giftCardTotals") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const day = (v) => v == null || v === "" ? undefined : (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v + "T12:00:00Z")) ? v : false);
+    const dateFrom = day(body.dateFrom), dateTo = day(body.dateTo);
+    if (dateFrom === false || dateTo === false) return jsonResponse({ status: "error", message: "The dates must be YYYY-MM-DD." }, 400);
+    // The range is whole days on the business's clock (Region time zone): from the first moment of dateFrom to the last of dateTo.
+    const tz = await resolveTimeZone(env);
+    const dayBefore = (d) => new Date(Date.parse(d + "T12:00:00Z") - 86400000).toISOString().slice(0, 10);
+    const from = dateFrom ? new Date(Date.parse(localDayEndInstant(dayBefore(dateFrom), tz) || "") + 1).toISOString() : "";
+    const to = dateTo ? localDayEndInstant(dateTo, tz) : "";
+    return jsonResponse({ status: "ok", totals: await giftCardTotals(env.DB, { ...(from && !from.startsWith("Invalid") ? { dateFrom: from } : {}), ...(to ? { dateTo: to } : {}) }) });
+  }
+
+  // ---- redeemGiftCard — spend a card on an order (the payment form's Gift card choice) ----
+  // A payment: orders.payments Edit, a closed month refuses it (periodGuard), recorded once per Save (requestKey). It
+  // takes the least of what was asked, the card's balance and what is still owed (db.js, one conditional update).
+  if (body.action === "redeemGiftCard") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    { const locked = await periodGuard(body); if (locked) return locked; }
+    const orderId = String(body.orderId || "").trim();
+    if (!orderId || !ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
+    if (typeof body.code !== "string" || !body.code.trim() || body.code.length > 64) return jsonResponse({ status: "error", message: "Enter the gift card number." }, 400);
+    let amountCents = 100000000;   // no amount = as much as the card holds and the order owes
+    if (body.amount != null && body.amount !== "") {
+      const amount = Number(body.amount);
+      if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) return jsonResponse({ status: "error", message: "Amount must be a positive number" }, 400);
+      amountCents = Math.round(amount * 100);
+    }
+    const before = await getOrderById(env.DB, orderId);
+    if (!before || (body.org && before.orgId !== body.org)) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    if (before.voidedAt) return jsonResponse({ status: "error", message: "This order is voided." }, 409);
+    const requestKey = requestKeyOf(body, "giftcard");
+    const answer_ = (o, extra = {}) => jsonResponse({ status: "ok", orderId, amountReceived: o.amountReceived, balanceDue: o.balanceDue,
+      discountAmount: o.discountAmount, discountNote: o.discountNote, effectiveTotal: o.effectiveTotal, salesTax: o.salesTax, payments: paymentsFor_(o.payments), ...paidState_(o), ...extra });
+    if (await alreadyRecorded(requestKey)) return answer_(await getOrderById(env.DB, orderId), { duplicate: true });
+    const chk = await checkGiftCard(env.DB, body.code);
+    if (!chk || !chk.ok) return jsonResponse({ status: "error", message: (chk && chk.reason) || "That gift card number isn't right." }, 400);
+    const r = await redeemGiftCard(env.DB, { code: body.code, orderId, amountCents, by: giftActor_(), now: new Date().toISOString(), ...(requestKey ? { requestKey } : {}) });
+    if (!r || !r.ok) {
+      if (requestKey && await alreadyRecorded(requestKey)) return answer_(await getOrderById(env.DB, orderId), { duplicate: true });
+      return jsonResponse({ status: "error", message: (r && (r.reason || r.error)) || "That gift card can't be used now." }, 400);
+    }
+    const updated = await getOrderById(env.DB, orderId);
+    audit({ orgId: before.orgId, orderId, action: "payment.added", detail: { amount: (Number(r.takenCents) || 0) / 100, method: "gift card", reference: "Gift card ••" + chk.card.last4, note: "Paid by gift card" } });
+    if (updated && updated.paid) await deliverDigital_(orderId);
+    return answer_(updated, { taken: (Number(r.takenCents) || 0) / 100, cardBalance: (Number(r.balanceCents) || 0) / 100, last4: chk.card.last4 });
+  }
+
+  // ---- refundToGiftCard — put (part of) a gift-card payment back on its card instead of paying it out ----
+  // A refund (the refund permission), so a closed month refuses it. db.js writes the card's ledger row and the order's
+  // negative payment together.
+  if (body.action === "refundToGiftCard") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    { const locked = await periodGuard(body); if (locked) return locked; }
+    const paymentId = Number(body.paymentId);
+    if (!Number.isInteger(paymentId) || paymentId < 1) return jsonResponse({ status: "error", message: "Invalid payment ID" }, 400);
+    const amount = Number(body.amount);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) return jsonResponse({ status: "error", message: "Refund amount must be a positive number" }, 400);
+    const payment = await getOrderPaymentById(env.DB, paymentId);
+    if (!payment) return jsonResponse({ status: "error", message: "Payment not found" }, 404);
+    if (payment.voidedAt) return jsonResponse({ status: "error", message: "That entry is already voided" }, 400);
+    const order = await getOrderById(env.DB, payment.orderId);
+    if (!order) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    const r = await refundToGiftCard(env.DB, { paymentId, amountCents: Math.round(amount * 100), by: giftActor_() });
+    if (!r || r.ok === false || r.error) return jsonResponse({ status: "error", message: (r && (r.reason || r.error)) || "Couldn't put the money back on the card. Try again." }, 409);
+    audit({ orgId: order.orgId, orderId: order.orderId, action: "payment.refunded", detail: { amount, method: "gift card", paymentId, note: "Refunded to the gift card" } });
+    const updated = await getOrderById(env.DB, payment.orderId);
+    return jsonResponse({ status: "ok", orderId: payment.orderId, payments: paymentsFor_(updated.payments), amountReceived: updated.amountReceived,
+      refundedAmount: updated.refundedAmount, netReceived: updated.netReceived, balanceDue: updated.balanceDue, ...paidState_(updated) });
   }
 
   // ---- Email campaigns (migrations/0117): the Discount codes page's Email campaigns tab ----------------------------
@@ -5465,6 +6021,40 @@ async function handleOrdersPost_(context, listBefore = null) {
       return jsonResponse({ status: "ok", rush: { rule: rushRuleView(saved.rule), taxable: saved.taxable } });
     }
 
+    // ---- Discount codes: may more than one be used on an order? (Global settings → Discount codes; phase 6) ----
+    // Off = one code an order, as before. On = several (up to CODES_PER_ORDER_MAX_): their percents add up, then amounts
+    // come off what is left (db.js planDiscountCodes). A gift card is a payment and works with codes either way.
+    if (body.action === "getDiscountRules") {
+      return jsonResponse({ status: "ok", discountRules: await getDiscountRules(env.DB) });
+    }
+    if (body.action === "updateDiscountRules") {
+      if (typeof body.multiple !== "boolean") return jsonResponse({ status: "error", message: "Say whether more than one code can be used on an order." }, 400);
+      const before = await getDiscountRules(env.DB);
+      let saved;
+      try { saved = await setDiscountRules(env.DB, { multiple: body.multiple }); }
+      catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
+      audit({ orgId: null, orderId: null, action: "settings.discount_rules_set", detail: { from: before, to: saved } });
+      // Checkout's code box follows the rule (catalog.js): the catalog moves to a new version.
+      try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
+      return jsonResponse({ status: "ok", discountRules: saved });
+    }
+
+    // ---- Gift cards: sell them online? which amounts? (Global settings → Gift cards; phase 6) ----
+    if (body.action === "getGiftCardSettings") {
+      return jsonResponse({ status: "ok", giftCards: await getGiftCardSettings(env.DB) });
+    }
+    if (body.action === "updateGiftCardSettings") {
+      const input = giftCardSettingsInput_(body);
+      if (input.error) return jsonResponse({ status: "error", message: input.error }, 400);
+      const before = await getGiftCardSettings(env.DB);
+      let saved;
+      try { saved = await setGiftCardSettings(env.DB, input.value); }
+      catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
+      audit({ orgId: null, orderId: null, action: "settings.gift_cards_set", detail: { from: before, to: saved } });
+      try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
+      return jsonResponse({ status: "ok", giftCards: saved });
+    }
+
     // ---- Pricing awareness (migrations/0067): fees, supplies, targets, and the analysis itself ----
     if (body.action === "getPricingSettings") {
       const sr = ((await getShopRate(env.DB).catch(() => ({}))) || {}).result;
@@ -5910,6 +6500,19 @@ async function handleOrdersPost_(context, listBefore = null) {
         decorationChanges = decorationChanges_(before.decoration, input);
       }
 
+      // Discount code rules and gift card settings (phase 6): checked as updateDiscountRules / updateGiftCardSettings check them.
+      if (s.discountRules) {
+        if (typeof s.discountRules.multiple !== "boolean") return refuse("discountRules", "Say whether more than one code can be used on an order.");
+        before.discountRules = await getDiscountRules(env.DB);
+        if ((r = await build("discountRules", () => buildDiscountRules(env.DB, { multiple: s.discountRules.multiple })))) return r;
+      }
+      if (s.giftCards) {
+        const input = giftCardSettingsInput_(s.giftCards);
+        if (input.error) return refuse("giftCards", input.error);
+        before.giftCards = await getGiftCardSettings(env.DB);
+        if ((r = await build("giftCards", () => buildGiftCardSettings(env.DB, input.value)))) return r;
+      }
+
       // Everything checked: the write, all of it or none of it.
       const writes = Object.values(builds);
       if (plan && Object.keys(plan.changes).length) {
@@ -5942,6 +6545,8 @@ async function handleOrdersPost_(context, listBefore = null) {
       }
       if (builds.digital) audit({ orgId: null, orderId: null, action: "settings.digital_set", detail: { from: before.digital, to: v("digital") } });
       if (builds.machine) audit({ orgId: null, orderId: null, action: "settings.machine_set", detail: s.machine });
+      if (builds.discountRules) audit({ orgId: null, orderId: null, action: "settings.discount_rules_set", detail: { from: before.discountRules, to: v("discountRules") } });
+      if (builds.giftCards) audit({ orgId: null, orderId: null, action: "settings.gift_cards_set", detail: { from: before.giftCards, to: v("giftCards") } });
       if (decorationChanges && decorationChanges.prices) decorationAuditPrices_(decorationChanges);
       if (builds.pricing) audit({ orgId: null, orderId: null, action: "settings.pricing_set", detail: v("pricing") });
       if (builds.rush) {
@@ -5951,7 +6556,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       // The storefront reads the country, the switches, the tax rate and mode, the business's name and payment
       // details and the rush rule from the cached catalog: one refresh for all of them. (The payment-method boxes
       // wait for Publish, as they always have.)
-      if (["locale", "features", "salesTax", "business", "rush", "decoration"].some(k => builds[k])) {
+      if (["locale", "features", "salesTax", "business", "rush", "decoration", "discountRules", "giftCards"].some(k => builds[k])) {
         try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
       }
       // New fees, targets or a new tax rate re-check every product: which are now below a target.
@@ -8682,7 +9287,9 @@ async function handleOrdersPost_(context, listBefore = null) {
   }
 
   // ---- Order submission -------------------------------------------------------
-  if (host.kind === "admin") {
+  // (checkGiftCard, below, is the one customer-side action the admin's own pages also use: the order's Payments
+  // window and the Local sale window check a card number with it.)
+  if (host.kind === "admin" && body.action !== "checkGiftCard") {
     return jsonResponse({ status: "error", message: "Not available here." }, 403);
   }
   // A storefront cart priced on the server, as the order is: the published shop's prices, quantity breaks
@@ -8759,11 +9366,118 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (!e || !e.userFacing) console.error("Pricing a cart for a discount code failed:", e);
       return bad(e && e.userFacing ? e.message : "We couldn't price your cart — please refresh the page and try again.");
     }
-    const r = await checkDiscountCode(env.DB, { code, orgId: checkOrgId, email, subtotal, today: await localToday(env) });
+    // `others`: the codes already applied at this checkout (phase 6). The shop's rule (one code, or several) and the same
+    // code twice are checked against them; `combined` in the answer is what they all take off together, and
+    // `freeShipping` says a code takes the shipping off (the page shows it as $0.00 with the code's name).
+    const others = codeOthersOf_(body.others);
+    if (others === null) return bad("Those codes aren't valid.");
+    // `shipping` (dollars, optional): the shipping charge at this checkout, so a free-shipping code can say what it takes off.
+    const shipping = body.shipping == null || body.shipping === "" ? 0 : Number(body.shipping);
+    if (!Number.isFinite(shipping) || shipping < 0 || shipping > 10000) return bad("The shipping charge isn't valid.");
+    const r = await checkDiscountCode(env.DB, { code, orgId: checkOrgId, email, subtotal, shipping, today: await localToday(env), others });
     if (!r || r.notReady) return bad(DISCOUNTS_OFF_MSG);
     if (!r.ok) return bad(r.reason || "This code isn't valid.");
-    return jsonResponse({ status: "ok", code: r.code.code, label: r.code.label, discount: r.discount });
+    return jsonResponse(codeCheckAnswer_(r));
   }
+
+  // ---- checkGiftCard — "Check" on a gift card number: does it work, and what is on it? (phase 6) ----
+  // The customer's side, not a back-office action (named by a constant, as checkDiscountCode is). A card belongs to the
+  // business, not one shop, so any of its addresses (a shop's, or the admin's payment form) may ask. No sign-in, so it is
+  // rate-limited per address (10 a minute) and a wrong number, a voided card and a number nobody has all get the same
+  // answer. It never says whose a card is.
+  const STOREFRONT_CHECK_GIFT_ = "checkGiftCard";
+  if (body.action === STOREFRONT_CHECK_GIFT_) {
+    if (host.kind === "locked" && !featureOn("storefront")) return jsonResponse({ status: "error", message: GIFT_CARDS_OFF_MSG_ }, 400);
+    if (!(await giftCardsAvailable_(null))) return jsonResponse({ status: "error", message: GIFT_CARDS_OFF_MSG_ }, 400);
+    const rl = await rateLimited(env, "giftcard_check", request, 10);
+    if (rl.blocked) return rateLimitResponse(rl.retryAfter);
+    if (typeof body.code !== "string" || !body.code.trim()) return jsonResponse({ status: "error", message: "Enter the gift card number." }, 400);
+    if (body.code.length > 64) return jsonResponse({ status: "ok", ok: false, reason: "That gift card number isn't right.", message: "That gift card number isn't right." });
+    const r = await checkGiftCard(env.DB, body.code);
+    if (!r || !r.ok) { const reason = (r && r.reason) || "That gift card number isn't right."; return jsonResponse({ status: "ok", ok: false, reason, message: reason }); }
+    return jsonResponse({ status: "ok", ok: true, last4: r.card.last4, balance: r.card.balance });
+  }
+  // ---- buyGiftCard — a customer buys a gift card online (phase 6) ----
+  // Makes an ordinary order in the shop for the buyer — one line, productId "__giftcard__", the gift's details in its
+  // configJson — and answers what the storefront needs to start Stripe Checkout exactly as for a card order (orderId,
+  // orgId and checkoutToken, to /api/checkout). The card itself is made and emailed to the recipient once the payment
+  // is in (stripe-webhook.js), never before. Needs Gift cards on, selling online on (Global settings → Gift cards), card
+  // payments on and Stripe set up. The amount is one of the buttons or within the minimum and maximum; the line is
+  // never taxed. Named by a constant, as checkDiscountCode is: the customer's side, not a back-office action.
+  const STOREFRONT_BUY_GIFT_ = "buyGiftCard";
+  if (body.action === STOREFRONT_BUY_GIFT_) {
+    if (!featureOn("storefront")) return jsonResponse({ status: "error", feature: "storefront", message: "Online ordering isn't available here." }, 403);
+    let buyOrgId = body.orgId;
+    if (host.kind === "locked") buyOrgId = host.orgId;
+    else {
+      const h = new URL(request.url).hostname;
+      if (h !== "localhost" && h !== "127.0.0.1") return jsonResponse({ status: "error", message: "Orders are placed from a shop's own page." }, 403);
+    }
+    const buyRl = await rateLimited(env, "order_submit", request, 20);
+    if (buyRl.blocked) return rateLimitResponse(buyRl.retryAfter);
+    const buyBot = await verifyTurnstile(env, body.turnstileToken, request);
+    if (!buyBot.ok) return jsonResponse({ status: "error", message: buyBot.message }, 403);
+    const bad = (message, status = 400) => jsonResponse({ status: "error", message }, status);
+    if (typeof buyOrgId !== "string" || !buyOrgId) return bad("Unknown org");
+    const buyOrg = await getPublishedOrg(env.DB, buyOrgId, priceLookups());
+    if (!buyOrg || !buyOrg.ready) return bad("This shop is not currently accepting orders.", 403);
+    const gcSettings = await getGiftCardSettings(env.DB);
+    if (!(await giftCardsAvailable_(buyOrg)) || !gcSettings || !gcSettings.sellOnline) return bad("Gift cards aren't sold online right now.");
+    // The card is paid by card (Checkout): card payments on for the install and this shop, and Stripe set up.
+    let cardsOn = !!env.STRIPE_SECRET_KEY && !(buyOrg.enabledPayments && buyOrg.enabledPayments.card === false);
+    try { if (((await getGlobalSettings(env.DB)).enabledPayments || {}).card === false) cardsOn = false; } catch (_) { /* unreadable: leave it as is */ }
+    if (!cardsOn) return bad("Gift cards are bought by card, and card payments aren't available right now.");
+    const amountCents = Number(body.amountCents);
+    const amounts = Array.isArray(gcSettings.amounts) ? gcSettings.amounts.map(Number) : [];
+    if (!Number.isInteger(amountCents) || !(amounts.includes(amountCents) || (amountCents >= Number(gcSettings.minCents) && amountCents <= Number(gcSettings.maxCents)))) {
+      const whole$ = (c) => "$" + (Number(c) / 100).toFixed(2).replace(/\.00$/, "");
+      return bad(`Pick an amount from ${whole$(gcSettings.minCents)} to ${whole$(gcSettings.maxCents)}.`);
+    }
+    const clean = (v, max) => String(v == null ? "" : v).replace(/\s+/g, " ").trim().slice(0, max);
+    const recipientName = clean(body.recipientName, 100), recipientEmail = clean(body.recipientEmail, 200);
+    const buyerName = clean(body.buyerName, 200), buyerEmail = clean(body.buyerEmail, 200);
+    const message = String(body.message == null ? "" : body.message).trim().slice(0, 300);
+    if (!recipientName) return bad("Enter who the gift card is for.");
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(recipientEmail)) return bad("Enter the email address to send the gift card to.");
+    if (!buyerName) return bad("Enter your name.");
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(buyerEmail)) return bad("Enter your email address.");
+    // One order per Save: the form's requestId names the order, so a double click or a retry after a lost answer finds
+    // the first one's order and answers it (its checkout token) instead of making a second.
+    const buyPrefix = buyOrgId.replace(/[^A-Za-z0-9]/g, "").slice(0, 4).toUpperCase() || "ORD";
+    const buyKey = /^[A-Za-z0-9_-]{8,64}$/.test(String(body.requestId || "")) ? String(body.requestId).replace(/[^A-Za-z0-9]/g, "").slice(0, 20).toUpperCase() : "";
+    const buyOrderId = buyKey ? buyPrefix + "-GC-" + buyKey : buyPrefix + "-GC-" + Date.now().toString(36).toUpperCase() + crypto.randomUUID().replace(/-/g, "").slice(0, 6).toUpperCase();
+    const buyAnswer = async (extra = {}) => {
+      const checkoutToken = await signOrderToken(env, buyOrderId);
+      let emailOn = true;
+      try { if (typeof emailCanSend === "function") emailOn = await emailCanSend(env); } catch (_) {}
+      return jsonResponse({ status: "ok", orderId: buyOrderId, orgId: buyOrgId, checkoutToken, total: amountCents / 100, giftCard: true, emailOn, ...extra });
+    };
+    const priorBuy = await env.DB.prepare("SELECT orgId, contact, voidedAt FROM orders WHERE orderId = ?").bind(buyOrderId).first();
+    if (priorBuy) {
+      const same = priorBuy.orgId === buyOrgId && String(priorBuy.contact || "").toLowerCase() === buyerEmail.toLowerCase() && !priorBuy.voidedAt;
+      return same ? buyAnswer({ duplicate: true }) : bad("This order has already been received.", 409);
+    }
+    const amount = amountCents / 100;
+    const giftLine = { productId: "__giftcard__", name: ("Gift card for " + recipientName).slice(0, 200), type: "giftcard", size: "", qty: 1, unitPrice: amount,
+      personalized: false, persName: "", personalizationFee: 0, lineTotal: amount, taxable: false,
+      config: { giftCard: { recipientName, recipientEmail, message } } };
+    const giftOrder = { orderId: buyOrderId, orgId: buyOrgId, customerName: buyerName, contact: buyerEmail, paymentMethod: "Card", subtotal: amount, shippingCost: 0, total: amount,
+      shippingMethod: "Digital delivery", shippingAddress: null, totalWeightOz: 0, placedAt: new Date().toISOString() };
+    try { await insertOrder(env.DB, giftOrder, [giftLine], {}); }
+    catch (e) {
+      if (/UNIQUE constraint failed: orders\.orderId/i.test(String(e && e.message))) return buyAnswer({ duplicate: true });
+      throw e;
+    }
+    // The buyer's "order received" email, after the answer (as an order's): its gift card note says where the card goes.
+    const buyReceived = (async () => {
+      let saved = null;
+      try { saved = await getOrderById(env.DB, buyOrderId); } catch (_) {}
+      if (saved && await sendOrderReceivedEmail(env, saved)) await setOrderEmailTimestamp(env.DB, buyOrderId, "receivedEmailAt", new Date().toISOString());
+    })().catch((e) => console.error("Order-received email failed for", buyOrderId, e));
+    if (typeof context.waitUntil === "function") context.waitUntil(buyReceived); else await buyReceived;
+    return buyAnswer();
+  }
+
   if (body.action) {
     return jsonResponse({ status: "error", message: "Unknown action" }, 400);
   }
@@ -8859,7 +9573,9 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (!same) return jsonResponse({ status: "error", message: "This order has already been received." }, 409);
     const checkoutToken = await signOrderToken(env, orderId);
     // A code used on it: the same discount, total and what's still owed the first answer gave.
-    const withCode = prior.discountCode ? { discount: prior.discountAmount, discountCode: prior.discountCode, total: prior.effectiveTotal, owed: prior.balanceDue } : {};
+    const withCode = prior.discountCode ? { discount: prior.discountAmount, discountCode: prior.discountCode, discountCodes: prior.discountCodes || [], total: prior.effectiveTotal, owed: prior.balanceDue } : {};
+    // Gift cards already spent on it: what is still to pay is the first answer's too (the card step is skipped when nothing is).
+    if (Number(prior.amountReceived) > 0 && !prior.discountCode) Object.assign(withCode, { owed: prior.balanceDue, paid: !!prior.paid });
     return jsonResponse(prior.taxMode === "exclusive"
       ? { status: "ok", duplicate: true, taxMode: "exclusive", salesTax: prior.salesTax, total: prior.total, checkoutToken, ...withCode }
       : { status: "ok", duplicate: true, checkoutToken, ...withCode });
@@ -9066,32 +9782,36 @@ async function handleOrdersPost_(context, listBefore = null) {
     ...(rushPayBy ? { rushPayBy } : {}),
   };
 
-  // A discount code (migrations/0115): checked again here with this order's email and the goods as priced above (the
-  // storefront's Apply only showed it), then one use claimed for this order id — one conditional insert, so two orders
-  // racing for a code's last use can't both have it. The discount is booked like a manual one (order.discount).
+  // Discount codes (migrations/0115; more than one when the shop allows it, phase 6): each checked again here with this
+  // order's email and the goods as priced above (the storefront's Apply only showed them), then together (percents add up,
+  // amounts come off what is left, free shipping once — db.js planDiscountCodes), then one use of each claimed for this
+  // order id — one conditional insert each, all or none, so two orders racing for a code's last use can't both have it.
+  // What they take off is booked like a manual discount (order.discount).
   let discountUse = null;
-  if (body.discountCode != null && body.discountCode !== "") {
-    if (typeof body.discountCode !== "string" || body.discountCode.length > 64) return jsonResponse({ status: "error", message: "This code isn't valid." }, 400);
-    const wanted = body.discountCode.trim();
-    if (wanted) {
-      if (!featureOn("discounts")) return jsonResponse({ status: "error", message: DISCOUNTS_OFF_MSG }, 400);
-      const chk = await checkDiscountCode(env.DB, { code: wanted, orgId, email: contact.trim(), subtotal, today: await localToday(env) });
-      if (!chk || chk.notReady) return jsonResponse({ status: "error", message: DISCOUNTS_OFF_MSG }, 400);
-      if (!chk.ok) return jsonResponse({ status: "error", message: chk.reason || "This code isn't valid." }, 400);
-      discountUse = { codeId: chk.code.id, code: chk.code.code, cents: Math.max(0, Math.round(Number(chk.discount) * 100) || 0) };
-    }
-  }
-  if (discountUse) {
-    const claim = await claimDiscountCode(env.DB, { codeId: discountUse.codeId, orderId, email: contact.trim().toLowerCase(), amountCents: discountUse.cents, now: new Date().toISOString() });
+  const wantedCodes = discountCodesOf_(body);
+  if (wantedCodes.error) return jsonResponse({ status: "error", message: wantedCodes.error }, 400);
+  // Gift cards (migrations/0120) are PAYMENTS, not discounts: they work with codes whatever the one-code rule says, take
+  // what is owed after the codes, the shipping and the tax, and are spent once the order is saved (below). Asked for and
+  // checked before anything is claimed, so a refusal leaves nothing behind.
+  const wantedCards = giftCardsOf_(body);
+  if (wantedCards.error) return jsonResponse({ status: "error", message: wantedCards.error }, 400);
+  if (wantedCards.cards.length && !(await giftCardsAvailable_(orgRow))) return jsonResponse({ status: "error", message: GIFT_CARDS_OFF_MSG_ }, 400);
+  if (wantedCodes.codes.length) {
+    if (!featureOn("discounts")) return jsonResponse({ status: "error", message: DISCOUNTS_OFF_MSG }, 400);
+    const got = await resolveDiscountCodes_(env.DB, { codes: wantedCodes.codes, orgId, email: contact.trim(), goodsCents: Math.round(subtotal * 100),
+      shippingCents: Math.round(serverShippingCost * 100), today: await localToday(env) });
+    if (got.notReady) return jsonResponse({ status: "error", message: DISCOUNTS_OFF_MSG }, 400);
+    if (got.error) return jsonResponse({ status: "error", message: got.error }, 400);
+    const claim = await claimResolvedCodes_(env.DB, orderId, contact, got);
     if (!claim || !claim.ok) {
-      // The same order sent twice at once: the first try holds this order id's use, so this is its repeat.
+      // The same order sent twice at once: the first try holds this order id's uses, so this is its repeat.
       { const again = await answerRepeatOrder(); if (again) return again; }
       return jsonResponse({ status: "error", message: (claim && claim.reason) || "This code has reached its limit." }, 400);
     }
-    // `already`: this order id held a live use of this code before this request (the same order sent twice at once),
-    // so that use is the other try's, not ours to give back if the insert fails.
-    discountUse.claimedHere = !claim.already;
-    order.discount = { cents: discountUse.cents, note: "Code " + discountUse.code };
+    // `already`: this order id held live uses of these codes before this request (the same order sent twice at once),
+    // so those uses are the other try's, not ours to give back if the insert fails.
+    discountUse = { ...got, claimedHere: !claim.already };
+    order.discount = { cents: got.goodsOffCents, note: got.note, ...(got.shippingOffCents ? { shippingCents: got.shippingOffCents } : {}) };
   }
 
   // What the order comes to, as recorded (insertOrder works the tax out per line; with tax added
@@ -9106,7 +9826,11 @@ async function handleOrdersPost_(context, listBefore = null) {
     // is that order's now.
     let keepUse = false;
     if (discountUse && discountUse.claimedHere && /UNIQUE constraint failed: orders\.orderId/i.test(String(e && e.message))) {
-      try { keepUse = Number(((await env.DB.prepare("SELECT discountCents FROM orders WHERE orderId = ?").bind(orderId).first()) || {}).discountCents) > 0; }
+      try {
+        keepUse = Number(((await env.DB.prepare("SELECT discountCents FROM orders WHERE orderId = ?").bind(orderId).first()) || {}).discountCents) > 0;
+        // …or a free-shipping code's discount (migrations/0120; the column may not be there yet).
+        if (!keepUse) keepUse = Number(((await env.DB.prepare("SELECT shippingDiscountCents FROM orders WHERE orderId = ?").bind(orderId).first().catch(() => null)) || {}).shippingDiscountCents) > 0;
+      }
       catch (_) { keepUse = false; }
     }
     if (discountUse && discountUse.claimedHere && !keepUse) {
@@ -9128,6 +9852,17 @@ async function handleOrdersPost_(context, listBefore = null) {
   if (typeof body.marketingOptIn === "boolean" && featureOn("emailCampaigns") && typeof setMarketingChoice === "function") {
     try { await setMarketingChoice(env.DB, contact, body.marketingOptIn, "checkout"); }
     catch (e) { console.error("Saving the marketing choice failed for", orderId, e); }
+  }
+
+  // Gift cards typed at checkout: spent now, in order, after the codes, shipping and tax, each up to its amount and what
+  // is still owed (db.js redeemGiftCard: one conditional update each, with the payment). A card that is refused is
+  // reported and the rest of the order goes on as chosen — it is paid by the method picked, for what the cards didn't
+  // cover. Done before the confirmation email is read back, so the email shows them as payments.
+  let cardResults = null, cardAfter = null;
+  if (wantedCards.cards.length) {
+    cardResults = await redeemOrderGiftCards_(env.DB, { orderId, cards: wantedCards.cards, by: "customer" });
+    try { cardAfter = await getOrderById(env.DB, orderId); } catch (_) { cardAfter = null; }
+    if (cardAfter && cardAfter.paid) await deliverDigital_(orderId);
   }
 
   // The customer's "order received" email goes out AFTER the response: sending can take a second
@@ -9160,9 +9895,17 @@ async function handleOrdersPost_(context, listBefore = null) {
   // the tax mode, so the confirmation and the card step use the server's figures.
   let withCode = {};
   if (discountUse) {
-    const discount = placed.discount != null ? Number(placed.discount) : discountUse.cents / 100;
-    const owed = placed.total != null ? Number(placed.total) : Math.max(0, Math.round(total * 100) - discountUse.cents) / 100;
-    withCode = { discount, discountCode: discountUse.code, total: owed, owed };
+    const discount = placed.discount != null ? Number(placed.discount) : discountUse.goodsOffCents / 100;
+    const owed = placed.total != null ? Number(placed.total) : Math.max(0, Math.round(total * 100) - discountUse.goodsOffCents - discountUse.shippingOffCents) / 100;
+    withCode = { discount, discountCode: discountUse.names.join(", "), discountCodes: discountUse.names, total: owed, owed,
+      ...(discountUse.shippingOffCents ? { shippingDiscount: discountUse.shippingOffCents / 100 } : {}) };
+  }
+  // Gift cards (spent above): `giftCards` lists each card's result, with its reason when it was refused. `owed` is what is
+  // still to pay (0 when the cards covered it all: the page skips the card step, and `paid` is true); `total` stays what
+  // the order comes to.
+  if (cardResults) {
+    withCode = { ...withCode, giftCards: cardResults,
+      ...(cardAfter ? { owed: Number(cardAfter.balanceDue), paid: !!cardAfter.paid, ...(withCode.total == null ? { total: Number(cardAfter.effectiveTotal) } : {}) } : {}) };
   }
   return jsonResponse(placed.taxMode === "exclusive"
     ? { status: "ok", taxMode: "exclusive", salesTax: placed.salesTax, total: placed.total, checkoutToken, emailOn, ...withCode }

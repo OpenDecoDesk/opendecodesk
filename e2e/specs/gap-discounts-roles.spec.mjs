@@ -123,7 +123,7 @@ test("Manager: Discount codes right after Quotes; makes, changes, switches off a
   await dlg.locator("#dcNote").fill("Spring club night");
   const sent = mp.waitForRequest(r => r.url().endsWith("/api/orders") && (r.postDataJSON() || {}).action === "saveDiscountCode");
   await dlg.locator("#dcSave").click();
-  expect((await sent).postDataJSON().code).toEqual({ code, kind: "percent", percent: 10, amount: null, maxDiscount: null, orgId: shop.orgId, email: "",
+  expect((await sent).postDataJSON().code).toEqual({ code, kind: "percent", percent: 10, amount: null, maxDiscount: null, minOrder: null, freeShipping: false, orgId: shop.orgId, email: "",
     maxUses: 50, oncePerEmail: true, expiresOn: FAR, note: "Spring club night" });
   await expect(toast(mp)).toContainText(`Code ${code} created.`);
   await expect(dlg).toHaveCount(0);

@@ -183,7 +183,7 @@ test("Payments: a partial Venmo payment, the rest by Zelle, then a cash refund",
   const pm = page.locator("#pmContent");
   await expect(pm).toContainText("Amount due");
   await expect(pm).toContainText("$40.00");
-  await expect(pm.locator("#pmMethod option")).toHaveText(["Card", "Venmo", "Zelle", "Check", "Cash", "Other"]);
+  await expect(pm.locator("#pmMethod option")).toHaveText(["Card", "Venmo", "Zelle", "Check", "Cash", "Other", "Gift card"]);
 
   // Nothing typed: refused in the window.
   await pm.locator("#pmSavePayment").click();

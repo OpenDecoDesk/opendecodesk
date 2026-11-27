@@ -796,3 +796,28 @@
     .ro-filter, .ro-bar .admin-btn{min-height:40px;}
     .ro-sort select{flex:1;}
   }
+
+/* ---- Gift cards (migrations/0120): the page (public/admin-giftcards.js), the Local sale and Payments windows ---- */
+.gc-totals{display:flex; flex-wrap:wrap; gap:12px; margin:0 0 14px;}
+.gc-total{flex:1 1 160px; padding:10px 14px; border:1px solid var(--line,#e2e2e2); border-radius:8px; background:var(--surface,#fff);}
+.gc-total-n{font-size:20px; font-weight:700; font-variant-numeric:tabular-nums;}
+.gc-total-l{font-size:12px; color:var(--ink-soft,#666);}
+.gc-total-note{font-size:11px; color:var(--ink-soft,#888); margin-top:2px;}
+.gc-filter{flex:0 1 160px;}
+.gc-tag-on{background:#e3f2e6; color:#1b5e20;}
+.gc-neg{color:#b03a2e;}
+.gc-summary{display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin:0 0 10px;}
+.gc-bal{font-size:28px; font-weight:700; font-variant-numeric:tabular-nums;}
+.gc-number{display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:0 0 10px; font-size:13px;}
+.gc-code{font-family:'IBM Plex Mono', ui-monospace, monospace; letter-spacing:.04em; font-size:15px; word-break:break-all;}
+.gc-issued .gc-code{display:block; font-size:20px; padding:12px 14px; margin:8px 0; border:1px dashed var(--line,#bbb); border-radius:8px; background:#f7f7f7; text-align:center;}
+.gc-issued-h{font-weight:700; font-size:15px;}
+.gc-facts{display:grid; grid-template-columns:max-content 1fr; gap:4px 14px; font-size:13px; margin:0 0 6px;}
+.gc-facts dt{color:var(--ink-soft,#666);}
+.gc-facts dd{margin:0; min-width:0; overflow-wrap:anywhere;}
+.gc-msg{white-space:pre-wrap;}
+@media(max-width:760px){
+  .gc-total{flex-basis:100%;}
+  .gc-facts{grid-template-columns:1fr; gap:0;}
+  .gc-facts dd{margin-bottom:6px;}
+}

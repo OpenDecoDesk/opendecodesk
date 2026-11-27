@@ -19,7 +19,7 @@
  * ---- WHAT IT SHOWS ----
  * One quote: the shop's name, its number, title and note to the customer, the lines (with the list price
  * when a quantity break took something off), the one-time fees, the totals with the tax taken when it was
- * sent, the expiry date and what the customer can still do. Never the internal note, costs, who made it,
+ * sent (and any discount codes on it, with what they took off, and free shipping), the expiry date and what the customer can still do. Never the internal note, costs, who made it,
  * or anything about another quote. Nothing is priced here: the prices were frozen when it was sent.
  *
  * ---- WHAT THE CUSTOMER CAN DO ----
@@ -32,7 +32,7 @@
 
 import { getEstimate, getEstimateByToken, markEstimateViewed, respondToEstimate, getOrgById, getSalesTaxSettings,
   insertAuditLog, recordSystemIssue, localToday } from "../_lib/db.js";
-import { sendEstimateResponseNotification, estimateLinesView, emailCanSend } from "../_lib/email.js";
+import { sendEstimateResponseNotification, estimateLinesView, estimateDiscountView, emailCanSend } from "../_lib/email.js";
 import { convertEstimateToOrder_ } from "./orders.js";
 import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { jsonResponse, featureIsOff } from "../_lib/http.js";
@@ -91,6 +91,7 @@ async function estimateView_(env, got) {
   const est = full.estimate, totals = full.totals || {}, customer = full.customer || {};
   const { lines, fees } = estimateLinesView(full.items);
   const tax = await getSalesTaxSettings(env.DB).catch(() => ({}));
+  const dv = estimateDiscountView(totals, est.discountCodes);   // the codes typed on the quote and what they took off
   const canAccept = !estimateRefusal_(est, expired, "accept");
   const canAskChanges = !estimateRefusal_(est, expired, "changes");
   return {
@@ -103,6 +104,7 @@ async function estimateView_(env, got) {
     customerNote: est.status === "changes" ? est.customerNote || "" : "",
     orderId: est.status === "accepted" || est.status === "converted" ? est.orderId || "" : "",
     lines, fees,
+    discountCodes: dv.codes, discount: dv.discount, discounts: dv.per, shippingOff: dv.shippingOff,
     subtotal: Number(totals.subtotal) || 0, tax: Number(totals.tax) || 0, total: Number(totals.total) || 0,
     taxMode: totals.taxMode === "exclusive" ? "exclusive" : "inclusive", taxRate: (Number(totals.taxRateBps) || 0) / 100,
     taxJurisdiction: tax.jurisdiction || "",

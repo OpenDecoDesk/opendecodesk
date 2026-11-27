@@ -524,8 +524,8 @@ test("a customer's page: name, company and since when, the totals, and their ord
   await expect(table.locator("thead th")).toHaveText(["Order", "Shop", "Placed", "Total", "Paid", "Balance", "Status"]);
   const orderRow = (orderId) => table.locator("tbody tr").filter({ has: page.getByRole("link", { name: orderId, exact: true }) });
   await expect(table.locator("tbody tr")).toHaveCount(2);
-  await expect(orderRow(owed).locator("td")).toHaveText([owed, shop.name, A_DATE, "$20.00", "$0.00", "$20.00", ""]);
-  await expect(orderRow(paid).locator("td")).toHaveText([paid, shop.name, A_DATE, "$40.00", "$40.00", "$0.00", ""]);
+  await expect(orderRow(owed).locator("td")).toHaveText([owed, shop.name, A_DATE, "$20.00", "$0.00", "$20.00", /^\s*Reorder$/]);   // (phase 6: a Reorder button in the Status cell)
+  await expect(orderRow(paid).locator("td")).toHaveText([paid, shop.name, A_DATE, "$40.00", "$40.00", "$0.00", /^\s*Reorder$/]);
   await expect(page.locator("#custPage")).not.toContainText("Voided and test orders are listed");
   await expect(page.locator("#custPage")).not.toContainText("No orders yet.");
 

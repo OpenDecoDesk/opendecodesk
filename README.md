@@ -114,8 +114,15 @@ and the tax and shipping features are built around a US business (see [Region](#
   to the group and what is still owed, and a payout is recorded as an expense.
 - Discount codes customers type at checkout: a percent or an amount off the goods, for every shop or
   one, with an optional last day. A code for one person (tied to their email, used once), or one for
-  anyone that works a set number of times; codes for a pasted list of emails in one go. A voided order
-  gives its use back.
+  anyone that works a set number of times; codes for a pasted list of emails in one go. A code can have a
+  minimum order or make delivery free (or be a free-shipping-only code). One code per order to start;
+  a Global setting lets customers use more than one (percent codes add up). Codes also work on the
+  order page, the customer's invoice page and quotes. A voided order gives its use back.
+- Gift cards, as a payment and not a discount: staff issue them, customers can buy them online (emailed
+  to the recipient once paid), and a balance is spent across orders at checkout, on a Local sale, on an
+  order or on an invoice. They never expire, can't be cashed out, count as a liability rather than
+  revenue, and a refund goes back onto the card.
+- Reorder: a button that copies a past order into a new Local sale at today's prices.
 
 **Running it**
 - An admin panel on its own address, with a sign-in for each person, three roles (back office, manager, admin), two-step sign-in that can be required, and an audit log.
@@ -203,8 +210,8 @@ without it.
 
 ## Feature switches
 
-Nine parts of the site are optional. Each has a switch in the admin under Settings → Global settings →
-Features. **All nine are on by default.** Turning one off hides its pages in the admin menu (opening one
+Ten parts of the site are optional. Each has a switch in the admin under Settings → Global settings →
+Features. **All ten are on by default.** Turning one off hides its pages in the admin menu (opening one
 of them directly shows a "this feature is turned off" page), and the server refuses its actions. Nothing
 is deleted — every table and row stays — so turning it back on brings everything back as it was. Each
 change is written to the audit log.
@@ -248,6 +255,8 @@ change is written to the audit log.
   them (see docs/operations.md). Off: the page is hidden, the checkout shows no code box, and an order
   sent with a code is refused ("Discount codes aren't available right now."). Orders that already used
   a code keep their discount.
+- **Gift cards** — the Gift cards page, selling cards online and paying with one. Off: the page is hidden
+  and cards can't be bought, issued or spent (see docs/operations.md). Cards that exist keep their balance.
 - **Email campaigns** — marketing emails to your customers, on the Discount codes page's Email campaigns
   tab (shown once email is set up), and the box at checkout and on a Local sale where customers say yes
   to shop news and discounts (see docs/operations.md). Off: the tab and the box are hidden, and nothing

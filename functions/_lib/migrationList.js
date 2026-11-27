@@ -121,4 +121,5 @@ export const MIGRATIONS = [
   "0117_email_campaigns.sql",
   "0118_decoration_types.sql",
   "0119_quote_notices.sql",
+  "0120_gift_cards_multi_codes.sql",
 ];

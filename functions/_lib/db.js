@@ -18272,7 +18272,7 @@ export async function issueGiftCard(db, p = {}) {
   const requestKey = p.requestKey ? String(p.requestKey).slice(0, 100) : null;
   const firstOf_ = async () => {
     const had = source ? await db.prepare("SELECT * FROM gift_cards WHERE sourceOrderId = ?").bind(source).first()
-      : requestKey ? await db.prepare("SELECT * FROM gift_cards WHERE requestKey = ?").bind(requestKey).first() : null;
+      : requestKey ? await db.prepare("SELECT * FROM gift_cards WHERE issueRequestId = ?").bind(requestKey).first() : null;
     return had ? { id: Number(had.id), code: had.code, last4: had.last4, balanceCents: Number(had.balanceCents) || 0, created: false } : null;
   };
   try {
@@ -18282,7 +18282,7 @@ export async function issueGiftCard(db, p = {}) {
       const code = generateGiftCardCode_(), last4 = code.slice(-4);
       try {
         const res = await db.batch([
-          db.prepare(`INSERT INTO gift_cards (code, last4, initialCents, balanceCents, recipientName, recipientEmail, buyerName, buyerEmail, message, sourceOrderId, status, note, createdAt, createdBy, requestKey)
+          db.prepare(`INSERT INTO gift_cards (code, last4, initialCents, balanceCents, recipientName, recipientEmail, buyerName, buyerEmail, message, sourceOrderId, status, note, createdAt, createdBy, issueRequestId)
                       VALUES (?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)`)
             .bind(code, last4, cents, cents, clean(p.recipientName, 100), recipientEmail, clean(p.buyerName, 100), buyerEmail, clean(p.message, 300), source, clean(p.note, 500), now, by, requestKey),
           db.prepare("INSERT INTO gift_card_ledger (cardId, kind, deltaCents, orderId, paymentId, note, at, by) VALUES (last_insert_rowid(), 'issue', ?, ?, NULL, ?, ?, ?)")

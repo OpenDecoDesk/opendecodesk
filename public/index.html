@@ -403,6 +403,28 @@
   .discount-on{margin-top:6px; font-family:'IBM Plex Mono',monospace; font-size:12px; color:#86efac;}
   .discount-msg{margin-top:6px; font-size:12px; line-height:1.4; color:#fca5a5;}
   .ticket-discount-line{color:#86efac;}
+  /* More than one code and gift cards at checkout (migrations/0120) */
+  .discount-list{list-style:none; margin:0 0 6px; padding:0; display:flex; flex-direction:column; gap:4px;}
+  .discount-chip{display:flex; align-items:center; justify-content:space-between; gap:8px; font-family:'IBM Plex Mono',monospace; font-size:12px; color:#86efac;}
+  .discount-x{background:none; border:1px solid #3a3a38; color:#F6F3EC; width:26px; height:26px; line-height:1; border-radius:var(--radius); cursor:pointer; font-size:16px; flex:0 0 auto;}
+  .discount-link{background:none; border:none; padding:2px 0; color:#F6F3EC; font-family:'IBM Plex Mono',monospace; font-size:12px; text-decoration:underline; cursor:pointer;}
+  .gift-input{max-width:260px;}
+  .ticket-gift{border-top:none; margin-top:0;}
+  .ticket-gift-line{color:#86efac;}
+  .ticket-topay-line{color:#F6F3EC; font-weight:600;}
+  .gift-covers{color:#86efac;}
+  .gift-refused{color:#b03a2e;}
+  /* The shop page's "Gift cards" button and its buying form */
+  .gift-buy-row{margin-top:14px;}
+  .gift-buy-btn{font-family:'IBM Plex Mono',monospace; font-size:12px; text-transform:uppercase; letter-spacing:.06em; background:none; border:1px solid var(--org-accent); color:var(--org-accent); padding:8px 16px; border-radius:var(--radius); cursor:pointer; font-weight:600;}
+  .gb-form{margin-top:18px; display:flex; flex-direction:column; gap:12px; max-width:480px;}
+  .gb-label{font-size:13px; font-weight:600;}
+  .gb-amounts{display:flex; flex-wrap:wrap; gap:8px;}
+  .gb-amount{font-size:15px; font-weight:600; padding:10px 18px; border:1px solid #999; border-radius:var(--radius); background:#fff; color:#1a1a1a; cursor:pointer;}
+  .gb-amount.on{background:var(--org-accent); border-color:var(--org-accent); color:#fff;}
+  .gb-field{display:flex; flex-direction:column; gap:4px; font-size:13px; font-weight:600;}
+  .gb-field input,.gb-field textarea{font:inherit; font-weight:400; padding:9px 10px; border:1px solid #999; border-radius:var(--radius); background:#fff; color:#1a1a1a;}
+  .gb-count{font-size:11px; color:#555; text-align:right; margin-top:-8px;}
   /* Shop news and discounts (email campaigns, migrations/0117): the opt-in box under the email address */
   .marketing-optin{display:flex; gap:10px; align-items:flex-start; margin:2px 0 10px; font-size:13px; line-height:1.45; cursor:pointer; color:#F6F3EC;}
   .checkout-fields .marketing-optin input{width:16px; height:16px; min-height:0; padding:0; margin:2px 0 0; flex:0 0 auto; accent-color:var(--accent);}
@@ -469,6 +491,13 @@
   .inv input[type=text]{width:100%; box-sizing:border-box; padding:8px 9px; border:1px solid #bbb; border-radius:4px; font-size:16px; margin-top:3px; background:#fff; color:#111;}
   .inv-btn{display:inline-block; padding:12px 22px; border-radius:6px; border:none; background:var(--inv-accent,#1d4ed8); color:var(--inv-accent-ink,#fff); font-size:15px; font-weight:700; cursor:pointer; text-decoration:none;}
   .inv-btn.second{background:#fff; color:#1a1a1a; border:1px solid #999; font-weight:600;}
+  /* A discount code and a gift card before paying (migrations/0120) */
+  .inv-addons{display:flex; flex-direction:column; gap:14px; margin-bottom:16px;}
+  .inv-addon label{display:block; font-size:13px; font-weight:600; margin-bottom:4px;}
+  .inv-addon-row{display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
+  .inv-addon-row input{flex:1 1 180px; min-width:0; max-width:300px; padding:10px; border:1px solid #999; border-radius:6px; font-size:15px; text-transform:uppercase;}
+  .inv-addon-row .inv-btn{padding:10px 16px; font-size:14px;}
+  .inv-totals .inv-gift td{color:#14532d;}
   .inv-btn[disabled]{opacity:.5; cursor:not-allowed;}
   .inv-btn:focus-visible,.inv-opt input:focus-visible{outline:2px solid #111; outline-offset:2px; box-shadow:none;}
   .inv-pay{display:flex; flex-direction:column; gap:12px; align-items:flex-start;}

@@ -186,7 +186,7 @@ test("Discount codes switched off in Global settings: no menu item or page, the 
     expect((await catalogOf(cust.request, shop)).discountCodes).toBe(true);
     r = await checkCode(cust.request, shop, c.code.toLowerCase());
     expect(r.status).toBe(200);
-    expect(r.data).toEqual({ status: "ok", code: c.code, label: "10% off", discount: 2 });
+    expect(r.data).toEqual({ status: "ok", code: c.code, label: "10% off", discount: 2, freeShipping: false, combined: { discount: 2, freeShipping: false, codes: [{ code: c.code, discount: 2, freeShipping: false }] } });
     await openCart(cust, shop);
     const email = anEmail();
     await cust.getByLabel("Your name").fill(uniq("Pat Example"));

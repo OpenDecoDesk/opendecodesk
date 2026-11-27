@@ -786,7 +786,7 @@ test("a voided order, and one whose every line is cancelled, offer neither Link 
   await openCustomer(page, c);
   await expect(page.locator("#custPage table.cust-table tbody tr")).toHaveCount(3);
   await expect(historyRow(page, linkedVoid).locator("td").last()).toHaveText("Voided");
-  await expect(historyRow(page, kept).locator("td").last()).toHaveText("");
+  await expect(historyRow(page, kept).locator("td").last()).toHaveText(/^\s*Reorder$/);   // no status; its Reorder button (phase 6)
   await expect(page.locator("#custPage")).toContainText("Voided and test orders are listed but not counted in the totals.");
   const h = await historyOf(api, c.id);
   await expect(totalOf(page, "Orders")).toHaveText(String(h.totals.orderCount));

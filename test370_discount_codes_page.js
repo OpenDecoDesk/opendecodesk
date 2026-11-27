@@ -201,8 +201,8 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   ok("…Status: Active, Switched off, Expired, Used up, All — All chosen", same([...id("dcStatus").options].map(o => o.value + "=" + o.textContent), ["active=Active", "off=Switched off", "expired=Expired", "usedUp=Used up", "all=All"]) && id("dcStatus").value === "all");
   ok("…and “+ New code” and “Codes for a list of emails…”, needing Edit", text(id("dcNew")) === "+ New code" && id("dcNew").getAttribute("data-need") === "discounts.codes:edit" && !off(id("dcNew")) &&
     text(id("dcBulk")) === "Codes for a list of emails…" && id("dcBulk").getAttribute("data-need") === "discounts.codes:edit" && !off(id("dcBulk")));
-  ok("the note under it: the discount is off the goods, one code an order, a void gives the use back",
-    /the discount comes off the goods \(not shipping or a rush fee\), and an order uses one code at most\. A voided or deleted order gives its use back\./.test(text(page())));
+  ok("the note under it: the discount is off the goods, one code an order unless Global settings allows more, a void gives the use back",
+    /the discount comes off the goods \(not shipping or a rush fee; a free-shipping code takes the shipping off\), and an order uses one code unless Global settings → Discount codes allows more\. A voided or deleted order gives its use back\./.test(text(page())));
   asRoles("staff");
   await go();
   ok("Back office (Read): the same empty list without the “Make one” sentence, and the buttons hidden", text(id("dcBody")) === "No discount codes yet." && off(id("dcNew")) && off(id("dcBulk")));
@@ -460,7 +460,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   fire($("#dcForm"), "submit");
   await wait(() => !win()); await idle();
   ok("Save sends saveDiscountCode with the whole code as it was, the new uses, expiry and note (trimmed), and Active",
-    same(of("saveDiscountCode"), [{ action: "saveDiscountCode", code: { code: "SAVE10", kind: "percent", percent: 10, amount: null, maxDiscount: null, orgId: null, email: "", maxUses: 60, oncePerEmail: false, expiresOn: "2999-06-30", note: "Spring <again>", id: cSave.id, active: true } }]) &&
+    same(of("saveDiscountCode"), [{ action: "saveDiscountCode", code: { code: "SAVE10", kind: "percent", percent: 10, amount: null, maxDiscount: null, minOrder: null, freeShipping: false, orgId: null, email: "", maxUses: 60, oncePerEmail: false, expiresOn: "2999-06-30", note: "Spring <again>", id: cSave.id, active: true } }]) &&
     of("setDiscountCodeActive").length === 0);
   ok("…the server keeps it, the window closes, “Code SAVE10 saved.”, and the list is asked for again",
     codeRow("SAVE10").maxUses === 60 && codeRow("SAVE10").expiresOn === "2999-06-30" && codeRow("SAVE10").note === "Spring <again>" && lastToast().m === "Code SAVE10 saved." && !lastToast().err && of("listDiscountCodes").length === 1 &&
@@ -678,7 +678,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
     release(); }
   await wait(() => !win()); await idle();
   ok("Create code sends saveDiscountCode with no id or Active: the code, amount 5, the club, 25 uses, once per email, the expiry and the note",
-    same(of("saveDiscountCode"), [{ action: "saveDiscountCode", code: { code: "CLUB5", kind: "amount", percent: null, amount: 5, maxDiscount: null, orgId: "club", email: "", maxUses: 25, oncePerEmail: true, expiresOn: "2999-01-31", note: "Fall" } }]));
+    same(of("saveDiscountCode"), [{ action: "saveDiscountCode", code: { code: "CLUB5", kind: "amount", percent: null, amount: 5, maxDiscount: null, minOrder: null, freeShipping: false, orgId: "club", email: "", maxUses: 25, oncePerEmail: true, expiresOn: "2999-01-31", note: "Fall" } }]));
   ok("…the server makes it, “Code CLUB5 created.”, and it is in the list", !!codeRow("CLUB5") && codeRow("CLUB5").amountCents === 500 && codeRow("CLUB5").oncePerEmail === 1 && lastToast().m === "Code CLUB5 created." &&
     same(cellsOf(rowOf("CLUB5")), ["CLUB5", "$5.00 off", "Example Club", "Anyone, once per email", "0 of 25", day("2999-01-31"), "Active"]));
   // One person, a blank code (the server makes it up)
@@ -688,7 +688,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   fire($("#dcForm"), "submit");
   await wait(() => !win()); await idle();
   const saved = of("saveDiscountCode")[0];
-  ok("one person's code: the email lower-case and trimmed, 1 use, once per email off, a blank code", same(saved, { action: "saveDiscountCode", code: { code: "", kind: "percent", percent: 12.5, amount: null, maxDiscount: null, orgId: null, email: "sam@example.com", maxUses: 1, oncePerEmail: false, expiresOn: "", note: "" } }));
+  ok("one person's code: the email lower-case and trimmed, 1 use, once per email off, a blank code", same(saved, { action: "saveDiscountCode", code: { code: "", kind: "percent", percent: 12.5, amount: null, maxDiscount: null, minOrder: null, freeShipping: false, orgId: null, email: "sam@example.com", maxUses: 1, oncePerEmail: false, expiresOn: "", note: "" } }));
   { const r = d1.q("SELECT * FROM discount_codes WHERE email = 'sam@example.com'")[0];
     ok("…the toast names the code the server made up", !!r && lastToast().m === "Code " + r.code + " created." && /^[A-Z2-9]{8}$/.test(r.code)); }
   // A code already taken

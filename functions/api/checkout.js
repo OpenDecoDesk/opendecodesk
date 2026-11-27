@@ -156,8 +156,14 @@ export async function onRequestPost(context){
   let downloadUrl = "";
   try { if ((await orderDigitalLines(env.DB, orderId)).length) downloadUrl = await downloadLink(env, orderId, orderOrgId, { origin }); }
   catch (e) { console.error("Couldn't make the download link for", orderId, e); }
+  // A gift card sold online (phase 6: its line has productId "__giftcard__"): the thank-you page says the card is emailed to
+  // the recipient (`giftcard=1`), and Stripe's page names what is being bought. The card is made once the payment is in
+  // (stripe-webhook.js). A database from before the gift card migration has nothing to find.
+  let giftCardOrder = false;
+  try { giftCardOrder = !!(await env.DB.prepare("SELECT 1 AS x FROM order_items WHERE orderId = ? AND productId = '__giftcard__' LIMIT 1").bind(String(orderId)).first()); }
+  catch (e) { giftCardOrder = false; }
   const successUrl = downloadUrl ? downloadUrl : viaInvoice ? origin + "/?invoice=" + invoiceToken + "&paid=1"
-    : origin + "/?stripe=success&orderId=" + encodeURIComponent(orderId) + "&org=" + encodeURIComponent(orderOrgId);
+    : origin + "/?stripe=success&orderId=" + encodeURIComponent(orderId) + "&org=" + encodeURIComponent(orderOrgId) + (giftCardOrder ? "&giftcard=1" : "");
   const cancelUrl  = viaInvoice ? origin + "/?invoice=" + invoiceToken
     : origin + "/?stripe=cancel&orderId=" + encodeURIComponent(orderId) + "&org=" + encodeURIComponent(orderOrgId);
 
@@ -169,9 +175,9 @@ export async function onRequestPost(context){
   // changed) is closed first; one just paid (its webhook not in yet) refuses, so it isn't paid twice.
   const page = await createCheckoutSession(env, {
     orderId: String(orderId), orgId: orderOrgId, amountCents,
-    name: "Order — " + orderOrgId,
+    name: (giftCardOrder ? "Gift card — " : "Order — ") + orderOrgId,
     // One line for the whole balance; when sales tax was added on top of the prices, say how much of it is tax.
-    description: "Order " + orderId + (orderName ? " for " + orderName : "")
+    description: (giftCardOrder ? "Gift card, order " : "Order ") + orderId + (orderName ? " for " + orderName : "")
       + (state.taxAdded > 0 ? " — includes $" + Number(state.taxAdded).toFixed(2) + " sales tax" : ""),
     // Echoed back in the webhook so it finds the order without a separate lookup.
     sessionMetadata: { customerName: orderName, contact: orderContact },

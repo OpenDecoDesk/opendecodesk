@@ -149,7 +149,20 @@ About fifty tables (`schema.sql`). The main groups:
   that used a code: the order, email and amount). A void or delete sets the use's `releasedAt` rather
   than removing it, and a released use no longer counts. The order itself keeps the discount in
   `orders.discountCents` / `discountNote` like any other discount. `maxDiscountCents` (migrations/0116)
-  is the most a percent code takes off.
+  is the most a percent code takes off. Migration 0120 lets an order have several uses (unique on order and
+  code), and adds `minOrderCents`, `freeShipping` and `goodsOff` to a code. A free-shipping-only code is
+  stored as a 100% code with `goodsOff = 0` and `freeShipping = 1`, which `db.js` hides: it reads and saves as
+  kind "shipping". What a code took off delivery is kept in `orders.shippingDiscountCents`, and every
+  owed/balance calculation (JavaScript and the SQL twins) subtracts it from shipping. `combineDiscounts_`
+  works out several codes at once: percent codes add (capped at 100%, each with its own max), then amount
+  codes, then free shipping once. The setting `discountRules` `{ multiple }` allows more than one.
+- **Gift cards** (migration 0120) — `gift_cards` (the code, last four, the amount it started with and its
+  balance, who it's for, who bought it, the order that sold it online, active or void) and `gift_card_ledger`
+  (every issue, redeem, refund, adjust and void, with its amount and order; the history). A card spent on an
+  order is an ordinary `order_payments` row with method `other` and `giftCardId` set, with no account, so it
+  is never on the deposits list or in an account's balance. The setting `giftCards` holds the online-sale
+  options. A card sold online is an order line with productId `__giftcard__`, which is left out of revenue,
+  tax, fundraising, cost and production.
 - **Email campaigns** (migrations/0117) — `marketing_optouts` (one row per address that asked for no
   marketing email, and why: checkout, unsubscribe, reply or admin), `email_campaigns` (subject, theme,
   the design as blocks or HTML, who it's for, its discount, and draft → scheduled → sending → sent or
@@ -226,6 +239,14 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
   from the order's priced lines; the storefront only shows it. Whether a shop's checkout shows the code
   box is read fresh on each catalog request (`functions/api/catalog.js`), not cached, so a new code needs
   no Publish.
+- **A gift card's balance moves with one conditional update.** Spending a card is
+  `UPDATE gift_cards SET balanceCents = balanceCents - ? WHERE id = ? AND status = 'active' AND balanceCents >= ?`,
+  batched with the ledger row, the payment row and the paid refresh; if it changes nothing, nothing else is
+  written, so two orders can't spend the same money. A request key makes a double click harmless. A card
+  sold online is made when the payment is confirmed, with a unique index on the selling order, so a repeated
+  Stripe confirmation makes no second card (and no second email). The full code is never in a list or a
+  reading: only `revealGiftCardCode` returns it, and it is audited. Checking a card is limited to 10 a
+  minute for each address, and a wrong number never says whether a card exists.
 - **A built-in expense category can't be deleted.** A category with a `systemKey` (`sales_tax_paid`,
   `fundraiser_payout`) is one the code looks up; it can be renamed, never removed.
 

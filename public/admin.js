@@ -76,6 +76,7 @@ const ADMIN_ACTIONS_ = {
   ordersIncludeCancelled_(){ ordersSetInclude('cancelled', this.checked); },
   rerenderOrdersView(){ rerenderOrdersView(); },
   createLocalSale(){ createLocalSale(this.dataset.org); },
+  reorderOrder_(){ adminReorderOrder_(this.dataset.org, this.dataset.order); },
   linkOrderCustomer_(){ linkOrderCustomer_(this.dataset.org, this.dataset.order); },
   unlinkOrderCustomer_(){ unlinkOrderCustomer_(this.dataset.org, this.dataset.order); },
   pickOrderImportFile_(){ pickOrderImportFile_(this.dataset.org); },
@@ -100,6 +101,7 @@ const ADMIN_ACTIONS_ = {
   pmSetPaymentDate(){ pmSetPaymentDate(this.dataset.payId, this.dataset.payDate); },
   pmSetRefundShipping(){ pmSetRefundShipping(this.dataset.payId, this.dataset.ship, this.dataset.refund); },
   pmDeletePayment(){ pmDeletePayment(this.dataset.payId); },
+  pmRefundToGiftCard(){ pmRefundToGiftCard(this.dataset.payId, this.dataset.amount); },
   redrawPackingLabels_(){ document.getElementById('labelArea').innerHTML=window._buildPackingLabels(); },
   printLabelsPopup(){ window.printLabelsPopup(); },
   refreshAdminOrders(){ refreshAdminOrders(this.dataset.org); },
@@ -745,6 +747,22 @@ async function adminRoute() {
   }
   // Discount codes (migrations/0115): one list; a code opens in a window over it.
   if (raw === "discounts") { await renderDiscountCodes(app); return; }
+  // Gift cards (migrations/0120): the list; #giftcards/<id> opens one card. Its own script (public/admin-giftcards.js), loaded
+  // the first time, like Quotes. An id that isn't a number is the list.
+  const giftMatch = raw.match(/^giftcards(?:\/([^/]*))?$/);
+  if (giftMatch) {
+    const gid = /^[1-9]\d{0,14}$/.test(giftMatch[1] || "") ? Number(giftMatch[1]) : null;
+    try { await ensureGiftCardsPage_(); }
+    catch (e) {
+      adminSetHash(raw);
+      document.title = adminTitle_("Gift cards");
+      app.innerHTML = adminPageHead_("Gift cards") + `<div class="admin-panel" style="--org-accent:var(--accent);"><div class="admin-empty">${escapeHtml(e.message)}. Check your connection and reload the page.</div></div>`;
+      return;
+    }
+    if (location.hash.replace(/^#\/?/, "") !== raw) return;
+    await renderGiftCards(app, gid);
+    return;
+  }
   // Its Email campaigns tab (migrations/0117): #discounts/campaigns, /new and /<id>. Its own script (public/admin-campaigns.js,
   // with public/campaign-render.js), loaded the first time; only once email is set up and for a role that may see it.
   const campaignsMatch = raw.match(/^discounts\/campaigns(?:\/([^/]*))?$/);
@@ -2233,9 +2251,10 @@ const ADMIN_PAGE_FEATURE = {
   packages: "shipping",
   quotes: "quotes",
   discounts: "discounts",
+  giftcards: "giftCards",
 };
 // Names for the "turned off" page; replaced by the server's own list once Global settings has loaded it.
-let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products", quotes: "Quotes", discounts: "Discount codes", emailCampaigns: "Email campaigns" };
+let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products", quotes: "Quotes", discounts: "Discount codes", giftCards: "Gift cards", emailCampaigns: "Email campaigns" };
 function adminFeatureOn_(key){ return typeof featureOn_ !== "function" || featureOn_(key); }
 function adminPageFeature_(hash){ return ADMIN_PAGE_FEATURE[String(hash || "").replace(/^#\/?/, "").split("/")[0]] || ""; }
 function adminPageOn_(hash){ const f = adminPageFeature_(hash); return !adminDesktopHides_(hash) && (!f || adminFeatureOn_(f)) && decorationPageOn_(hash); }
@@ -2920,6 +2939,7 @@ function adminCanOpenPage_(hash){
   if (page === "quotes") return adminCanQuotes_();   // the same, for Quotes (migrations/0109)
   if (page === "fundraising") return adminCanFundraising_();   // and for Fundraising (migrations/0110)
   if (page === "discounts") return adminCanDiscounts_();       // and for Discount codes (migrations/0115)
+  if (page === "giftcards") return adminCanGiftCards_();       // and for Gift cards (migrations/0120)
   // The one Run order is for a role that has the production queue or the transfer queue (#runtransfer is the DTF filter).
   if (page === "runorder" || page === "runtransfer") return adminCan_("run.queue", "read") || adminCan_("transfer.queue", "read");
   return adminItemOn_(adminPageItem_(hash));
@@ -2932,6 +2952,8 @@ function adminCanCustomers_(){ return adminCan_("customers.records", "read"); }
 function adminCanQuotes_(){ return adminCan_("quotes.estimates", "read"); }
 // May this user open Discount codes (discounts.codes, read)? Making and changing codes needs edit (the page's buttons).
 function adminCanDiscounts_(){ return adminCan_("discounts.codes", "read"); }
+// May this user open Gift cards (giftcards.cards, read)? Issuing and resending need edit; adjusting and voiding need full.
+function adminCanGiftCards_(){ return adminCan_("giftcards.cards", "read"); }
 // The menu without the pages of switched-off features or the role's hidden items (a group left empty disappears).
 function adminNavGroups_(){
   return ADMIN_NAV_GROUPS.map(g => ({ label: g.label, items: g.items.filter(it => !Array.isArray(it) || (adminPageOn_(it[0]) && adminCanOpenPage_(it[0]))) }))
@@ -3015,7 +3037,7 @@ function adminNavActive_(){
   if(raw.startsWith("catalog")) return "catalog";
   // A page with a shop or record in its address belongs to its menu entry (#designs/<shop>/3 → Designs).
   const top = raw.split("/")[0];
-  if(top === "designs" || top === "graphics" || top === "maintenance" || top === "setup" || top === "customers" || top === "quotes" || top === "discounts") return top;
+  if(top === "designs" || top === "graphics" || top === "maintenance" || top === "setup" || top === "customers" || top === "quotes" || top === "discounts" || top === "giftcards") return top;
   if(top === "wizard") return "setup";
   return raw;
 }
@@ -3125,6 +3147,8 @@ function renderAdminNav(){
   if (adminCanOpen_("quotes")) top.splice(Math.max(top.findIndex(it => it[0] === "customers"), top.findIndex(it => it[0] === "orders"), top.findIndex(it => it[0] === "home")) + 1, 0, ["quotes", "Quotes"]);
   // Discount codes (migrations/0115) right after Quotes — or where Quotes would be, for a role without it.
   if (adminCanOpen_("discounts")) top.splice(Math.max(...["quotes", "customers", "orders", "home"].map(h => top.findIndex(it => it[0] === h))) + 1, 0, ["discounts", "Discount codes"]);
+  // Gift cards (migrations/0120) right after Discount codes — or where they would be, for a role without it.
+  if (adminCanOpen_("giftcards")) top.splice(Math.max(...["discounts", "quotes", "customers", "orders", "home"].map(h => top.findIndex(it => it[0] === h))) + 1, 0, ["giftcards", "Gift cards"]);
   const current = top.concat(...ADMIN_NAV_GROUPS.map(g => g.items.filter(Array.isArray))).find(it => it[0] === active);
   const currentLabel = current ? current[1] : "";
   const sheetItem = (it) => Array.isArray(it)
@@ -5032,6 +5056,9 @@ function adminActionCell(org, o){
   const can = (fn, lvl) => adminCan_(fn, lvl);
   const deleteBtn = !can("orders.details", "full") ? "" : `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" ${dataAttrs} data-need="orders.details:full" data-admin-action="deleteTransaction" style="margin-top:6px;">Void…</button>`;
 
+  // Reorder (migrations/0120): a new Local sale in this shop with this order's items. Written out here, not through a helper
+  // (tests lift this function out of the file on its own). For a role that may record a sale; a sale of a gift card has nothing to reorder.
+  const reorderBtn = !can("orders.details", "edit") || (o.items || []).some(it => it.productId === "__giftcard__") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" data-admin-action="reorderOrder_" title="Start a new Local sale with this order's items" style="margin-top:4px;">Reorder</button>`;
   const paymentsBtn = !can("orders.payments", "read") ? "" : `<button class="admin-btn" ${dataAttrs} data-admin-action="showPaymentsModal" style="margin-top:4px;">💰 Payments</button>`;
   // Link to a customer… / Unlink customer (migrations/0108). A voided order is left on the record it was on.
   // Written out here, not through a helper: tests lift this function out of the file on its own.
@@ -5042,7 +5069,7 @@ function adminActionCell(org, o){
 
   if(o.items.every(it => it.cancelDate)){
     // Payments stays available: money recorded on a cancelled order must be voided/refunded before the order can be voided.
-    return `<span class="muted-cell" style="font-size:12px;">Cancelled</span>` + paymentsBtn + deleteBtn;
+    return `<span class="muted-cell" style="font-size:12px;">Cancelled</span>` + reorderBtn + paymentsBtn + deleteBtn;
   }
   // The two customer emails are "Order received" and "Payment received" (email.js) — the button says which.
   const resendLabel = !o.paid ? (o.receivedEmailAt ? "Resend “Order received”" : "Send “Order received”") :
@@ -5076,7 +5103,7 @@ function adminActionCell(org, o){
       (adminDesktopNoEmail_() || !can("orders.invoices", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.invoices:edit" data-admin-action="resendEmail" style="margin-top:4px;">${resendLabel}</button>`) +
       (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") +
       (can("orders.details", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" data-admin-action="editOrder" style="margin-top:4px;">Edit items</button>` : "") +
-      digitizingBtn + rushBtn + dlBtn + customerBtn + paymentsBtn + deleteBtn;
+      digitizingBtn + rushBtn + dlBtn + customerBtn + reorderBtn + paymentsBtn + deleteBtn;
   }
 
   const eligibleAll = FULFILLMENT_STAGES.filter(s => (s.prereqMet ? s.prereqMet(o) : s.prereqCheck(o[s.prereqField])) && (!s.prereq2 || s.prereq2(o)) && !o[FULFILLMENT_FIELD[s.stage]]);
@@ -5107,7 +5134,7 @@ function adminActionCell(org, o){
       : "";
   // The rush fee still owed (the rest is paid), or a pay-on-delivery order's balance: Mark as paid settles it.
   const payRushBtn = !o.paid && Number(o.balanceDue) > 0 && can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid" title="${o.payOnDelivery && !o.paidForWork ? "Record the balance as paid" : "Record the rest of the balance — the rush fee — as paid"}" style="margin-top:4px;">Mark as paid</button>` : "";
-  return podTag + stageEl + completeBtn + payRushBtn + podOffBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + digitizingBtn + rushBtn + dlBtn + customerBtn + paymentsBtn + deleteBtn;
+  return podTag + stageEl + completeBtn + payRushBtn + podOffBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + digitizingBtn + rushBtn + dlBtn + customerBtn + reorderBtn + paymentsBtn + deleteBtn;
 }
 
 // The order row's Resend downloads (digital products, migrations/0086): a new download link, emailed with the files
@@ -7000,6 +7027,13 @@ async function showPaymentsModal(orgId, orderId) {
       // retry after a dropped answer sends the same key, and the server books the money once.
       const payRequestId = newRequestId_(), refundRequestId = newRequestId_();
       const defaultMethod  = (String(o.paymentMethod || "").toLowerCase() in METHOD_LABEL) ? String(o.paymentMethod).toLowerCase() : "other";
+      // A payment made with a gift card (migrations/0120): method "other" with the card on it. Shown as a gift card; its money
+      // goes back on the card when it is voided or refunded to the card, and it never goes into an account.
+      const isGiftPay = (p) => !!p && (!!p.giftCardId || /^Gift card ••\d{4}$/.test(String(p.reference || "")));
+      const giftOn = adminFeatureOn_("giftCards");
+      const codesOn = adminFeatureOn_("discounts");
+      const orderCodes = Array.isArray(o.discountCodes) ? o.discountCodes.filter(Boolean) : (o.discountCode ? String(o.discountCode).split(",").map(x => x.trim()).filter(Boolean) : []);
+      const shipOff = Number(o.shippingDiscount != null ? o.shippingDiscount : (Number(o.shippingDiscountCents) || 0) / 100) || 0;
       const paymentRows = (o.payments || []).map(p => `
         <tr style="${p.voidedAt ? "opacity:.5;text-decoration:line-through;" : ""}">
           <td style="padding:4px 8px;white-space:nowrap;">${adminDate_(p.receivedAt)}${!p.voidedAt && !p.fromStripe
@@ -7008,15 +7042,15 @@ async function showPaymentsModal(orgId, orderId) {
             (p.kind === "refund" || p.kind === "dispute") && !p.voidedAt ? `<br><span class="pm-refund-ship" style="font-size:11px;color:#666;">${Number(p.shipping) > 0 ? `$${Number(p.shipping).toFixed(2)} of it shipping (no tax)` : "all goods (tax backed out)"}</span>
               <button type="button" data-pay-id="${p.id}" data-ship="${Number(p.shipping || 0).toFixed(2)}" data-refund="${Math.abs(Number(p.amount)).toFixed(2)}" data-need="orders.payments:full" data-admin-action="pmSetRefundShipping"
                 title="How much of this refund was shipping — shipping isn't taxed, so no sales tax comes back on that part" style="padding:0 4px;background:none;border:none;cursor:pointer;color:#1d4ed8;font-size:11px;">Shipping part…</button>` : ""}</td>
-          <td style="padding:4px 8px;font-size:12px;">${escapeHtml(METHOD_LABEL[p.method] || "Other")}${p.reference ? " · " + escapeHtml(p.reference) : ""}${p.fee > 0 ? ` <span style="color:#666;">(fee $${Number(p.fee).toFixed(2)})</span>` : ""}
-            <br>${!p.voidedAt && !p.fromStripe && accounts.length
+          <td style="padding:4px 8px;font-size:12px;">${isGiftPay(p) ? "Gift card" : escapeHtml(METHOD_LABEL[p.method] || "Other")}${p.reference ? " · " + escapeHtml(p.reference) : ""}${p.fee > 0 ? ` <span style="color:#666;">(fee $${Number(p.fee).toFixed(2)})</span>` : ""}
+            <br>${!p.voidedAt && !p.fromStripe && accounts.length && !isGiftPay(p)
               ? `<select data-pay-id="${p.id}" class="pm-acct" title="Account the money went into / came out of" style="font-size:11px;padding:1px 3px;border:1px solid #ccc;border-radius:3px;">${accountOptions_(accounts, p.accountId || "", { blank: !p.accountId })}</select>`
               : `<span style="color:#666;">${escapeHtml(acctName(p.accountId) || (p.accountId ? "" : "no account"))}</span>`}</td>
           <td style="padding:4px 8px;color:var(--ink-soft,#666);font-size:12px;">${escapeHtml(p.note)}</td>
           <td style="padding:4px 8px;">${p.voidedAt
             ? `<span title="${escapeHtml(p.voidReason || "")}" style="font-size:11px;color:#b03a2e;font-weight:600;">void</span>`
             : p.fromStripe ? `<span title="Refund it in Stripe instead" style="font-size:11px;color:#888;">Stripe</span>`
-            : `<button class="admin-btn-danger" type="button" style="padding:2px 7px;border-radius:4px;cursor:pointer;font-size:11px;" data-pay-id="${p.id}" data-need="orders.payments:full" data-admin-action="pmDeletePayment" title="Void an entry made by mistake">Void</button>`}</td>
+            : `${isGiftPay(p) && Number(p.amount) > 0 ? `<button type="button" style="padding:2px 7px;border-radius:4px;cursor:pointer;font-size:11px;margin-right:4px;" data-pay-id="${p.id}" data-amount="${Number(p.amount).toFixed(2)}" data-need="orders.payments:full" data-admin-action="pmRefundToGiftCard" title="Put money from this payment back on the gift card">Back to card…</button>` : ""}<button class="admin-btn-danger" type="button" style="padding:2px 7px;border-radius:4px;cursor:pointer;font-size:11px;" data-pay-id="${p.id}" data-need="orders.payments:full" data-admin-action="pmDeletePayment" title="Void an entry made by mistake${isGiftPay(p) ? " (the money goes back on the gift card)" : ""}">Void</button>`}</td>
         </tr>`).join("");
 
       const content = document.createElement("div");
@@ -7025,6 +7059,7 @@ async function showPaymentsModal(orgId, orderId) {
         <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px;">
           <tr><td style="padding:3px 0;color:#666;">Subtotal</td><td style="padding:3px 0;text-align:right;">$${Number(o.itemsSubtotal ?? o.subtotal).toFixed(2)}</td></tr>
           ${o.shippingCost > 0 ? `<tr><td style="padding:3px 0;color:#666;">Shipping</td><td style="padding:3px 0;text-align:right;">$${Number(o.shippingCost).toFixed(2)}</td></tr>` : ""}
+          ${shipOff > 0 ? `<tr><td style="padding:3px 0;color:#166534;">Free shipping${orderCodes.length ? " (" + escapeHtml(orderCodes.join(", ")) + ")" : ""}</td><td style="padding:3px 0;text-align:right;color:#166534;">−$${shipOff.toFixed(2)}</td></tr>` : ""}
           ${o.rushRequested ? `<tr><td style="padding:3px 0;color:#666;">Rush fee</td><td style="padding:3px 0;text-align:right;">${o.rushFeePending ? "to follow" : "$" + Number(o.rushFee || 0).toFixed(2)}</td></tr>` : ""}
           ${discountAmount > 0 ? `<tr><td style="padding:3px 0;color:#166534;">Discount${orderDiscountNote_(o) ? " (" + escapeHtml(orderDiscountNote_(o)) + ")" : ""}</td><td style="padding:3px 0;text-align:right;color:#166534;">−$${discountAmount.toFixed(2)}</td></tr>` : ""}
           ${o.taxMode === "exclusive" && !o.taxExempt ? `<tr><td style="padding:3px 0;color:#666;">Sales tax (${Number(o.taxRate || 0)}%) — added to the prices</td><td style="padding:3px 0;text-align:right;">$${Number(o.salesTax || 0).toFixed(2)}</td></tr>` : ""}
@@ -7059,7 +7094,7 @@ async function showPaymentsModal(orgId, orderId) {
               <label style="display:block;font-size:12px;margin-bottom:3px;">Amount ($)</label>
               <input id="pmAmount" type="number" min="0.01" step="0.01" placeholder="${balanceDue > 0.005 ? balanceDue.toFixed(2) : "0.00"}" style="width:100px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">
             </div>
-            <div>
+            <div class="pm-std">
               <label style="display:block;font-size:12px;margin-bottom:3px;">When received</label>
               <input id="pmDate" type="datetime-local" value="${localDateTime_()}" data-shown="${localDateTime_()}" data-iso="" max="${localDateTime_(Date.now() + 60000)}" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">
             </div>
@@ -7067,21 +7102,31 @@ async function showPaymentsModal(orgId, orderId) {
               <label style="display:block;font-size:12px;margin-bottom:3px;">Paid by</label>
               <select id="pmMethod" style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">
                 ${Object.entries(METHOD_LABEL).map(([k, v]) => `<option value="${k}" ${k === defaultMethod ? "selected" : ""}>${v}</option>`).join("")}
+                ${giftOn ? `<option value="__giftcard__">Gift card</option>` : ""}
               </select>
             </div>
-            <div>
+            <div class="pm-std">
               <label style="display:block;font-size:12px;margin-bottom:3px;">Into account</label>
               <select id="pmAccount" style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">${accountOptions_(accounts, accountForMethod_(accounts, defaultMethod))}</select>
             </div>
-            <div>
+            <div class="pm-std">
               <label style="display:block;font-size:12px;margin-bottom:3px;">Reference</label>
               <input id="pmReference" type="text" maxlength="100" placeholder="Check # / Venmo ID" style="width:130px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">
             </div>
-            <div style="flex:1;min-width:140px;">
+            <div class="pm-gift" hidden style="flex:1;min-width:200px;">
+              <label style="display:block;font-size:12px;margin-bottom:3px;" for="pmGiftCode">Gift card number</label>
+              <div style="display:flex;gap:6px;">
+                <input id="pmGiftCode" type="text" maxlength="24" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX" style="flex:1;min-width:0;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;text-transform:uppercase;">
+                <button type="button" id="pmGiftCheck" style="padding:6px 12px;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:13px;background:#fff;">Check</button>
+              </div>
+              <div id="pmGiftInfo" role="status" aria-live="polite" style="font-size:12px;margin-top:3px;min-height:16px;"></div>
+            </div>
+            <div class="pm-std" style="flex:1;min-width:140px;">
               <label style="display:block;font-size:12px;margin-bottom:3px;">Note (optional)</label>
               <input id="pmNote" type="text" placeholder="e.g. Venmo payment" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">
             </div>
             <button type="button" id="pmSavePayment" style="padding:6px 14px;background:#1d4ed8;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:13px;font-weight:600;">Save</button>
+            <div class="pm-gift" hidden style="flex-basis:100%;font-size:12px;color:#666;">The gift card pays up to what is owed on this order. Leave the amount empty to take as much as it can, or enter less; the rest stays due.</div>
           </div>
         </div>
 
@@ -7137,6 +7182,18 @@ async function showPaymentsModal(orgId, orderId) {
             </div>
             <button type="button" id="pmSaveDiscount" data-need="orders.payments:edit" style="padding:6px 14px;background:#059669;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:13px;font-weight:600;">Apply</button>
           </div>
+          ${orderCodes.length ? `<div class="pm-code-note" style="font-size:12px;color:#666;margin-top:6px;">This order has a discount code; take the code off before setting a discount by hand.</div>` : ""}
+          ${codesOn ? `<div class="pm-codes" style="margin-top:12px;">
+            <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:#666;">Discount codes</div>
+            ${orderCodes.length ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">${orderCodes.map(c => `<span class="pm-code-chip" style="display:inline-flex;align-items:center;gap:4px;font-size:12px;padding:2px 4px 2px 8px;border:1px solid #bbf7d0;border-radius:12px;background:#f0fdf4;color:#166534;"><span class="dc-code">${escapeHtml(c)}</span><button type="button" data-pm-code-remove="${escapeHtml(c)}" aria-label="Take code ${escapeHtml(c)} off" title="Take this code off" style="border:none;background:none;cursor:pointer;font-size:15px;line-height:1;color:#166534;padding:0 4px;">×</button></span>`).join("")}</div>` : ""}
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+              <div style="flex:1;min-width:140px;">
+                <label style="display:block;font-size:12px;margin-bottom:3px;" for="pmCodeInput">${orderCodes.length ? "Add another code" : "Add code"}</label>
+                <input id="pmCodeInput" type="text" maxlength="32" autocomplete="off" spellcheck="false" placeholder="FALL20" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;text-transform:uppercase;">
+              </div>
+              <button type="button" id="pmCodeApply" data-need="orders.payments:edit" style="padding:6px 14px;background:#059669;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:13px;font-weight:600;">Add code</button>
+            </div>
+          </div>` : ""}
         </div>
 
         <div id="pmError" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:10px;"></div>
@@ -7145,7 +7202,33 @@ async function showPaymentsModal(orgId, orderId) {
 
       // Payment method → its usual account (still changeable)
       const pmMethodEl = ov.querySelector("#pmMethod"), pmAccountEl = ov.querySelector("#pmAccount");
-      if (pmMethodEl && pmAccountEl) pmMethodEl.addEventListener("change", () => { pmAccountEl.value = String(accountForMethod_(accounts, pmMethodEl.value)); });
+      if (pmMethodEl && pmAccountEl) pmMethodEl.addEventListener("change", () => { if (pmMethodEl.value !== "__giftcard__") pmAccountEl.value = String(accountForMethod_(accounts, pmMethodEl.value)); });
+      // Gift card (migrations/0120) as a way to pay: the number replaces the account, reference, date and note; Check shows
+      // the balance, Save takes up to the balance due (redeemGiftCard). Money from a card is a payment, never a discount.
+      const giftMode = () => !!pmMethodEl && pmMethodEl.value === "__giftcard__";
+      if (pmMethodEl) pmMethodEl.addEventListener("change", () => {
+        const on = giftMode();
+        ov.querySelectorAll(".pm-std").forEach(e => { e.hidden = on; });
+        ov.querySelectorAll(".pm-gift").forEach(e => { e.hidden = !on; });
+        const amt = ov.querySelector("#pmAmount");
+        if (amt) amt.placeholder = on ? "Up to the balance" : (balanceDue > 0.005 ? balanceDue.toFixed(2) : "0.00");
+        ov.querySelector("#pmSavePayment").textContent = on ? "Apply card" : "Save";
+        const gi = ov.querySelector("#pmGiftInfo"); if (gi) gi.textContent = "";
+      });
+      const giftCheck = ov.querySelector("#pmGiftCheck");
+      if (giftCheck) giftCheck.onclick = async () => {
+        const info = ov.querySelector("#pmGiftInfo"), code = ov.querySelector("#pmGiftCode").value.trim();
+        info.style.color = "#b03a2e";
+        if (!code) { info.textContent = "Enter the gift card number."; return; }
+        giftCheck.disabled = true;
+        try {
+          const d = await adminApi_({ action: "checkGiftCard", code });
+          const card = d && d.ok ? (d.card || d) : null;
+          if (card && card.last4 != null) { info.style.color = "#166534"; info.textContent = `Gift card ••${card.last4} has $${(Number(card.balance) || 0).toFixed(2)}.`; }
+          else info.textContent = (d && d.reason) || "That gift card number isn't right.";
+        } catch (ex) { info.textContent = (ex && ex.message) || "Couldn't check the gift card."; }
+        finally { giftCheck.disabled = false; }
+      };
       // No accounts to choose from (Bookkeeping is off, or they couldn't be loaded): the pickers go;
       // the server files each payment under its method's usual account by itself.
       if (!accounts.length) [pmAccountEl, ov.querySelector("#pmRefundAccount")].forEach(e => { if (e && e.parentNode) e.parentNode.style.display = "none"; });
@@ -7222,8 +7305,76 @@ async function showPaymentsModal(orgId, orderId) {
         } catch(e) { showToast("Network error.", true); }
       };
 
+      // Take money from a gift card for this order: up to the card's balance and the balance due (the server works it out;
+      // a double click or a retry sends the same key and takes it once).
+      const giftRequestId = newRequestId_();
+      const applyGiftCard = async () => {
+        const errEl = ov.querySelector("#pmError");
+        errEl.textContent = "";
+        const code = ov.querySelector("#pmGiftCode").value.trim();
+        if (!code) { errEl.textContent = "Enter the gift card number."; return; }
+        const raw = ov.querySelector("#pmAmount").value.trim();
+        const amount = raw === "" ? null : parseFloat(raw);
+        if (amount !== null && !(amount > 0)) { errEl.textContent = "Enter an amount, or leave it empty to take as much as the card can."; return; }
+        await whileSaving_(ov.querySelector("#pmSavePayment"), async () => { try {
+          const d = await adminApi_({ action: "redeemGiftCard", orderId, code, ...(amount !== null ? { amount } : {}), requestId: giftRequestId });
+          const updated = orderWithAnswer_(order, d);
+          updateOrderCache(orgId, orderId, updated);
+          updateOrderTableRow(orgId, orderId, updated);
+          const took = d.takenCents != null ? Number(d.takenCents) / 100 : (d.taken != null ? Number(d.taken) : null);
+          const left = d.balanceCents != null ? Number(d.balanceCents) / 100 : (d.cardBalance != null ? Number(d.cardBalance) : null);
+          showToast((d.duplicate ? "That gift card payment was already recorded — it isn't taken twice." : took != null ? `Took $${took.toFixed(2)} from the gift card` + (left != null ? `; $${left.toFixed(2)} is left on it.` : ".") : "Gift card applied."));
+          openModal(updated);
+        } catch (ex) { errEl.textContent = (ex && ex.message) || "Couldn't take the gift card."; } });
+      };
+      // Put money from a gift card payment back on the card (refundToGiftCard). Voiding the payment does the same for all of it.
+      window.pmRefundToGiftCard = async (idStr, amountStr) => {
+        const max = Number(amountStr) || 0;
+        const amt = await askText_(`How much goes back on the gift card?\n\nUp to $${max.toFixed(2)}, the amount of this payment.`, {
+          label: "Amount ($)", value: max.toFixed(2), inputMode: "decimal", confirmLabel: "Refund to card",
+          validate: (v) => { const n = Number(String(v).replace(/[$,\s]/g, "")); return v !== "" && Number.isFinite(n) && n > 0 && n <= max + 0.0001 ? { value: n } : { error: `Enter an amount from $0.01 to $${max.toFixed(2)}.` }; } });
+        if (amt === null) return;
+        try {
+          const d = await adminApi_({ action: "refundToGiftCard", paymentId: Number(idStr), amount: amt, orderId, requestId: newRequestId_() });
+          const updated = orderWithAnswer_(order, d);
+          updateOrderCache(orgId, orderId, updated);
+          updateOrderTableRow(orgId, orderId, updated);
+          showToast(`$${amt.toFixed(2)} put back on the gift card.`);
+          openModal(updated);
+        } catch (ex) { showToast("Not refunded: " + ((ex && ex.message) || "unknown error"), true); }
+      };
+
+      // Discount codes on this order (migrations/0120): Add code checks it against the order and takes it; × takes one off.
+      const codeApply = ov.querySelector("#pmCodeApply");
+      if (codeApply) {
+        const changeCode = async (action, code, done) => {
+          const errEl = ov.querySelector("#pmError");
+          errEl.textContent = "";
+          try {
+            const d = await adminApi_({ action, orderId, code });
+            const updated = orderWithAnswer_(order, d);
+            updateOrderCache(orgId, orderId, updated);
+            updateOrderTableRow(orgId, orderId, updated);
+            showToast(done);
+            openModal(updated);
+          } catch (ex) { errEl.textContent = (ex && ex.message) || "The code wasn't changed."; }
+        };
+        codeApply.onclick = async () => {
+          const code = ov.querySelector("#pmCodeInput").value.trim().toUpperCase();
+          if (!code) { ov.querySelector("#pmError").textContent = "Enter a code first."; return; }
+          await whileSaving_(codeApply, () => changeCode("applyOrderDiscountCode", code, "Code " + code + " added."));
+        };
+        ov.querySelector("#pmCodeInput").addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); codeApply.click(); } });
+        ov.querySelectorAll("button[data-pm-code-remove]").forEach(b => b.addEventListener("click", async () => {
+          const code = b.dataset.pmCodeRemove;
+          if (!await askConfirm_(`Take code ${code} off ${orderId}?\n\nThe order's total goes back up, and the code can be used again.`, { confirmLabel: "Take it off" })) return;
+          changeCode("removeOrderDiscountCode", code, "Code " + code + " taken off.");
+        }));
+      }
+
       // Save a new payment
       ov.querySelector("#pmSavePayment").onclick = async () => {
+        if (giftMode()) { await applyGiftCard(); return; }
         const amtEl = ov.querySelector("#pmAmount");
         const noteEl = ov.querySelector("#pmNote");
         const errEl = ov.querySelector("#pmError");
@@ -7303,6 +7454,8 @@ async function showPaymentsModal(orgId, orderId) {
         } catch(e) { errEl.textContent = "No answer from the server — the refund may have been recorded. Press Record refund again: it won't be added twice."; } });
       };
 
+      // A code is on the order: the server refuses a discount by hand, so the form says so instead of failing.
+      if (orderCodes.length) ["#pmDiscountAmount", "#pmDiscountNote", "#pmSaveDiscount"].forEach(id => { const e = ov.querySelector(id); if (e) e.disabled = true; });
       // Save discount
       ov.querySelector("#pmSaveDiscount").onclick = async () => {
         const errEl = ov.querySelector("#pmError");
@@ -7379,6 +7532,16 @@ function showBalanceMismatchPrompt(paymentAmount, remainder, doSave, errEl) {
 }
 
 // The order's paid state from a money action's reply (orders.js paidState_), when it has one.
+// An order from the cache with what the server answered after a change to its payments or codes (redeemGiftCard,
+// refundToGiftCard, applyOrderDiscountCode, removeOrderDiscountCode): the answer is the refreshed order or the figures that moved.
+// Only fields it carries are taken, so a smaller answer never blanks the window.
+function orderWithAnswer_(order, d){
+  const r = d && d.order && typeof d.order === "object" ? d.order : (d || {});
+  const out = Object.assign({}, order, paidOf_(r.paid !== undefined ? r : d));
+  ["payments", "amountReceived", "balanceDue", "effectiveTotal", "discountAmount", "discountNote", "discountCode", "discountCodes", "salesTax",
+    "shippingCost", "shippingDiscount", "shippingDiscountCents", "refundedAmount", "netReceived", "itemsSubtotal", "taxMode", "taxRate"].forEach(k => { if (r[k] !== undefined) out[k] = r[k]; });
+  return out;
+}
 function paidOf_(d){ return d && typeof d.paid === "boolean" ? { paid: d.paid, paidForWork: !!d.paidForWork, paidAt: d.paidAt || null, ...(typeof d.payOnDelivery === "boolean" ? { payOnDelivery: d.payOnDelivery } : {}) } : {}; }
 function updateOrderCache(orgId, orderId, updated) {
   if (!window._ordersCache) window._ordersCache = {};
@@ -7728,7 +7891,7 @@ async function renderDiscountCodes(app){
       <div class="cust-count" id="dcCount" role="status" aria-live="polite"></div>
       <div id="dcBody"><div class="cust-note">Loading…</div></div>
       <div class="cust-pager" id="dcPager"></div>
-      <div class="cust-note">A customer types a code at checkout; the discount comes off the goods (not shipping or a rush fee), and an order uses one code at most. A voided or deleted order gives its use back.</div>
+      <div class="cust-note">A customer types a code at checkout; the discount comes off the goods (not shipping or a rush fee; a free-shipping code takes the shipping off), and an order uses one code unless Global settings → Discount codes allows more. A voided or deleted order gives its use back.</div>
     </div>`;
   const root = document.getElementById("dcPage");
   const body = root.querySelector("#dcBody"), count = root.querySelector("#dcCount"), pager = root.querySelector("#dcPager");
@@ -7826,18 +7989,25 @@ async function renderDiscountCodes(app){
 // takes off (migrations/0116; blank = no limit).
 function dcValueHtml_(c, locked){
   const off = locked ? " disabled" : "";
-  const kind = c && c.kind === "amount" ? "amount" : "percent";
-  const val = !c ? "" : kind === "amount" ? (c.amount != null ? Number(c.amount).toFixed(2) : "") : (c.percent != null ? String(c.percent) : "");
+  // "Free shipping only" (migrations/0120) is a kind of its own here: no percent or amount, shipping is free. A percent or
+  // amount code can also tick "Also free shipping".
+  const kind = c && c.kind === "amount" ? "amount" : c && c.kind === "shipping" ? "shipping" : "percent";
+  const val = !c ? "" : kind === "amount" ? (c.amount != null ? Number(c.amount).toFixed(2) : "") : kind === "percent" ? (c.percent != null ? String(c.percent) : "") : "";
   const cap = c && c.maxDiscount != null ? Number(c.maxDiscount).toFixed(2) : "";
+  const minOrder = c && c.minOrder != null ? Number(c.minOrder).toFixed(2) : "";
   return `<div class="cust-grid">
       <label class="cust-field"><span>Discount</span>
-        <select id="dcKind"${off}><option value="percent"${kind === "percent" ? " selected" : ""}>Percent off</option><option value="amount"${kind === "amount" ? " selected" : ""}>Amount off</option></select></label>
-      <label class="cust-field"><span id="dcValueLabel">${kind === "amount" ? "Amount ($)" : "Percent (%)"}</span>
+        <select id="dcKind"${off}><option value="percent"${kind === "percent" ? " selected" : ""}>Percent off</option><option value="amount"${kind === "amount" ? " selected" : ""}>Amount off</option><option value="shipping"${kind === "shipping" ? " selected" : ""}>Free shipping only</option></select></label>
+      <label class="cust-field" id="dcValueWrap"${kind === "shipping" ? " hidden" : ""}><span id="dcValueLabel">${kind === "amount" ? "Amount ($)" : "Percent (%)"}</span>
         <input type="number" id="dcValue" inputmode="decimal" step="0.01" min="0.01" max="${kind === "amount" ? 10000 : 100}" value="${escapeHtml(val)}" autocomplete="off"${off}></label>
     </div>
-    <label class="cust-field dc-max" id="dcMaxWrap"${kind === "amount" ? " hidden" : ""}><span>Max discount ($, optional)</span>
+    <label class="cust-field dc-max" id="dcMaxWrap"${kind === "percent" ? "" : " hidden"}><span>Max discount ($, optional)</span>
       <input type="number" id="dcMaxOff" inputmode="decimal" step="0.01" min="0.01" max="10000" placeholder="No limit" value="${escapeHtml(cap)}" autocomplete="off"${off}>
-      <small class="dc-hint" id="dcMaxHint">The most this code takes off one order. 20% off a $300 order with a $25 max takes off $25.</small></label>`;
+      <small class="dc-hint" id="dcMaxHint">The most this code takes off one order. 20% off a $300 order with a $25 max takes off $25.</small></label>
+    <label class="cust-check" id="dcShipWrap"${kind === "shipping" ? " hidden" : ""}><input type="checkbox" id="dcFreeShip"${c && c.freeShipping && kind !== "shipping" ? " checked" : ""}${off}> Also free shipping</label>
+    <label class="cust-field dc-min" id="dcMinWrap"><span>Minimum order ($, optional)</span>
+      <input type="number" id="dcMinOrder" inputmode="decimal" step="0.01" min="0.01" max="100000" placeholder="No minimum" value="${escapeHtml(minOrder)}" autocomplete="off"${off}>
+      <small class="dc-hint">The goods total (before shipping and tax) an order needs before the code works.</small></label>`;
 }
 function dcShopHtml_(orgId, locked){
   const shops = (adminOrgs || []).slice().sort((a, b) => String(a.name || a.orgId).localeCompare(String(b.name || b.orgId)));
@@ -7849,7 +8019,8 @@ function dcShopHtml_(orgId, locked){
 }
 // The kind and value as typed: { kind, percent | amount } or { error }.
 function dcReadValue_(ov){
-  const kind = ov.querySelector("#dcKind").value === "amount" ? "amount" : "percent";
+  const kind = ov.querySelector("#dcKind").value === "amount" ? "amount" : ov.querySelector("#dcKind").value === "shipping" ? "shipping" : "percent";
+  if (kind === "shipping") return { kind };
   const n = dcNum_(ov.querySelector("#dcValue").value);
   if (kind === "percent") {
     if (!(n >= 0.01 && n <= 100)) return { error: "Enter a percent from 0.01 to 100." };
@@ -7864,11 +8035,13 @@ function dcReadValue_(ov){
 }
 function dcWireValue_(ov){
   const kind = ov.querySelector("#dcKind"), value = ov.querySelector("#dcValue"), label = ov.querySelector("#dcValueLabel");
-  const capWrap = ov.querySelector("#dcMaxWrap");
+  const capWrap = ov.querySelector("#dcMaxWrap"), valueWrap = ov.querySelector("#dcValueWrap"), shipWrap = ov.querySelector("#dcShipWrap");
   kind.addEventListener("change", () => {
     label.textContent = kind.value === "amount" ? "Amount ($)" : "Percent (%)";
     value.max = kind.value === "amount" ? "10000" : "100";
-    if (capWrap) capWrap.hidden = kind.value === "amount";
+    if (capWrap) capWrap.hidden = kind.value !== "percent";
+    if (valueWrap) valueWrap.hidden = kind.value === "shipping";   // free shipping only has no percent or amount
+    if (shipWrap) shipWrap.hidden = kind.value === "shipping";     // and "Also free shipping" would say the same twice
   });
 }
 
@@ -7992,6 +8165,13 @@ async function dcShowCode_(c, onChanged){
     if (typedCode && !/^[A-Z0-9_-]{3,32}$/.test(typedCode)) return fail("A code is 3–32 letters, digits, “-” or “_” — or leave it blank to make one.", "#dcCode");
     const value = locked ? { kind: code.kind, percent: code.percent, amount: code.amount, maxDiscount: code.maxDiscount } : dcReadValue_(ov);
     if (value.error) return fail(value.error, value.field || "#dcValue");
+    // The minimum order: blank = none; else $0.01 to $100,000 (the server checks it again).
+    let minOrder = null;
+    if (!locked) {
+      const rawMin = $("#dcMinOrder").value.trim();
+      if (rawMin) { minOrder = dcNum_(rawMin); if (!(minOrder >= 0.01 && minOrder <= 100000)) return fail("Enter a minimum order from $0.01 to $100,000, or leave it blank.", "#dcMinOrder"); }
+    } else minOrder = code.minOrder != null ? code.minOrder : null;
+    const freeShipping = value.kind === "shipping" ? true : locked ? !!code.freeShipping : $("#dcFreeShip").checked;
     const email = $("#dcEmail").value.trim().toLowerCase();
     if (who === "one" && !locked && !dcLooksLikeEmail_(email)) return fail("Enter the email address of the person it's for.", "#dcEmail");
     const max = Number($("#dcMax").value);
@@ -8001,6 +8181,7 @@ async function dcShowCode_(c, onChanged){
       code: typedCode, kind: value.kind,
       percent: value.kind === "percent" ? value.percent : null, amount: value.kind === "amount" ? value.amount : null,
       maxDiscount: value.kind === "percent" ? (value.maxDiscount != null ? value.maxDiscount : null) : null,
+      minOrder, freeShipping,
       orgId: $("#dcOrg").value || null,
       email: who === "one" ? (locked ? code.email : email) : "",
       maxUses: who === "one" ? 1 : max,
@@ -8016,7 +8197,8 @@ async function dcShowCode_(c, onChanged){
       const same = (k, a, b) => String(a == null ? "" : a) === String(b == null ? "" : b);
       const onlyActive = !isNew && input.active !== !!code.active &&
         same("code", input.code, code.code) && input.kind === code.kind && same("p", input.percent, code.kind === "percent" ? code.percent : null) &&
-        same("a", input.amount, code.kind === "amount" ? code.amount : null) && same("m", input.maxDiscount, code.maxDiscount) && same("o", input.orgId, code.orgId) && same("e", input.email, code.email) &&
+        same("a", input.amount, code.kind === "amount" ? code.amount : null) && same("m", input.maxDiscount, code.maxDiscount) &&
+        same("mo", input.minOrder, code.minOrder) && !!input.freeShipping === !!code.freeShipping && same("o", input.orgId, code.orgId) && same("e", input.email, code.email) &&
         Number(input.maxUses) === Number(code.maxUses) && !!input.oncePerEmail === !!code.oncePerEmail && same("x", input.expiresOn, code.expiresOn) && same("n", input.note, code.note);
       let saved;
       if (onlyActive) await adminApi_({ action: "setDiscountCodeActive", id: code.id, active: input.active });
@@ -8174,6 +8356,20 @@ function ensureQuotesPage_(){
     document.head.appendChild(sc);
   });
   return _quotesPagePromise;
+}
+// The Gift cards page (migrations/0120) is public/admin-giftcards.js, loaded the same way: it defines renderGiftCards(app, id).
+// It also defines the small helpers the order window and the Local sale window use for a gift card box.
+let _giftCardsPagePromise = null;
+function ensureGiftCardsPage_(){
+  if (typeof renderGiftCards === "function") return Promise.resolve();
+  if (!_giftCardsPagePromise) _giftCardsPagePromise = new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = "/admin-giftcards.js";
+    sc.onload = () => resolve();
+    sc.onerror = () => { _giftCardsPagePromise = null; sc.remove(); reject(new Error("Couldn't load the Gift cards page")); };
+    document.head.appendChild(sc);
+  });
+  return _giftCardsPagePromise;
 }
 // The Email campaigns tab (migrations/0117) is public/admin-campaigns.js, with public/campaign-render.js (the renderer the
 // server sends with), loaded the same way: it defines renderCampaigns(app, sub).
@@ -8413,6 +8609,57 @@ function askSaleShop_(text){
     overlay.querySelector("#saleShopPick").focus();
   });
 }
+// Several discount codes on one sale (Global settings → Discount codes): the same rule as the server's combineDiscounts_
+// (db.js), so the Local sale window shows what will be charged. Percent codes ADD (10% + 15% = 25%), each code's own
+// maximum capping its share, and never more than the goods; amount codes then come off what is left, in the order given;
+// a free-shipping code (kind "shipping", or any code with freeShipping) takes the shipping off once. Cents in, cents out.
+// codes are the parsed codes checkLocalSaleCode answers ({ kind, percent, amount (dollars), maxDiscount (dollars), freeShipping }).
+function lsCombineCodes_(codes, goodsCents, shippingCents){
+  const out = { goodsOffCents: 0, shippingOffCents: 0, perCode: [] };
+  const per = (codes || []).map(() => ({ goodsOffCents: 0, shippingOffCents: 0 }));
+  let left = Math.max(0, Math.round(Number(goodsCents) || 0));
+  let percentTotal = 0;
+  (codes || []).forEach((c, i) => {
+    if (c.kind !== "percent") return;
+    let share = Math.round(left * (Number(c.percent) || 0) / 100);
+    if (c.maxDiscount != null) share = Math.min(share, Math.round(Number(c.maxDiscount) * 100));
+    share = Math.max(0, Math.min(share, Math.max(0, goodsCents) - percentTotal));
+    per[i].goodsOffCents = share; percentTotal += share;
+  });
+  left = Math.max(0, Math.max(0, goodsCents) - percentTotal);
+  (codes || []).forEach((c, i) => {
+    if (c.kind !== "amount") return;
+    const take = Math.max(0, Math.min(left, Math.round((Number(c.amount) || 0) * 100)));
+    per[i].goodsOffCents = take; left -= take;
+  });
+  const ship = Math.max(0, Math.round(Number(shippingCents) || 0));
+  let shipDone = false;
+  (codes || []).forEach((c, i) => {
+    if ((c.kind === "shipping" || c.freeShipping) && !shipDone) { per[i].shippingOffCents = ship; shipDone = true; }
+  });
+  out.perCode = per;
+  out.goodsOffCents = per.reduce((s, x) => s + x.goodsOffCents, 0);
+  out.shippingOffCents = shipDone ? ship : 0;
+  return out;
+}
+// Whether the shop takes more than one code on a sale (getDiscountRules, a role with Global settings); asked once. Null
+// when it can't be read — the window then offers "Add another code" and the server's answer says no if the rule is one.
+let _lsRulesPromise = null;
+function lsDiscountRules_(){
+  if (!_lsRulesPromise) _lsRulesPromise = adminApi_({ action: "getDiscountRules" })
+    .then(d => (d && d.rules && typeof d.rules === "object" ? d.rules : d && typeof d.multiple === "boolean" ? { multiple: d.multiple } : null))
+    .catch(() => { _lsRulesPromise = null; return null; });
+  return _lsRulesPromise;
+}
+// Reorder: a past order's items into a new Local sale in the same shop (the order's Reorder button, and each past order on
+// a customer's page, which passes that customer). The sale form asks the server for the order's items and fills itself.
+async function adminReorderOrder_(orgId, orderId, customer){
+  if (!orgId || !orderId) return;
+  if (!adminCan_("orders.details", "edit")) { showToast("Your role can't record a sale.", true); return; }
+  adminNoteShop_(orgId);
+  await createLocalSale(orgId, { reorder: orderId, ...(customer ? { customer } : {}),
+    onRecorded: (data) => { if (/^#\/?customers(\/|$)/.test(location.hash)) adminRoute(); else refreshOrderRows_(orgId, [data.orderId]); } });
+}
 // The Customers page's "New sale for this customer": the Local sale form with that customer already picked.
 // `customer` is the page's own record ({ id, name, company, email, phone, … }). Afterwards the customer's page is
 // drawn again, so the new order is in its history.
@@ -8432,8 +8679,9 @@ async function adminNewSaleForCustomer_(customer){
 // One Local sale window per shop at a time (review #33): a double click on "+ Local sale" opened two, and each
 // could record the same sale.
 const _localSaleOpen = new Set();
-// opts (the Customers page's "New sale for this customer"): customer — picked when the form opens; onRecorded(data) —
-// called once the sale is recorded, in place of redrawing the Orders list.
+// opts (the Customers page's "New sale for this customer"): customer — picked when the form opens; reorder — an order id
+// (the Reorder button): the form opens filled from getOrderForReorder; onRecorded(data) — called once the sale is
+// recorded, in place of redrawing the Orders list.
 async function createLocalSale(orgId, opts){
   if (_localSaleOpen.has(orgId)) return;
   _localSaleOpen.add(orgId);
@@ -8470,6 +8718,20 @@ async function createLocalSaleOnce_(orgId, opts){
     try{ const g = await hoopApi_({ action: "listGraphics", org: orgId }); graphics = g.graphics || []; tiersCents = g.tiersCents || {}; }
     catch(e){ showToast("Could not load the shop's graphics: " + ((e && e.message) || "unknown error"), true); }
   }
+  // A reorder (migrations/0120): the old order's items, from the server (what it needs to fill the form again).
+  let reorder = null;
+  if(opts.reorder){
+    const from = String(typeof opts.reorder === "object" ? opts.reorder.orderId : opts.reorder);
+    try{
+      const d = await adminApi_({ action: "getOrderForReorder", orderId: from });
+      const r = d && (d.order || d.reorder || d);
+      if(!r || !Array.isArray(r.lines)) throw new Error("Nothing to reorder.");
+      reorder = { ...r, reorderOf: r.reorderOf || from };
+    }catch(e){
+      showToast("Couldn't load that order to reorder it: " + ((e && e.message) || "unknown error"), true);
+      return;
+    }
+  }
   // Pay on delivery (migrations/0105): offered where the shop allows it (limited to local sales or not) to a role that may set it.
   const pod = podRule_(orgId);
   // This sale's key: the server makes one order (and books one payment) per key, so the retries below (a dropped
@@ -8479,7 +8741,7 @@ async function createLocalSaleOnce_(orgId, opts){
   // The window stays open, with everything typed in it, until the server has answered: a session that ended asks
   // to sign in and sends the same sale again, and any other problem is shown in the window.
   let data = null;
-  const result = await showLocalSaleModal(products, blanks, { orgId, customer: opts.customer, payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"), graphics, tiersCents, submit: async (typed) => {
+  const result = await showLocalSaleModal(products, blanks, { orgId, customer: opts.customer, reorder, payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"), graphics, tiersCents, submit: async (typed) => {
     const { sendInvoice: _later, ...sale } = typed;
     const send = () => adminSave_({action:"createLocalSale", org:orgId, requestId, ...sale});
     let r;
@@ -8502,7 +8764,9 @@ async function createLocalSaleOnce_(orgId, opts){
       invoiceNote = inv.ok ? (inv.emailSent ? " — invoice emailed to " + inv.sentTo : " — but the invoice email couldn't be sent (use Send invoice… on the order)")
         : " — but the invoice wasn't sent: " + inv.message;
     }
-    showToast((data.repeated ? "Local sale already recorded — " : "Local sale recorded — ") + (data.orderId || "") + invoiceNote, /but the invoice/.test(invoiceNote));
+    // Gift cards typed in the window: the server reports each one; a refused card is said here, the sale stands.
+    const giftRefused = (Array.isArray(data.giftCards) ? data.giftCards : []).filter(g => g && g.ok === false).map(g => (g.reason || "A gift card wasn't taken.") + "").join(" ");
+    showToast((data.repeated ? "Local sale already recorded — " : "Local sale recorded — ") + (data.orderId || "") + invoiceNote + (giftRefused ? " — " + giftRefused : ""), /but the invoice/.test(invoiceNote) || !!giftRefused);
     // Only the new order is asked for, and put into the list where it sorts.
     if (typeof opts.onRecorded === "function") opts.onRecorded(data);
     else refreshOrderRows_(orgId, [data.orderId]);
@@ -8624,6 +8888,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
       <form class="admin-pass-box" id="localSaleForm" style="max-width:480px;max-height:90vh;overflow-y:auto;">
         <div style="font-weight:600;font-size:15px;margin-bottom:14px;">Record local sale</div>
 
+        <div id="lsReorderNote" role="status" style="display:none;font-size:13px;line-height:1.4;padding:8px 10px;margin:0 0 12px;border:1px solid #fde68a;border-radius:5px;background:#fffbeb;color:#78350f;"></div>
         <div id="lsLines">${lineHtml(0)}</div>
         <div style="margin:0 0 12px;">
           <button type="button" id="lsAddLine" style="font-size:13px;padding:5px 12px;border:1px dashed var(--border,#ccc);border-radius:5px;cursor:pointer;background:var(--surface,#fff);color:var(--ink,#111);">+ Add another item</button>
@@ -8640,6 +8905,8 @@ function showLocalSaleModal(products, blanks, opts = {}){
             <button type="button" id="lsCodeApply" style="font-size:13px;padding:6px 14px;border:1px solid var(--border,#ccc);border-radius:5px;cursor:pointer;background:var(--surface,#fff);color:var(--ink,#111);">Apply</button>
           </div>
           <div id="lsCodeMsg" role="status" aria-live="polite" style="font-size:13px;margin-top:4px;"></div>
+          <div id="lsCodeExtra"></div>
+          <button type="button" id="lsCodeAdd" hidden style="font-size:13px;margin-top:6px;padding:0;border:none;background:none;cursor:pointer;color:var(--accent,#1d4ed8);text-decoration:underline;">Add another code</button>
         </div>` : ""}
 
         ${LS("Payment method")}
@@ -8652,6 +8919,16 @@ function showLocalSaleModal(products, blanks, opts = {}){
           <option value="Check">Check</option>
           <option value="Other">Other</option>
         </select>
+
+        ${adminFeatureOn_("giftCards") ? `<div id="lsGiftWrap" data-need="orders.payments:edit" style="margin-bottom:10px;">
+          ${LS("Gift card", true, "lsGift")}
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="lsGift" maxlength="24" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX" style="${IS()}margin-bottom:0;flex:1;text-transform:uppercase;">
+            <button type="button" id="lsGiftApply" style="font-size:13px;padding:6px 14px;border:1px solid var(--border,#ccc);border-radius:5px;cursor:pointer;background:var(--surface,#fff);color:var(--ink,#111);">Apply</button>
+          </div>
+          <div id="lsGiftList"></div>
+          <div id="lsGiftMsg" role="status" aria-live="polite" style="font-size:13px;margin-top:4px;"></div>
+        </div>` : ""}
 
         ${adminCanCustomers_() ? `<div id="lsCustomerWrap" style="margin-bottom:10px;">
           ${LS("Customer", true, "lsCustomer")}
@@ -8976,19 +9253,33 @@ function showLocalSaleModal(products, blanks, opts = {}){
     // total here. The shipping charge follows when the order ships.
     // A discount code (Apply checks it with the server; Record sale checks it again against the goods as the server
     // prices them). What it takes off here is worked out from what Apply answered, so the preview follows the items.
-    let appliedCode = null, goodsSum = 0;
-    function codeOff(sum){
-      if (!appliedCode) return 0;
-      const cents = Math.round(sum * 100);
-      let off = appliedCode.kind === "percent" ? Math.round(cents * (Number(appliedCode.percent) || 0) / 100) : Math.round((Number(appliedCode.amount) || 0) * 100);
-      if (appliedCode.kind === "percent" && appliedCode.maxDiscount != null) off = Math.min(off, Math.round(Number(appliedCode.maxDiscount) * 100));
-      return Math.max(0, Math.min(cents, off)) / 100;
-    }
+    // More than one code when the shop's rule allows it (Global settings → Discount codes): each code has its own row
+    // (the first is the box that was always there); percent codes add up, amount codes come off what is left and a
+    // free-shipping code takes the shipping off (lsCombineCodes_, the same rule as the server's combineDiscounts_).
+    const codeRows = [], giftCards = [];   // giftCards: the cards typed below (Apply), { code, last4, balance }
+    let goodsSum = 0, codesMultiple = null;   // null: the rule couldn't be read (a role without Global settings): the server decides
+    const appliedCodes = () => codeRows.filter(r => r.applied).map(r => r.applied);
+    const shipNow = () => overlay.querySelector("#lsShip").checked ? (parseFloat(overlay.querySelector("#lsShipCost").value) || 0) : 0;
+    const comboNow = (sum) => lsCombineCodes_(appliedCodes(), Math.round(sum * 100), Math.round(shipNow() * 100));
     function showCodeMsg(){
-      const m = overlay.querySelector("#lsCodeMsg");
-      if (!m || !appliedCode) return;
-      m.style.color = "#1b5e20";
-      m.textContent = `✓ ${appliedCode.code}: ${appliedCode.label} — $${codeOff(goodsSum).toFixed(2)} off`;
+      const cmb = comboNow(goodsSum);
+      let i = 0;
+      codeRows.forEach(r => {
+        if (!r.applied) return;
+        const per = cmb.perCode[i++] || { goodsOffCents: 0, shippingOffCents: 0 };
+        const parts = [];
+        if (r.applied.kind !== "shipping") parts.push(`$${(per.goodsOffCents / 100).toFixed(2)} off`);
+        if (r.applied.kind === "shipping" || r.applied.freeShipping) parts.push("free shipping");
+        r.msg.style.color = "#1b5e20";
+        r.msg.textContent = `✓ ${r.applied.code}: ${r.applied.label} — ${parts.join(" and ")}`;
+      });
+    }
+    // "Add another code": offered once the last row has an applied code, when the rule isn't known to be one code, up to the server's 5.
+    function showAddCode(){
+      const b = overlay.querySelector("#lsCodeAdd");
+      if (!b) return;
+      const last = codeRows[codeRows.length - 1];
+      b.hidden = !(codesMultiple !== false && codeRows.length < 5 && last && last.applied);
     }
     function updatePricePreview(){
       const all = lines();
@@ -9005,11 +9296,15 @@ function showLocalSaleModal(products, blanks, opts = {}){
       });
       const text0 = many ? `Total for ${all.length} items: $${sum.toFixed(2)}` : linePrice(all[0], pieces).text;
       goodsSum = sum;
-      const off = text0 ? codeOff(sum) : 0;
-      const text = off > 0 ? text0 + ` − $${off.toFixed(2)} code ${appliedCode.code}` : text0;
-      const shipCost = overlay.querySelector("#lsShip").checked ? (parseFloat(overlay.querySelector("#lsShipCost").value) || 0) : 0;
-      overlay.querySelector("#lsPricePreview").textContent = text && shipCost > 0 ? text + ` + $${shipCost.toFixed(2)} shipping` : text;
-      if (appliedCode) showCodeMsg();
+      const cmb = comboNow(sum);
+      const off = text0 ? cmb.goodsOffCents / 100 : 0;
+      const names = appliedCodes().map(c => c.code);
+      const text = off > 0 ? text0 + ` − $${off.toFixed(2)} code${names.length > 1 ? "s" : ""} ${names.join(", ")}` : text0;
+      const shipCost = shipNow();
+      overlay.querySelector("#lsPricePreview").textContent = text && shipCost > 0
+        ? text + (cmb.shippingOffCents > 0 ? ` + $0.00 shipping (free with ${names.join(", ")})` : ` + $${shipCost.toFixed(2)} shipping`) : text;
+      if (codeRows.some(r => r.applied)) showCodeMsg();
+      if (typeof updateGiftNote === "function") updateGiftNote();
       const note = overlay.querySelector("#lsBreakNote");
       note.textContent = broke ? "Quantity breaks count every piece of a product in this sale. They're worked out again from the shop's published prices when the sale is recorded." : "";
       note.style.display = broke ? "" : "none";
@@ -9125,31 +9420,193 @@ function showLocalSaleModal(products, blanks, opts = {}){
       if (opts.customer) pickCustomer(opts.customer);
     }
 
-    // Apply: the code, the shop, the customer (a code for one person is checked against their email) and the goods.
+    // Apply: the code, the shop, the customer (a code for one person is checked against their email), the goods and the
+    // codes already applied on this sale (`others`, so the server can refuse a second code when the shop allows one).
     const codeInput = overlay.querySelector("#lsCode");
-    async function applyCode(quiet){
-      const m = overlay.querySelector("#lsCodeMsg");
-      const typed = codeInput.value.trim().toUpperCase();
-      if (!typed) { appliedCode = null; m.textContent = quiet ? "" : "Enter a code first."; m.style.color = "#b03a2e"; updatePricePreview(); return; }
+    async function applyCode(row, quiet){
+      const m = row.msg;
+      const typed = row.input.value.trim().toUpperCase();
+      if (!typed) { row.applied = null; m.textContent = quiet ? "" : "Enter a code first."; m.style.color = "#b03a2e"; updatePricePreview(); showAddCode(); return; }
       if (!goodsSum) updatePricePreview();
-      const btn = overlay.querySelector("#lsCodeApply");
-      btn.disabled = true;
+      row.btn.disabled = true;
+      const others = codeRows.filter(r => r !== row && r.applied).map(r => r.applied.code);
       try {
         const d = await adminApi_({ action: "checkLocalSaleCode", org: opts.orgId || "", code: typed, subtotal: Math.round(goodsSum * 100) / 100,
-          contact: overlay.querySelector("#lsEmail").value.trim(), ...(pickedCustomer ? { customerId: pickedCustomer.id } : {}) });
-        if (d && d.ok && d.code) { appliedCode = d.code; codeInput.value = d.code.code; }
-        else { appliedCode = null; m.style.color = "#b03a2e"; m.textContent = (d && d.reason) || "This code isn't valid."; }
-      } catch (ex) { appliedCode = null; m.style.color = "#b03a2e"; m.textContent = (ex && ex.message) || "Couldn't check the code."; }
-      finally { btn.disabled = false; }
+          contact: overlay.querySelector("#lsEmail").value.trim(), ...(pickedCustomer ? { customerId: pickedCustomer.id } : {}), ...(others.length ? { others } : {}) });
+        if (d && d.ok && d.code) { row.applied = d.code; row.input.value = d.code.code; }
+        else { row.applied = null; m.style.color = "#b03a2e"; m.textContent = (d && d.reason) || "This code isn't valid."; }
+      } catch (ex) { row.applied = null; m.style.color = "#b03a2e"; m.textContent = (ex && ex.message) || "Couldn't check the code."; }
+      finally { row.btn.disabled = false; }
       updatePricePreview();
+      showAddCode();
     }
+    function wireCodeRow(row){
+      row.btn.addEventListener("click", () => applyCode(row, false));
+      row.input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); applyCode(row, false); } });
+      row.input.addEventListener("input", () => { if (row.applied && row.input.value.trim().toUpperCase() !== row.applied.code) { row.applied = null; row.msg.textContent = ""; updatePricePreview(); showAddCode(); } });
+    }
+    const addCodeRow = (typed) => {
+      const n = codeRows.length + 1;
+      const holder = document.createElement("div");
+      holder.className = "ls-code-row";
+      holder.style.marginTop = "8px";
+      holder.innerHTML = `<div style="display:flex;gap:8px;">
+          <input type="text" class="dc-code" maxlength="32" autocomplete="off" spellcheck="false" aria-label="Discount code ${n}" style="${IS()}margin-bottom:0;flex:1;text-transform:uppercase;">
+          <button type="button" data-f="apply" style="font-size:13px;padding:6px 14px;border:1px solid var(--border,#ccc);border-radius:5px;cursor:pointer;background:var(--surface,#fff);color:var(--ink,#111);">Apply</button>
+          <button type="button" data-f="remove" aria-label="Remove code ${n}" title="Remove this code" style="font-size:18px;line-height:1;padding:0 8px;border:none;background:none;cursor:pointer;color:var(--ink-soft,#666);">×</button>
+        </div>
+        <div role="status" aria-live="polite" data-f="msg" style="font-size:13px;margin-top:4px;"></div>`;
+      overlay.querySelector("#lsCodeExtra").appendChild(holder);
+      const row = { input: holder.querySelector("input"), btn: holder.querySelector('[data-f="apply"]'), msg: holder.querySelector('[data-f="msg"]'), applied: null };
+      codeRows.push(row);
+      wireCodeRow(row);
+      holder.querySelector('[data-f="remove"]').addEventListener("click", () => {
+        codeRows.splice(codeRows.indexOf(row), 1);
+        holder.remove();
+        updatePricePreview(); showAddCode();
+        (codeRows[codeRows.length - 1].input).focus();
+      });
+      if (typed) row.input.value = typed;
+      return row;
+    };
     if (codeInput) {
-      overlay.querySelector("#lsCodeApply").addEventListener("click", () => applyCode(false));
-      codeInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); applyCode(false); } });
-      codeInput.addEventListener("input", () => { if (appliedCode && codeInput.value.trim().toUpperCase() !== appliedCode.code) { appliedCode = null; overlay.querySelector("#lsCodeMsg").textContent = ""; updatePricePreview(); } });
+      const first = { input: codeInput, btn: overlay.querySelector("#lsCodeApply"), msg: overlay.querySelector("#lsCodeMsg"), applied: null };
+      codeRows.push(first);
+      wireCodeRow(first);
+      overlay.querySelector("#lsCodeAdd").addEventListener("click", () => { addCodeRow().input.focus(); overlay.querySelector("#lsCodeAdd").hidden = true; });
       // A different customer may change whether a one-person code is theirs: checked again.
-      overlay.querySelector("#lsEmail").addEventListener("change", () => { if (appliedCode) applyCode(true); });
+      overlay.querySelector("#lsEmail").addEventListener("change", () => { codeRows.forEach(r => { if (r.applied) applyCode(r, true); }); });
+      // Whether more than one code may be used (Global settings → Discount codes); asked once. A role that can't read it
+      // sees the link anyway and the server's answer says so.
+      lsDiscountRules_().then(rules => { codesMultiple = rules ? !!rules.multiple : null; showAddCode(); });
     }
+
+    // Gift cards: a payment, not a discount, so they work next to codes in any rule. Apply checks the number with the
+    // server and shows the balance; the card pays first, up to what the sale comes to, and the payment method above
+    // covers the rest (the server takes the card when the sale is recorded, and says if one was refused).
+    function updateGiftNote(){
+      const list = overlay.querySelector("#lsGiftList");
+      if (!list) return;
+      const cmb = comboNow(goodsSum);
+      let owed = Math.max(0, Math.round(goodsSum * 100) - cmb.goodsOffCents) + Math.max(0, Math.round(shipNow() * 100) - cmb.shippingOffCents);
+      list.innerHTML = giftCards.map((g, i) => {
+        const take = Math.min(Math.round(g.balance * 100), owed);
+        owed -= take;
+        return `<div class="ls-gift-chip" style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;margin-top:6px;padding:6px 10px;border:1px solid #bae6fd;border-radius:5px;background:#f0f9ff;">
+          <span>Gift card ••${escapeHtml(g.last4)} — balance $${g.balance.toFixed(2)}${goodsSum > 0 ? `, pays about $${(take / 100).toFixed(2)} (before sales tax)` : ""}</span>
+          <button type="button" data-gift-remove="${i}" aria-label="Remove gift card ••${escapeHtml(g.last4)}" title="Take this gift card off" style="font-size:18px;line-height:1;padding:0 6px;border:none;background:none;cursor:pointer;color:var(--ink-soft,#666);">×</button>
+        </div>`;
+      }).join("");
+    }
+    const giftInput = overlay.querySelector("#lsGift");
+    if (giftInput) {
+      const giftMsg = overlay.querySelector("#lsGiftMsg"), giftBtn = overlay.querySelector("#lsGiftApply");
+      const norm = (v) => String(v || "").toUpperCase().replace(/[\s-]+/g, "");
+      const applyGift = async () => {
+        const typed = giftInput.value.trim();
+        giftMsg.style.color = "#b03a2e";
+        if (!typed) { giftMsg.textContent = "Enter the gift card number first."; return; }
+        if (giftCards.length >= 3) { giftMsg.textContent = "Up to 3 gift cards can pay one sale."; return; }
+        if (giftCards.some(g => norm(g.code) === norm(typed))) { giftMsg.textContent = "That gift card is already on this sale."; return; }
+        giftBtn.disabled = true;
+        try {
+          const d = await adminApi_({ action: "checkGiftCard", code: typed });
+          const card = d && d.ok ? (d.card || d) : null;
+          if (card && card.last4 != null) {
+            giftCards.push({ code: typed, last4: String(card.last4), balance: Number(card.balance) || 0 });
+            giftInput.value = "";
+            giftMsg.style.color = "#1b5e20";
+            giftMsg.textContent = `✓ Gift card ••${card.last4} has $${(Number(card.balance) || 0).toFixed(2)}.`;
+            updateGiftNote();
+          } else giftMsg.textContent = (d && d.reason) || "That gift card number isn't right.";
+        } catch (ex) { giftMsg.textContent = (ex && ex.message) || "Couldn't check the gift card."; }
+        finally { giftBtn.disabled = false; }
+      };
+      giftBtn.addEventListener("click", applyGift);
+      giftInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); applyGift(); } });
+      overlay.querySelector("#lsGiftList").addEventListener("click", (ev) => {
+        const x = ev.target.closest("button[data-gift-remove]");
+        if (!x) return;
+        giftCards.splice(Number(x.dataset.giftRemove), 1);
+        giftMsg.textContent = "";
+        updateGiftNote();
+      });
+    }
+
+    // A reorder (the order's Reorder button, the Customers page): the old order's items put into the form as they were
+    // (product, size, quantity, choices, personalization), priced as the shop prices them today. Anything the shop no
+    // longer sells is left out, and the note says so, and which prices have changed since the original order.
+    function reorderFill(){
+      const ro = opts.reorder;
+      if (!ro || !Array.isArray(ro.lines)) return;
+      if (!pickedCustomer && ro.customerId && lsField("#lsCustomerWrap")) pickCustomer({ id: ro.customerId, ...(ro.customer || {}) });
+      const note = overlay.querySelector("#lsReorderNote");
+      const missing = [], changed = [];
+      let used = 0;
+      const setVal = (el, v) => { if (!el) return false; el.value = v; return el.value === String(v); };
+      const fire = (el) => el.dispatchEvent(new Event("change", { bubbles: true }));
+      for (const l of ro.lines) {
+        const isCustom = l.productId === "__custom__" || l.type === "custom";
+        const p = isCustom ? null : productMap[l.productId];
+        if (!isCustom && !p) { missing.push(String(l.name || l.productId || "An item")); continue; }
+        if (used > 0) overlay.querySelector("#lsAddLine").click();
+        const line = lines()[lines().length - 1];
+        used++;
+        const sel = f(line, "product");
+        sel.value = isCustom ? "__custom__" : p.productId;
+        fire(sel);
+        const qty = Math.max(1, Math.min(MAX_QTY, parseInt(l.qty) || 1));
+        f(line, "qty").value = String(qty);
+        if (isCustom) {
+          f(line, "customDesc").value = String(l.name || "").slice(0, 200);
+          f(line, "customUnitPrice").value = (Number(l.customUnitPrice) || 0).toFixed(2);
+          f(line, "customTaxable").checked = l.taxable !== false;
+        } else {
+          if (isCfg_(p) && l.config && typeof l.config === "object") {
+            const cs = f(line, "color");
+            if (l.config.garmentColor && cs && setVal(cs, l.config.garmentColor)) fire(cs);
+            for (const lc of (l.config.locations || [])) {
+              const ls = locSel_(line, lc.location);
+              if (!ls) continue;
+              if (setVal(ls, lc.custom ? "custom" : String(lc.graphicId))) {
+                fire(ls);
+                const ik = inkSel_(line, lc.location);
+                if (ik && lc.ink && ik.style.display !== "none") setVal(ik, lc.ink);
+              }
+            }
+          }
+          if (isSized_(p) && l.size) setVal(f(line, "size"), l.size);
+          if (l.customDesign && !f(line, "customDesign").disabled && f(line, "customDesignWrap").style.display !== "none") { f(line, "customDesign").checked = true; }
+          if (l.personalized && p.personalizationPrice != null) {
+            f(line, "pers").checked = true; fire(f(line, "pers"));
+            const optSel = f(line, "persOption");
+            if (f(line, "persOptionWrap").style.display !== "none" && optSel && setVal(optSel, l.persName)) { /* the option is the personalization */ }
+            else f(line, "persName").value = String(l.persName || "").slice(0, 200);
+          }
+        }
+        // Prices are today's: say which one differs from what the customer paid then.
+        updatePricePreview();
+        if (!isCustom && l.priceThen != null && Number.isFinite(Number(l.priceThen))) {
+          const now = linePrice(line, piecesByProduct()).total / qty;
+          if (Math.abs(now - Number(l.priceThen)) >= 0.005) changed.push(`${l.name || p.name} (was $${Number(l.priceThen).toFixed(2)}, now $${now.toFixed(2)})`);
+        }
+      }
+      renumber(); updatePricePreview();
+      const bits = [`Reordered from ${escapeHtml(ro.reorderOf || "an earlier order")}. Prices are today's${changed.length ? `; ${changed.length} changed since the original order: ${changed.map(escapeHtml).join("; ")}.` : "; none changed since the original order."}`];
+      if (missing.length) bits.push(`Left out because the shop doesn't sell ${missing.length === 1 ? "it" : "them"} now: ${missing.map(escapeHtml).join(", ")}.`);
+      note.innerHTML = bits.join("<br>");
+      note.style.display = "";
+      // The customer's details, when no customer record was picked for the sale (an order with no record, or one
+      // this role can't pick from): what the old order had.
+      const c = ro.customer;
+      if (c && !pickedCustomer) {
+        if (c.name && !lsField("#lsName").value) lsField("#lsName").value = String(c.name).slice(0, 200);
+        if (c.email && !lsField("#lsEmail").value) lsField("#lsEmail").value = String(c.email).slice(0, 200);
+        if (c.phone && !lsField("#lsPhone").value) lsField("#lsPhone").value = String(c.phone).slice(0, 50);
+        if (c.name || c.email || c.phone) lsField("#lsCustomerInfo").open = true;
+      }
+    }
+    reorderFill();
 
     const finish = (result) => { if(sending && !result) return; document.body.removeChild(overlay); resolve(result); };
 
@@ -9206,7 +9663,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
 
       // Emailing an invoice: the customer picks how to pay on its page, so no method is needed here.
       const wantsInvoice = overlay.querySelector("#lsInvoice").checked;
-      const paymentMethod = overlay.querySelector("#lsPayment").value || (wantsInvoice ? "Invoice" : "");
+      const paymentMethod = overlay.querySelector("#lsPayment").value || (wantsInvoice ? "Invoice" : giftCards.length ? "Other" : "");
       if(!paymentMethod){
         errEl.textContent = "Please select a payment method.";
         errEl.style.display = "";
@@ -9273,6 +9730,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
         items.push(r.item);
       }
 
+      const typedCodes = [...new Set(codeRows.map(r => r.input.value.trim().toUpperCase()).filter(Boolean))];
       const sale = {
         items,
         paymentMethod,
@@ -9287,7 +9745,11 @@ function showLocalSaleModal(products, blanks, opts = {}){
         ...(podBox && podBox.checked ? { payOnDelivery: true } : {}),
         placedAt:  (readWhen_(overlay.querySelector("#lsDate")).at) || null,   // when the sale happened — also when it was paid / handed over
         sendInvoice: wantsInvoice,
-        ...(codeInput && codeInput.value.trim() ? { discountCode: codeInput.value.trim().toUpperCase() } : {}),
+        // One code goes as it always did; several go as a list (the server takes up to 5 and refuses a second one when the
+        // shop's rule is one code).
+        ...(typedCodes.length === 1 ? { discountCode: typedCodes[0] } : typedCodes.length > 1 ? { discountCodes: typedCodes } : {}),
+        ...(giftCards.length ? { giftCards: giftCards.map(g => ({ code: g.code, amount: g.balance })) } : {}),
+        ...(opts.reorder && opts.reorder.reorderOf ? { reorderOf: opts.reorder.reorderOf } : {}),
         // Shop news and discounts (migrations/0117): only with an email to keep it for.
         ...(overlay.querySelector("#lsMarketing") && (contact || pickedCustomer) ? { marketingOptIn: overlay.querySelector("#lsMarketing").checked } : {}),
       };
@@ -11625,6 +12087,21 @@ async function renderGlobalSettings(app){
     }catch(e){}
     let rush = { rule: { mode: "off" }, taxable: false };   // migrations/0082
     try{ const rr = await hoopApi_({ action: "getRushSettings" }); if(rr && rr.rush) rush = rr.rush; }catch(e){}
+    // Discount codes: may more than one be used on an order (migrations/0120). Gift cards: sold online, and the amounts offered.
+    // Each is drawn, and so sent, only once it has loaded, so a failed read can't save the form's defaults over the real ones.
+    let discountRules = { multiple: false }, discountRulesLoaded = false;
+    if(features.discounts !== false) try{
+      const dr = await hoopApi_({ action: "getDiscountRules" });
+      const r = dr && (dr.discountRules || dr.rules || dr);
+      if(r && typeof r.multiple === "boolean"){ discountRules = { multiple: r.multiple }; discountRulesLoaded = true; }
+    }catch(e){}
+    let giftSettings = { sellOnline: false, amounts: [2500, 5000, 10000], minCents: 500, maxCents: 50000 }, giftSettingsLoaded = false;
+    if(features.giftCards !== false) try{
+      const gr = await hoopApi_({ action: "getGiftCardSettings" });
+      const r = gr && (gr.giftCards || gr.settings || gr);
+      if(r && Array.isArray(r.amounts)){ giftSettings = { sellOnline: !!r.sellOnline, amounts: r.amounts.map(Number).filter(Number.isFinite), minCents: Number(r.minCents) || 500, maxCents: Number(r.maxCents) || 50000 }; giftSettingsLoaded = true; }
+    }catch(e){}
+    const giftDollars = (c) => { c = Math.round(Number(c) || 0); return Math.floor(c / 100) + (c % 100 ? "." + String(c % 100).padStart(2, "0") : ""); };
     // Decoration types: which kinds of work the shop does, and each one's prices (public/admin.js). Not drawn
     // (and so not sent) when the server can't say, so a failed read can't save the form's defaults over the real ones.
     let decoInfo = null;
@@ -11698,10 +12175,31 @@ async function renderGlobalSettings(app){
         <label class="checkbox-row"><input type="checkbox" id="gPayVenmo" ${checked("venmo")}> Venmo</label>
         <label class="checkbox-row"><input type="checkbox" id="gPayZelle" ${checked("zelle")}> Zelle</label>
         <label class="checkbox-row"><input type="checkbox" id="gPayCheck" ${checked("check")}> Check</label>
+        ${features.giftCards !== false ? `<label class="checkbox-row"><input type="checkbox" id="gPayGiftCard" ${checked("giftCard")}> Gift cards (a card's balance can pay part or all of an order — a payment, not a discount)</label>` : ""}
         <div class="admin-note" style="margin-top:10px;">Disable all four to accept orders without any payment selection — useful for deposit-later or invoice workflows.</div>
         <label class="checkbox-row" style="margin-top:14px;"><input type="checkbox" id="gPayOnDelivery" ${pay.onDelivery === true ? "checked" : ""}> Payment on delivery</label>
         <label class="checkbox-row" style="margin-left:26px;"><input type="checkbox" id="gPayOnDeliveryLocal" ${pay.onDeliveryLocalOnly === true ? "checked" : ""}> Only for local sales (the Local sale window on Orders)</label>
         <div class="admin-note" style="margin-top:6px;">An order set to pay on delivery goes through its steps — blanks, digitizing, the run, packing and delivery — before it's paid, and is completed once it's paid in full. It's set on Orders by a role with <strong>Set orders to pay on delivery</strong> (Manager and Admin unless changed under Users → Roles). Off here, no shop can use it; each shop can also turn it off or limit it to local sales for itself.</div>
+
+        ${discountRulesLoaded ? `<h2 style="margin:22px 0 12px;">Discount codes</h2>
+        <label class="checkbox-row"><input type="checkbox" id="gDiscMultiple" ${discountRules.multiple ? "checked" : ""}> More than one discount code can be used on an order</label>
+        <div class="admin-note" style="margin-top:6px;">Off: one code per order. On: percent codes add up (10% and 15% make 25%, never more than the whole price), then amount codes come off what is left; a free-shipping code makes shipping free. A gift card is a payment, not a discount, so it can be used with a code either way.</div>` : ""}
+
+        ${giftSettingsLoaded ? `<h2 style="margin:22px 0 12px;">Gift cards</h2>
+        <div class="admin-note" style="margin-bottom:10px;">You can always issue a gift card from the Gift cards page. A card's balance can be spent on any order, never expires and can't be cashed out. Whether cards can be spent is the Gift cards box under Payment methods.</div>
+        <label class="checkbox-row"><input type="checkbox" id="gGiftSell" ${giftSettings.sellOnline ? "checked" : ""}> Customers can buy gift cards on the shop (paid by card; the card is emailed once it is paid)</label>
+        <label>Amounts offered (dollars, up to 6, separated by commas)
+          <input type="text" id="gGiftAmounts" value="${escapeHtml(giftSettings.amounts.map(giftDollars).join(", "))}" placeholder="25, 50, 100" style="max-width:260px;">
+        </label>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <label style="flex:0 0 150px;">Custom amount from ($)
+            <input type="number" id="gGiftMin" min="1" max="10000" step="0.01" value="${escapeHtml(giftDollars(giftSettings.minCents))}">
+          </label>
+          <label style="flex:0 0 150px;">up to ($)
+            <input type="number" id="gGiftMax" min="1" max="10000" step="0.01" value="${escapeHtml(giftDollars(giftSettings.maxCents))}">
+          </label>
+        </div>
+        <div class="admin-note" style="margin-top:2px;">Shown as buttons on the shop, with a box for any other amount between the two figures.</div>` : ""}
 
         <h2 style="margin:22px 0 12px;">Sales tax</h2>
         <div class="admin-note" style="margin-bottom:14px;">Leave the rate at 0 if you don't collect sales tax. Orders shipped to another state, tax-exempt shops and non-taxable products carry no tax; shipping is never taxed. Changing the rate, the state or how prices are shown affects <strong>new orders only</strong> — every order keeps what it was placed with.</div>
@@ -12001,7 +12499,7 @@ function setupStatusHtml_(items){
 // setting are read fresh every time. So the "saved" message only mentions Publish when a
 // payment-method box actually changed (compared with how the form was drawn).
 function globalSettingsNeedPublish_(){
-  return ["gPayCard", "gPayVenmo", "gPayZelle", "gPayCheck"].some(id => { const e = document.getElementById(id); return !!e && e.checked !== e.defaultChecked; });
+  return ["gPayCard", "gPayVenmo", "gPayZelle", "gPayCheck", "gPayGiftCard"].some(id => { const e = document.getElementById(id); return !!e && e.checked !== e.defaultChecked; });
 }
 async function submitGlobalSettings(){
   const errEl = document.getElementById("globalSettingsError");
@@ -12032,7 +12530,8 @@ async function submitGlobalSettings(){
   const collect = () => {
     const settings = {
       payments: { card: $g("gPayCard").checked, venmo: $g("gPayVenmo").checked, zelle: $g("gPayZelle").checked, check: $g("gPayCheck").checked,
-        onDelivery: $g("gPayOnDelivery").checked, onDeliveryLocalOnly: $g("gPayOnDeliveryLocal").checked },
+        onDelivery: $g("gPayOnDelivery").checked, onDeliveryLocalOnly: $g("gPayOnDeliveryLocal").checked,
+        ...($g("gPayGiftCard") ? { giftCard: $g("gPayGiftCard").checked } : {}) },
       salesTax: { ratePercent: parseFloat($g("gTaxRate").value), jurisdiction: $g("gTaxJurisdiction").value.trim(), taxMode: ($g("gTaxMode") || {}).value || undefined },
     };
     // Region: the country decides how the ship-from address, and the tax state, are checked (the server does it first).
@@ -12071,6 +12570,18 @@ async function submitGlobalSettings(){
     if($g("gDecoration") && typeof decorationSettingsCollect_ === "function" && adminCan_("settings.global", "edit")){
       const dc = decorationSettingsCollect_();
       if(dc) settings.decoration = { types: dc.types, pricing: dc.pricing };
+    }
+    // Discount codes and gift cards (migrations/0120): sent only when the section was drawn (it loaded), and not for a feature
+    // switched off on this form (the server would refuse it).
+    if($g("gDiscMultiple") && stillOn("discounts") && adminCan_("settings.global", "edit")) settings.discountRules = { multiple: $g("gDiscMultiple").checked };
+    if($g("gGiftSell") && stillOn("giftCards") && adminCan_("settings.global", "edit")){
+      // Dollars typed → whole cents without a float multiply: 0 or more, at most two decimals.
+      const cents = (v) => { const m = /^\$?(\d+)(?:\.(\d{1,2}))?$/.exec(String(v).trim()); return m ? Number(m[1]) * 100 + Number((m[2] || "").padEnd(2, "0") || 0) : NaN; };
+      const amounts = $g("gGiftAmounts").value.split(/[,\s]+/).filter(Boolean).map(cents);
+      const minCents = cents($g("gGiftMin").value), maxCents = cents($g("gGiftMax").value);
+      if(!amounts.length || amounts.length > 6 || amounts.some(c => !(c >= 100 && c <= 1000000))) return { error: "Gift cards: enter 1 to 6 amounts, each from $1 to $10,000, like 25, 50, 100." };
+      if(!(minCents >= 100) || !(maxCents >= minCents) || maxCents > 1000000) return { error: "Gift cards: the custom amount's two figures must run from at least $1 up to no more than $10,000, the second not below the first." };
+      settings.giftCards = { sellOnline: $g("gGiftSell").checked, amounts: [...new Set(amounts)].sort((a, b) => a - b), minCents, maxCents };
     }
     const rushRule = readRushRule_("gRush");   // checked before anything was sent (globalSettingsProblem_)
     if(rushRule.error) return { error: "Rush fee: " + rushRule.error };

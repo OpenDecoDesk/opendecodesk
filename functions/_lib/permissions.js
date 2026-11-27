@@ -37,6 +37,8 @@ export const PERMISSION_AREAS = [
     { hash: "quotes", label: "Quotes", fns: [["quotes.estimates", "Quotes"]] } ] },
   { key: "discounts", label: "Discount codes", items: [
     { hash: "discounts", label: "Discount codes", fns: [["discounts.codes", "Discount codes"], ["discounts.campaigns", "Email campaigns"]] } ] },
+  { key: "giftcards", label: "Gift cards", items: [
+    { hash: "giftcards", label: "Gift cards", fns: [["giftcards.cards", "Gift cards: issue, look up, adjust and void"]] } ] },
   { key: "runorder", label: "Run Order", items: [
     { hash: "runorder", label: "Run Order", fns: [["run.queue", "Production queue"], ["run.runs", "Start, finish and abort runs"], ["run.markMade", "Mark pieces made"]] } ] },
   { key: "runtransfer", label: "Run Order: DTF transfers", items: [
@@ -112,14 +114,19 @@ const BY_FN = {
   "orders.details": {
     read: ["getOrders", "getOrdersByIds", "getOrdersAllShops", "getOpenOrders", "getOrderItemFiles", "getOrderItemDesigns", "listDesignVerifications"],
     edit: ["updateCustomerInfo", "editOrder", "updateOrderDate", "setOrderDates", "setOrderDueDate", "bulkSetDueDate", "refreshOrderFromCatalog",
-      "saveOrderItemFile", "saveOrderItemDesign", "createLocalSale", "checkLocalSaleCode", "sendDesignVerification"],
+      "saveOrderItemFile", "saveOrderItemDesign", "createLocalSale", "checkLocalSaleCode", "sendDesignVerification",
+      // Reorder (phase 6) reads a past order to start a new Local sale from it: reading the order AND making a sale, so Edit.
+      "getOrderForReorder"],
     full: ["deleteOrderItemFile", "cancelLineItem", "bulkCancelLineItems", "deleteOrder", "voidOrder"] },
   "orders.stepsEarly": { read: ["getBlankShipments"], edit: ["useBlanksFromStock", "addBlankShipment", "updateBlankShipment", "checkBlankShipments"], full: ["deleteBlankShipment"] },
   "orders.stepsLate": { edit: ["setOrderCompleted", "checkDeliveries"] },
   "orders.shipping": { read: ["getOrderForShipping"], edit: ["recordTracking", "bulkRecordTracking", "setShippingInfo"] },
   "orders.payments": {
-    edit: ["markPaidManual", "addPayment", "setPaymentDate", "setDiscount", "setShippingPaidAmount", "createShippingPaymentLink", "setPaymentAccount"],
-    full: ["setRushFee", "recordRefund", "setRefundShipping", "deletePayment", "voidPayment", "setLineItemRefund"] },
+    // Phase 6: a discount code on an order (apply / take off) is a discount, so Edit as setDiscount is; spending a gift
+    // card on an order is a payment (Edit, as addPayment). Putting money back on a card is a refund: Full.
+    edit: ["markPaidManual", "addPayment", "setPaymentDate", "setDiscount", "setShippingPaidAmount", "createShippingPaymentLink", "setPaymentAccount",
+      "applyOrderDiscountCode", "removeOrderDiscountCode", "redeemGiftCard"],
+    full: ["setRushFee", "recordRefund", "setRefundShipping", "deletePayment", "voidPayment", "setLineItemRefund", "refundToGiftCard"] },
   // Pay on delivery (migrations/0105): the order's steps go on before it's paid. Its own function, so who may let work
   // start unpaid is chosen apart from who records payments: Manager and Admin by default (Back office and Production none).
   "orders.payOnDelivery": { edit: ["setPayOnDelivery"] },
@@ -144,6 +151,13 @@ const BY_FN = {
     read: ["listDiscountCodes", "getDiscountCode"],
     edit: ["saveDiscountCode", "createDiscountCodes", "setDiscountCodeActive"],
     full: ["deleteDiscountCode"] },
+  // Gift cards (migrations/0120): staff issue, look up, adjust and void cards. Showing a card's full number is Edit's and
+  // audited (it is the card: anyone who has it can spend it). Adjusting a balance and voiding a card take money
+  // off a customer's card: Full. Spending a card on an order and refunding to one are orders.payments' (above).
+  "giftcards.cards": {
+    read: ["listGiftCards", "getGiftCard", "giftCardTotals"],
+    edit: ["issueGiftCard", "revealGiftCardCode", "resendGiftCard"],
+    full: ["adjustGiftCard", "voidGiftCard"] },
   // Email campaigns (migrations/0117): read sees them and who they'd go to; edit writes them and sends tests; full
   // sends, schedules, cancels and deletes — emailing customers is the owner's call. Recording a customer's "no
   // marketing email" is the customer record's (Edit).
@@ -235,10 +249,11 @@ const BY_FN = {
   "reports.taxpacket": { read: ["getTaxPacketExtras"] },
   "settings.global": {
     read: ["getGlobalSettings", "getFeatures", "getBusinessProfile", "getLocaleSettings", "getSalesTaxSettings", "getShipFromAddress", "getSetupStatus",
-      "getRushSettings", "getEmailSettings", "getDecorationSettings", "getDigitalSettings", "previewCustomerEmail", "samplePdf", "getAccountingSettings"],
+      "getRushSettings", "getEmailSettings", "getDecorationSettings", "getDigitalSettings", "getDiscountRules", "getGiftCardSettings", "previewCustomerEmail", "samplePdf", "getAccountingSettings"],
     edit: ["saveGlobalSettingsAll", "updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "updateLocaleSettings", "updateSalesTaxSettings", "updateShipFromAddress",
       "updateAccountingSettings", "updateMachineSettings", "updatePricingSettings", "updateRushSettings", "updateEmailSettings",
-      "updateDecorationSettings", "sendSampleEmail", "sendTestEmail", "checkMailbox", "updateDigitalSettings", "getCloudflareSetup", "connectCloudflare", "backfillStripeFees"] },
+      "updateDecorationSettings", "sendSampleEmail", "sendTestEmail", "checkMailbox", "updateDigitalSettings", "getCloudflareSetup", "connectCloudflare", "backfillStripeFees",
+      "updateDiscountRules", "updateGiftCardSettings"] },
   "settings.vendors": {
     read: ["vendorDirectorySearch", "vendorDirectoryEndpoints"],
     edit: ["saveVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks"],
@@ -291,6 +306,11 @@ const ALSO = {
   // An order's or a quote's digitizing jobs show where they are used; the form picks the vendor from the vendor list.
   listDigitizingJobs: [["orders.details", "read"], ["quotes.estimates", "read"]],
   listVendors: [["production.digitizing", "edit"]],
+  // Phase 6. Whether a shop takes more than one discount code is asked by every screen that has a code box (the Local
+  // sale, an order's discount area, the quote editor, the Discount codes page); whether gift cards can be sold online
+  // and their amounts by the Gift cards page and the order's payment form (to offer the Gift card choice).
+  getDiscountRules: [["orders.details", "edit"], ["orders.payments", "read"], ["quotes.estimates", "read"], ["discounts.codes", "read"]],
+  getGiftCardSettings: [["giftcards.cards", "read"], ["orders.payments", "edit"]],
 };
 
 // action → [[fn, level], ...] (any one is enough), or "*" (anyone signed in).
@@ -314,7 +334,7 @@ const MANAGER_FNS = Object.assign(all_("full"), {
 const STAFF_FNS = only_({
   "home.counts": "read",
   "orders.details": "edit", "orders.stepsEarly": "edit", "orders.stepsLate": "edit", "orders.shipping": "edit", "orders.payments": "edit", "orders.invoices": "edit",
-  "customers.records": "edit", "quotes.estimates": "edit", "discounts.codes": "read",
+  "customers.records": "edit", "quotes.estimates": "edit", "discounts.codes": "read", "giftcards.cards": "edit",
   "run.queue": "read", "run.runs": "edit", "run.markMade": "edit", "transfer.queue": "read", "transfer.mark": "edit",
   "production.digitizing": "edit",
   "catalog.products": "edit", "catalog.designs": "edit", "catalog.graphics": "edit", "catalog.categories": "edit", "catalog.locations": "edit",

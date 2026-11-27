@@ -34,7 +34,7 @@ Free plan). A clean-up that fails is recorded and reported in the roll-up an hou
    (each lookup, each "your order has shipped" email and each supplier call counts, with room kept
    for the roll-up email itself); the rest wait for tomorrow.
 2. Collects what is new since the last roll-up: orders (not test or voided ones), payments, refunds
-   and disputes, customers' answers to design proofs, deliveries and pickups, failed admin sign-ins,
+   and disputes, gift cards sold online, customers' answers to design proofs, deliveries and pickups, failed admin sign-ins,
    and problems (an email that couldn't be sent, a Stripe webhook that failed, a roll-up that
    failed). A customer's answer to a quote shows as **Quote** (not Invoice). With the Production feature on, it also lists machine maintenance that's due (never a
    reason to send on its own).
@@ -308,6 +308,11 @@ switch off and delete codes; Back office can look at them and the orders that us
 can't open the page. As with Customers, a role you made yourself, or a built-in one you have changed,
 starts without it ([Discount codes](#discount-codes) below).
 
+**Gift cards** is a permission of its own, "Gift cards": Admin and Manager in full (including adjusting and
+voiding), Back office can look, issue and resend, Production can't open the page. As with Customers, a
+role you made yourself, or a built-in one you have changed, starts without it ([Gift
+cards](#gift-cards) below).
+
 - **Adding someone:** name, email, role. You are shown a temporary password once; give it to
   them. They must choose their own the first time they sign in.
 - **Someone leaves:** disable them. They are signed out at once and can't sign in. Users are
@@ -516,23 +521,39 @@ after Quotes). Each code is either:
   **Once per email address** to stop the same email using it twice.
 
 Either kind takes a **percent off** (0.01% to 100%) — with an optional **max discount**, the most it
-takes off one order (20% off, up to $25) — or an **amount off** ($0.01 to $10,000), works at
-**all shops or one**, and can have a **last day** (it works through the end of that day, in the
+takes off one order (20% off, up to $25) — or an **amount off** ($0.01 to $10,000), or is a **Free
+shipping only** code (no percent or amount: it just makes delivery free). Any percent or amount code
+can also tick **Free shipping**, to take its discount off the goods and make delivery free. A code can
+have a **minimum order** ($0.01 to $100,000, counted on the goods): below it, the customer is told "This code
+needs an order of at least $X." A code works at **all shops or one**, and can have a **last day** (it works through the end of that day, in the
 business's time zone — Global settings → Region), and a private note. Leave the code blank and one is
 made for you; codes are letters, digits, `-` and `_`, 3 to 32 characters, and read the same in any case.
 
 **What it takes off.** The discount is off the order's goods — the lines as priced, quantity breaks and
-personalization included — never the delivery or the rush fee. A percent is rounded to the cent; an
+personalization included — never the rush fee. A percent is rounded to the cent; an
 amount is never more than the goods. It is stored as the order's discount, like one you type on an
-order (its note says "Code SAVE10"), so the balance, card checkout, the reports and the Fundraising
-report treat it the same. The Orders page shows "Code SAVE10" next to it. One code per order.
+order (its note says "Code SAVE10", or "Codes SAVE10, TEAM5"), so the balance, card checkout, the reports and the Fundraising
+report treat it the same. The Orders page shows "Code SAVE10" next to it. A free-shipping code takes the
+delivery charge off as well; the order keeps what it took off delivery, and the balance, the tax on
+delivery (if delivery is taxed) and the reports all use the lower delivery.
+
+**One code or more.** **Global settings → Discount codes** has the rule, **Allow more than one code on an
+order**, off to start. Off: one code per order ("Only one discount code can be used on an order.").
+On: a customer can add up to five. **Percent codes add up** (10% and 15% is 25%, never more than 100%
+of the goods — each code's own max discount still limits its share), then **amount codes** come off what
+is left, and a free-shipping code makes delivery free once. The same code twice is refused ("That code
+is already applied."). The rule is read fresh each time, so changing it needs no Publish; orders that
+already have several codes keep them. A **gift card is not a code** — see [Gift cards](#gift-cards): it
+pays, it doesn't discount, so a customer can use a code and a gift card together even when only one
+code is allowed.
 
 **At checkout.** The shop page shows a **Discount code** box only while the shop has a code that can be
 used — switched on, not used up and not past its last day, for that shop or all shops. **Apply** checks
 the code (with the email typed so far) and shows the discount in the totals; changing the cart checks it
-again. The server checks it once more when the order is placed and decides the discount; two orders
-racing for a code's last use can't both get it. An order the code covers in full has nothing to pay and
-skips the card step.
+again. With more than one code allowed, an **Add another code** link shows each code with a ×, the total
+discount, and "Free shipping (CODE)". A second code that is refused shows the reason. The server checks
+them once more when the order is placed and decides the discount; two orders racing for a code's last
+use can't both get it. An order the codes cover in full has nothing to pay and skips the card step.
 
 **Codes for a list of emails…** makes one single-use code per address for up to 500 pasted emails (one
 per line or separated by commas), all with the same discount, shop, last day and note, and an optional
@@ -558,10 +579,86 @@ off: off, the page is hidden, the checkout has no code box and an order sent wit
 **On a Local sale.** The Local sale window has a **Discount code** box (web and desktop): **Apply**
 checks the code against the items, the shop and the customer (a code for one person must be the
 picked customer's, or the email typed under Customer info) and shows the discount in the price line.
-**Record sale** checks it again and books it exactly as at checkout.
+**Record sale** checks it again and books it exactly as at checkout. With more than one code allowed the
+box takes several (**Add another code**, each with a ×). The same window has a **Gift card** box.
 
-**Not included:** codes on an invoice or a quote (type a discount on the order instead); gift cards or
-store credit; a minimum order; free-shipping codes; and more than one code on an order.
+**On an order.** The order window's discount area has **Add code**, beside the typed discount, and lists the
+codes on the order with a × to take one off. The code is checked against the order's goods, shop and
+email like any other, and the order's discount, tax and balance are worked out again from all its codes.
+A code can't go on an order that has a typed discount ("take the discount off first"), and a typed
+discount can't go on an order with a code ("This order has a discount code; take the code off first.").
+Not on an order that is void, completed or fully refunded ("This order can't take a code now."). It needs the
+same permission as typing a discount, the Discount codes feature, and an open month; both are in the audit
+log (`order.discount_code_applied`, `order.discount_code_removed`).
+
+**On the customer's invoice page.** Before paying the balance, a customer can type a discount code (only
+while the order has no typed discount and the rules allow it) and/or a gift card. The server applies them
+only to that invoice's order, only while it has a balance and isn't paid, and answers the same refusals;
+wrong tries are limited, and a wrong code never says whom it belongs to.
+
+**On a quote.** The quote editor has a **Discount codes** box under the lines (one, or several when the rule
+allows). It checks them against the quote's goods, shop and customer email, and the quote's totals, the
+quote page and the quote email show each code's discount and free shipping. Sending the quote checks the
+codes again, and a refused code stops the send with its reason. A code is claimed only when the quote
+becomes an order.
+
+## Gift cards
+
+A gift card is a **payment, not a discount**: tax is worked out on the goods after any codes, then gift
+cards pay part or all of what is owed. So a code and a gift card always work together, even when only one
+code is allowed. Cards are on the **Gift cards** page (in the menu), and the **Gift cards** feature
+(Global settings → Features) is on unless you turned it off: off, the page is hidden and a card can't be
+bought, issued or spent.
+
+**Making one.** **Issue gift card** takes an amount ($1 to $1,000,000), the recipient's name and email, a
+message, a private note, and **Email it now**. The full code is shown once, with **Copy**. A code is 16
+letters and digits without look-alikes, shown in four groups (`XXXX-XXXX-XXXX-XXXX`). Afterwards the page
+shows it masked (`••••-••••-••••-1234`); **Show** reveals it and is audited (`giftcard.code_shown`).
+
+**Selling them online.** **Global settings → Gift cards**: **Sell gift cards online** (off to start), the
+amount buttons (to start $25, $50 and $100) and the lowest and highest custom amount (to start $5 and
+$500). With it on and card payments on, every shop page has a **Gift cards** button: amount, recipient
+name and email, the buyer's name and email, and a message (up to 300 characters). It is an ordinary card
+order with one line, "Gift card for <recipient>". The card is made and emailed to the recipient once the
+card payment is confirmed — a repeated confirmation makes no second card or email — and the buyer's receipt
+says so. The gift card line is never taxed, raises nothing for a fundraiser and isn't made or packed.
+
+**Spending one.** At checkout ("Have a gift card?": the number, **Check** shows the balance, **Apply**;
+up to three cards), on a Local sale, in the order window's payment form (method **Gift card**) and on the
+customer's invoice page. A card pays up to its balance or what is owed, whichever is less; the balance
+carries over to the next order. When cards cover everything the order is paid and the card step is
+skipped. At checkout a card that is refused doesn't fail the order — the rest is paid the usual way. A
+wrong number just says "That gift card number isn't right." (never whether a card exists), and tries are
+limited to 10 a minute for each address. The Gift card payment method has a tick in Global settings →
+Payment methods, on to start.
+
+**Refunds and voids.** Voiding a gift-card payment, or refunding it, puts the money **back on the card**; it
+is never paid out in cash. The card's history lists every sale, use, refund and adjustment.
+
+**Never expire, never cashed out.** A card has no last day and can't be turned into money. **Adjust…**
+adds or takes off a balance (a note is required, and the balance can't go below nothing); **Void…** takes
+the balance to nothing and the card stops working. Both need full access and are in the audit log.
+
+**In the books.** A card is a **liability** until it is spent, not revenue: selling one is not a sale, and the
+gift card line is left out of Revenue, Sales tax, Fundraising, cost and pricing reports and the Home
+page's money. The sale is revenue when the card pays for an order. A gift card payment is not money in
+a bank account, so it is never on the deposits list or in an account's balance. The page's top strip shows
+what is **outstanding** (all active balances), and what was sold and spent this month.
+
+**Who can.** The **Gift cards** permission: Admin and Manager have it in full, Back office can look and
+issue or resend, Production has no access ([Users and roles](#users-and-roles)). Taking a card as payment
+on an order needs the same permission as any payment; refunding to a card needs the refund permission.
+Issuing, showing a code, adjusting, voiding and resending are in the audit log. The morning roll-up has a
+**Gift cards sold** line for each card bought online ("Gift card $50 for Pat — order X").
+
+## Reorder
+
+The order window and each past order on a customer's page have a **Reorder** button (for anyone who can
+see the order and make a Local sale). It opens the Local sale window filled with the same customer and
+the same lines — size, quantity, personalization, design and price for a custom line — leaving out
+cancelled lines, gift cards and fees. **Prices are today's**: a note lists any that changed since the
+original order, and you can edit it before **Record sale**. The new order remembers which it was a
+reorder of.
 
 ## Email campaigns
 

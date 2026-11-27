@@ -29,7 +29,7 @@ const OFF = "Discount codes is turned off. Turn it on under Settings → Global 
 const LOCKED = "This code has been used — you can change its expiry, uses, note or switch it off.";
 const USED_NO_DELETE = "This code has been used, so it can't be deleted — switch it off instead.";
 const NOT_READY_DB = "Discount codes need the latest database update. Apply the migrations, then try again.";
-const CODE_KEYS = "active,amount,code,createdAt,createdBy,email,expiresOn,id,kind,label,maxDiscount,maxUses,note,oncePerEmail,orgId,orgName,percent,status,used";
+const CODE_KEYS = "active,amount,code,createdAt,createdBy,email,expiresOn,freeShipping,id,kind,label,maxDiscount,maxUses,minOrder,note,oncePerEmail,orgId,orgName,percent,status,used";
 const ordersJs = read("functions/api/orders.js");
 
 (async () => {
@@ -57,7 +57,7 @@ const ordersJs = read("functions/api/orders.js");
       stored.fns["discounts.codes"] === "none" && SIX.every(a => !P.roleAllows({ key: "r_old", permissions: stored }, P.ACTION_PERM[a])));
     const featureLists = {};
     for (const m of ordersJs.match(/const FEATURE_ACTIONS = \{([\s\S]*?)\n\};/)[1].matchAll(/\n  (\w+): \[([\s\S]*?)\],/g)) featureLists[m[1]] = [...m[2].matchAll(/"(\w+)"/g)].map(x => x[1]);
-    ok("the six actions, and the Local sale's code check, are listed under the discounts feature switch", same([...(featureLists.discounts || [])].sort(), [...SIX, "checkLocalSaleCode"].sort()));
+    ok("the six actions, the Local sale's code check and the two codes-on-an-order actions (phase 6) are listed under the discounts feature switch", same([...(featureLists.discounts || [])].sort(), [...SIX, "checkLocalSaleCode", "applyOrderDiscountCode", "removeOrderDiscountCode"].sort()));
     ok("…and under no other switch", Object.entries(featureLists).filter(([k]) => k !== "discounts").every(([, l]) => SIX.every(a => !l.includes(a))));
     const noMonth = [...ordersJs.match(/const NO_MONTH_ACTIONS = new Set\(\[([\s\S]*?)\]\);/)[1].matchAll(/"(\w+)"/g)].map(m => m[1]);
     ok("the four writes change no month's numbers (NO_MONTH_ACTIONS): a code is no sale", WRITES.every(a => noMonth.includes(a)));
@@ -198,7 +198,7 @@ const ordersJs = read("functions/api/orders.js");
     ok("…made by the signed-in person", save10.createdBy === "olive@example.com" && /^\d{4}-\d{2}-\d{2}T/.test(save10.createdAt));
     ok("…one audit row discount_code.created, no shop, no order, with the code's settings and never its uses",
       r.rows.length === 1 && r.rows[0].action === "discount_code.created" && r.rows[0].orgId === null && r.rows[0].orderId === null &&
-      same(r.rows[0].detail, { id: save10.id, code: "SAVE10", kind: "percent", percent: 10, amount: null, maxDiscount: null, orgId: null, email: "", maxUses: 50, oncePerEmail: true,
+      same(r.rows[0].detail, { id: save10.id, code: "SAVE10", kind: "percent", percent: 10, amount: null, maxDiscount: null, orgId: null, email: "", minOrder: null, freeShipping: false, maxUses: 50, oncePerEmail: true,
         expiresOn: null, active: true, note: "Spring sale" }));
 
     r = await logged({ action: "saveDiscountCode", code: { code: "PAT5", kind: "amount", amount: 5, orgId: "acme", email: " Pat@Example.com ", maxUses: 40, oncePerEmail: true, expiresOn: "2099-06-30" } }, manager);
@@ -356,14 +356,14 @@ const ordersJs = read("functions/api/orders.js");
       ana.expiresOn === "2099-06-30" && ana.note === "Thank you" && ana.active === 1 && ana.createdBy === "eddie@example.com");
     ok("…one audit row discount_code.bulk_created for the shop: how many and the settings — never the email addresses or the codes",
       r.rows.length === 1 && r.rows[0].action === "discount_code.bulk_created" && r.rows[0].orgId === "acme" &&
-      same(r.rows[0].detail, { count: 2, skipped: 2, kind: "percent", percent: 15, amount: null, orgId: "acme", expiresOn: "2099-06-30", prefix: "spring-" }) &&
+      same(r.rows[0].detail, { count: 2, skipped: 2, kind: "percent", percent: 15, amount: null, minOrder: null, freeShipping: false, orgId: "acme", expiresOn: "2099-06-30", prefix: "spring-" }) &&
       !/@|ana|ben|not-an-email/i.test(r.rows[0].detail && JSON.stringify(r.rows[0].detail)) && !r.body.codes.some(c => JSON.stringify(r.rows[0].detail).includes(c.code)));
 
     r = await logged({ action: "createDiscountCodes", emails: ["cy@example.com", null], kind: "amount", amount: "4", org: "" }, admin);
     ok("a list with an amount, every shop: the codes have no prefix; the audit row has the amount and no percent, no shop, no expiry",
       r.status === 200 && r.body.codes.length === 1 && /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/.test(r.body.codes[0].code) && same(r.body.skipped, []) &&
       codeRow(r.body.codes[0].code).orgId === null && codeRow(r.body.codes[0].code).amountCents === 400 &&
-      same(r.rows[0].detail, { count: 1, skipped: 0, kind: "amount", percent: null, amount: "4", orgId: null, expiresOn: null, prefix: "" }) && r.rows[0].orgId === null);
+      same(r.rows[0].detail, { count: 1, skipped: 0, kind: "amount", percent: null, amount: "4", minOrder: null, freeShipping: false, orgId: null, expiresOn: null, prefix: "" }) && r.rows[0].orgId === null);
 
     const n2 = codeCount();
     r = await logged({ action: "createDiscountCodes", emails: ["nobody", "still nobody"], kind: "percent", percent: 5 }, admin);
@@ -427,7 +427,7 @@ const ordersJs = read("functions/api/orders.js");
       r.status === 200 && same(r.body, { status: "ok" }) && codeRow("PAT5") === null);
     ok("…one audit row discount_code.deleted for its shop, with what the code was",
       r.rows.length === 1 && r.rows[0].action === "discount_code.deleted" && r.rows[0].orgId === "acme" &&
-      same(r.rows[0].detail, { id: pat5.id, code: "PAT5", kind: "amount", percent: null, amount: 6, maxDiscount: null, orgId: "acme", email: "pat@example.com", maxUses: 1,
+      same(r.rows[0].detail, { id: pat5.id, code: "PAT5", kind: "amount", percent: null, amount: 6, maxDiscount: null, orgId: "acme", email: "pat@example.com", minOrder: null, freeShipping: false, maxUses: 1,
         oncePerEmail: false, expiresOn: null, active: true, note: "" }));
     ok("deleting it again: 404", refused(await call({ action: "deleteDiscountCode", id: pat5.id }, manager), 404, NOT_FOUND));
 

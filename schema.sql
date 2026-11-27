@@ -309,6 +309,8 @@ CREATE TABLE IF NOT EXISTS orders (
   payOnDelivery       INTEGER NOT NULL DEFAULT 0 CHECK (payOnDelivery IN (0, 1)),  -- migrations/0105: steps go on before it's paid
   customerId          INTEGER REFERENCES customers(id),  -- migrations/0108: the customer it belongs to; NULL = none
   trackingCheckedAt   TEXT                        -- migrations/0111: the delivery check's last tracking lookup (least recent first)
+  , reorderOf           TEXT NOT NULL DEFAULT ''   -- migrations/0120: the order a Local sale was copied from ('' = none)
+  , shippingDiscountCents INTEGER NOT NULL DEFAULT 0 CHECK (shippingDiscountCents >= 0)  -- migrations/0120: what free-shipping codes took off shipping
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -429,7 +431,7 @@ CREATE TABLE IF NOT EXISTS estimates (
   createdAt      TEXT NOT NULL,
   updatedAt      TEXT NOT NULL,
   createdBy      TEXT NOT NULL DEFAULT ''
-);
+  , discountCodes TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(discountCodes)));  -- migrations/0120: the codes typed on the quote
 CREATE INDEX IF NOT EXISTS idx_estimates_org_status ON estimates(orgId, status);
 CREATE INDEX IF NOT EXISTS idx_estimates_customer ON estimates(customerId);
 -- A quote's lines: a catalog product, a custom line or a one-time fee (feeKind). Prices in cents as quoted —
@@ -462,6 +464,9 @@ CREATE INDEX IF NOT EXISTS idx_estimate_items_estimate ON estimate_items(estimat
 -- (oncePerEmail: once per address); else that one address (lower-case), once. expiresOn = the last day it works.
 -- The discount itself is stored on the order like a manual one (discountNote "Code SAVE10"). maxDiscountCents
 -- (migrations/0116, an ALTER, so it sits after createdBy just as SQLite writes it): the most a percent code takes off.
+-- migrations/0120 (ALTERs too): minOrderCents (the goods must come to at least this; NULL = none), freeShipping (the
+-- code also makes shipping free) and goodsOff (0 = takes nothing off the goods: a "free shipping only" code is percent
+-- 10000 with goodsOff 0 and freeShipping 1).
 CREATE TABLE IF NOT EXISTS discount_codes (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   code         TEXT NOT NULL,
@@ -478,6 +483,9 @@ CREATE TABLE IF NOT EXISTS discount_codes (
   createdAt    TEXT NOT NULL,
   createdBy    TEXT NOT NULL DEFAULT '',
   maxDiscountCents INTEGER CHECK (maxDiscountCents IS NULL OR maxDiscountCents BETWEEN 1 AND 1000000),
+  minOrderCents INTEGER CHECK (minOrderCents IS NULL OR minOrderCents BETWEEN 1 AND 10000000),
+  freeShipping INTEGER NOT NULL DEFAULT 0 CHECK (freeShipping IN (0, 1)),
+  goodsOff     INTEGER NOT NULL DEFAULT 1 CHECK (goodsOff IN (0, 1)),
   CHECK ((kind = 'percent' AND percentBps IS NOT NULL AND percentBps BETWEEN 1 AND 10000 AND amountCents IS NULL)
       OR (kind = 'amount' AND amountCents IS NOT NULL AND amountCents BETWEEN 1 AND 1000000 AND percentBps IS NULL))
 );
@@ -493,8 +501,44 @@ CREATE TABLE IF NOT EXISTS discount_code_uses (
   usedAt       TEXT NOT NULL,
   releasedAt   TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_discount_uses_order ON discount_code_uses(orderId);
+-- migrations/0120: one use per (order, code), so an order may carry several codes when the shop's rule allows.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_discount_uses_order_code ON discount_code_uses(orderId, codeId);
+CREATE INDEX IF NOT EXISTS idx_discount_uses_order ON discount_code_uses(orderId);
 CREATE INDEX IF NOT EXISTS idx_discount_uses_code ON discount_code_uses(codeId) WHERE releasedAt IS NULL;
+
+-- Gift cards (migrations/0120): a PAYMENT, never a discount, and a liability until spent. See the migration.
+CREATE TABLE IF NOT EXISTS gift_cards (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  code           TEXT NOT NULL,
+  last4          TEXT NOT NULL,
+  initialCents   INTEGER NOT NULL CHECK (initialCents BETWEEN 100 AND 100000000),
+  balanceCents   INTEGER NOT NULL CHECK (balanceCents >= 0),
+  recipientName  TEXT NOT NULL DEFAULT '',
+  recipientEmail TEXT NOT NULL DEFAULT '',
+  buyerName      TEXT NOT NULL DEFAULT '',
+  buyerEmail     TEXT NOT NULL DEFAULT '',
+  message        TEXT NOT NULL DEFAULT '',
+  sourceOrderId  TEXT NOT NULL DEFAULT '',
+  status         TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'void')),
+  note           TEXT NOT NULL DEFAULT '',
+  createdAt      TEXT NOT NULL,
+  createdBy      TEXT NOT NULL DEFAULT '',
+  voidedAt       TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gift_cards_code ON gift_cards(code);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gift_cards_source ON gift_cards(sourceOrderId) WHERE sourceOrderId <> '';
+CREATE TABLE IF NOT EXISTS gift_card_ledger (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  cardId      INTEGER NOT NULL REFERENCES gift_cards(id),
+  kind        TEXT NOT NULL CHECK (kind IN ('issue', 'redeem', 'refund', 'adjust', 'void')),
+  deltaCents  INTEGER NOT NULL,
+  orderId     TEXT NOT NULL DEFAULT '',
+  paymentId   INTEGER,
+  note        TEXT NOT NULL DEFAULT '',
+  at          TEXT NOT NULL,
+  by          TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_gift_card_ledger_card ON gift_card_ledger(cardId, id);
 
 -- Email campaigns (migrations/0117): addresses that asked for no marketing email, the campaigns, and who each
 -- one went to. See the migration for the rules.
@@ -1057,7 +1101,9 @@ CREATE TABLE IF NOT EXISTS order_payments (
   stripeCheckedAt TEXT,
   -- (0099) 1 = not yet fully cashed out and not matched to a bank line (the deposit picker's candidates); kept by
   -- the payments_/cashouts_/transfers_/matches_deposit_open triggers below.
-  depositOpen INTEGER NOT NULL DEFAULT 1 CHECK (depositOpen IN (0, 1))
+  depositOpen INTEGER NOT NULL DEFAULT 1 CHECK (depositOpen IN (0, 1)),
+  -- (0120) the gift card a gift-card payment (method 'other', accountId NULL) or its refund came from.
+  giftCardId  INTEGER
 );
 
 -- How much of a Venmo payment each Venmo -> bank transfer covers (migrations/0018). A payment
@@ -1152,6 +1198,7 @@ CREATE INDEX IF NOT EXISTS idx_payments_order        ON order_payments(orderId);
 CREATE INDEX IF NOT EXISTS idx_payments_received     ON order_payments(receivedAt);
 CREATE INDEX IF NOT EXISTS idx_payments_cashout      ON order_payments(cashoutTransferId);
 CREATE INDEX IF NOT EXISTS idx_payments_deposit_open ON order_payments(depositOpen, kind) WHERE depositOpen = 1;   -- migrations/0099
+CREATE INDEX IF NOT EXISTS idx_order_payments_giftcard ON order_payments(giftCardId) WHERE giftCardId IS NOT NULL;   -- migrations/0120
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_external_ref ON order_payments(externalRef) WHERE externalRef <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_request_key ON order_payments(requestKey) WHERE requestKey IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_verif_order           ON design_verifications(orderId);

@@ -66,6 +66,7 @@ function addUse(d1, codeId, orderId, email, released) {
     codeId, orderId, email || "", released ? "2027-01-01T00:00:00.000Z" : null);
 }
 const liveUses = (d1, codeId) => d1.q("SELECT count(*) AS n FROM discount_code_uses WHERE codeId = ? AND releasedAt IS NULL", codeId)[0].n;
+const liveRow = (d1, orderId) => d1.q("SELECT * FROM discount_code_uses WHERE orderId = ? AND releasedAt IS NULL", orderId)[0] || null;
 const useRow = (d1, orderId) => d1.q("SELECT * FROM discount_code_uses WHERE orderId = ?", orderId)[0] || null;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -119,7 +120,7 @@ const ORDER_HAS_CODE = "This order already has a discount code.";
 
   let r = await check("SAVE10");
   ok("a good percent code answers ok with its id, code, label, kind, percent and amount",
-    r.ok === true && same(r.code, { id: save10, code: "SAVE10", label: "10% off", kind: "percent", percent: 10, amount: null, maxDiscount: null }));
+    r.ok === true && same(r.code, { id: save10, code: "SAVE10", label: "10% off", kind: "percent", percent: 10, amount: null, maxDiscount: null, minOrder: null, freeShipping: false }));
   ok("its discount is in dollars: 10% of $19.95 is $2.00", r.discount === 2);
   ok("the answer never carries the email, the uses or the limit", !("email" in r.code) && !("used" in r.code) && !("maxUses" in r.code) && !("email" in r));
   r = await check("FIVE-OFF", { subtotal: 3.5 });
@@ -277,8 +278,8 @@ const ORDER_HAS_CODE = "This order already has a discount code.";
   ok("the count drops: the code has no live use", liveUses(c2, give) === 0);
   r = await lib.releaseDiscountCodeUse(c2, "G1", "2027-06-17T09:00:00.000Z");
   ok("giving it back twice is a no-op: no code, the first time kept", r.ok === true && r.code === "" && useRow(c2, "G1").releasedAt === "2027-06-16T09:00:00.000Z");
-  ok("an order with no use: a no-op answering no code", same(await lib.releaseDiscountCodeUse(c2, "NOSUCH"), { ok: true, code: "" }));
-  ok("no order id: a no-op answering no code", same(await lib.releaseDiscountCodeUse(c2, ""), { ok: true, code: "" }) && same(await lib.releaseDiscountCodeUse(c2, null), { ok: true, code: "" }));
+  ok("an order with no use: a no-op answering no code", same(await lib.releaseDiscountCodeUse(c2, "NOSUCH"), { ok: true, codes: [], code: "" }));
+  ok("no order id: a no-op answering no code", same(await lib.releaseDiscountCodeUse(c2, ""), { ok: true, codes: [], code: "" }) && same(await lib.releaseDiscountCodeUse(c2, null), { ok: true, codes: [], code: "" }));
   ok("releasing one order leaves other orders' uses counted", liveUses(c2, single) === 1 && liveUses(c2, each) === 4);
 
   r = await lib.claimDiscountCode(c2, { codeId: give, orderId: "G1", email: "pat@example.com", amountCents: 140, now: "2027-06-18T10:00:00.000Z" });
@@ -290,7 +291,7 @@ const ORDER_HAS_CODE = "This order already has a discount code.";
   r = await lib.claimDiscountCode(c2, { codeId: give, orderId: "G1", email: "pat@example.com", amountCents: 1 });
   ok("…and then the first order can't take it back: the code has been used", r.ok === false && r.reason === USED_ONCE && useRow(c2, "G1").releasedAt !== null);
   r = await lib.claimDiscountCode(c2, { codeId: other, orderId: "G1", email: "pat@example.com", amountCents: 77 });
-  ok("a released order can take a different code: its one row moves to that code", r.ok === true && useRow(c2, "G1").codeId === other && useRow(c2, "G1").releasedAt === null && useRow(c2, "G1").amountCents === 77);
+  ok("a released order can take a different code: it takes a live row of its own (the given-back use stays, released: an order may now carry several codes, migrations/0120)", r.ok === true && liveRow(c2, "G1").codeId === other && liveRow(c2, "G1").releasedAt === null && liveRow(c2, "G1").amountCents === 77 && c2.q("SELECT count(*) AS n FROM discount_code_uses WHERE orderId = 'G1'")[0].n === 2);
 
   // ---- before migrations/0115 -----------------------------------------------------------------------------------------
   const old = await makeDb("0115");
@@ -298,7 +299,7 @@ const ORDER_HAS_CODE = "This order already has a discount code.";
   ok("before 0115, checking a code says it isn't valid (not ready), never an error", r.ok === false && r.reason === INVALID_EMAIL && r.notReady === true);
   r = await lib.claimDiscountCode(old, { codeId: 1, orderId: "A", email: "", amountCents: 1 });
   ok("before 0115, a claim is refused as not ready", r.ok === false && r.reason === INVALID && r.notReady === true);
-  ok("before 0115, giving a use back is a no-op", same(await lib.releaseDiscountCodeUse(old, "A"), { ok: true, code: "" }));
+  ok("before 0115, giving a use back is a no-op", same(await lib.releaseDiscountCodeUse(old, "A"), { ok: true, codes: [], code: "" }));
   r = await lib.createDiscountCodesForEmails(old, { emails: ["pat@example.com"], kind: "percent", percent: 10 });
   ok("before 0115, bulk codes answer not ready", r.notReady === true && /latest database update/.test(r.error));
   const broken = { prepare() { throw new Error("D1_ERROR: disk I/O error"); } };

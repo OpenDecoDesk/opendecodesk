@@ -85,8 +85,10 @@ const addCode = (d1, cols) => {
     ok(`the index ${ix} is the same in schema.sql and the migration`, !!indexSql(migrated, ix) && indexSql(fresh, ix) === indexSql(migrated, ix));
   ok("a code's text is unique (a unique index on discount_codes.code)",
     indexSql(migrated, "idx_discount_codes_code") === "CREATE UNIQUE INDEX idx_discount_codes_code ON discount_codes(code)");
-  ok("an order has at most one use (a unique index on discount_code_uses.orderId)",
-    indexSql(migrated, "idx_discount_uses_order") === "CREATE UNIQUE INDEX idx_discount_uses_order ON discount_code_uses(orderId)");
+  // migrations/0120: an order may carry several codes, so one use per (order, code) and a plain index on the order.
+  ok("an order has at most one use of each code (a unique index on discount_code_uses.orderId, codeId), and its uses are found by a plain index on the order",
+    indexSql(migrated, "idx_discount_uses_order_code") === "CREATE UNIQUE INDEX idx_discount_uses_order_code ON discount_code_uses(orderId, codeId)" &&
+    indexSql(migrated, "idx_discount_uses_order") === "CREATE INDEX idx_discount_uses_order ON discount_code_uses(orderId)");
   ok("a code's live uses are counted through a partial index on the uses not given back",
     indexSql(migrated, "idx_discount_uses_code") === "CREATE INDEX idx_discount_uses_code ON discount_code_uses(codeId) WHERE releasedAt IS NULL");
   ok("a code's shop refers to the shop (orgs.orgId); its use refers to the code (discount_codes.id)",
@@ -231,8 +233,8 @@ const addCode = (d1, cols) => {
   ok("claimDiscountCode without 0115 is refused (\"This code isn't valid.\") and says the database isn't ready",
     claim.ok === false && claim.reason === "This code isn't valid." && claim.notReady === true);
   ok("(control) releaseDiscountCodeUse gives back the second order's use and names its code",
-    same(await lib.releaseDiscountCodeUse(ctl, "C-2", "2026-06-16T00:00:00.000Z"), { ok: true, code: "SAVE10" }));
-  ok("releaseDiscountCodeUse without 0115 is a no-op: ok, no code", same(await lib.releaseDiscountCodeUse(old, "O-1"), { ok: true, code: "" }));
+    same(await lib.releaseDiscountCodeUse(ctl, "C-2", "2026-06-16T00:00:00.000Z"), { ok: true, codes: ["SAVE10"], code: "SAVE10" }));
+  ok("releaseDiscountCodeUse without 0115 is a no-op: ok, no code", same(await lib.releaseDiscountCodeUse(old, "O-1"), { ok: true, codes: [], code: "" }));
 
   const notReady = (r) => !!r && r.notReady === true && r.error === NOT_READY;
   ok("saveDiscountCode (a new code) without 0115: { error, notReady }",

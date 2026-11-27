@@ -182,7 +182,7 @@ test("the owner makes a percent code and a code for one person on the page; the 
   // The code in lower case: the server's answer, the code shown, the Discount line and the lower total.
   const r = await apply(cp, pct.toLowerCase());
   expect(r.status).toBe(200);
-  expect(r.body).toEqual({ status: "ok", code: pct, label: "10% off", discount: 4 });
+  expect(r.body).toEqual({ status: "ok", code: pct, label: "10% off", discount: 4, freeShipping: false, combined: { discount: 4, freeShipping: false, codes: [{ code: pct, discount: 4, freeShipping: false }] } });
   expect(r.sent).toMatchObject({ action: "checkDiscountCode", orgId: shop.orgId, code: pct.toLowerCase(), email: "casey@example.test" });
   expect(r.sent.items).toHaveLength(1);
   await expect(b.on).toHaveText(pct + " — 10% off");
@@ -268,7 +268,7 @@ test("a code for one person: refused for another email with the generic sentence
   // pat@example.com (typed in another case): $5 off the $20 tee.
   await cp.getByLabel("Email address").fill("Pat@Example.com");
   r = await apply(cp, code);
-  expect(r.body).toEqual({ status: "ok", code, label: "$5.00 off", discount: 5 });
+  expect(r.body).toEqual({ status: "ok", code, label: "$5.00 off", discount: 5, freeShipping: false, combined: { discount: 5, freeShipping: false, codes: [{ code: code, discount: 5, freeShipping: false }] } });
   await expect(b.on).toHaveText(code + " — $5.00 off");
   await expect(b.line).toHaveText(`Discount (${code})−$5.00`);
   await expect(b.total).toHaveText("$15.00");
@@ -387,7 +387,7 @@ test("a 100% code places an order with nothing to pay", async ({ page, api, as }
   const code = codeOf("FREE");
   await apiCode(api, shop, { code, kind: "percent", percent: 100, maxUses: 3 });
   const cp = await checkout(as, shop, { qty: 2, email: "free@example.com" });
-  expect((await apply(cp, code)).body).toEqual({ status: "ok", code, label: "100% off", discount: 40 });
+  expect((await apply(cp, code)).body).toEqual({ status: "ok", code, label: "100% off", discount: 40, freeShipping: false, combined: { discount: 40, freeShipping: false, codes: [{ code: code, discount: 40, freeShipping: false }] } });
   await expect(box(cp).line).toHaveText(`Discount (${code})−$40.00`);
   await expect(box(cp).total).toHaveText("$0.00");
   const order = await placeIt(cp);

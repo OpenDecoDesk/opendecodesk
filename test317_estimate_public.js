@@ -198,8 +198,8 @@ const quietly = async (fn) => { console.error = (...a) => logged.push(a.map(Stri
     !json.includes("SECRET-NOTE") && !/internalNote|sentTo|createdBy|customerId|"token"/.test(json) && !json.includes(A.token) && !json.includes("pat@example.com"));
   ok("it never shows costs or list prices by their stored names", !/cost|listUnitPrice|breakOff|Cents/i.test(json));
   ok("it never shows anything of another quote", !json.includes("OTHER-QUOTE") && !json.includes(other.number));
-  ok("its exact keys are the customer's view and nothing more", JSON.stringify(Object.keys(v).sort()) === JSON.stringify(["acceptedAt", "canAccept", "canAskChanges", "customerName", "customerNote", "expired",
-    "expiresOn", "fees", "lines", "message", "number", "orderId", "orgAccent", "orgId", "orgName", "respondedAt", "sentAt", "status", "subtotal", "tax", "taxJurisdiction", "taxMode", "taxRate", "title", "total"].sort()) &&
+  ok("its exact keys are the customer's view and nothing more", JSON.stringify(Object.keys(v).sort()) === JSON.stringify(["acceptedAt", "canAccept", "canAskChanges", "customerName", "customerNote", "discount", "discountCodes", "discounts", "expired",
+    "expiresOn", "fees", "lines", "message", "number", "orderId", "orgAccent", "orgId", "orgName", "respondedAt", "sentAt", "shippingOff", "status", "subtotal", "tax", "taxJurisdiction", "taxMode", "taxRate", "title", "total"].sort()) &&
     JSON.stringify(Object.keys(L[0]).sort()) === JSON.stringify(["detail", "kind", "lineTotal", "name", "qty", "size", "taxable", "unitPrice", "wasPrice"]));
   const firstView = estRow(A.id).viewedAt;
   ok("opening the link marks the quote viewed", !!firstView);

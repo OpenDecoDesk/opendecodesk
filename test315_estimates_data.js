@@ -89,7 +89,7 @@ const TOKEN_A = "a".repeat(32), TOKEN_B = "b".repeat(32);
     ["sendCount", "INTEGER", 1, "0", 0], ["viewedAt", "TEXT", 0, null, 0], ["respondedAt", "TEXT", 0, null, 0], ["customerNote", "TEXT", 1, "''", 0],
     ["acceptedAt", "TEXT", 0, null, 0], ["orderId", "TEXT", 0, null, 0], ["convertedAt", "TEXT", 0, null, 0], ["cancelledAt", "TEXT", 0, null, 0],
     ["taxMode", "TEXT", 1, "'inclusive'", 0], ["taxRateBps", "INTEGER", 1, "0", 0], ["createdAt", "TEXT", 1, null, 0], ["updatedAt", "TEXT", 1, null, 0],
-    ["createdBy", "TEXT", 1, "''", 0],
+    ["createdBy", "TEXT", 1, "''", 0], ["discountCodes", "TEXT", 1, "'[]'", 0],   // migrations/0120: the codes typed on the quote
   ];
   const wantItems = [
     ["id", "INTEGER", 0, null, 1], ["estimateId", "INTEGER", 1, null, 0], ["position", "INTEGER", 1, "0", 0], ["kind", "TEXT", 1, null, 0],
@@ -98,7 +98,7 @@ const TOKEN_A = "a".repeat(32), TOKEN_B = "b".repeat(32);
     ["qty", "INTEGER", 1, "1", 0], ["unitPriceCents", "INTEGER", 1, "0", 0], ["listUnitCents", "INTEGER", 1, "0", 0],
     ["personalizationFeeCents", "INTEGER", 1, "0", 0], ["customPrice", "INTEGER", 1, "0", 0], ["taxable", "INTEGER", 1, "1", 0], ["lineTotalCents", "INTEGER", 1, "0", 0],
   ];
-  ok("the migrated estimates table has the 25 columns, with their types and defaults, in order", cols(migrated, "estimates") === JSON.stringify(wantEstimates));
+  ok("the migrated estimates table has the 26 columns, with their types and defaults, in order", cols(migrated, "estimates") === JSON.stringify(wantEstimates));
   ok("schema.sql's estimates table has exactly the same columns", cols(fresh, "estimates") === cols(migrated, "estimates"));
   ok("the migrated estimate_items table has the 19 columns, with their types and defaults, in order", cols(migrated, "estimate_items") === JSON.stringify(wantItems));
   ok("schema.sql's estimate_items table has exactly the same columns", cols(fresh, "estimate_items") === cols(migrated, "estimate_items"));
@@ -260,7 +260,7 @@ const TOKEN_A = "a".repeat(32), TOKEN_B = "b".repeat(32);
   let g = await lib.getEstimate(d1, q1);
   ok("getEstimate answers the quote, its lines, its customer and its totals", keys(g) === "customer,estimate,items,totals");
   ok("the quote has every field people see, plus expired and the link's token", keys(g.estimate) === [
-    "acceptedAt", "cancelledAt", "convertedAt", "createdAt", "createdBy", "customerId", "customerNote", "expired", "expiresOn", "id", "internalNote", "message", "number",
+    "acceptedAt", "cancelledAt", "convertedAt", "createdAt", "createdBy", "customerId", "customerNote", "discountCodes", "expired", "expiresOn", "id", "internalNote", "message", "number",
     "orderId", "orgId", "respondedAt", "sendCount", "sentAt", "sentTo", "status", "taxMode", "taxRateBps", "title", "token", "updatedAt", "viewedAt"].join(","));
   ok("what isn't set yet reads as empty text, not null", same([g.estimate.token, g.estimate.sentAt, g.estimate.viewedAt, g.estimate.respondedAt, g.estimate.acceptedAt,
     g.estimate.orderId, g.estimate.convertedAt, g.estimate.cancelledAt], ["", "", "", "", "", "", "", ""]));

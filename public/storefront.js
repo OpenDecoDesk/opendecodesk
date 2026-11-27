@@ -555,12 +555,17 @@ function renderStripeSuccess(app, orgId, org, orderId){
   // Paid: forget the pending card order and the cart it came from.
   writePendingCard_(orgId, null); unpaidCardNotice = null;
   clearCart_(); try{ sessionStorage.removeItem("cart:" + orgId); }catch(_){}
+  // Back from buying a gift card (giftBuySubmit_ left a note in this tab): the card goes to the recipient.
+  let gift = null;
+  try{ gift = JSON.parse(sessionStorage.getItem("giftCardBuy:" + orgId) || "null"); if(gift && orderId && gift.orderId !== orderId) gift = null; }catch(_){}
+  if(gift){ try{ sessionStorage.removeItem("giftCardBuy:" + orgId); }catch(_){} }
   app.innerHTML = `
     <div class="confirmation" style="${orgAccentVars(org.accent)}">
       <div class="stitch"></div>
       <h2>Thank you — your payment went through.</h2>
       <div class="order-number">${escapeHtml(orderId || "")}</div>
-      <p>Your order for ${escapeHtml(org.name)} is in. Stripe emails you a receipt for the card payment, and we'll email you once we've confirmed your order.</p>
+      ${gift ? `<p>Your gift card for ${escapeHtml(gift.recipientName || "your recipient")} is on its way: we're emailing it to ${escapeHtml(gift.recipientEmail || "them")} now. Stripe emails you a receipt for the card payment. A gift card never expires.</p>`
+      : `<p>Your order for ${escapeHtml(org.name)} is in. Stripe emails you a receipt for the card payment, and we'll email you once we've confirmed your order.</p>`}
       <p>Questions about your order? Reply to your order email.</p>
       <br>
       <button class="confirmation-back" data-action="go-org" data-org="${orgId}" style="background:none; border:none; margin-top:12px;">&larr; Back to ${escapeHtml(org.name)}</button>
@@ -568,16 +573,138 @@ function renderStripeSuccess(app, orgId, org, orderId){
   `;
 }
 
+// ---- Buy a gift card (migrations/0120) ----
+// Shown when Global settings → Gift cards sells them online (catalog.giftCards.sellOnline: also needs the Gift cards
+// feature and card payments at this shop). A shop page's "Gift cards" button opens this form: amount buttons plus an
+// amount of the buyer's own within the limits, who it is for, who is buying, a message. The order is a card order
+// (buyGiftCard), paid through Stripe Checkout exactly like any other; the card is made and emailed to the recipient once
+// the payment is in (the server does that, from Stripe's notice), never before. The server checks every number again.
+const gb_ = { amount: 0, custom: "", recipientName: "", recipientEmail: "", buyerName: "", buyerEmail: "", message: "", busy: false, err: "", attempt: null };
+const GIFT_MESSAGE_MAX_ = 300;
+function giftSellOn_(org){ return !!(org && org.giftCards && org.giftCards.sellOnline === true && Array.isArray(org.giftCards.amounts) && !org.preview); }
+function giftBuyCents_(){
+  const custom = String(gb_.custom || "").replace(/[$,\s]/g, "");
+  const dollars = custom ? (/^\d+(\.\d{1,2})?$/.test(custom) ? Number(custom) : NaN) : gb_.amount;
+  return Number.isFinite(dollars) && dollars > 0 ? Math.round(dollars * 100) : 0;
+}
+function giftBuyMsgEl_(text){
+  gb_.err = text || "";
+  const el = document.getElementById("gbMsg");
+  if(el){ el.textContent = gb_.err; el.hidden = !gb_.err; }
+}
+function renderGiftBuy_(){
+  const org = currentOrg, app = document.getElementById("app");
+  if(!org || !app || !giftSellOn_(org)) return;
+  document.title = org.name + " — Gift cards";
+  const g = org.giftCards, money = (n) => "$" + Number(n).toFixed(Number(n) % 1 ? 2 : 0);
+  const field = (key, label, attrs) => `<label class="gb-field">${label}<input type="${attrs.type || "text"}" data-gb="${key}" value="${escapeHtml(gb_[key])}" maxlength="${attrs.max}" autocomplete="${attrs.auto}"${attrs.mode ? ` inputmode="${attrs.mode}"` : ""}></label>`;
+  app.innerHTML = `
+    <div class="confirmation giftbuy" style="${orgAccentVars(org.accent)}">
+      <div class="stitch"></div>
+      <h2>Gift cards</h2>
+      <p>Give a gift card for ${escapeHtml(org.name)}. We email it to the person you choose once your payment goes through. It can be used at checkout and never expires.</p>
+      <div class="gb-form">
+        <div class="gb-label" id="gbAmountLabel">Amount</div>
+        <div class="gb-amounts" role="group" aria-labelledby="gbAmountLabel">
+          ${g.amounts.map(a => `<button type="button" class="gb-amount${gb_.amount === a && !gb_.custom ? " on" : ""}" data-action="giftbuy-amount" data-amount="${escapeHtml(String(a))}" aria-pressed="${gb_.amount === a && !gb_.custom ? "true" : "false"}">${escapeHtml(money(a))}</button>`).join("")}
+        </div>
+        <label class="gb-field">Or another amount (${escapeHtml(money(g.min))} to ${escapeHtml(money(g.max))})
+          <input type="text" data-gb="custom" value="${escapeHtml(gb_.custom)}" maxlength="9" inputmode="decimal" autocomplete="off" placeholder="e.g. 40"></label>
+        ${field("recipientName", "Who is it for? (name)", { max: 100, auto: "off" })}
+        ${field("recipientEmail", "Their email address", { type: "email", max: 254, auto: "off" })}
+        ${field("buyerName", "Your name", { max: 100, auto: "name" })}
+        ${field("buyerEmail", "Your email address (for your receipt)", { type: "email", max: 254, auto: "email" })}
+        <label class="gb-field">Message (optional)
+          <textarea data-gb="message" rows="3" maxlength="${GIFT_MESSAGE_MAX_}">${escapeHtml(gb_.message)}</textarea></label>
+        <div class="gb-count" id="gbCount" aria-hidden="true">${gb_.message.length} / ${GIFT_MESSAGE_MAX_}</div>
+        <div class="checkout-msg" id="gbMsg" role="alert"${gb_.err ? "" : " hidden"}>${escapeHtml(gb_.err)}</div>
+        <button type="button" class="place-order-btn" id="gbSubmit" data-action="giftbuy-submit"${gb_.busy ? " disabled" : ""}>${gb_.busy ? "Processing…" : "Pay by card"}</button>
+      </div>
+      <br>
+      <button class="confirmation-back" data-action="go-org" data-org="${escapeHtml(org.orgId)}" style="background:none; border:none; margin-top:12px;">&larr; Back to ${escapeHtml(org.name)}</button>
+    </div>`;
+  window.scrollTo(0, 0);
+}
+function giftBuyInput_(el){
+  const key = el.dataset.gb;
+  if(!(key in gb_) || key === "amount") return;
+  gb_[key] = el.value;
+  if(gb_.err) giftBuyMsgEl_("");
+  if(key === "custom" && el.value.trim()){ gb_.amount = 0; document.querySelectorAll(".gb-amount").forEach(b => { b.classList.remove("on"); b.setAttribute("aria-pressed", "false"); }); }
+  if(key === "message"){ const c = document.getElementById("gbCount"); if(c) c.textContent = el.value.length + " / " + GIFT_MESSAGE_MAX_; }
+}
+function giftBuyPickAmount_(v){
+  gb_.amount = Number(v) || 0; gb_.custom = "";
+  const c = document.querySelector('[data-gb="custom"]'); if(c) c.value = "";
+  document.querySelectorAll(".gb-amount").forEach(b => { const on = Number(b.dataset.amount) === gb_.amount; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on ? "true" : "false"); });
+  if(gb_.err) giftBuyMsgEl_("");
+}
+async function giftBuySubmit_(){
+  const org = currentOrg;
+  if(!giftSellOn_(org) || gb_.busy) return;
+  const cents = giftBuyCents_(), g = org.giftCards;
+  const emailOk = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v).trim());
+  const fail = (msg, focus) => { giftBuyMsgEl_(msg); const f = focus && document.querySelector('[data-gb="' + focus + '"]'); if(f) f.focus(); };
+  const inList = g.amounts.some(a => Math.round(a * 100) === cents);
+  if(!cents || (!inList && (cents < Math.round(g.min * 100) || cents > Math.round(g.max * 100)))){
+    return fail("Choose an amount, or type one between $" + Number(g.min).toFixed(2) + " and $" + Number(g.max).toFixed(2) + ".", gb_.amount ? "" : "custom");
+  }
+  if(!gb_.recipientName.trim()) return fail("Please add the name of the person it is for.", "recipientName");
+  if(!emailOk(gb_.recipientEmail)) return fail("Please add a valid email address for the person it is for — the gift card is sent there.", "recipientEmail");
+  if(!gb_.buyerName.trim()) return fail("Please add your name.", "buyerName");
+  if(!emailOk(gb_.buyerEmail)) return fail("Please add a valid email address for your receipt.", "buyerEmail");
+  const body = { action: "buyGiftCard", orgId: org.orgId, amountCents: cents, recipientName: gb_.recipientName.trim(), recipientEmail: gb_.recipientEmail.trim(),
+    buyerName: gb_.buyerName.trim(), buyerEmail: gb_.buyerEmail.trim(), message: gb_.message.trim().slice(0, GIFT_MESSAGE_MAX_) };
+  // The same request id for the same gift until it is placed, so a retry after a lost answer is the same order.
+  const sig = JSON.stringify(body);
+  if(!gb_.attempt || gb_.attempt.sig !== sig) gb_.attempt = { sig, id: "GC-" + Date.now().toString(36).toUpperCase() + "-" + crypto.getRandomValues(new Uint32Array(1))[0].toString(36).toUpperCase() };
+  body.requestId = gb_.attempt.id;
+  gb_.busy = true; giftBuyMsgEl_("");
+  const btn = document.getElementById("gbSubmit"); if(btn){ btn.disabled = true; btn.textContent = "Processing…"; }
+  const done = (msg) => { gb_.busy = false; if(btn){ btn.disabled = false; btn.textContent = "Pay by card"; } if(msg) giftBuyMsgEl_(msg); };
+  try{
+    const turnstileToken = await getTurnstileToken();
+    if(turnstileToken) body.turnstileToken = turnstileToken;
+    const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => null);
+    if(!res.ok || !data || data.status !== "ok"){
+      if(res.status === 429) return done("Too many tries — please wait a minute and try again.");
+      return done(data && data.message && res.status < 500 ? String(data.message) : "We couldn't start your gift card order just now. Please try again in a moment.");
+    }
+    // Card payment: the order exists; Stripe's hosted page takes the card (as for any card order), and the server makes
+    // and emails the gift card when Stripe says the payment went through.
+    let url = data.url || "";
+    if(!url){
+      const co = await fetch("/api/checkout", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId: data.orderId, orgId: org.orgId, checkoutToken: data.checkoutToken || null }) });
+      const cd = await co.json().catch(() => null);
+      url = cd && cd.url ? cd.url : "";
+    }
+    if(!url) return done("Your gift card order is saved, but the card payment couldn't be started. Please try again.");
+    try{
+      sessionStorage.setItem("giftCardBuy:" + org.orgId, JSON.stringify({ orderId: data.orderId, recipientName: body.recipientName, recipientEmail: body.recipientEmail }));
+    }catch(_){}
+    writePendingCard_(org.orgId, { orderId: data.orderId, token: data.checkoutToken || null, total: cents / 100 });
+    gb_.attempt = null;
+    window.location.href = url;
+  }catch(err){
+    console.error("Gift card order failed:", err);
+    done("We couldn't reach the server — check your connection and try again.");
+  }
+}
+
 // ---- Invoice page (/?invoice=<token>) ---------------------------------------------------------
 // Opened from the link in an invoice email (admin → Orders → Send invoice…). Shows the order and
 // what's owed, lets the customer choose how they'll get it — the shop's delivery & pickup options,
 // with carrier rates for an address — and pay the balance. Everything comes from /api/invoice; a
 // delivery choice is saved there (the fee is the server's) and the page is redrawn from its answer.
-const _inv = { token: "", data: null, pick: "", rates: [], ratesZip: "", rateIdx: -1, manual: false, addr: {}, busy: "", err: "", paidNote: false };
+const _inv = { token: "", data: null, pick: "", rates: [], ratesZip: "", rateIdx: -1, manual: false, addr: {}, busy: "", err: "", paidNote: false,
+  codeText: "", codeMsg: "", giftText: "", giftMsg: "", giftOk: "" };
 const invMoney_ = (n) => "$" + Number(n || 0).toFixed(2);
 async function renderInvoice(app, token, justPaid){
   document.title = "Invoice";
-  Object.assign(_inv, { token, data: null, pick: "", rates: [], ratesZip: "", rateIdx: -1, manual: false, addr: {}, busy: "", err: "", paidNote: !!justPaid });
+  Object.assign(_inv, { token, data: null, pick: "", rates: [], ratesZip: "", rateIdx: -1, manual: false, addr: {}, busy: "", err: "", paidNote: !!justPaid,
+    codeText: "", codeMsg: "", giftText: "", giftMsg: "", giftOk: "" });
   app.innerHTML = `<div class="inv" role="status">Loading your invoice…</div>`;
   let res, data;
   try { res = await fetch("/api/invoice?token=" + encodeURIComponent(token)); data = await res.json(); }
@@ -624,6 +751,13 @@ function invDraw_(){
   const deliveryRow = cur
     ? `<tr><td>${escapeHtml(cur.label)}</td><td class="num">${cur.fee == null ? "To follow" : Number(cur.fee) > 0 ? invMoney_(cur.fee) : "Free"}</td></tr>`
     : (v.shipping > 0 ? `<tr><td>Delivery</td><td class="num">${invMoney_(v.shipping)}</td></tr>` : "");
+  // What free-shipping codes took off the shipping (migrations/0120).
+  const freeShipRow = Number(v.shippingDiscount) > 0
+    ? `<tr><td>Free shipping${(v.discountCodes || []).length ? " (" + escapeHtml(v.discountCodes.join(", ")) + ")" : ""}</td><td class="num">−${invMoney_(v.shippingDiscount)}</td></tr>` : "";
+  // Gift cards are a payment: listed as paid, and out of "Paid so far" so nothing is counted twice.
+  const giftPaid = (v.giftCardPaid || []).filter(g => Number(g.amount) > 0);
+  const giftRows = giftPaid.map(g => `<tr class="inv-gift"><td>Paid by ${escapeHtml(String(g.label || "gift card").replace(/^Gift card/i, "gift card"))}</td><td class="num">−${invMoney_(g.amount)}</td></tr>`).join("");
+  const otherReceived = Math.round((Number(v.received) - giftPaid.reduce((n, g) => n + Math.round(g.amount * 100), 0) / 100) * 100) / 100;
   // Sales tax added on top of the prices (taxMode "exclusive") is its own line in the totals; tax
   // included in them is noted under the totals.
   const taxOnTop = v.taxMode === "exclusive";
@@ -702,7 +836,21 @@ function invDraw_(){
     // Who to pay comes from Global settings → Business profile (the same details the order confirmation shows).
     if (!wait && v.payments.includes("Zelle")) how.push(`<div class="inv-how"><b class="t">Zelle</b>${business.zelle ? `Send ${due} to <b>${escapeHtml(business.zelle)}</b>` : `Amount due: <b>${due}</b> — we'll send you the Zelle details`} — put <b>${escapeHtml(v.orderId)}</b> in the memo.</div>`);
     if (!wait && v.payments.includes("Check")) how.push(`<div class="inv-how"><b class="t">Check</b>Make it payable to <b>${escapeHtml(business.legalName || bizName_())}</b>, write <b>${escapeHtml(v.orderId)}</b> in the memo${business.mailingAddress ? ` and mail it to <b>${escapeHtml(business.mailingAddress)}</b>` : " — we'll tell you where to send it"}.</div>`);
+    // A discount code and/or a gift card, before paying the balance (what the server allows now is v.addOns).
+    const ao = v.addOns || {};
+    const addOnHtml = !wait && (ao.code || ao.giftCard) ? `<div class="inv-addons">
+        ${ao.code ? `<div class="inv-addon"><label for="invCode">${(v.discountCodes || []).length ? "Another discount code" : "Have a discount code?"}</label>
+          <div class="inv-addon-row"><input type="text" id="invCode" maxlength="64" autocomplete="off" autocapitalize="characters" spellcheck="false" value="${escapeHtml(_inv.codeText)}" aria-describedby="invCodeMsg">
+          <button type="button" class="inv-btn second" id="invCodeBtn"${_inv.busy === "code" ? " disabled" : ""}>${_inv.busy === "code" ? "Checking…" : "Apply"}</button></div>
+          <div class="inv-err" id="invCodeMsg" role="alert">${escapeHtml(_inv.codeMsg)}</div></div>` : ""}
+        ${ao.giftCard ? `<div class="inv-addon"><label for="invGift">Have a gift card?</label>
+          <div class="inv-addon-row"><input type="text" id="invGift" maxlength="24" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX" value="${escapeHtml(_inv.giftText)}" aria-describedby="invGiftMsg">
+          <button type="button" class="inv-btn second" id="invGiftBtn"${_inv.busy === "gift" ? " disabled" : ""}>${_inv.busy === "gift" ? "Checking…" : "Use gift card"}</button></div>
+          <div class="inv-detail" style="margin-top:4px;">It pays up to what is on the card, of what you owe.</div>
+          <div class="${_inv.giftOk ? "inv-detail" : "inv-err"}" id="invGiftMsg" role="alert">${escapeHtml(_inv.giftMsg)}</div></div>` : ""}
+      </div>` : "";
     payHtml = `${_inv.paidNote ? `<div class="inv-banner inv-wait" role="status">Thanks — your payment is being confirmed. This page will update in a moment.</div>` : ""}
+      ${addOnHtml}
       ${wait ? `<p class="inv-detail" style="font-size:14px;">Choose how you'd like to get your order above — the total depends on it — then pay here.</p>` : ""}
       ${rushShort}
       <div class="inv-pay">${how.join("") || `<p>We'll be in touch about payment.</p>`}</div>
@@ -719,10 +867,12 @@ function invDraw_(){
         <tr><td>Subtotal</td><td class="num">${invMoney_(v.subtotal)}</td></tr>
         ${v.discount > 0 ? `<tr><td>Discount${v.discountNote ? " (" + escapeHtml(v.discountNote) + ")" : ""}</td><td class="num">−${invMoney_(v.discount)}</td></tr>` : ""}
         ${deliveryRow}
+        ${freeShipRow}
         ${v.rushRequested ? `<tr><td>Rush fee</td><td class="num">${v.rushFeePending ? "To follow" : invMoney_(v.rushFee)}</td></tr>` : ""}
         ${taxRow}
         <tr class="inv-total"><td>Total</td><td class="num">${invMoney_(v.total)}</td></tr>
-        ${v.received > 0 ? `<tr><td>Paid so far</td><td class="num">−${invMoney_(v.received)}</td></tr>` : ""}
+        ${giftRows}
+        ${otherReceived > 0 ? `<tr><td>Paid so far</td><td class="num">−${invMoney_(otherReceived)}</td></tr>` : ""}
         ${v.paid ? "" : `<tr class="inv-due"><td>Balance due</td><td class="num">${invMoney_(v.balanceDue)}</td></tr>`}
       </tbody></table>
       ${taxNote}
@@ -758,6 +908,37 @@ function invWire_(){
   });
   const save = document.getElementById("invSaveDelivery"); if (save) save.onclick = invSaveDelivery_;
   const card = document.getElementById("invPayCard"); if (card) card.onclick = invPayCard_;
+  const codeBtn = document.getElementById("invCodeBtn"); if (codeBtn) codeBtn.onclick = () => invAddOn_("applyCode");
+  const giftBtn = document.getElementById("invGiftBtn"); if (giftBtn) giftBtn.onclick = () => invAddOn_("applyGiftCard");
+  const codeBox = document.getElementById("invCode");
+  if (codeBox) { codeBox.oninput = () => { _inv.codeText = codeBox.value; }; codeBox.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); invAddOn_("applyCode"); } }; }
+  const giftBox = document.getElementById("invGift");
+  if (giftBox) { giftBox.oninput = () => { _inv.giftText = giftBox.value; }; giftBox.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); invAddOn_("applyGiftCard"); } }; }
+}
+// A discount code or a gift card typed on the invoice. The server (the shop's rules) decides; its answer is the invoice as
+// it is now, or a sentence to show under the box. Nothing is kept of a gift card number once it has been tried.
+async function invAddOn_(action){
+  const isCode = action === "applyCode";
+  const text = (isCode ? _inv.codeText : _inv.giftText).trim();
+  const setMsg = (m, ok) => { if (isCode) _inv.codeMsg = m; else { _inv.giftMsg = m; _inv.giftOk = ok ? "1" : ""; } };
+  if (!text) { setMsg(isCode ? "Enter a discount code." : "Enter your gift card number."); invDraw_(); return; }
+  setMsg(""); _inv.busy = isCode ? "code" : "gift"; invDraw_();
+  try {
+    const res = await fetch("/api/invoice", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: _inv.token, action, code: text }) });
+    const data = await res.json().catch(() => null);
+    _inv.busy = "";
+    if (data && data.status === "ok") {
+      const before = Number(_inv.data.balanceDue) || 0;
+      if (isCode) _inv.codeText = ""; else _inv.giftText = "";
+      setMsg("");
+      announceStatus(isCode ? "Discount code applied." : "Gift card used.");
+      invApply_(data.invoice);
+      if (!isCode) { const took = before - (Number(data.invoice.balanceDue) || 0); if (took > 0 && !data.invoice.paid) { setMsg("The gift card paid " + invMoney_(took) + ". The rest is still due below.", true); invDraw_(); } }
+    } else {
+      setMsg(res.status === 429 ? "Too many tries — please wait a minute and try again." : (data && data.message && res.status < 500 ? String(data.message) : "We couldn't do that just now. Please try again."));
+      invDraw_();
+    }
+  } catch (e) { _inv.busy = ""; setMsg("We couldn't reach the server — try again."); invDraw_(); }
 }
 // Carrier rates for the typed ZIP, from the same /api/shipping the storefront uses (each rate comes
 // back signed for this shop, these items and that ZIP — that signature is what gets saved).
@@ -924,6 +1105,7 @@ function estDraw_(){
       ${feeRows ? `<table class="inv-items" style="margin-top:14px;"><thead><tr><th>One-time charges</th><th class="num">Amount</th></tr></thead><tbody>${feeRows}</tbody></table>` : ""}
       <table class="inv-totals"><tbody>
         <tr><td>Subtotal</td><td class="num">${invMoney_(v.subtotal)}</td></tr>
+        ${estDiscountRows_(v)}
         ${taxRow}
         <tr class="inv-total"><td>Total</td><td class="num">${invMoney_(v.total)}</td></tr>
       </tbody></table>
@@ -933,6 +1115,17 @@ function estDraw_(){
     </div>`;
   estWire_();
   restoreFocus();
+}
+// The discount codes on a quote (migrations/0120): one line per code when the quote names each code's share, else one
+// line for them all; then free shipping. The total already has them taken off.
+function estDiscountRows_(v){
+  const per = Array.isArray(v.discounts) ? v.discounts.filter(d => d && Number(d.amount) > 0) : [];
+  const codes = Array.isArray(v.discountCodes) ? v.discountCodes.map(c => String(c && typeof c === "object" ? c.code : c || "")).filter(Boolean) : [];
+  let rows = "";
+  if (per.length > 1) rows = per.map(d => `<tr><td>Discount${d.code ? " (" + escapeHtml(d.code) + ")" : ""}</td><td class="num">−${invMoney_(Number(d.amount))}</td></tr>`).join("");
+  else if (Number(v.discount) > 0) rows = `<tr><td>Discount${codes.length ? " (" + escapeHtml(codes.join(", ")) + ")" : ""}</td><td class="num">−${invMoney_(Number(v.discount))}</td></tr>`;
+  if (Number(v.shippingOff) > 0) rows += `<tr><td>Free shipping</td><td class="num">−${invMoney_(Number(v.shippingOff))}</td></tr>`;
+  return rows;
 }
 function estWire_(){
   const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
@@ -1347,6 +1540,7 @@ function renderOrgPage(app, orgId, org){
       <div class="stitch stitch-thick"></div>
       <p class="desc">${escapeHtml(org.desc)}</p>
       ${fundraiserHtml}
+      ${giftSellOn_(org) ? `<p class="gift-buy-row"><button type="button" class="gift-buy-btn" data-action="giftbuy-open">Gift cards</button></p>` : ""}
     </div>
     ${previewHtml}
     ${bannerHtml}
@@ -1994,28 +2188,42 @@ function checkoutError_(msg, focusId){
   const f = focusId && document.getElementById(focusId);
   if(f && f.focus) f.focus();
 }
-// ---- Discount codes (migrations/0115) ----
+// ---- Discount codes (migrations/0115; more than one at a time: migrations/0120) ----
 // The checkout's "Discount code" box, shown only when the catalog says a code could work at this shop
 // (catalog.discountCodes) and the Discount codes feature is on. Apply asks the server (checkDiscountCode, with the
-// email typed so far and the cart's lines); the SERVER decides the discount — again when the order is placed — so what
-// the cart shows is only its answer for the cart as it was then. A changed cart asks again (debounced).
-let discountApplied_ = null;   // { code, label, discount (dollars), sig (the cart it was worked out for) }
+// email typed so far, the cart's lines and the codes already applied); the SERVER decides the discount — again when the
+// order is placed — so what the cart shows is only its answer for the cart as it was then. A changed cart asks again
+// (debounced). When Global settings → Discount codes allows more than one (catalog.discountRules.multiple) the box
+// takes up to DISCOUNT_MAX_CODES_ of them, each with its own ×; the server says each code's share (percent codes add
+// up, amount codes come off what is left), the page only adds those shares up.
+let discountApplied_ = null;   // null, or a list of { code, label, discount (dollars, this code's share), freeShipping, sig (the cart it was worked out for) }
 let discountInput_ = "";       // what's typed in the box, kept across the panel's redraws
 let discountMsg_ = "";         // the server's refusal (or a note), shown under the box
 let discountBusy_ = false, discountTimer_ = null, discountSeq_ = 0;
+let discountAdding_ = false;   // more than one code allowed: the box for another code is open
+const DISCOUNT_MAX_CODES_ = 5;
 function discountBoxOn_(org){ return !!(org && org.discountCodes === true && featureOn_("discounts") && !org.preview); }
-function discountReset_(){
-  discountApplied_ = null; discountInput_ = ""; discountMsg_ = ""; discountBusy_ = false; discountSeq_++;
+function discountMulti_(org){ return !!(org && org.discountRules && org.discountRules.multiple === true); }
+// Takes the codes off (not the gift cards: those are a payment, kept when a code comes off).
+function discountClear_(){
+  discountApplied_ = null; discountInput_ = ""; discountMsg_ = ""; discountBusy_ = false; discountAdding_ = false; discountSeq_++;
   if(discountTimer_){ clearTimeout(discountTimer_); discountTimer_ = null; }
 }
+// Everything the checkout holds beyond the cart: the codes and the gift cards (a placed order, another shop).
+function discountReset_(){ discountClear_(); giftReset_(); }
 // The lines as the server prices them: a change to any of these can change the discount (a percent of the subtotal,
 // an amount capped at it).
 function discountCartSig_(){ return JSON.stringify(cart.map(c => [c.productId, c.size || "", c.qty, c.lineTotal])); }
-// The discount the cart shows now: the server's answer, never more than the goods subtotal.
+// The discount the cart shows now: the server's answers added up, never more than the goods subtotal.
 function discountNow_(subtotal){
   if(!discountApplied_) return 0;
-  return Math.min(Math.round(Number(discountApplied_.discount || 0) * 100), Math.round(subtotal * 100)) / 100;
+  const cents = discountApplied_.reduce((s, e) => s + Math.max(0, Math.round(Number(e.discount || 0) * 100)), 0);
+  return Math.min(cents, Math.round(subtotal * 100)) / 100;
 }
+// A code (or codes) that makes shipping free: the delivery fee shows as $0.00 and the total drops it. The server
+// takes it off the order's shipping when the order is placed.
+function discountFreeShipping_(){ return !!discountApplied_ && discountApplied_.some(e => e.freeShipping); }
+function discountCodesOf_(pred){ return (discountApplied_ || []).filter(pred || (() => true)).map(e => e.code).join(", "); }
 // A refusal that's about the email address (a code for one person): typing another address makes it stale.
 function discountMsgAboutEmail_(m){ return /check the email address|Enter your email address first/i.test(String(m || "")); }
 function discountMsgEl_(text){
@@ -2023,10 +2231,10 @@ function discountMsgEl_(text){
   const el = document.getElementById("discountMsg");
   if(el){ el.textContent = discountMsg_; el.hidden = !discountMsg_; }
 }
-async function askDiscountCode_(code){
+async function askDiscountCode_(code, others){
   const contactEl = document.getElementById("custContact");
   const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "checkDiscountCode", orgId: currentOrg.orgId, code,
+    body: JSON.stringify({ action: "checkDiscountCode", orgId: currentOrg.orgId, code, others: others || [],
       email: contactEl ? contactEl.value.trim() : "", items: cart.map(({ cdPreviews, ...line }) => line) }) });
   const data = await res.json().catch(() => null);
   if(res.ok && data && data.status === "ok") return { ok: true, data };
@@ -2035,33 +2243,90 @@ async function askDiscountCode_(code){
   if(data && data.message && res.status < 500) return { ok: false, message: String(data.message) };
   return { ok: false, failed: true, message: "We couldn't check that code just now. Please try again." };
 }
+const sameCode_ = (a, b) => String(a || "").trim().toUpperCase() === String(b || "").trim().toUpperCase();
+// One code's row from the server's answer. Free shipping is the code's own flag (the answer's `freeShipping`, or its
+// entry in `combined.perCode`, or a "shipping" kind) — not the shipping amount, which isn't known until delivery is chosen.
+function discountEntryFrom_(d, typed, sig){
+  const code = String(d.code || typed.toUpperCase());
+  const perList = d.combined && (Array.isArray(d.combined.perCode) ? d.combined.perCode : Array.isArray(d.combined.codes) ? d.combined.codes : null);
+  const per = perList ? perList.find(p => sameCode_(p.code, code)) : null;
+  const free = d.freeShipping === true || d.kind === "shipping" || !!(per && (per.freeShipping === true || Number(per.shippingOffCents) > 0));
+  return { code, label: String(d.label || (free && !(Number(d.discount) > 0) ? "Free shipping" : "")), discount: Number(d.discount) || 0, freeShipping: free, sig };
+}
+// With several codes the answer carries the whole picture (`combined`): each code's share of the goods now, which is
+// not what each was worth alone (percent codes add up, an amount code takes only what is left). Without it, the answer
+// is for this code alone and the others keep their shares.
+function discountApplyCombined_(list, d){
+  const c = d && d.combined;
+  if(!c || list.length < 2) return list;
+  if(Array.isArray(c.perCode)){
+    return list.map(e => {
+      const per = c.perCode.find(p => sameCode_(p.code, e.code));
+      if(!per) return e;
+      return Object.assign({}, e, { discount: Math.max(0, Number(per.goodsOffCents) || 0) / 100,
+        freeShipping: e.freeShipping || per.freeShipping === true || Number(per.shippingOffCents) > 0 });
+    });
+  }
+  // The server's answer (orders.js codeCheckAnswer_): `combined.codes` [{ code, discount (dollars), freeShipping }].
+  if(Array.isArray(c.codes)){
+    return list.map(e => {
+      const per = c.codes.find(p => sameCode_(p.code, e.code));
+      if(!per) return e;
+      return Object.assign({}, e, { discount: Math.max(0, Number(per.discount) || 0), freeShipping: e.freeShipping || per.freeShipping === true });
+    });
+  }
+  if(typeof c.goodsOffCents === "number"){
+    const others = list.slice(0, -1).reduce((s, e) => s + Math.round(e.discount * 100), 0);
+    return list.map((e, i) => i === list.length - 1 ? Object.assign({}, e, { discount: Math.max(0, c.goodsOffCents - others) / 100 }) : e);
+  }
+  return list;
+}
 async function applyDiscountCode_(){
   const code = discountInput_.trim();
   if(!code){ discountMsgEl_("Enter a discount code."); return; }
   if(!cart.length) return;
+  const list = discountApplied_ || [];
+  if(list.some(e => sameCode_(e.code, code))){ discountMsgEl_("That code is already applied."); return; }
+  if(list.length >= DISCOUNT_MAX_CODES_){ discountMsgEl_("That's the most codes one order can take."); return; }
   const seq = ++discountSeq_, sig = discountCartSig_();
   discountBusy_ = true; discountMsg_ = "";
   renderTicket(currentOrg, currentOrgId);
   let r;
-  try{ r = await askDiscountCode_(code); }
+  try{ r = await askDiscountCode_(code, list.map(e => e.code)); }
   catch(_){ r = { ok: false, failed: true, message: "We couldn't check that code — check your connection and try again." }; }
   if(seq !== discountSeq_) return;   // removed, or asked again, meanwhile
   discountBusy_ = false;
+  let entry = null;
   if(r.ok){
-    const d = r.data;
-    discountApplied_ = { code: String(d.code || code.toUpperCase()), label: String(d.label || ""), discount: Number(d.discount) || 0, sig };
-    discountInput_ = discountApplied_.code;
+    entry = discountEntryFrom_(r.data, code, sig);
+    discountApplied_ = discountApplyCombined_(list.map(e => Object.assign({}, e, { sig })).concat(entry), r.data);
+    discountInput_ = discountMulti_(currentOrg) ? "" : entry.code;
+    discountAdding_ = false;
     discountMsg_ = "";
   } else discountMsg_ = r.message;
   renderTicket(currentOrg, currentOrgId);
-  announceStatus(r.ok ? discountApplied_.code + " applied: " + (discountApplied_.label || "discount") + ". " : discountMsg_);
+  announceStatus(r.ok ? entry.code + " applied: " + (entry.label || "discount") + ". " : discountMsg_);
 }
-function removeDiscountCode_(){
-  const code = discountApplied_ ? discountApplied_.code : "";
-  discountReset_();
+// × on one code (with several allowed) or Remove (the one code). Taking one off changes the others' shares (percent codes
+// add up, an amount code takes what is left), so the rest are asked about again at once.
+function removeDiscountCode_(code){
+  const list = discountApplied_ || [];
+  const target = code ? list.find(e => e.code === code) : null;
+  if(discountMulti_(currentOrg) && target && list.length > 1){
+    discountApplied_ = list.filter(e => e !== target);
+    discountMsg_ = ""; discountSeq_++;
+    if(discountTimer_){ clearTimeout(discountTimer_); discountTimer_ = null; }
+    renderTicket(currentOrg, currentOrgId);
+    announceStatus("Discount code " + target.code + " removed.");
+    const f = document.getElementById("discountCodeInput") || document.querySelector('[data-action="discount-add"]'); if(f) f.focus();
+    recheckDiscountCode_();
+    return;
+  }
+  const gone = list.map(e => e.code).join(", ");
+  discountClear_();
   renderTicket(currentOrg, currentOrgId);
   const box = document.getElementById("discountCodeInput"); if(box) box.focus();
-  if(code) announceStatus("Discount code " + code + " removed.");
+  if(gone) announceStatus("Discount code " + (code || gone) + " removed.");
 }
 // The cart (or the email, for a code for one person) changed since the code was applied: ask again, after a pause so
 // a run of +/− clicks is one request. Refused now → the code comes off, with the reason.
@@ -2070,21 +2335,25 @@ function scheduleDiscountRecheck_(){
   if(discountTimer_) clearTimeout(discountTimer_);
   discountTimer_ = setTimeout(recheckDiscountCode_, 700);
 }
+// Each code is asked about in turn with the ones kept so far, so the last answer's `combined` is the picture of them all.
 async function recheckDiscountCode_(){
   discountTimer_ = null;
   if(!discountApplied_ || !currentOrg) return;
   if(!cart.length){ discountApplied_ = null; renderTicket(currentOrg, currentOrgId); return; }
   const applied = discountApplied_, seq = ++discountSeq_, sig = discountCartSig_();
-  let r;
-  try{ r = await askDiscountCode_(applied.code); }catch(_){ r = { ok: false, failed: true }; }
-  if(seq !== discountSeq_ || discountApplied_ !== applied) return;
-  if(r.ok) discountApplied_ = Object.assign({}, applied, { label: String(r.data.label || applied.label), discount: Number(r.data.discount) || 0, sig });
-  else if(r.failed) discountApplied_ = Object.assign({}, applied, { sig });   // no answer: keep it — the order is checked anyway
-  else {
-    discountApplied_ = null;
-    discountMsg_ = applied.code + " no longer applies: " + r.message;
-    announceStatus(discountMsg_);
+  const kept = [], notes = [];
+  let lastAnswer = null;
+  for(const e of applied){
+    let r;
+    try{ r = await askDiscountCode_(e.code, kept.map(k => k.code)); }catch(_){ r = { ok: false, failed: true }; }
+    if(seq !== discountSeq_ || discountApplied_ !== applied) return;
+    if(r.ok){ kept.push(Object.assign(discountEntryFrom_(r.data, e.code, sig), { label: String(r.data.label || e.label) })); lastAnswer = r.data; }
+    else if(r.failed) kept.push(Object.assign({}, e, { sig }));   // no answer: keep it — the order is checked anyway
+    else notes.push(e.code + " no longer applies: " + r.message);
   }
+  const next = discountApplyCombined_(kept, lastAnswer);
+  discountApplied_ = next.length ? next : null;
+  if(notes.length){ discountMsg_ = notes.join(" "); announceStatus(discountMsg_); }
   renderTicket(currentOrg, currentOrgId);
 }
 // Shop news and discounts (email campaigns, migrations/0117): a box under the email address, ticked to start with.
@@ -2100,11 +2369,14 @@ function marketingBoxHtml_(org){
         <span class="marketing-optin-note">We'll never sell your information or share it with anyone else. You can unsubscribe from any email.</span></span>
       </label>`;
 }
-// The box, above the totals: the code field with Apply, or (once applied) the code, its label and Remove.
+// The box, above the totals: the code field with Apply, or (once applied) the code, its label and Remove. With several
+// codes allowed: each applied code with its ×, and "Add another code" (up to DISCOUNT_MAX_CODES_) that opens the field.
 function discountSectionHtml_(org){
   if(!discountBoxOn_(org) || !cart.length) return "";
-  const a = discountApplied_;
-  return `
+  const list = discountApplied_ || [];
+  if(!discountMulti_(org)){
+    const a = list[0] || null;
+    return `
     <div class="shipping-section discount-section">
       <label class="shipping-section-label" for="discountCodeInput">Discount code</label>
       <div class="discount-row">
@@ -2116,6 +2388,134 @@ function discountSectionHtml_(org){
       <div class="discount-on" id="discountOn"${a ? "" : " hidden"}>${a ? escapeHtml(a.code + (a.label ? " — " + a.label : "")) : ""}</div>
       <div class="discount-msg" id="discountMsg" aria-live="polite"${discountMsg_ ? "" : " hidden"}>${escapeHtml(discountMsg_)}</div>
     </div>`;
+  }
+  const showInput = !list.length || discountAdding_ || discountBusy_;
+  return `
+    <div class="shipping-section discount-section">
+      ${showInput ? `<label class="shipping-section-label" for="discountCodeInput">${list.length ? "Another discount code" : "Discount code"}</label>`
+        : `<div class="shipping-section-label" id="discountListLabel">Discount codes</div>`}
+      <ul class="discount-list" id="discountOn" aria-describedby="discountMsg"${list.length ? "" : " hidden"}>
+        ${list.map(e => `<li class="discount-chip"><span>${escapeHtml(e.code + (e.label ? " — " + e.label : ""))}</span>
+          <button type="button" class="discount-x" data-action="discount-remove" data-code="${escapeHtml(e.code)}" aria-label="Remove code ${escapeHtml(e.code)}">&times;</button></li>`).join("")}
+      </ul>
+      ${showInput ? `<div class="discount-row">
+        <input type="text" id="discountCodeInput" class="shipping-zip-input discount-input" maxlength="32" autocomplete="off" autocapitalize="characters" spellcheck="false"
+          value="${escapeHtml(discountInput_)}" aria-describedby="discountMsg discountOn">
+        <button type="button" class="discount-btn" data-action="discount-apply"${discountBusy_ ? " disabled" : ""}>${discountBusy_ ? "Checking…" : "Apply"}</button>
+      </div>`
+      : list.length < DISCOUNT_MAX_CODES_ ? `<button type="button" class="discount-link" data-action="discount-add">Add another code</button>` : ""}
+      <div class="discount-msg" id="discountMsg" aria-live="polite"${discountMsg_ ? "" : " hidden"}>${escapeHtml(discountMsg_)}</div>
+    </div>`;
+}
+
+// ---- Gift cards at checkout (migrations/0120) ----
+// A gift card is a payment, not a discount: it comes after the codes, the shipping and the tax, and it works alongside
+// codes even when only one code is allowed. "Have a gift card?" → the number → Check (the server says the balance, and
+// nothing else about the card) → Apply, up to GIFT_MAX_CARDS_. Each card pays up to its balance of what is still owed;
+// the order sends the numbers and the amounts the page showed, the server redeems each up to what is really due and
+// answers what each took. Card numbers are kept in this page's memory only (never in the saved cart or the attempt record).
+let giftCards_ = [];       // [{ code, last4, balance (dollars) }] — applied
+let giftChecked_ = null;   // { code, last4, balance } — checked, waiting for Apply
+let giftInput_ = "", giftMsg_ = "", giftBusy_ = false, giftOpen_ = false, giftSeq_ = 0;
+const GIFT_MAX_CARDS_ = 3;
+function giftBoxOn_(org){ return !!(org && org.giftCardPay === true && !org.preview); }
+function giftReset_(){ giftCards_ = []; giftChecked_ = null; giftInput_ = ""; giftMsg_ = ""; giftBusy_ = false; giftOpen_ = false; giftSeq_++; }
+const giftNormalize_ = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+function giftMsgEl_(text){
+  giftMsg_ = text || "";
+  const el = document.getElementById("giftMsg");
+  if(el){ el.textContent = giftMsg_; el.hidden = !giftMsg_; }
+}
+// What each card pays of `due` dollars, in order: [{ card, take (dollars) }]. Cents throughout.
+function giftPlan_(due){
+  let left = Math.max(0, Math.round((Number(due) || 0) * 100));
+  return giftCards_.map(card => {
+    const takeCents = Math.min(Math.max(0, Math.round(card.balance * 100)), left);
+    left -= takeCents;
+    return { card, take: takeCents / 100 };
+  });
+}
+async function checkGiftCard_(){
+  const code = giftNormalize_(giftInput_);
+  if(!code){ giftMsgEl_("Enter your gift card number."); return; }
+  if(code.length !== 16){ giftMsgEl_("That gift card number isn't right."); return; }
+  if(giftCards_.some(c => c.code === code)){ giftMsgEl_("That gift card is already added."); return; }
+  const seq = ++giftSeq_;
+  giftBusy_ = true; giftMsg_ = ""; giftChecked_ = null;
+  renderTicket(currentOrg, currentOrgId);
+  let msg = "", card = null;
+  try{
+    const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "checkGiftCard", orgId: currentOrg.orgId, code }) });
+    const data = await res.json().catch(() => null);
+    const c = data && (data.card || data);
+    if(res.ok && data && data.status === "ok" && data.ok !== false && c && c.last4) card = { code, last4: String(c.last4), balance: Number(c.balance) || 0 };
+    else if(res.status === 429) msg = "Too many tries — please wait a minute and try again.";
+    else if(data && (data.message || data.reason) && res.status < 500) msg = String(data.message || data.reason);
+    else msg = "We couldn't check that gift card just now. Please try again.";
+  }catch(_){ msg = "We couldn't check that gift card — check your connection and try again."; }
+  if(seq !== giftSeq_) return;
+  giftBusy_ = false;
+  if(card){ giftChecked_ = card; giftMsg_ = "Gift card ••" + card.last4 + " has $" + card.balance.toFixed(2) + " on it. Press Apply to use it."; }
+  else giftMsg_ = msg;
+  renderTicket(currentOrg, currentOrgId);
+  announceStatus(giftMsg_);
+}
+function applyGiftCard_(){
+  const c = giftChecked_;
+  if(!c) return;
+  if(giftCards_.length >= GIFT_MAX_CARDS_ || giftCards_.some(x => x.code === c.code)) return;
+  giftCards_ = giftCards_.concat(c);
+  giftChecked_ = null; giftInput_ = ""; giftMsg_ = ""; giftOpen_ = false;
+  renderTicket(currentOrg, currentOrgId);
+  announceStatus("Gift card ••" + c.last4 + " added.");
+  const f = document.querySelector('[data-action="gift-open"]'); if(f) f.focus();
+}
+function removeGiftCard_(idx){
+  const c = giftCards_[idx];
+  if(!c) return;
+  giftCards_ = giftCards_.filter((_, i) => i !== idx);
+  renderTicket(currentOrg, currentOrgId);
+  announceStatus("Gift card ••" + c.last4 + " removed.");
+  const f = document.querySelector('[data-action="gift-open"]'); if(f) f.focus();
+}
+function giftSectionHtml_(org){
+  if(!giftBoxOn_(org) || !cart.length) return "";
+  const room = giftCards_.length < GIFT_MAX_CARDS_;
+  const chips = giftCards_.length ? `<ul class="discount-list" aria-label="Gift cards added">${giftCards_.map((c, i) => `<li class="discount-chip"><span>Gift card ••${escapeHtml(c.last4)} — $${c.balance.toFixed(2)} on it</span>
+      <button type="button" class="discount-x" data-action="gift-remove" data-idx="${i}" aria-label="Remove gift card ending ${escapeHtml(c.last4)}">&times;</button></li>`).join("")}</ul>` : "";
+  const open = room && (giftOpen_ || giftBusy_ || giftChecked_ || giftMsg_);
+  const field = open ? `<div class="discount-row">
+        <input type="text" id="giftCardInput" class="shipping-zip-input discount-input gift-input" maxlength="24" autocomplete="off" autocapitalize="characters" spellcheck="false"
+          placeholder="XXXX-XXXX-XXXX-XXXX" value="${escapeHtml(giftInput_)}" aria-label="Gift card number" aria-describedby="giftMsg">
+        ${giftChecked_ ? `<button type="button" class="discount-btn" data-action="gift-apply">Apply</button>`
+          : `<button type="button" class="discount-btn" data-action="gift-check"${giftBusy_ ? " disabled" : ""}>${giftBusy_ ? "Checking…" : "Check"}</button>`}
+      </div>`
+    : room ? `<button type="button" class="discount-link" data-action="gift-open">${giftCards_.length ? "Add another gift card" : "Have a gift card?"}</button>` : "";
+  return `
+    <div class="shipping-section gift-section">
+      ${giftCards_.length || open ? `<div class="shipping-section-label">Gift card</div>` : ""}
+      ${chips}
+      ${field}
+      <div class="discount-msg gift-msg" id="giftMsg" aria-live="polite"${giftMsg_ ? "" : " hidden"}>${escapeHtml(giftMsg_)}</div>
+    </div>`;
+}
+// What the whole cart comes to as the page works it out (the server prices the order itself): the goods less the codes,
+// the delivery (free when a code makes it so), the rush fee and the sales tax added on top.
+function cartGrand_(org, delivery, rush){
+  const subtotal = cart.reduce((s, c) => s + c.lineTotal, 0);
+  const discount = discountNow_(subtotal);
+  const rushFee = rush ? rush.fee : 0;
+  const shipping = discountFreeShipping_() ? 0 : delivery.fee;
+  return Math.round((subtotal - discount + shipping + rushFee + cartTax_(org, delivery, rushFee, discount).tax) * 100) / 100;
+}
+// "Your gift card covers it" — the cards pay everything this page knows is owed. Not while the shipping cost or a rush
+// fee is still to follow: more will be owed.
+function giftCovers_(org, delivery, rush){
+  if(!giftBoxOn_(org) || !giftCards_.length || !cart.length) return false;
+  if((delivery && delivery.kind === "manual") || (rush && rush.pending)) return false;
+  const grand = cartGrand_(org, delivery, rush);
+  return giftPlan_(grand).reduce((s, p) => s + Math.round(p.take * 100), 0) >= Math.round(grand * 100);
 }
 function flashAdded_(pid){
   const b = document.querySelector('.add-btn[data-pid="' + (window.CSS && CSS.escape ? CSS.escape(pid) : pid) + '"]'); if(!b) return;
@@ -2236,7 +2636,15 @@ document.addEventListener("click", (e)=>{
   else if(a === "dismiss-unpaid"){ unpaidCardNotice = null; writePendingCard_(currentOrgId, null); const b = document.getElementById("unpaidBar"); if(b) b.remove(); }
   else if(a === "place-order") placeOrder(btn.dataset.org);
   else if(a === "discount-apply") applyDiscountCode_();
-  else if(a === "discount-remove") removeDiscountCode_();
+  else if(a === "discount-remove") removeDiscountCode_(btn.dataset.code);
+  else if(a === "discount-add"){ discountAdding_ = true; renderTicket(currentOrg, currentOrgId); const f = document.getElementById("discountCodeInput"); if(f) f.focus(); }
+  else if(a === "gift-open"){ giftOpen_ = true; renderTicket(currentOrg, currentOrgId); const f = document.getElementById("giftCardInput"); if(f) f.focus(); }
+  else if(a === "gift-check") checkGiftCard_();
+  else if(a === "gift-apply") applyGiftCard_();
+  else if(a === "gift-remove") removeGiftCard_(Number(btn.dataset.idx));
+  else if(a === "giftbuy-open") renderGiftBuy_();
+  else if(a === "giftbuy-amount") giftBuyPickAmount_(btn.dataset.amount);
+  else if(a === "giftbuy-submit") giftBuySubmit_();
   else if(a === "go-org") go("org", btn.dataset.org);
   else if(a === "version") versionSwitch_(btn.dataset.vgroup, btn.dataset.vpid);
   else if(a === "color") cfgPickColor_(btn.dataset.pid, btn);
@@ -2245,7 +2653,8 @@ document.addEventListener("click", (e)=>{
 });
 
 document.addEventListener("keydown", (e)=>{
-  if(e.key === "Enter" && e.target && e.target.id === "discountCodeInput" && !discountApplied_ && !discountBusy_){ e.preventDefault(); applyDiscountCode_(); }
+  if(e.key === "Enter" && e.target && e.target.id === "discountCodeInput" && !e.target.readOnly && !discountBusy_){ e.preventDefault(); applyDiscountCode_(); }
+  if(e.key === "Enter" && e.target && e.target.id === "giftCardInput" && !giftBusy_){ e.preventDefault(); if(giftChecked_) applyGiftCard_(); else checkGiftCard_(); }
 });
 
 document.addEventListener("change", (e)=>{
@@ -2296,6 +2705,16 @@ document.addEventListener("change", (e)=>{
 
 document.addEventListener("input", (e)=>{
   if(e.target.id === "discountCodeInput"){ discountInput_ = e.target.value; if(discountMsg_) discountMsgEl_(""); return; }
+  if(e.target.id === "giftCardInput"){
+    giftInput_ = e.target.value; if(giftMsg_) giftMsgEl_("");
+    // Another number than the one checked: back to Check (in place, so the customer keeps typing).
+    if(giftChecked_ && giftNormalize_(giftInput_) !== giftChecked_.code){
+      giftChecked_ = null;
+      const b = document.querySelector('[data-action="gift-apply"]'); if(b){ b.dataset.action = "gift-check"; b.textContent = "Check"; }
+    }
+    return;
+  }
+  if(e.target.dataset && e.target.dataset.gb){ giftBuyInput_(e.target); return; }
   // Another email address: a refusal about the address no longer holds, and a code for one person is asked about again.
   if(e.target.id === "custContact"){
     if(discountMsgAboutEmail_(discountMsg_)) discountMsgEl_("");
@@ -2852,16 +3271,24 @@ function renderTicket(org, orgId){
   // What the quantity breaks take off, in cents (shown under the lines; the subtotal already has it).
   const breakSavingsCents = cart.reduce((s, c) => s + Math.round(Number(c.breakOff || 0) * 100) * (Number(c.qty) || 0), 0);
   const delivery = currentDelivery_(org);
-  const shippingCost = delivery.fee;
   const rush = rushOn ? rushQuote_(org, cartSubtotal) : null;
   if(rushOn && !rush) rushOn = false;      // the shop stopped offering it
   const rushFee = rush ? rush.fee : 0;
   // A discount code: off the goods only (not delivery, not the rush fee). Not shown for a shop without the box.
   if(!discountBoxOn_(org) || !cart.length){ if(discountApplied_) discountApplied_ = null; }
-  else if(discountApplied_ && discountApplied_.sig !== discountCartSig_()) scheduleDiscountRecheck_();
+  else if(discountApplied_ && discountApplied_.some(e => e.sig !== discountCartSig_())) scheduleDiscountRecheck_();
   const discount = discountNow_(cartSubtotal);
+  // A free-shipping code: the delivery fee is not charged (the line below says so); the server does the same.
+  const shippingFull = delivery.fee;
+  const freeShip = discountFreeShipping_() && shippingFull > 0;
+  const shippingCost = freeShip ? 0 : shippingFull;
   const cartTax = cartTax_(org, delivery, rushFee, discount);
   const grandTotal   = Math.round((cartSubtotal - discount + shippingCost + rushFee + cartTax.tax) * 100) / 100;
+  // Gift cards pay part or all of the total (a payment after the codes, shipping and tax).
+  const giftPlan = giftBoxOn_(org) && cart.length ? giftPlan_(grandTotal).filter(p => p.take > 0) : [];
+  const giftTakenCents = giftPlan.reduce((s, p) => s + Math.round(p.take * 100), 0);
+  const stillToPay = Math.max(0, Math.round(grandTotal * 100) - giftTakenCents) / 100;
+  const giftAll = giftCovers_(org, delivery, rush);
 
   // Check the currently-selected payment method to decide whether to
   // show the discounted total. Reading from the DOM directly here since
@@ -2891,10 +3318,11 @@ function renderTicket(org, orgId){
 
   // When shipping is active, show a breakdown above the total line so the
   // customer can see merchandise vs. shipping separately.
-  const breakdownHtml = (shippingCost > 0 || cartTax.tax > 0 || rush || discount > 0) ? `
+  const breakdownHtml = (shippingCost > 0 || freeShip || cartTax.tax > 0 || rush || discount > 0) ? `
     <div class="ticket-breakdown">
       <div class="ticket-breakdown-line"><span>Merchandise</span><span>$${cartSubtotal.toFixed(2)}</span></div>
-      ${discount > 0 ? `<div class="ticket-breakdown-line ticket-discount-line"><span>Discount (${escapeHtml(discountApplied_.code)})</span><span>&minus;$${discount.toFixed(2)}</span></div>` : ""}
+      ${discount > 0 ? `<div class="ticket-breakdown-line ticket-discount-line"><span>Discount (${escapeHtml(discountCodesOf_(e => e.discount > 0) || discountCodesOf_())})</span><span>&minus;$${discount.toFixed(2)}</span></div>` : ""}
+      ${freeShip ? `<div class="ticket-breakdown-line ticket-discount-line ticket-freeship-line"><span>Free shipping (${escapeHtml(discountCodesOf_(e => e.freeShipping))})</span><span>$0.00</span></div>` : ""}
       ${shippingCost > 0 ? `<div class="ticket-breakdown-line">
         <span>${escapeHtml(delivery.label)}</span>
         <span>$${shippingCost.toFixed(2)}</span>
@@ -2921,10 +3349,15 @@ function renderTicket(org, orgId){
     ${renderShippingSection(org)}
     ${rushSectionHtml_(org, cartSubtotal)}
     ${discountSectionHtml_(org)}
+    ${giftSectionHtml_(org)}
     ${breakdownHtml}
     <div class="ticket-total">
       ${totalHtml}
     </div>
+    ${giftPlan.length ? `<div class="ticket-breakdown ticket-gift">
+      ${giftPlan.map(p => `<div class="ticket-breakdown-line ticket-gift-line"><span>Gift card ••${escapeHtml(p.card.last4)}</span><span>&minus;$${p.take.toFixed(2)}</span></div>`).join("")}
+      <div class="ticket-breakdown-line ticket-topay-line"><span>Still to pay</span><span>$${stillToPay.toFixed(2)}</span></div>
+    </div>` : ""}
     ${taxNote}
     <div class="checkout-fields">
       <input type="text" id="custName" placeholder="Your name" aria-label="Your name" value="${escapeHtml(savedName)}">
@@ -2932,6 +3365,7 @@ function renderTicket(org, orgId){
       ${marketingBoxHtml_(currentOrg)}
       ${(function(){
         const methods = currentOrg.enabledPayments || [];
+        if(giftAll) return '<div class="form-hint gift-covers" id="paymentHint" role="status">Your gift card covers it — there\'s nothing to pay.</div>';
         if(methods.length === 0) return '<div class="form-hint">Payment is handled separately — your order will be recorded and we\'ll follow up with payment details.</div>';
         const labels = {"Card":"Credit / Debit Card","Venmo":"Venmo","Zelle":"Zelle","Check":"Check"};
         const opts = methods.map(m => `<option value="${m}">${labels[m] || m}</option>`).join("");
@@ -3060,18 +3494,24 @@ async function placeOrder(orgId){
     return;
   }
   const enabledPayments = (currentOrg && currentOrg.enabledPayments) || [];
-  if(enabledPayments.length > 0 && !paymentMethod){
+  // Gift cards that cover everything: nothing to pay, so no payment method to choose.
+  const giftAllNow = giftCovers_(currentOrg, currentDelivery_(currentOrg), rushOn ? rushQuote_(currentOrg, cart.reduce((s, c) => s + c.lineTotal, 0)) : null);
+  if(enabledPayments.length > 0 && !paymentMethod && !giftAllNow){
     checkoutError_("Please choose how you'll pay.", "custPaymentMethod");
     return;
   }
   if(cart.length===0) return;
   // A code typed but not applied isn't sent unseen: the customer sees what it does (or why not) first.
   const codeBoxOn = discountBoxOn_(currentOrg);
-  if(codeBoxOn && !discountApplied_ && discountInput_.trim()){
+  if(codeBoxOn && discountInput_.trim() && (!discountApplied_ || discountMulti_(currentOrg))){
     checkoutError_(discountBusy_ ? "Checking your discount code — one moment." : "Press Apply to use your discount code, or clear the box to order without it.", "discountCodeInput");
     return;
   }
-  const discountCode = codeBoxOn && discountApplied_ ? discountApplied_.code : "";
+  const discountCodeList = codeBoxOn && discountApplied_ ? discountApplied_.map(e => e.code) : [];
+  const discountCode = discountCodeList.join(", ");
+  // What the codes do to shipping, for the confirmation (the server takes it off the order's shipping itself).
+  const freeShipCodes = codeBoxOn ? discountCodesOf_(e => e.freeShipping) : "";
+  const freeShipNow = !!freeShipCodes;
 
   // When the customer chose carrier shipping OR manual shipping is pending,
   // collect their full address before submission so the admin knows where to ship.
@@ -3096,11 +3536,15 @@ async function placeOrder(orgId){
   const rush = rushOn ? rushQuote_(currentOrg, cartSubtotal) : null;
   const neededByEl = document.getElementById("rushNeededBy");
   if(neededByEl) rushNeededBy = neededByEl.value;
+  // The gift cards and what each is to pay of the total as the page worked it out (the server redeems each up to what is
+  // really due and answers what it took). After the codes, shipping and tax; always allowed alongside a code.
+  const giftPlanNow = giftBoxOn_(currentOrg) ? giftPlan_(cartGrand_(currentOrg, delivery, rush)).filter(p => p.take > 0) : [];
   const _orderPrefix = ((orgId || "ORD").replace(/[^A-Za-z0-9]/g, "").slice(0, 4).toUpperCase()) || "ORD";
   // The same order id for the same checkout (same cart, details and delivery) until it's saved: a retry after a
   // lost answer resends THIS order, which the server recognises, instead of placing a second one.
   const _attemptSig = JSON.stringify([orgId, name, contact, paymentMethod, cart.map(({ cdPreviews, ...line }) => line),
-    delivery.kind, delivery.label || "", delivery.kind === "option" ? delivery.option.id : null, shippingAddress, orderShippingCost, !!rush, rushNeededBy || "", discountCode]);
+    delivery.kind, delivery.label || "", delivery.kind === "option" ? delivery.option.id : null, shippingAddress, orderShippingCost, !!rush, rushNeededBy || "", discountCode,
+    giftPlanNow.map(p => [p.card.last4, p.take])]);   // never the card numbers: this record is kept in the tab's session storage
   const order = {
     orderId: orderIdForAttempt_(_orderPrefix, _attemptSig),
     orgId, customerName: name, contact, paymentMethod,
@@ -3121,9 +3565,13 @@ async function placeOrder(orgId){
       return s + ((p && p.weightOz) ? p.weightOz * it.qty : 8 * it.qty);
     }, 0),
     // What the cart showed (the server prices the order itself and ignores this).
-    total: Math.round((cartSubtotal - discountNow_(cartSubtotal) + orderShippingCost + (rush ? rush.fee : 0) + cartTax_(currentOrg, delivery, rush ? rush.fee : 0, discountNow_(cartSubtotal)).tax) * 100) / 100,
-    // The discount code (migrations/0115): the server checks it again, works out the discount and records the use.
-    ...(discountCode ? { discountCode, discount: discountNow_(cartSubtotal) } : {}),
+    total: cartGrand_(currentOrg, delivery, rush),
+    // The discount codes (migrations/0115, 0120): the server checks each again, works out the discount and records the
+    // uses. One code goes as `discountCode` (as ever), more than one as the list `discountCodes`.
+    ...(discountCodeList.length === 1 ? { discountCode, discount: discountNow_(cartSubtotal) } : {}),
+    ...(discountCodeList.length > 1 ? { discountCodes: discountCodeList, discount: discountNow_(cartSubtotal) } : {}),
+    // Gift cards (migrations/0120): number and the amount the page showed it paying (dollars).
+    ...(giftPlanNow.length ? { giftCards: giftPlanNow.map(p => ({ code: p.card.code, amount: p.take })) } : {}),
     // Shop news and discounts (migrations/0117): only sent when the box was shown.
     ...(marketingBoxOn_(currentOrg) ? { marketingOptIn: !!marketingOptIn_ } : {}),
     ...(rush ? { rush: true, rushFee: rush.fee, rushFeePending: rush.pending } : {}),
@@ -3144,8 +3592,30 @@ async function placeOrder(orgId){
     // Tax added on top: the confirmation (and the Venmo/Zelle amount) uses the recorded total.
     if(saved && typeof saved.total === "number"){ order.total = saved.total; order.salesTax = saved.salesTax; }
     // A discount code: what the server took off, and what's still to pay (0 when the code covers it all).
-    if(saved && typeof saved.discount === "number"){ order.discount = saved.discount; order.discountCode = String(saved.discountCode || discountCode); }
+    if(saved && typeof saved.discount === "number"){
+      order.discount = saved.discount;
+      order.discountCode = String(saved.discountCode || (Array.isArray(saved.discountCodes) ? saved.discountCodes.join(", ") : "") || discountCode);
+    }
+    if(freeShipNow) order.freeShippingCodes = freeShipCodes;
     if(saved && typeof saved.owed === "number") order.owed = saved.owed;
+    // Gift cards: what each took (a card the server turned down is told to the customer; the rest is paid the usual way).
+    if(giftPlanNow.length){
+      const got = Array.isArray(saved && saved.giftCards) ? saved.giftCards : [];
+      order.giftCardUse = giftPlanNow.map((p, i) => {
+        const g = got[i] || got.find(x => x && String(x.last4) === p.card.last4) || null;
+        // No word from the server about this card: it is taken to have paid what the page showed.
+        let taken = p.take, refused = false, reason = "";
+        if(g){
+          if(typeof g.taken === "number") taken = g.taken;
+          else if(typeof g.takenCents === "number") taken = g.takenCents / 100;
+          else if(g.ok === false) taken = 0;
+          reason = String(g.reason || "");
+          refused = g.ok === false || !(taken > 0);
+        }
+        return { last4: p.card.last4, taken, refused, reason };
+      });
+      order.giftTaken = Math.round(order.giftCardUse.reduce((s, u) => s + Math.round(u.taken * 100), 0)) / 100;
+    }
     // No email set up on this install: the confirmation doesn't promise a copy by email.
     if(saved && saved.emailOn === false) order.noEmail = true;
   }catch(err){
@@ -3184,7 +3654,7 @@ async function placeOrder(orgId){
       if(data.url){
         // The order exists now: remember it (so Cancel on Stripe offers to pay it, not to order again) and
         // empty the cart, then hand off to Stripe's hosted payment page.
-        writePendingCard_(orgId, { orderId: order.orderId, token: (saved && saved.checkoutToken) || null, total: order.total });
+        writePendingCard_(orgId, { orderId: order.orderId, token: (saved && saved.checkoutToken) || null, total: payDue_(order) });
         clearCart_(); saveCart_(); discountReset_();
         window.location.href = data.url;
         return;
@@ -3192,13 +3662,13 @@ async function placeOrder(orgId){
       console.error("Stripe checkout session failed:", data);
       // The order is saved; only the card step failed. Show it as placed, with how to pay.
       clearCart_(); saveCart_(); discountReset_();
-      unpaidCardNotice = (saved && saved.checkoutToken) ? { orderId: order.orderId, token: saved.checkoutToken, total: order.total } : null;
+      unpaidCardNotice = (saved && saved.checkoutToken) ? { orderId: order.orderId, token: saved.checkoutToken, total: payDue_(order) } : null;
       showConfirmation(orgId, Object.assign({}, order, { cardStartFailed: true }));
       return;
     }catch(err){
       console.error("Stripe checkout error:", err);
       clearCart_(); saveCart_(); discountReset_();
-      unpaidCardNotice = (saved && saved.checkoutToken) ? { orderId: order.orderId, token: saved.checkoutToken, total: order.total } : null;
+      unpaidCardNotice = (saved && saved.checkoutToken) ? { orderId: order.orderId, token: saved.checkoutToken, total: payDue_(order) } : null;
       showConfirmation(orgId, Object.assign({}, order, { cardStartFailed: true }));
       return;
     }
@@ -3266,7 +3736,7 @@ function venmoPayLink(order){
   if(!VENMO_USERNAME) return null;
   const note = `${order.orgId} order ${order.orderId}`;
   return `https://venmo.com/u/${encodeURIComponent(VENMO_USERNAME)}` +
-    `?txn=pay&amount=${order.total.toFixed(2)}&note=${encodeURIComponent(note)}`;
+    `?txn=pay&amount=${payDue_(order).toFixed(2)}&note=${encodeURIComponent(note)}`;
 }
 
 // What happens next with payment, in words that fit how the shopper chose to pay.
@@ -3275,10 +3745,14 @@ function confirmationPaymentText_(order){
   const rushLater = order.rush && order.rushFeePending ? " The rush fee will follow — we'll confirm it and send it separately." : "";
   return confirmationPaymentBase_(order) + rushLater;
 }
+// What is still to be paid on a just-placed order: the total less what gift cards took.
+function payDue_(order){
+  return Number(order.giftTaken) > 0 && typeof order.owed === "number" ? order.owed : Number(order.total) || 0;
+}
 function confirmationPaymentBase_(order){
   const m = order.paymentMethod;
   if(order.manualShipping) return "The shipping cost still has to be worked out — we'll email you the total and how to pay.";
-  if(order.owed === 0) return "Your order is in. Your discount covers it — there's nothing to pay.";
+  if(order.owed === 0) return Number(order.giftTaken) > 0 ? "Your order is in. Your gift card covers it — there's nothing to pay." : "Your order is in. Your discount covers it — there's nothing to pay.";
   if(m === "Card") return order.cardStartFailed ? "Your order is saved, but the card payment couldn't be started. Try it again below, or contact the shop to pay another way — there's no need to order again." : "Your order is saved.";
   if(m === "Venmo" || m === "Zelle" || m === "Check") return "Your order is in. Please pay using the details below — we'll email you once your payment is received.";
   return "Your order is in. We'll contact you about payment.";
@@ -3288,10 +3762,15 @@ function confirmationSummaryHtml_(order){
   const rows = (order.items || []).map(it => `<div class="row"><span>${escapeHtml(it.name)}${it.size && it.size !== "OSFA" ? " · " + escapeHtml(it.size) : ""} &times; ${Number(it.qty) || 1}${it.personalized && it.persName ? `<br><small>Personalization: “${escapeHtml(it.persName)}”</small>` : ""}${it.cfgText ? `<br><small>${escapeHtml(it.cfgText)}</small>` : ""}</span><span>$${Number(it.lineTotal || 0).toFixed(2)}</span></div>`).join("");
   const opt = order.deliveryOptionId ? (deliveryOptions_(currentOrg).find(o => o.id === order.deliveryOptionId) || {}) : null;
   const deliveryLabel = order.manualShipping ? "Shipping — cost to follow" : order.shippingMethod || (opt && opt.label) || (order.shippingAddress ? "Shipping" : "");
-  const delivery = deliveryLabel ? `<div class="row"><span>${escapeHtml(deliveryLabel)}</span><span>${order.manualShipping ? "TBD" : Number(order.shippingCost) ? "$" + Number(order.shippingCost).toFixed(2) : "Free"}</span></div>` : "";
+  const delivery = order.freeShippingCodes && !order.manualShipping
+    ? `<div class="row"><span>${escapeHtml(deliveryLabel || "Shipping")}</span><span>$0.00</span></div><div class="row"><span>Free shipping (${escapeHtml(order.freeShippingCodes)})</span><span>Free</span></div>`
+    : deliveryLabel ? `<div class="row"><span>${escapeHtml(deliveryLabel)}</span><span>${order.manualShipping ? "TBD" : Number(order.shippingCost) ? "$" + Number(order.shippingCost).toFixed(2) : "Free"}</span></div>` : "";
   const rush = order.rush ? `<div class="row"><span>Rush fee${order.neededBy ? ` <small>(needed by ${escapeHtml(order.neededBy)})</small>` : ""}</span><span>${order.rushFeePending ? "To follow" : "$" + Number(order.rushFee || 0).toFixed(2)}</span></div>` : "";
   const discount = Number(order.discount) > 0 ? `<div class="row"><span>Discount${order.discountCode ? " (" + escapeHtml(order.discountCode) + ")" : ""}</span><span>&minus;$${Number(order.discount).toFixed(2)}</span></div>` : "";
-  return `<div class="conf-items">${rows}${discount}${delivery}${rush}<div class="row total"><span>Total</span><span>$${Number(order.total || 0).toFixed(2)}${order.manualShipping ? " + shipping" : ""}</span></div></div>`;
+  // Gift cards: each card's part of the payment (a payment, not a discount), then what is left to pay.
+  const gifts = (order.giftCardUse || []).filter(u => u.taken > 0).map(u => `<div class="row"><span>Paid by gift card ••${escapeHtml(u.last4)}</span><span>&minus;$${Number(u.taken).toFixed(2)}</span></div>`).join("");
+  const giftDue = gifts && typeof order.owed === "number" ? `<div class="row"><span>Still to pay</span><span>$${Number(order.owed).toFixed(2)}</span></div>` : "";
+  return `<div class="conf-items">${rows}${discount}${delivery}${rush}<div class="row total"><span>Total</span><span>$${Number(order.total || 0).toFixed(2)}${order.manualShipping ? " + shipping" : ""}</span></div>${gifts}${giftDue}</div>`;
 }
 
 function showConfirmation(orgId, order){
@@ -3303,13 +3782,13 @@ function showConfirmation(orgId, order){
   else if(order.paymentMethod === "Venmo"){
     const link = venmoPayLink(order);
     paymentHtml = link
-      ? `<a class="confirmation-back" href="${link}" target="_blank" rel="noopener" style="display:inline-block; margin-top:16px; text-decoration:none;">Pay $${order.total.toFixed(2)} with Venmo &rarr;</a>`
+      ? `<a class="confirmation-back" href="${link}" target="_blank" rel="noopener" style="display:inline-block; margin-top:16px; text-decoration:none;">Pay $${payDue_(order).toFixed(2)} with Venmo &rarr;</a>`
       : `<p style="margin-top:16px;"><em>Venmo isn't set up yet — you'll be contacted with payment instructions.</em></p>`;
   } else if(order.paymentMethod === "Zelle"){
     const zelleDiscount = CASH_DISCOUNT_PERCENT ? `<div class="pi-discount">✓ ${CASH_DISCOUNT_PERCENT}% discount applied — mention this when sending payment.</div>` : "";
     paymentHtml = `<div class="payment-instructions">
       <div class="pi-label">Zelle payment</div>
-      <div class="pi-value">${business.zelle ? `Send $${order.total.toFixed(2)} to <strong>${escapeHtml(business.zelle)}</strong>` : `Amount due: <strong>$${order.total.toFixed(2)}</strong> — you'll be contacted with Zelle details.`}</div>
+      <div class="pi-value">${business.zelle ? `Send $${payDue_(order).toFixed(2)} to <strong>${escapeHtml(business.zelle)}</strong>` : `Amount due: <strong>$${payDue_(order).toFixed(2)}</strong> — you'll be contacted with Zelle details.`}</div>
       <div class="pi-note">Include <strong>${order.orderId}</strong> in the memo so we can match it to your order.</div>
       ${zelleDiscount}
     </div>`;
@@ -3331,6 +3810,7 @@ function showConfirmation(orgId, order){
       <div class="order-number">${order.orderId} &middot; $${order.total.toFixed(2)}</div>
       <p>${escapeHtml(confirmationPaymentText_(order))}</p>
       ${confirmationSummaryHtml_(order)}
+      ${(order.giftCardUse || []).filter(u => u.refused).map(u => `<p class="gift-refused" role="status">Gift card ••${escapeHtml(u.last4)} couldn't be used${u.reason ? ": " + escapeHtml(u.reason) : ""}. The rest of your order is paid the usual way.</p>`).join("")}
       ${order.cardStartFailed && unpaidCardNotice ? unpaidCardBannerHtml_() : ""}
       ${paymentHtml}
       ${order.noEmail ? `<p style="font-size:13px;opacity:.8;">Keep your order number for any question about this order.</p>`

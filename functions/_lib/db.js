@@ -300,7 +300,10 @@ function tookRow_(r) { return Number(r && r.meta && r.meta.changes) > 0; }
 // "exclusive"; shipping is never taxed). Everything that needs "the order's total", "the balance" or "is it paid"
 // goes through here (refreshPaidStatus, the card checkout amount, the order loaders, the revenue
 // report), so they can't drift apart. `itemsTaxCents` / `discountTaxCents` are the tax recorded on
-// the active lines and the discount's share of it.
+// the active lines and the discount's share of it. `shippingDiscountCents` (migrations/0120) is what free-shipping
+// codes took off shipping: shipping charged = shipping − that (never below 0). Shipping is never taxed, so the
+// discount has no tax share. Anything that adds shipping into an order's total subtracts it too (the SQL twins
+// below, SHIP_DISC_SQL_).
 //   owedCents      what the customer pays in all (before payments received)
 //   taxCents       sales tax in that amount (never negative)
 //   netSalesCents  goods revenue: no tax, no shipping
@@ -310,10 +313,10 @@ function tookRow_(r) { return Number(r && r.meta && r.meta.changes) > 0; }
 //   rushCents      the rush fee charged (migrations/0082; 0 once every line is cancelled), rushTaxCents the tax
 //                  on it (inside the fee when inclusive, on top of it when exclusive), rushNetCents the fee without tax
 //   workOwedCents  what's owed leaving the rush fee (and its tax) out — an unpaid rush fee doesn't hold up production
-export function orderAmounts({ itemsCents, itemsTaxCents, shippingCents, discountCents, discountTaxCents, taxMode, rushCents, rushTaxCents }) {
+export function orderAmounts({ itemsCents, itemsTaxCents, shippingCents, shippingDiscountCents, discountCents, discountTaxCents, taxMode, rushCents, rushTaxCents }) {
   const items = Number(itemsCents) || 0, discount = Number(discountCents) || 0;
   const exclusive = taxMode_(taxMode) === "exclusive";
-  const shipping = items > 0 ? Number(shippingCents) || 0 : 0;
+  const shipping = items > 0 ? Math.max(0, (Number(shippingCents) || 0) - Math.max(0, Number(shippingDiscountCents) || 0)) : 0;
   const rush = items > 0 ? Number(rushCents) || 0 : 0;
   const rushTax = rush > 0 ? (exclusive ? Math.max(0, Number(rushTaxCents) || 0) : Math.min(rush, Math.max(0, Number(rushTaxCents) || 0))) : 0;
   const goodsTax = Math.max(0, (Number(itemsTaxCents) || 0) - (Number(discountTaxCents) || 0));
@@ -334,30 +337,50 @@ export function orderAmounts({ itemsCents, itemsTaxCents, shippingCents, discoun
   };
 }
 // The columns orderAmounts needs, for the order aliased `o` (one row per order).
-const ORDER_AMOUNT_COLS_ = `o.shippingCostCents, o.discountCents, o.discountTaxCents, o.rushFeeCents, o.rushFeeTaxCents, o.taxMode,
+const ORDER_AMOUNT_COLS_ = `o.shippingCostCents, o.shippingDiscountCents, o.discountCents, o.discountTaxCents, o.rushFeeCents, o.rushFeeTaxCents, o.taxMode,
       COALESCE((SELECT SUM(lineTotalCents) FROM order_items WHERE orderId = o.orderId AND cancelDate IS NULL), 0) AS itemsCents,
       COALESCE((SELECT SUM(taxCents) FROM order_items WHERE orderId = o.orderId AND cancelDate IS NULL), 0) AS itemsTaxCents`;
 const orderAmountsOfRow_ = (row) => orderAmounts({ itemsCents: row.itemsCents, itemsTaxCents: row.itemsTaxCents,
-  shippingCents: row.shippingCostCents, discountCents: row.discountCents, discountTaxCents: row.discountTaxCents, taxMode: row.taxMode,
+  shippingCents: row.shippingCostCents, shippingDiscountCents: row.shippingDiscountCents, discountCents: row.discountCents, discountTaxCents: row.discountTaxCents, taxMode: row.taxMode,
   rushCents: row.rushFeeCents, rushTaxCents: row.rushFeeTaxCents });
 // Runs a query that reads orders.taxMode, written as a function of how to spell that column
 // ("o.taxMode"). On a database from before migrations/0052 the column doesn't exist and every order
 // is inclusive, so the query is retried with that constant instead (tests pin older schemas).
 async function withTaxMode_(run) {
-  try { return await run("o.taxMode"); }
-  catch (e) {
-    // (A database that old has no rush columns either — migrations/0082 — and SQLite may name one of those first.)
-    if (!/no such column: (o\.)?(taxMode|rushFee\w*|paidForWork)\b/i.test(String(e && e.message))) throw e;
-    return run("'inclusive'");
+  let tm = "o.taxMode";
+  for (let step = 0; step < 2; step++) {
+    try { return await run(tm); }
+    catch (e) {
+      const msg = String(e && e.message);
+      // A database that has not had migrations/0120 yet: shipping discounts read as 0 (rushSql_ spells it so).
+      if (tm === "o.taxMode" && /no such column: (o\.)?shippingDiscountCents\b/i.test(msg)) { tm = "o.taxMode" + NO_SHIP_DISC_MARK_; continue; }
+      // (A database that old has no rush columns either — migrations/0082 — and SQLite may name one of those first.)
+      if (!/no such column: (o\.)?(taxMode|rushFee\w*|paidForWork)\b/i.test(msg)) throw e;
+      return run("'inclusive'");
+    }
   }
+  return run("'inclusive'");
 }
+// What free-shipping codes took off an order's shipping (orders.shippingDiscountCents, migrations/0120), for the
+// order aliased `o`. Every SQL that adds shipping into what's owed or reported subtracts this from it.
+const SHIP_DISC_SQL_ = "COALESCE(o.shippingDiscountCents, 0)";
+// withTaxMode_'s middle step: the tax-mode column exists but the shipping-discount one doesn't yet (a comment in the
+// tax-mode text that rushSql_ looks for; harmless inside the SQL).
+const NO_SHIP_DISC_MARK_ = " /*noShipDisc*/";
 // A database from before migrations/0052 (withTaxMode_ passes the constant 'inclusive') is from before the
 // rush fee too (migrations/0082): its rush columns read as 0 and paidForWork as `paid`.
 const LEGACY_TAX_MODE_ = "'inclusive'";
-const rushSql_ = (tm, sql) => tm !== LEGACY_TAX_MODE_ ? sql : sql
-  .replace(/o\.(rushFeeCents|rushFeeTaxCents|rushFeePending)(?=\s+AS\b)/g, "0")
-  .replace(/o\.(rushFeeCents|rushFeeTaxCents|rushFeePending)\b/g, "0 AS $1")
-  .replace(/o\.paidForWork\b/g, "o.paid AS paidForWork");
+const rushSql_ = (tm, sql) => {
+  // No shipping-discount column yet (withTaxMode_'s middle step, or older): it reads as 0.
+  if (tm.includes(NO_SHIP_DISC_MARK_) || tm === LEGACY_TAX_MODE_) sql = sql
+    .replace(/COALESCE\(o\.shippingDiscountCents, 0\)/g, "0")
+    .replace(/o\.shippingDiscountCents(?=\s+AS\b)/g, "0")
+    .replace(/o\.shippingDiscountCents\b/g, "0 AS shippingDiscountCents");
+  return tm !== LEGACY_TAX_MODE_ ? sql : sql
+    .replace(/o\.(rushFeeCents|rushFeeTaxCents|rushFeePending)(?=\s+AS\b)/g, "0")
+    .replace(/o\.(rushFeeCents|rushFeeTaxCents|rushFeePending)\b/g, "0 AS $1")
+    .replace(/o\.paidForWork\b/g, "o.paid AS paidForWork");
+};
 
 // ---- What's taxed (migrations/0013) ----------------------------------------
 // A line is taxed at the order's snapshotted rate only when (1) its product is
@@ -542,7 +565,8 @@ async function storeOrderTotals_(db, orderId) {
   const subtotalCents = row ? Number(row.itemsCents) || 0 : 0;
   const exclusive = !!row && taxMode_(row.taxMode) === "exclusive";
   // The rush fee (migrations/0082) is part of the total like shipping; with tax on top, so is its tax.
-  const totalCents = subtotalCents + (row ? (Number(row.shippingCostCents) || 0) + (Number(row.rushFeeCents) || 0) : 0)
+  // Shipping as charged: less what free-shipping codes took off it (migrations/0120).
+  const totalCents = subtotalCents + (row ? Math.max(0, (Number(row.shippingCostCents) || 0) - (Number(row.shippingDiscountCents) || 0)) + (Number(row.rushFeeCents) || 0) : 0)
     + (exclusive ? (Number(row.itemsTaxCents) || 0) + (Number(row.rushFeeTaxCents) || 0) : 0);
   await db.prepare("UPDATE orders SET subtotalCents=?, totalCents=? WHERE orderId=?").bind(subtotalCents, totalCents, orderId).run();
   return { subtotalCents, totalCents };
@@ -1167,7 +1191,7 @@ export function fundraiserRaisedCents_(fundraiserCents, lineTotalCents, refundCe
 const FUNDRAISER_RAISED_SQL_ = (oi) => `(CASE WHEN ${oi}.lineTotalCents > 0 THEN MAX(0, ${oi}.fundraiserCents - CAST(ROUND(${oi}.fundraiserCents * MAX(0, COALESCE(${oi}.refundCents, 0)) * 1.0 / ${oi}.lineTotalCents) AS INTEGER)) ELSE 0 END)`;
 // A line that can raise money: one for a catalog product. A custom line or a quote's fee ("__custom__", or no product)
 // is the shop's own work outside the shop's catalog, so it raises nothing.
-const fundraiserLine_ = (productId) => !!productId && productId !== "__custom__";
+const fundraiserLine_ = (productId) => !!productId && productId !== "__custom__" && productId !== GIFT_CARD_PRODUCT_ID;
 // The shop's live fundraiser as stored (bps / cents), or null — none, or a database from before 0110.
 async function orgFundraiserStored_(db, orgId) {
   try {
@@ -1482,7 +1506,15 @@ async function setProductNoBlankNeeded_(db, orgId, productId, on) {
 }
 // True for an order line (row alias `alias`) whose product is marked "No blank needed". A custom
 // line with no product still counts as needing a blank, as before.
-const noBlankLineSql_ = (alias) => `EXISTS (SELECT 1 FROM products nb WHERE nb.orgId = ${alias}.orgId AND nb.productId = ${alias}.productId AND nb.noBlankNeeded = 1)`;
+// A gift card sold online (productId GIFT_CARD_PRODUCT_ID, migrations/0120) is made of nothing: no blank, no design, no
+// shipping — it is left out of production like a digital line (see digitalLine_), and it is not revenue (the reports
+// leave its line out: GIFT_CARD_LINE_SQL_).
+export const GIFT_CARD_PRODUCT_ID = "__giftcard__";
+const GIFT_CARD_LINE_SQL_ = (alias) => `${alias}.productId = '__giftcard__'`;
+// An order (alias `o`) that is nothing but gift cards sold online: no sale at all, so no report lists it.
+const GIFT_ONLY_ORDER_SQL_ = `(EXISTS (SELECT 1 FROM order_items gx WHERE gx.orderId = o.orderId AND gx.productId = '__giftcard__')
+    AND NOT EXISTS (SELECT 1 FROM order_items gx WHERE gx.orderId = o.orderId AND gx.productId <> '__giftcard__'))`;
+const noBlankLineSql_ = (alias) => `(${GIFT_CARD_LINE_SQL_(alias)} OR EXISTS (SELECT 1 FROM products nb WHERE nb.orgId = ${alias}.orgId AND nb.productId = ${alias}.productId AND nb.noBlankNeeded = 1))`;
 // The SQL builder to use against THIS database: the real test, or a constant "no" on a database
 // that doesn't have the column yet — so the order loaders and queues keep working if the code is
 // deployed a moment before the migration. Only a "yes" is remembered (a "no" is re-checked, so the
@@ -1495,7 +1527,7 @@ const _hasNoBlankColumn = new WeakSet();
 async function noBlankLine_(db) {
   if (!_hasNoBlankColumn.has(db)) {
     try { await db.prepare("SELECT noBlankNeeded FROM products LIMIT 0").all(); _hasNoBlankColumn.add(db); }
-    catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; return () => "0"; }
+    catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; return (alias) => `(${GIFT_CARD_LINE_SQL_(alias)})`; }
   }
   if (!(await hasFromStockColumn_(db))) return noBlankLineSql_;
   return (alias) => `(${noBlankLineSql_(alias)} OR COALESCE(${alias}.fromStock, 0) = 1)`;
@@ -1531,9 +1563,9 @@ const _hasDigitalColumn = new WeakSet();
 async function digitalLine_(db) {
   if (!_hasDigitalColumn.has(db)) {
     try { await db.prepare("SELECT digital FROM products LIMIT 0").all(); _hasDigitalColumn.add(db); }
-    catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; return () => "0"; }
+    catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; return (alias) => `(${GIFT_CARD_LINE_SQL_(alias)})`; }
   }
-  return (alias) => `EXISTS (SELECT 1 FROM products dg WHERE dg.orgId = ${alias}.orgId AND dg.productId = ${alias}.productId AND dg.digital = 1)`;
+  return (alias) => `(${GIFT_CARD_LINE_SQL_(alias)} OR EXISTS (SELECT 1 FROM products dg WHERE dg.orgId = ${alias}.orgId AND dg.productId = ${alias}.productId AND dg.digital = 1))`;
 }
 
 // migrations/0034 — a product that never needs an embroidery design (DTF, …).
@@ -3957,6 +3989,8 @@ export const FEATURES = [
     description: "Quotes for a customer — products at their quantity-break prices, custom lines and setup or digitizing fees — emailed as a link the customer opens to accept or ask for changes; an accepted quote becomes an order. Off: the Quotes page is hidden and quote links already sent say quotes aren't available. Quantity breaks on products still apply." },
   { key: "discounts", label: "Discount codes",
     description: "Codes customers type at checkout for a percent or an amount off: one person's single-use code, or a code anyone can use a set number of times, for every shop or one, with an optional last day. Off: the Discount codes page is hidden, the checkout has no code box and codes already sent don't work. A discount typed on an order by hand still applies." },
+  { key: "giftCards", label: "Gift cards",
+    description: "Gift cards: staff issue a card (a 16-character number, emailed to the person it's for), customers can buy one online when Global settings allows it, and a card's balance pays part or all of an order — at checkout, on a Local sale, on the order page or on the invoice page — across as many orders as it takes. A gift card is a payment, not a discount, so it works alongside a discount code. Cards never expire and can't be cashed out; unspent balances are a liability, not revenue. Off: the Gift cards page is hidden, the checkout has no gift card box or Gift cards button and a card can't be spent." },
   { key: "emailCampaigns", label: "Email campaigns",
     description: "Marketing emails to your customers from the Discount codes page: pick who gets one (shops, when they last ordered, how many orders, or addresses you type), start from a holiday theme, add a discount code, and send now or later. The checkout and Local sale get a box, ticked by default, for customers to say yes to shop news and discounts, and every email has a way to unsubscribe. The tab shows once email is set up. Off: the tab and the box are hidden and nothing is sent." },
 ];
@@ -4420,8 +4454,9 @@ function balanceReceivedCents_(payments, items, taxMode) {
 // refreshPaidStatus below, orderAmounts' "owed" (items + shipping + rush fee − discount, plus the sales tax
 // when it's added on top, migrations/0052; test124 checks the two agree) — so it can ride in the same batch
 // as the payment row it depends on. `tm` spells the order's tax mode (its column, or 'inclusive' on a
-// database from before 0052). Bind: [now, orderId].
-const paidRefreshSql_ = (tm) => {
+// database from before 0052); `shipDisc` = the orders table has shippingDiscountCents (migrations/0120), which comes
+// off the shipping owed (paidRefreshStmt_ passes it; left out, the statement is the one migrations/0114 pins). Bind: [now, orderId].
+const paidRefreshSql_ = (tm, shipDisc = false) => {
   const items = "COALESCE((SELECT SUM(lineTotalCents) FROM order_items WHERE orderId = orders.orderId AND cancelDate IS NULL), 0)";
   const itemsTax = "COALESCE((SELECT SUM(taxCents) FROM order_items WHERE orderId = orders.orderId AND cancelDate IS NULL), 0)";
   const taxAdded = `(CASE WHEN ${tm} = 'exclusive' THEN MAX(0, ${itemsTax} - COALESCE(discountTaxCents, 0)) ELSE 0 END)`;
@@ -4429,8 +4464,9 @@ const paidRefreshSql_ = (tm) => {
   const legacy = tm === LEGACY_TAX_MODE_;   // before 0052, so before the rush fee too
   const rush = legacy ? "0" : `(CASE WHEN ${items} > 0 THEN COALESCE(rushFeeCents, 0) + (CASE WHEN ${tm} = 'exclusive' THEN COALESCE(rushFeeTaxCents, 0) ELSE 0 END) ELSE 0 END)`;
   // What's owed for the work itself — everything but the rush fee (paidForWork) — and in all.
-  const workOwed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN COALESCE(shippingCostCents, 0) ELSE 0 END) - COALESCE(discountCents, 0) + ${taxAdded})`;
-  const owed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN COALESCE(shippingCostCents, 0) ELSE 0 END) + ${rush} - COALESCE(discountCents, 0) + ${taxAdded})`;
+  const ship = shipDisc && !legacy ? "MAX(0, COALESCE(shippingCostCents, 0) - COALESCE(shippingDiscountCents, 0))" : "COALESCE(shippingCostCents, 0)";
+  const workOwed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN ${ship} ELSE 0 END) - COALESCE(discountCents, 0) + ${taxAdded})`;
+  const owed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN ${ship} ELSE 0 END) + ${rush} - COALESCE(discountCents, 0) + ${taxAdded})`;
   // Less the refunds for cancelled lines (see above); the tax mode is the order's, spelled so the lines' subquery reads it.
   const received = balanceReceivedSql_("orders.orderId", legacy ? tm : "orders." + tm);
   return `UPDATE orders SET
@@ -4443,11 +4479,14 @@ const paidRefreshSql_ = (tm) => {
   WHERE orderId = ?`;
 };
 async function paidRefreshStmt_(db, orderId) {
-  if (db.__ordersHaveTaxMode === undefined) {
-    try { const { results } = await db.prepare("PRAGMA table_info(orders)").all(); db.__ordersHaveTaxMode = results.some(c => c.name === "taxMode"); }
-    catch (e) { db.__ordersHaveTaxMode = false; }
+  if (db.__ordersHaveTaxMode === undefined || db.__ordersHaveShipDisc === undefined) {
+    try {
+      const { results } = await db.prepare("PRAGMA table_info(orders)").all();
+      db.__ordersHaveTaxMode = results.some(c => c.name === "taxMode");
+      db.__ordersHaveShipDisc = results.some(c => c.name === "shippingDiscountCents");
+    } catch (e) { db.__ordersHaveTaxMode = false; db.__ordersHaveShipDisc = false; }
   }
-  return db.prepare(paidRefreshSql_(db.__ordersHaveTaxMode ? "taxMode" : LEGACY_TAX_MODE_)).bind(new Date().toISOString(), orderId);
+  return db.prepare(paidRefreshSql_(db.__ordersHaveTaxMode ? "taxMode" : LEGACY_TAX_MODE_, db.__ordersHaveShipDisc)).bind(new Date().toISOString(), orderId);
 }
 
 // Records one ledger row and brings the order's paid flag up to date IN THE SAME TRANSACTION (one
@@ -4549,12 +4588,17 @@ export async function deleteOrderPayment(db, id) {
   if (row) await refreshPaidStatus(db, row.orderId);
 }
 
+// Refused ({ error }, nothing changed) while a discount code is on the order — its discount is worked out from its codes
+// (applyOrderDiscountCode / removeOrderDiscountCode) and a typed amount would be overwritten by the next change to them.
+// Callers that don't look at the answer see no difference on an order without a code. { ok: true } otherwise.
 export async function setOrderDiscount(db, orderId, amount, note) {
+  if (await orderHasLiveCode_(db, orderId)) return { error: "This order has a discount code; take the code off first." };
   // A discount also reduces the tax collected (backed out of it, or not added, per the order's mode).
   const discountCents = Math.max(0, toCents(amount));
   await db.prepare("UPDATE orders SET discountCents=?, discountNote=? WHERE orderId=?").bind(discountCents, note || "", orderId).run();
   await recomputeOrderTax_(db, orderId);
   await refreshPaidStatus(db, orderId);
+  return { ok: true };
 }
 
 // Recomputes the cached orders.paid / paidAt from the payments ledger.
@@ -6568,7 +6612,8 @@ async function stageSql_(db) {
   // A line filled from finished stock (migrations/0060) is already made: it needs no digitizing or approval.
   const fs = await hasFromStockColumn_(db);
   // A line sold as files (products.digital, migrations/0086) has no stitch file to make: it needs no digitizing.
-  const dg = (await digitalLine_(db))("x") !== "0";
+  await digitalLine_(db);
+  const dg = _hasDigitalColumn.has(db);   // the column exists (digitalLine_ remembers a "yes")
   const skipStock = (sql) => (fs ? sql.replace(/ax\.cancelDate IS NULL/g, "ax.cancelDate IS NULL AND COALESCE(ax.fromStock, 0) = 0")
     .replace(/dx\.cancelDate IS NULL/g, "dx.cancelDate IS NULL AND COALESCE(dx.fromStock, 0) = 0") : sql)
     .replace(/pdx\.designId IS NULL/g, dg ? "pdx.designId IS NULL AND COALESCE(pdx.digital, 0) = 0" : "pdx.designId IS NULL");
@@ -11367,7 +11412,7 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
     blankShipmentsByOrder_(db, { sub, binds }),
     invoicesByOrder_(db, sub, binds),   // the invoice link emailed for it, if any (0053)
     estimatesByOrder_(db, sub, binds),  // the quote it was made from, if any (0109)
-    discountCodesByOrder_(db, sub, binds),  // the discount code it used, if any (0115)
+    discountCodeListByOrder_(db, sub, binds),  // the discount codes it used, if any (0115, several since 0120)
   ]);
   for (const r of orderRows) r.orderDesignsMissing = missing[r.orderId] || 0;
 
@@ -11400,7 +11445,8 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
     o.blankShipments = shipmentsByOrder[r.orderId] || [];
     o.invoice = invoices[r.orderId] || null;
     o.estimate = estimates[r.orderId] || null;
-    o.discountCode = discountCodes[r.orderId] || "";
+    o.discountCodes = discountCodes[r.orderId] || [];
+    o.discountCode = o.discountCodes.join(", ");
     o.brandReview = reviews.get(r.orderId) || [];
     o.catalogDrift = r.manufacturedAt || r.completedAt || r.voidedAt ? [] : drift.get(r.orderId) || [];
     return o;
@@ -11420,13 +11466,14 @@ export async function getOrderById(db, orderId) {
     db.prepare("SELECT * FROM shipping_labels WHERE orderId=? ORDER BY purchasedAt ASC").bind(orderId).all(),
     Promise.resolve().then(() => getBlankShipmentsForOrder(db, orderId)).catch(() => []),
     invoicesByOrder_(db, "?", [orderId]),
-    discountCodesByOrder_(db, "?", [orderId]),
+    discountCodeListByOrder_(db, "?", [orderId]),
   ]);
   row.orderDesignsMissing = missing[orderId] || 0;
   const order = parseOrder_(row, itemRows.map(parseItem_), paymentRows.map(parsePayment_), labelRows.map(parseLabel_));
   order.blankShipments = blankShipments;
   order.invoice = invoices[orderId] || null;
-  order.discountCode = discountCodes[orderId] || "";   // the discount code it used (migrations/0115), "" = none
+  order.discountCodes = discountCodes[orderId] || [];   // the discount codes it used (migrations/0115, several since 0120)
+  order.discountCode = order.discountCodes.join(", ");   // …joined for older callers, "" = none
   // The quote it was made from (migrations/0109): { id, number } or null.
   order.estimate = await estimateOfOrder_(db, orderId).catch(() => null);
   const settled = row.manufacturedAt || row.completedAt || row.voidedAt;
@@ -11597,10 +11644,10 @@ export async function getCustomer(db, id) {
     }
   } catch (e) { if (noCustomersYet_(e)) return null; throw e; }
   if (!row) return null;
-  const { results } = await db.prepare(
-    `SELECT o.orderId, o.orgId, o.placedAt, o.voidedAt, o.isTest, o.completedAt, ${ORDER_AMOUNT_COLS_},
-            ${paymentsSql_("o.orderId")} AS receivedCents, ${balanceReceivedSql_("o.orderId", "o.taxMode")} AS balanceReceivedCents
-       FROM orders o WHERE o.customerId = ? ORDER BY o.placedAt DESC, o.orderId DESC`).bind(row.id).all();
+  const { results } = await withTaxMode_((tm) => db.prepare(rushSql_(tm,
+    `SELECT o.orderId, o.orgId, o.placedAt, o.voidedAt, o.isTest, o.completedAt, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
+            ${paymentsSql_("o.orderId")} AS receivedCents, ${balanceReceivedSql_("o.orderId", tm)} AS balanceReceivedCents
+       FROM orders o WHERE o.customerId = ? ORDER BY o.placedAt DESC, o.orderId DESC`)).bind(row.id).all());
   let orderCount = 0, spentCents = 0, dueCents = 0;
   const orders = [];
   for (const r of results) {
@@ -11773,6 +11820,8 @@ function parseEstimate_(r, timeZone) {
     orderId: r.orderId || "", convertedAt: r.convertedAt || "", cancelledAt: r.cancelledAt || "",
     taxMode: taxMode_(r.taxMode), taxRateBps: Number(r.taxRateBps) || 0,
     createdAt: r.createdAt || "", updatedAt: r.updatedAt || "", createdBy: r.createdBy || "",
+    // The discount codes typed on the quote (migrations/0120): checked when it is sent, claimed when it becomes an order.
+    discountCodes: estimateCodesOf_(r),
     // Only a quote that is still open can run out; an accepted or converted one stays what it is.
     expired: ["draft", "sent", "changes"].includes(status) && estimateExpired(r, Date.now(), timeZone),
   };
@@ -11793,15 +11842,41 @@ function parseEstimateItem_(r) {
 }
 // Subtotal, tax and total of a quote's lines (rows with lineTotalCents and taxable) at a mode and rate — per line,
 // as insertOrder taxes an order's lines, so the order a quote becomes comes to the same.
-function estimateTotals_(itemRows, taxMode, taxRateBps) {
+// With discount codes (codeRows: discount_codes rows, migrations/0120) the codes come off the goods as combineDiscounts_
+// works them out, and the tax share of the discount comes off the tax as insertOrder does for the order it becomes;
+// `discount`, `freeShipping` and `discountCodes` ([{ code, discount, freeShipping }]) are added only then.
+function estimateTotals_(itemRows, taxMode, taxRateBps, codeRows = []) {
   const mode = taxMode_(taxMode), bps = Math.max(0, Math.round(Number(taxRateBps) || 0));
-  let sub = 0, tax = 0;
+  let sub = 0, tax = 0, taxableGross = 0;
   for (const it of itemRows || []) {
     const line = Number(it.lineTotalCents) || 0;
     sub += line;
-    if (Number(it.taxable)) tax += taxOn_(line, bps, mode);
+    if (Number(it.taxable)) { tax += taxOn_(line, bps, mode); taxableGross += line; }
   }
-  return { subtotal: fromCents(sub), tax: fromCents(tax), total: fromCents(sub + (mode === "exclusive" ? tax : 0)), taxMode: mode, taxRateBps: bps };
+  if (!codeRows || !codeRows.length) return { subtotal: fromCents(sub), tax: fromCents(tax), total: fromCents(sub + (mode === "exclusive" ? tax : 0)), taxMode: mode, taxRateBps: bps };
+  const combined = combineDiscounts_(codeRows, { goodsCents: sub, shippingCents: 0 });
+  const disc = Math.min(sub, combined.goodsOffCents);
+  const discTax = sub > 0 && disc > 0 ? (disc >= sub ? tax : Math.min(tax, taxOn_(Math.round(disc * taxableGross / sub), bps, mode))) : 0;
+  const taxAfter = Math.max(0, tax - discTax);
+  return { subtotal: fromCents(sub), tax: fromCents(taxAfter), total: fromCents(Math.max(0, sub - disc) + (mode === "exclusive" ? taxAfter : 0)), taxMode: mode, taxRateBps: bps,
+    discount: fromCents(disc), freeShipping: codeRows.some(r => discountShape_(r).freeShip),
+    discountCodes: combined.perCode.map((pc, i) => ({ code: pc.code, discount: fromCents(pc.goodsOffCents), freeShipping: discountShape_(codeRows[i]).freeShip,
+      label: parseDiscountCode_(codeRows[i], "").label })) };
+}
+// The codes on a quote row: a list of strings (what migrations/0120's discountCodes column holds; [] before it).
+function estimateCodesOf_(r) {
+  const v = r && r.discountCodes != null ? tryParse_(r.discountCodes, []) : [];
+  return Array.isArray(v) ? v.map(x => String(x)).filter(Boolean) : [];
+}
+// The discount_codes rows for these codes, in the order given (one that no longer exists is left out).
+async function estimateCodeRows_(db, codes) {
+  const list = discountCodeList_(codes);
+  if (!list.length) return [];
+  try {
+    const { results } = await db.prepare("SELECT * FROM discount_codes WHERE code IN (SELECT value FROM json_each(?))").bind(JSON.stringify(list)).all();
+    const by = new Map((results || []).map(r => [r.code, r]));
+    return list.map(c => by.get(c)).filter(Boolean);
+  } catch (e) { if (noDiscountCodesYet_(e)) return []; throw e; }
 }
 // The tax a quote would be sent with today: the Global settings mode and rate, none when the shop or the quote's
 // customer is exempt — the customer's exemption counts because staff picked the customer (as on a local sale).
@@ -11830,10 +11905,11 @@ async function estimateFull_(db, row) {
     estimateZone_(db),
   ]);
   const tax = estimateTaxLive_(row) ? await estimateTaxNow_(db, row) : { taxMode: row.taxMode, taxRateBps: row.taxRateBps };
+  const codeRows = await estimateCodeRows_(db, estimateCodesOf_(row));
   return {
     estimate: parseEstimate_(row, zone), items: (itemRows || []).map(parseEstimateItem_),
     customer: customerRow ? parseCustomer_(customerRow) : null,
-    totals: estimateTotals_(itemRows, tax.taxMode, tax.taxRateBps),
+    totals: estimateTotals_(itemRows, tax.taxMode, tax.taxRateBps, codeRows),
   };
 }
 
@@ -11899,6 +11975,9 @@ export async function listEstimates(db, { orgId = null, customerId = null, statu
   }
   const [settings, zone] = await Promise.all([getSalesTaxSettings(db), estimateZone_(db)]);
   const today = dateInTimeZone(new Date(), zone);
+  // The codes on this page's quotes (migrations/0120), read once, so a quote's total here is the one its page shows.
+  const pageCodes = [...new Set(rows.flatMap(estimateCodesOf_))];
+  const codeByName = new Map((await estimateCodeRows_(db, pageCodes)).map(c => [c.code, c]));
   return {
     estimates: rows.map(r => {
       const tax = estimateTaxLive_(r)
@@ -11906,7 +11985,7 @@ export async function listEstimates(db, { orgId = null, customerId = null, statu
         : { taxMode: r.taxMode, taxRateBps: r.taxRateBps };
       const e = parseEstimate_(r, zone);
       return { id: e.id, number: e.number, orgId: e.orgId, customerId: e.customerId, customerName: r.customerName_ || r.customerCompany_ || "",
-        title: e.title, status: e.status, total: estimateTotals_(linesBy.get(e.id) || [], tax.taxMode, tax.taxRateBps).total,
+        title: e.title, status: e.status, total: estimateTotals_(linesBy.get(e.id) || [], tax.taxMode, tax.taxRateBps, discountCodeList_(e.discountCodes).map(c => codeByName.get(c)).filter(Boolean)).total,
         expiresOn: e.expiresOn, expired: e.expired, sentAt: e.sentAt, updatedAt: e.updatedAt, orderId: e.orderId };
     }),
     total: Number(totalRow && totalRow.n) || 0,
@@ -11990,6 +12069,29 @@ export async function setEstimateFields(db, id, fields = {}) {
   const zone = await estimateZone_(db);
   const after = await db.prepare("SELECT * FROM estimates WHERE id = ?").bind(row.id).first();
   return { ok: true, before: parseEstimate_(row, zone), after: parseEstimate_(after, zone) };
+}
+
+// Sets the discount codes typed on a quote (migrations/0120): codes (strings) once each, at most DISCOUNT_CODES_PER_ORDER_MAX,
+// and one only unless the shop allows more (getDiscountRules). Only while the quote can still be changed. This only
+// saves what was typed — whether each code works is checked when the quote is sent and again when it becomes an order.
+// { ok, codes, before, after } or { error }.
+export async function setEstimateDiscountCodes(db, estimateId, codes) {
+  const row = await estimateRow_(db, estimateId);
+  if (!row) return { error: ESTIMATE_NOT_FOUND_ };
+  const locked = estimateLocked_(row);
+  if (locked) return { error: locked };
+  const raw = Array.isArray(codes) ? codes : codes == null || codes === "" ? [] : [codes];
+  const list = discountCodeList_(raw);
+  if (raw.filter(c => String(c == null ? "" : c).trim()).length !== list.length) return { error: "A discount code is 3 to 32 letters, digits, - or _, and each code can be on a quote once." };
+  if (list.length > DISCOUNT_CODES_PER_ORDER_MAX) return { error: `At most ${DISCOUNT_CODES_PER_ORDER_MAX} discount codes can be used on a quote.` };
+  if (list.length > 1 && !(await getDiscountRules(db)).multiple) return { error: DISCOUNT_ONE_CODE_ };
+  const now = new Date().toISOString();
+  try {
+    await db.prepare("UPDATE estimates SET discountCodes = ?, updatedAt = ? WHERE id = ?").bind(JSON.stringify(list), now, row.id).run();
+  } catch (e) { if (/no such column|has no column named/i.test(String(e && e.message))) return { error: DISCOUNT_CODES_NOT_READY_ }; throw e; }
+  const zone = await estimateZone_(db);
+  const after = await db.prepare("SELECT * FROM estimates WHERE id = ?").bind(row.id).first();
+  return { ok: true, codes: list, before: parseEstimate_(row, zone), after: parseEstimate_(after, zone) };
 }
 
 // Replaces a quote's lines (only a draft, or one the customer asked to change). `items` (dollars), in order:
@@ -12199,7 +12301,8 @@ export const DISCOUNT_CODES_BULK_MAX = 500;
 const DISCOUNT_CODE_RE_ = /^[A-Z0-9_-]{3,32}$/;
 // No 0/O or 1/I: a code is read off a page or an email and typed in by hand.
 const DISCOUNT_CODE_ALPHABET_ = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const noDiscountCodesYet_ = (e) => /no such table: (main\.)?discount_code/i.test(String(e && e.message));
+// (Also a database from before migrations/0120, whose codes have no minimum / free-shipping columns yet.)
+const noDiscountCodesYet_ = (e) => /no such table: (main\.)?discount_code|(no such column|has no column named)[: ]+(\w+\.)?(minOrderCents|freeShipping|goodsOff)\b/i.test(String(e && e.message));
 const DISCOUNT_CODES_NOT_READY_ = "Discount codes need the latest database update. Apply the migrations, then try again.";
 const DISCOUNT_CODE_NOT_FOUND_ = "That discount code wasn't found.";
 // getDiscountCode answers null both for no such code and before migrations/0115. A write that found none asks the
@@ -12227,12 +12330,16 @@ export function generateDiscountCode_(prefix = "") {
 }
 // "10% off" / "12.5% off" / "20% off, up to $25.00" / "$5.00 off".
 const discountDollars_ = (cents) => "$" + fromCents(cents).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-function discountCodeLabel_(kind, percentBps, amountCents, maxDiscountCents) {
-  if (kind === "percent") {
+function discountCodeLabel_(kind, percentBps, amountCents, maxDiscountCents, { freeShipping = false, minOrderCents = 0 } = {}) {
+  let label;
+  if (kind === "shipping") label = "Free shipping";
+  else if (kind === "percent") {
     const pct = String(Number((Number(percentBps) / 100).toFixed(2))) + "% off";
-    return Number(maxDiscountCents) > 0 ? pct + ", up to " + discountDollars_(maxDiscountCents) : pct;
-  }
-  return discountDollars_(amountCents) + " off";
+    label = Number(maxDiscountCents) > 0 ? pct + ", up to " + discountDollars_(maxDiscountCents) : pct;
+  } else label = discountDollars_(amountCents) + " off";
+  if (freeShipping && kind !== "shipping") label += " and free shipping";
+  if (Number(minOrderCents) > 0) label += ", on orders of " + discountDollars_(minOrderCents) + " or more";
+  return label;
 }
 const discountToday_ = (today) => CUSTOMER_DATE_RE_.test(String(today || "")) ? String(today) : dateInTimeZone(new Date(), _shopTimeZone_);
 // A real calendar date YYYY-MM-DD (not 2027-02-30). Month 13 or day 32 is no Date at all: checked before toISOString,
@@ -12242,19 +12349,28 @@ const realDate_ = (s) => { if (!CUSTOMER_DATE_RE_.test(s)) return false; const d
 // The shape every reader answers: a discount_codes row read with `used_` (DISCOUNT_USED_SQL_) and `orgName_`.
 function parseDiscountCode_(row, today) {
   const used = Number(row.used_) || 0, maxUses = Number(row.maxUses) || 1, active = !!Number(row.active);
+  // A "free shipping only" code is stored as a percent code that takes nothing off the goods (migrations/0120); here
+  // it is { kind: "shipping" } and the storage is hidden.
+  const shippingOnly = discountShippingOnlyRow_(row);
+  const kind = shippingOnly ? "shipping" : row.kind;
+  const freeShipping = shippingOnly || Number(row.freeShipping) === 1;
+  const minOrderCents = Number(row.minOrderCents) > 0 ? Number(row.minOrderCents) : 0;
   const expiresOn = row.expiresOn || null;
   const status = !active ? "off" : expiresOn && expiresOn < discountToday_(today) ? "expired" : used >= maxUses ? "usedUp" : "active";
   return {
-    id: Number(row.id), code: row.code, kind: row.kind,
-    percent: row.kind === "percent" ? Number(row.percentBps) / 100 : null,
-    amount: row.kind === "amount" ? fromCents(row.amountCents) : null,
-    maxDiscount: row.kind === "percent" && Number(row.maxDiscountCents) > 0 ? fromCents(row.maxDiscountCents) : null,
+    id: Number(row.id), code: row.code, kind,
+    percent: kind === "percent" ? Number(row.percentBps) / 100 : null,
+    amount: kind === "amount" ? fromCents(row.amountCents) : null,
+    maxDiscount: kind === "percent" && Number(row.maxDiscountCents) > 0 ? fromCents(row.maxDiscountCents) : null,
+    minOrder: minOrderCents ? fromCents(minOrderCents) : null, freeShipping,
     orgId: row.orgId || null, orgName: row.orgId ? (row.orgName_ || row.orgId) : "",
     email: row.email || "", maxUses, oncePerEmail: !!Number(row.oncePerEmail), expiresOn, active,
     note: row.note || "", createdAt: row.createdAt || "", createdBy: row.createdBy || "",
-    used, status, label: discountCodeLabel_(row.kind, row.percentBps, row.amountCents, row.maxDiscountCents),
+    used, status, label: discountCodeLabel_(kind, row.percentBps, row.amountCents, row.maxDiscountCents, { freeShipping, minOrderCents }),
   };
 }
+// A stored row that is a free-shipping-only code (goodsOff 0, freeShipping 1; a missing column reads as no).
+const discountShippingOnlyRow_ = (row) => !!row && Number(row.goodsOff) === 0 && Number(row.freeShipping) === 1;
 const DISCOUNT_CODE_SELECT_ = `SELECT c.*, ${DISCOUNT_USED_SQL_} AS used_, o.name AS orgName_ FROM discount_codes c LEFT JOIN orgs o ON o.orgId = c.orgId`;
 
 // Checks what the admin typed for a code. { value } — in cents and basis points, as stored — or { error } for the
@@ -12264,10 +12380,16 @@ export function normalizeDiscountCodeInput_(input) {
   const rawCode = String(p.code == null ? "" : p.code).trim();
   const code = rawCode ? normalizeDiscountCode_(rawCode) : "";
   if (rawCode && !code) return { error: "A code is 3 to 32 letters, digits, - or _ (no spaces)." };
-  const kind = p.kind === "percent" || p.kind === "amount" ? p.kind : "";
-  if (!kind) return { error: "Choose percent off or an amount off." };
+  const askedKind = p.kind === "percent" || p.kind === "amount" || p.kind === "shipping" ? p.kind : "";
+  if (!askedKind) return { error: "Choose percent off or an amount off." };
+  // Stored: free shipping only = a percent code with goodsOff 0 (migrations/0120). Any percent or amount typed with
+  // it is ignored (the page may still hold one).
+  const shippingOnly = askedKind === "shipping";
+  const kind = shippingOnly ? "percent" : askedKind;
   let percentBps = null, amountCents = null, maxDiscountCents = null;
-  if (kind === "percent") {
+  if (shippingOnly) {
+    percentBps = 10000;
+  } else if (kind === "percent") {
     const n = Number(p.percent);
     if (p.percent === "" || p.percent == null || typeof p.percent === "boolean" || !Number.isFinite(n)) return { error: "Enter the percent off." };
     percentBps = Math.round(n * 100);
@@ -12289,6 +12411,17 @@ export function normalizeDiscountCodeInput_(input) {
     if (Math.abs(n * 100 - amountCents) > 1e-6) return { error: "The amount off can't have fractions of a cent." };
     if (amountCents < 1 || amountCents > 1000000) return { error: "The amount off must be from $0.01 to $10,000." };
   }
+  // The least the goods must come to (blank = none) and whether the code also makes shipping free (migrations/0120).
+  let minOrderCents = null;
+  if (!(p.minOrder === "" || p.minOrder == null || p.minOrder === false)) {
+    const m = Number(p.minOrder);
+    if (typeof p.minOrder === "boolean" || !Number.isFinite(m)) return { error: "The minimum order must be an amount, or left blank for none." };
+    minOrderCents = toCents(m);
+    if (Math.abs(m * 100 - minOrderCents) > 1e-6) return { error: "The minimum order can't have fractions of a cent." };
+    if (minOrderCents < 1 || minOrderCents > 10000000) return { error: "The minimum order must be from $0.01 to $100,000." };
+  }
+  const freeShipping = shippingOnly || p.freeShipping === true || p.freeShipping === 1 || p.freeShipping === "1" || p.freeShipping === "true" ? 1 : 0;
+  const goodsOff = shippingOnly ? 0 : 1;
   const orgId = p.orgId == null || p.orgId === "" ? null : String(p.orgId).slice(0, 100);
   const rawEmail = String(p.email == null ? "" : p.email).trim();
   const email = rawEmail ? normalizeCustomerEmail_(rawEmail) : "";
@@ -12308,7 +12441,7 @@ export function normalizeDiscountCodeInput_(input) {
   if (note.length > 200) return { error: "The note can be at most 200 characters." };
   // Left out = unchanged on an edit, on for a new code.
   const active = p.active === undefined || p.active === null ? undefined : !(p.active === false || p.active === 0 || p.active === "0" || p.active === "false");
-  return { value: { code, kind, percentBps, amountCents, maxDiscountCents, orgId, email, maxUses, oncePerEmail, expiresOn: exp || null, note, active } };
+  return { value: { code, kind, percentBps, amountCents, maxDiscountCents, minOrderCents, freeShipping, goodsOff, orgId, email, maxUses, oncePerEmail, expiresOn: exp || null, note, active } };
 }
 
 // The Discount codes page's list, newest first. q matches the code, the email or the note; orgId = the codes that
@@ -12389,9 +12522,9 @@ export async function saveDiscountCode(db, input, { actor = "", now = new Date()
       for (let attempt = 0; attempt < 5; attempt++) {
         const code = v.code || generateDiscountCode_();
         try {
-          const r = await db.prepare(`INSERT INTO discount_codes (code, kind, percentBps, amountCents, maxDiscountCents, orgId, email, maxUses, oncePerEmail, expiresOn, active, note, createdAt, createdBy)
-                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-            .bind(code, v.kind, v.percentBps, v.amountCents, v.maxDiscountCents, v.orgId, v.email, v.maxUses, v.oncePerEmail, v.expiresOn, v.active === false ? 0 : 1, v.note, now, String(actor || "").slice(0, 200)).run();
+          const r = await db.prepare(`INSERT INTO discount_codes (code, kind, percentBps, amountCents, maxDiscountCents, minOrderCents, freeShipping, goodsOff, orgId, email, maxUses, oncePerEmail, expiresOn, active, note, createdAt, createdBy)
+                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .bind(code, v.kind, v.percentBps, v.amountCents, v.maxDiscountCents, v.minOrderCents, v.freeShipping, v.goodsOff, v.orgId, v.email, v.maxUses, v.oncePerEmail, v.expiresOn, v.active === false ? 0 : 1, v.note, now, String(actor || "").slice(0, 200)).run();
           return { code: await getDiscountCode(db, r.meta.last_row_id, today) };
         } catch (e) {
           if (!isUniqueError_(e)) throw e;
@@ -12403,11 +12536,14 @@ export async function saveDiscountCode(db, input, { actor = "", now = new Date()
     const before = await getDiscountCode(db, id, today);
     if (!before) return await discountCodeAbsent_(db);
     const code = v.code || before.code;
-    const beforeBps = before.kind === "percent" ? Math.round(before.percent * 100) : null;
+    // As stored: a free-shipping-only code is a percent code of 100% that takes nothing off the goods.
+    const beforeShipOnly = before.kind === "shipping";
+    const beforeBps = beforeShipOnly ? 10000 : before.kind === "percent" ? Math.round(before.percent * 100) : null;
     const beforeCents = before.kind === "amount" ? toCents(before.amount) : null;
     const beforeMax = before.maxDiscount != null ? toCents(before.maxDiscount) : null;
-    const fixedChanged = code !== before.code || v.kind !== before.kind || v.percentBps !== beforeBps || v.amountCents !== beforeCents
-      || v.maxDiscountCents !== beforeMax
+    const beforeMin = before.minOrder != null ? toCents(before.minOrder) : null;
+    const fixedChanged = code !== before.code || v.kind !== (beforeShipOnly ? "percent" : before.kind) || v.percentBps !== beforeBps || v.amountCents !== beforeCents
+      || v.maxDiscountCents !== beforeMax || v.minOrderCents !== beforeMin || !!v.freeShipping !== before.freeShipping || !!v.goodsOff === beforeShipOnly
       || (v.orgId || null) !== (before.orgId || null) || v.email !== before.email || (!v.email && !!v.oncePerEmail !== before.oncePerEmail);
     if (fixedChanged && before.used > 0) return { error: DISCOUNT_CODE_LOCKED_ };
     if (v.maxUses < before.used) return { error: `This code has been used ${before.used} times, so it needs at least ${before.used} uses in all.` };
@@ -12415,10 +12551,10 @@ export async function saveDiscountCode(db, input, { actor = "", now = new Date()
     // Guarded by the uses as they are NOW, so a checkout claiming a use meanwhile can't be undercut.
     let r;
     try {
-      r = await db.prepare(`UPDATE discount_codes SET code=?, kind=?, percentBps=?, amountCents=?, maxDiscountCents=?, orgId=?, email=?, maxUses=?, oncePerEmail=?, expiresOn=?, active=?, note=?
+      r = await db.prepare(`UPDATE discount_codes SET code=?, kind=?, percentBps=?, amountCents=?, maxDiscountCents=?, minOrderCents=?, freeShipping=?, goodsOff=?, orgId=?, email=?, maxUses=?, oncePerEmail=?, expiresOn=?, active=?, note=?
                              WHERE id = ? AND (? = 0 OR NOT EXISTS (SELECT 1 FROM discount_code_uses u WHERE u.codeId = discount_codes.id AND u.releasedAt IS NULL))
                                AND ? >= (SELECT count(*) FROM discount_code_uses u WHERE u.codeId = discount_codes.id AND u.releasedAt IS NULL)`)
-        .bind(code, v.kind, v.percentBps, v.amountCents, v.maxDiscountCents, v.orgId, v.email, v.maxUses, v.oncePerEmail, v.expiresOn, active, v.note,
+        .bind(code, v.kind, v.percentBps, v.amountCents, v.maxDiscountCents, v.minOrderCents, v.freeShipping, v.goodsOff, v.orgId, v.email, v.maxUses, v.oncePerEmail, v.expiresOn, active, v.note,
           id, fixedChanged ? 1 : 0, v.maxUses).run();
     } catch (e) { if (isUniqueError_(e)) return discountCodeTaken_(code); throw e; }
     if (!(r && r.meta && Number(r.meta.changes) > 0)) {
@@ -12439,7 +12575,7 @@ export async function createDiscountCodesForEmails(db, p, { actor = "", now = ne
   p = p && typeof p === "object" ? p : {};
   const prefix = String(p.prefix == null ? "" : p.prefix).trim().toUpperCase();
   if (prefix && !/^[A-Z0-9_-]{1,12}$/.test(prefix)) return { error: "A prefix can be up to 12 letters, digits, - or _." };
-  const checked = normalizeDiscountCodeInput_({ kind: p.kind, percent: p.percent, amount: p.amount, maxDiscount: p.maxDiscount, orgId: p.orgId, expiresOn: p.expiresOn, note: p.note, maxUses: 1 });
+  const checked = normalizeDiscountCodeInput_({ kind: p.kind, percent: p.percent, amount: p.amount, maxDiscount: p.maxDiscount, minOrder: p.minOrder, freeShipping: p.freeShipping, orgId: p.orgId, expiresOn: p.expiresOn, note: p.note, maxUses: 1 });
   if (checked.error) return checked;
   const v = checked.value;
   const raw = (Array.isArray(p.emails) ? p.emails.map(e => String(e == null ? "" : e)) : String(p.emails == null ? "" : p.emails).split(/[\s,;]+/))
@@ -12466,9 +12602,9 @@ export async function createDiscountCodesForEmails(db, p, { actor = "", now = ne
       });
       // OR IGNORE: a code taken already (by another code, or one made meanwhile) inserts nothing — changes 0 — and
       // that address gets a new code in the next round, rather than the whole list failing.
-      const results = await db.batch(tries.map(t => db.prepare(`INSERT OR IGNORE INTO discount_codes (code, kind, percentBps, amountCents, maxDiscountCents, orgId, email, maxUses, oncePerEmail, expiresOn, active, note, createdAt, createdBy)
-                                                                VALUES (?,?,?,?,?,?,?,1,0,?,1,?,?,?)`)
-        .bind(t.code, v.kind, v.percentBps, v.amountCents, v.maxDiscountCents, v.orgId, t.email, v.expiresOn, v.note, now, by)));
+      const results = await db.batch(tries.map(t => db.prepare(`INSERT OR IGNORE INTO discount_codes (code, kind, percentBps, amountCents, maxDiscountCents, minOrderCents, freeShipping, goodsOff, orgId, email, maxUses, oncePerEmail, expiresOn, active, note, createdAt, createdBy)
+                                                                VALUES (?,?,?,?,?,?,?,?,?,?,1,0,?,1,?,?,?)`)
+        .bind(t.code, v.kind, v.percentBps, v.amountCents, v.maxDiscountCents, v.minOrderCents, v.freeShipping, v.goodsOff, v.orgId, t.email, v.expiresOn, v.note, now, by)));
       pending = [];
       tries.forEach((t, i) => { if (Number(results[i] && results[i].meta && results[i].meta.changes) > 0) made.set(t.email, t.code); else pending.push(t.email); });
     }
@@ -12509,10 +12645,12 @@ export async function deleteDiscountCode(db, id) {
 
 // What a code takes off goods of subtotalCents, in cents: a percent rounded to the cent (and no more than its max
 // discount, when it has one), an amount no more than the goods. `code` is a discount_codes row (percentBps /
-// amountCents / maxDiscountCents) or a parsed code (percent / amount / maxDiscount).
+// amountCents / maxDiscountCents) or a parsed code (percent / amount / maxDiscount). A free-shipping-only code (a row
+// with goodsOff 0, or a parsed { kind: "shipping" }) takes nothing off the goods.
 export function discountForCode_(code, subtotalCents) {
   const sub = Math.max(0, Math.round(Number(subtotalCents) || 0));
   if (!code) return 0;
+  if (code.kind === "shipping" || (code.goodsOff != null && Number(code.goodsOff) === 0)) return 0;
   if (code.kind === "percent") {
     const bps = code.percentBps != null ? Number(code.percentBps) : Math.round(Number(code.percent) * 100);
     const off = Math.min(sub, Math.max(0, Math.round(sub * (Number(bps) || 0) / 10000)));
@@ -12523,8 +12661,74 @@ export function discountForCode_(code, subtotalCents) {
   return Math.min(sub, Math.max(0, Number(cents) || 0));
 }
 
+// ---- More than one code on an order (migrations/0120) -----------------------------------------------------------
+// The shop-wide rule (global_settings "discountRules"): { multiple } — false (the default) = one code per order.
+// Gift cards are not codes: they are a payment, so a code and a gift card always work together, whatever this says.
+export async function getDiscountRules(db) {
+  const v = await getSettingJson_(db, "discountRules", null);
+  return { multiple: !!(v && typeof v === "object" && v.multiple === true) };
+}
+// The build step (see writeSettingBuilds): `multiple` is a boolean; one left out keeps what it is.
+export async function buildDiscountRules(db, v) {
+  const cur = await getDiscountRules(db);
+  const p = v && typeof v === "object" ? v : {};
+  if (p.multiple !== undefined && typeof p.multiple !== "boolean") throw pricingError_("Choose whether more than one discount code can be used on an order");
+  const value = { multiple: p.multiple === undefined ? cur.multiple : p.multiple };
+  return { value, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('discountRules', ?)").bind(JSON.stringify(value))] };
+}
+export async function setDiscountRules(db, v) {
+  const b = await buildDiscountRules(db, v);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
+}
+const DISCOUNT_ONE_CODE_ = "Only one discount code can be used on an order.";
+const DISCOUNT_SAME_CODE_ = "That code is already applied.";
+
+// How a code takes its discount, from a discount_codes row or a parsed code: { shippingOnly, goodsOff (does it take
+// anything off the goods), kind, bps, amountCents, maxCents, freeShip }.
+function discountShape_(c) {
+  const shippingOnly = c.kind === "shipping" || discountShippingOnlyRow_(c);
+  const goodsOff = !shippingOnly && !(c.goodsOff != null && Number(c.goodsOff) === 0);
+  const bps = c.percentBps != null ? Number(c.percentBps) : Math.round(Number(c.percent) * 100);
+  const cap = c.maxDiscountCents != null ? Number(c.maxDiscountCents) : c.maxDiscount != null ? toCents(c.maxDiscount) : 0;
+  const amt = c.amountCents != null ? Number(c.amountCents) : toCents(c.amount);
+  return { shippingOnly, goodsOff, kind: c.kind, bps: Math.max(0, Number(bps) || 0), maxCents: cap > 0 ? cap : 0, amountCents: Math.max(0, Number(amt) || 0),
+    freeShip: shippingOnly || c.freeShipping === true || Number(c.freeShipping) === 1 };
+}
+// What several codes take off together, in cents. The owner's rule: percent codes ADD UP (10% + 15% = 25%, never more
+// than the goods) and come off the goods first — each percent code's own maximum, if it has one, caps ITS share —
+// then amount codes come off what is left, in the order given, each no more than what is left. A shipping code (or any
+// code with freeShipping) makes shipping free: shippingOff = shippingCents once, however many say so, credited to the
+// first of them. Each share is rounded half up to the cent. Codes are rows or parsed codes.
+// → { goodsOffCents, shippingOffCents, perCode: [{ id, code, goodsOffCents, shippingOffCents }] } (in the order given)
+export function combineDiscounts_(codes, { goodsCents = 0, shippingCents = 0 } = {}) {
+  const goods = Math.max(0, Math.round(Number(goodsCents) || 0)), ship = Math.max(0, Math.round(Number(shippingCents) || 0));
+  const list = (Array.isArray(codes) ? codes : []).filter(Boolean);
+  const shapes = list.map(discountShape_);
+  const per = list.map((c) => ({ id: c.id == null ? null : Number(c.id), code: c.code || "", goodsOffCents: 0, shippingOffCents: 0 }));
+  let off = 0;
+  shapes.forEach((sh, i) => {
+    if (!sh.goodsOff || sh.kind !== "percent") return;
+    // Half up, in integers: floor((2 × goods × bps + 10000) / 20000).
+    let share = Math.floor((2 * goods * sh.bps + 10000) / 20000);
+    if (sh.maxCents > 0) share = Math.min(share, sh.maxCents);
+    share = Math.max(0, Math.min(share, goods - off));
+    per[i].goodsOffCents = share; off += share;
+  });
+  shapes.forEach((sh, i) => {
+    if (!sh.goodsOff || sh.kind !== "amount") return;
+    const share = Math.max(0, Math.min(sh.amountCents, goods - off));
+    per[i].goodsOffCents = share; off += share;
+  });
+  let shippingOff = 0;
+  const first = shapes.findIndex(sh => sh.freeShip);
+  if (first >= 0) { shippingOff = ship; per[first].shippingOffCents = ship; }
+  return { goodsOffCents: off, shippingOffCents: shippingOff, perCode: per };
+}
+
 // Why a code can't be used, from its row (read with used_ and, with an email, usedByEmail_) — "" when it can.
-function discountRefusal_(row, { orgId, email, today }) {
+// subtotalCents (the goods as priced) is checked against the code's minimum order when it is given.
+function discountRefusal_(row, { orgId, email, today, subtotalCents }) {
   if (!row) return DISCOUNT_CODE_INVALID_EMAIL_;
   if (row.email) {
     if (!email) return "Enter your email address first — this code is for one person.";
@@ -12535,6 +12739,9 @@ function discountRefusal_(row, { orgId, email, today }) {
   if (row.expiresOn && row.expiresOn < discountToday_(today)) return "This code has expired.";
   if ((Number(row.used_) || 0) >= Number(row.maxUses)) return Number(row.maxUses) === 1 ? "This code has already been used." : "This code has reached its limit.";
   if (Number(row.oncePerEmail) && email && Number(row.usedByEmail_) > 0) return "You've already used this code.";
+  if (Number(row.minOrderCents) > 0 && subtotalCents != null && Math.round(Number(subtotalCents) || 0) < Number(row.minOrderCents)) {
+    return "This code needs an order of at least " + discountDollars_(row.minOrderCents) + ".";
+  }
   return "";
 }
 async function discountCodeRow_(db, { code, id, email }) {
@@ -12542,29 +12749,72 @@ async function discountCodeRow_(db, { code, id, email }) {
                             (SELECT count(*) FROM discount_code_uses u WHERE u.codeId = c.id AND u.releasedAt IS NULL AND u.email = ?) AS usedByEmail_
                        FROM discount_codes c WHERE ${id ? "c.id = ?" : "c.code = ?"}`).bind(email || "", id || code).first();
 }
+const discountCodeList_ = (codes) => [...new Set((Array.isArray(codes) ? codes : []).map(normalizeDiscountCode_).filter(Boolean))];
 
 // Is this code good for this cart, in this shop, for this email (trimmed, lower-case; "" = not typed yet)?
-// subtotal (dollars) = the goods as priced. { ok: true, code: { id, code, label, kind, percent, amount }, discount }
+// subtotal (dollars) = the goods as priced; shipping (dollars, optional) = what shipping would cost, so a free-shipping
+// code can say what it takes off; others = the codes already applied (strings). One code only, unless the shop's rule
+// (getDiscountRules) allows more; the same code twice is refused either way.
+// { ok: true, code: { id, code, label, kind, percent, amount, maxDiscount, minOrder, freeShipping }, discount,
+//   combined (combineDiscounts_ of all the codes, in cents), combinedOff: { goods, shipping } (dollars) }
 // or { ok: false, reason } — reasons a customer reads, which never give away a code's email address or its uses.
-export async function checkDiscountCode(db, { code, orgId, email, subtotal, today } = {}) {
+export async function checkDiscountCode(db, { code, orgId, email, subtotal, shipping, today, others = [] } = {}) {
   const c = normalizeDiscountCode_(code);
   const em = normalizeCustomerEmail_(email);
   if (!c) return { ok: false, reason: DISCOUNT_CODE_INVALID_EMAIL_ };
+  const other = discountCodeList_(others).filter(o => o !== c);
+  if (discountCodeList_(others).includes(c)) return { ok: false, reason: DISCOUNT_SAME_CODE_ };
+  if (other.length && !(await getDiscountRules(db)).multiple) return { ok: false, reason: DISCOUNT_ONE_CODE_ };
+  const subtotalCents = toCents(subtotal), shippingCents = Math.max(0, toCents(shipping || 0));
   let row;
   try { row = await discountCodeRow_(db, { code: c, email: em }); }
   catch (e) { if (noDiscountCodesYet_(e)) return { ok: false, reason: DISCOUNT_CODE_INVALID_EMAIL_, notReady: true }; throw e; }
-  const reason = discountRefusal_(row, { orgId, email: em, today });
+  const reason = discountRefusal_(row, { orgId, email: em, today, subtotalCents });
   if (reason) return { ok: false, reason };
+  // The ones already applied, as far as they still stand (one that no longer works is left out of the total).
+  const rows = [];
+  for (const o of other) {
+    const r = await discountCodeRow_(db, { code: o, email: em });
+    if (r && !discountRefusal_(r, { orgId, email: em, today, subtotalCents })) rows.push(r);
+  }
+  rows.push(row);
+  const combined = combineDiscounts_(rows, { goodsCents: subtotalCents, shippingCents });
   const p = parseDiscountCode_(row, today);
-  return { ok: true, code: { id: p.id, code: p.code, label: p.label, kind: p.kind, percent: p.percent, amount: p.amount, maxDiscount: p.maxDiscount },
-    discount: fromCents(discountForCode_(row, toCents(subtotal))) };
+  return { ok: true, code: { id: p.id, code: p.code, label: p.label, kind: p.kind, percent: p.percent, amount: p.amount, maxDiscount: p.maxDiscount,
+      minOrder: p.minOrder, freeShipping: p.freeShipping },
+    discount: fromCents(discountForCode_(row, subtotalCents)),
+    combined, combinedOff: { goods: fromCents(combined.goodsOffCents), shipping: fromCents(combined.shippingOffCents) } };
 }
 
+// Checks a whole list of codes typed on one cart or order and works out what they come to together: the shared step
+// of the storefront order, the Local sale and a quote becoming an order. codes (strings, in order, at most 5),
+// goodsCents / shippingCents (the cart), orgId, email, today. → { ok: true, uses: [{ codeId, code, amountCents }],
+// combined, note ("Code SAVE10" | "Codes SAVE10, TEAM5"), shippingOffCents, goodsOffCents } or { ok: false, reason, code }.
+// Claiming the uses is the caller's next step (claimDiscountCodes), just before insertOrder.
+export async function planDiscountCodes(db, { codes, goodsCents, shippingCents = 0, orgId, email, today } = {}) {
+  const list = discountCodeList_(codes);
+  if (!list.length) return { ok: true, uses: [], combined: combineDiscounts_([], { goodsCents, shippingCents }), note: "", shippingOffCents: 0, goodsOffCents: 0 };
+  if (list.length > DISCOUNT_CODES_PER_ORDER_MAX) return { ok: false, reason: `At most ${DISCOUNT_CODES_PER_ORDER_MAX} discount codes can be used on an order.` };
+  const em = normalizeCustomerEmail_(email);
+  const rows = [];
+  for (const [i, code] of list.entries()) {
+    const chk = await checkDiscountCode(db, { code, orgId, email: em, subtotal: fromCents(goodsCents), shipping: fromCents(shippingCents), today, others: list.slice(0, i) });
+    if (!chk.ok) return { ok: false, reason: chk.reason, code };
+    rows.push(await discountCodeRow_(db, { code, email: em }));
+  }
+  const combined = combineDiscounts_(rows, { goodsCents, shippingCents });
+  return { ok: true, combined, goodsOffCents: combined.goodsOffCents, shippingOffCents: combined.shippingOffCents,
+    uses: combined.perCode.map(pc => ({ codeId: pc.id, code: pc.code, amountCents: pc.goodsOffCents + pc.shippingOffCents })),
+    note: (list.length > 1 ? "Codes " : "Code ") + list.join(", ") };
+}
+export const DISCOUNT_CODES_PER_ORDER_MAX = 5;
+
 // Takes one use of a code for an order, just before the order is inserted. ONE conditional statement: the code is
-// on, has a use left, is this email's (one person's code) and — once per email — not used by it yet; so two orders
-// racing for the last use can't both have it. Expiry and the shop are the caller's check (checkDiscountCode).
+// on, has a use left, is this email's (one person's code) and — once per email — not used by it yet; and, when the
+// shop allows one code per order, the order has no other live code; so two orders racing for the last use can't both
+// have it. Expiry, the shop and the minimum order are the caller's check (checkDiscountCode).
 // The same order trying again: its released use (the insert failed, the use was given back) is taken back — the
-// unique order index allows one row per order, so the UPDATE is simpler than a second row — and its live use
+// unique (order, code) index allows one row per pair, so the UPDATE is simpler than a second row — and its live use
 // for the same code answers ok again. { ok: true } | { ok: false, reason }.
 export async function claimDiscountCode(db, { codeId, orderId, email, amountCents, now = new Date().toISOString() } = {}) {
   const id = Number(codeId), oid = String(orderId == null ? "" : orderId);
@@ -12572,48 +12822,166 @@ export async function claimDiscountCode(db, { codeId, orderId, email, amountCent
   if (!Number.isSafeInteger(id) || id < 1 || !oid) return { ok: false, reason: DISCOUNT_CODE_INVALID_ };
   const cents = Math.max(0, Math.round(Number(amountCents) || 0));
   try {
+    const multiple = (await getDiscountRules(db)).multiple;
     const r = await db.prepare(`INSERT INTO discount_code_uses (codeId, orderId, email, amountCents, usedAt)
         SELECT c.id, ?, ?, ?, ? FROM discount_codes c
          WHERE c.id = ? AND c.active = 1 AND (c.email = '' OR c.email = ?)
            AND ${DISCOUNT_USED_SQL_} < c.maxUses
            AND (c.oncePerEmail = 0 OR NOT EXISTS (SELECT 1 FROM discount_code_uses u WHERE u.codeId = c.id AND u.releasedAt IS NULL AND u.email = ?))
-        ON CONFLICT(orderId) DO UPDATE SET codeId = excluded.codeId, email = excluded.email, amountCents = excluded.amountCents,
+           AND (? = 1 OR NOT EXISTS (SELECT 1 FROM discount_code_uses x WHERE x.orderId = ? AND x.releasedAt IS NULL AND x.codeId <> c.id))
+        ON CONFLICT(orderId, codeId) DO UPDATE SET email = excluded.email, amountCents = excluded.amountCents,
                                            usedAt = excluded.usedAt, releasedAt = NULL
          WHERE discount_code_uses.releasedAt IS NOT NULL`)
-      .bind(oid, em, cents, now, id, em, em).run();
+      .bind(oid, em, cents, now, id, em, em, multiple ? 1 : 0, oid).run();
     if (r && r.meta && Number(r.meta.changes) > 0) return { ok: true };
-    const mine = await db.prepare("SELECT codeId FROM discount_code_uses WHERE orderId = ? AND releasedAt IS NULL").bind(oid).first();
-    if (mine) return Number(mine.codeId) === id ? { ok: true, already: true } : { ok: false, reason: "This order already has a discount code." };
+    const same = await db.prepare("SELECT 1 AS x FROM discount_code_uses WHERE orderId = ? AND codeId = ? AND releasedAt IS NULL").bind(oid, id).first();
+    if (same) return { ok: true, already: true };
+    if (!multiple && await db.prepare("SELECT 1 AS x FROM discount_code_uses WHERE orderId = ? AND releasedAt IS NULL").bind(oid).first()) {
+      return { ok: false, reason: "This order already has a discount code." };
+    }
     const row = await discountCodeRow_(db, { id, email: em });
-    // Refused: say why as checkDiscountCode would (the shop and expiry aside — they were checked just before).
+    // Refused: say why as checkDiscountCode would (the shop, expiry and minimum aside — they were checked just before).
     const reason = row ? discountRefusal_(row, { orgId: row.orgId, email: em, today: "0000-00-00" }) : DISCOUNT_CODE_INVALID_;
     return { ok: false, reason: reason || (Number(row.oncePerEmail) ? "You've already used this code." : "This code has reached its limit.") };
   } catch (e) { if (noDiscountCodesYet_(e)) return { ok: false, reason: DISCOUNT_CODE_INVALID_, notReady: true }; throw e; }
 }
-
-// Gives an order's use of a code back (its order voided or deleted, or never written): the row is kept, marked
-// released, and no longer counts. { ok, code } — the code given back ("" when there was none, or no 0115 yet).
-export async function releaseDiscountCodeUse(db, orderId, now = new Date().toISOString()) {
-  const oid = String(orderId == null ? "" : orderId);
-  if (!oid) return { ok: true, code: "" };
-  try {
-    const live = await db.prepare(`SELECT u.id, c.code FROM discount_code_uses u JOIN discount_codes c ON c.id = u.codeId
-                                    WHERE u.orderId = ? AND u.releasedAt IS NULL`).bind(oid).first();
-    if (!live) return { ok: true, code: "" };
-    await db.prepare("UPDATE discount_code_uses SET releasedAt = ? WHERE id = ? AND releasedAt IS NULL").bind(now, live.id).run();
-    return { ok: true, code: live.code || "" };
-  } catch (e) { if (noDiscountCodesYet_(e)) return { ok: true, code: "" }; throw e; }
+// Claims each of uses [{ codeId, amountCents }] in turn for the order. If one is refused, the ones this call took are
+// given back (one that was already the order's is left alone) and that refusal is returned: all or none.
+// { ok: true } | { ok: false, reason, codeId }.
+export async function claimDiscountCodes(db, { orderId, email, uses, now = new Date().toISOString() } = {}) {
+  const took = [];
+  for (const u of Array.isArray(uses) ? uses : []) {
+    const r = await claimDiscountCode(db, { codeId: u.codeId, orderId, email, amountCents: u.amountCents, now });
+    if (!r.ok) {
+      for (const id of took) await releaseDiscountCodeUseFor_(db, orderId, id, now).catch(() => {});
+      return { ok: false, reason: r.reason, codeId: Number(u.codeId) || null };
+    }
+    if (!r.already) took.push(Number(u.codeId));
+  }
+  return { ok: true };
+}
+// Gives one code's use of an order back.
+async function releaseDiscountCodeUseFor_(db, orderId, codeId, now) {
+  await db.prepare("UPDATE discount_code_uses SET releasedAt = ? WHERE orderId = ? AND codeId = ? AND releasedAt IS NULL").bind(now, String(orderId), Number(codeId)).run();
 }
 
-// { orderId: "SAVE10" } for the orders a loader just read that have a live use of a code; {} without 0115.
-async function discountCodesByOrder_(db, sub, binds) {
+// Gives ALL of an order's uses of codes back (its order voided or deleted, or never written): the rows are kept,
+// marked released, and no longer count. { ok, codes: ["SAVE10", …], code } — the codes given back; `code` is them
+// joined with ", " for older callers ("" when there were none, or no 0115 yet).
+export async function releaseDiscountCodeUse(db, orderId, now = new Date().toISOString()) {
+  const oid = String(orderId == null ? "" : orderId);
+  if (!oid) return { ok: true, codes: [], code: "" };
+  try {
+    const { results } = await db.prepare(`SELECT u.id, c.code FROM discount_code_uses u JOIN discount_codes c ON c.id = u.codeId
+                                           WHERE u.orderId = ? AND u.releasedAt IS NULL ORDER BY u.id`).bind(oid).all();
+    const live = results || [];
+    if (!live.length) return { ok: true, codes: [], code: "" };
+    await db.prepare("UPDATE discount_code_uses SET releasedAt = ? WHERE orderId = ? AND releasedAt IS NULL").bind(now, oid).run();
+    const codes = live.map(r => r.code || "").filter(Boolean);
+    return { ok: true, codes, code: codes.join(", ") };
+  } catch (e) { if (noDiscountCodesYet_(e)) return { ok: true, codes: [], code: "" }; throw e; }
+}
+
+// { orderId: ["SAVE10", "TEAM5"] } for the orders a loader just read that have live uses of codes (in the order they
+// were taken); {} without 0115.
+async function discountCodeListByOrder_(db, sub, binds) {
   try {
     const { results } = await db.prepare(`SELECT u.orderId, c.code FROM discount_code_uses u JOIN discount_codes c ON c.id = u.codeId
-                                           WHERE u.orderId IN (${sub}) AND u.releasedAt IS NULL`).bind(...binds).all();
+                                           WHERE u.orderId IN (${sub}) AND u.releasedAt IS NULL ORDER BY u.id`).bind(...binds).all();
     const out = byId_();
-    for (const r of results || []) out[r.orderId] = r.code || "";
+    for (const r of results || []) (out[r.orderId] = out[r.orderId] || []).push(r.code || "");
     return out;
   } catch (e) { if (noDiscountCodesYet_(e)) return byId_(); throw e; }
+}
+// { orderId: "SAVE10, TEAM5" }: the same, joined.
+async function discountCodesByOrder_(db, sub, binds) {
+  const lists = await discountCodeListByOrder_(db, sub, binds), out = byId_();
+  for (const [orderId, codes] of Object.entries(lists)) out[orderId] = codes.join(", ");
+  return out;
+}
+
+// ---- Codes on an order that already exists (the order page, the invoice page) ---------------------------------------
+const ORDER_NO_CODE_NOW_ = "This order can't take a code now.";
+const orderCodeRefusal_ = (reason) => ({ ok: false, reason, error: reason });
+// The order and the codes it carries, for working out its discount from all of them: { order, goodsCents, rows }.
+async function orderCodeState_(db, orderId) {
+  const o = await db.prepare(`SELECT orderId, orgId, contact, voidedAt, completedAt, refundedAt, shippingCostCents, discountCents, discountNote,
+                                     COALESCE((SELECT SUM(lineTotalCents) FROM order_items WHERE orderId = orders.orderId AND cancelDate IS NULL), 0) AS goodsCents
+                                FROM orders WHERE orderId = ?`).bind(String(orderId)).first();
+  if (!o) return null;
+  const { results } = await db.prepare(`SELECT c.*, ${DISCOUNT_USED_SQL_} AS used_ FROM discount_code_uses u JOIN discount_codes c ON c.id = u.codeId
+                                         WHERE u.orderId = ? AND u.releasedAt IS NULL ORDER BY u.id`).bind(String(orderId)).all();
+  return { order: o, goodsCents: Number(o.goodsCents) || 0, rows: results || [] };
+}
+// Writes the order's discount from ALL its live codes (and what they took off shipping), then its tax share and paid
+// status. With no live code left the order has no discount at all. Each use's amountCents is its share.
+async function applyCodesToOrder_(db, orderId, state, now) {
+  const { order, goodsCents, rows } = state;
+  const combined = combineDiscounts_(rows, { goodsCents, shippingCents: Number(order.shippingCostCents) || 0 });
+  const note = !rows.length ? "" : ((rows.length > 1 ? "Codes " : "Code ") + rows.map(r => r.code).join(", ")).slice(0, 300);
+  const stmts = [db.prepare("UPDATE orders SET discountCents = ?, discountNote = ?, shippingDiscountCents = ? WHERE orderId = ?")
+    .bind(combined.goodsOffCents, note, combined.shippingOffCents, orderId)];
+  for (const pc of combined.perCode) {
+    stmts.push(db.prepare("UPDATE discount_code_uses SET amountCents = ? WHERE orderId = ? AND codeId = ? AND releasedAt IS NULL").bind(pc.goodsOffCents + pc.shippingOffCents, orderId, pc.id));
+  }
+  await db.batch(stmts);
+  await recomputeOrderTax_(db, orderId);
+  await refreshPaidStatus(db, orderId);
+  return { ok: true, codes: rows.map(r => r.code), discountCents: combined.goodsOffCents, discountNote: note, shippingDiscountCents: combined.shippingOffCents, perCode: combined.perCode };
+}
+// Adds a discount code to an existing order: checked against the order's goods, its shop and its email (and the rule
+// about more than one code), claimed, and the order's discount worked out again from all its codes. Refused on a void,
+// completed or fully refunded order, and on one that has a manual discount. { ok, codes, discountCents, discountNote,
+// shippingDiscountCents } | { ok: false, reason, error }.
+export async function applyOrderDiscountCode(db, { orderId, code, today = "", now = new Date().toISOString() } = {}) {
+  try {
+    const state = await orderCodeState_(db, orderId);
+    if (!state) return orderCodeRefusal_("That order wasn't found.");
+    const { order, goodsCents, rows } = state;
+    if (order.voidedAt || order.completedAt || order.refundedAt) return orderCodeRefusal_(ORDER_NO_CODE_NOW_);
+    if (!rows.length && Number(order.discountCents) > 0) return orderCodeRefusal_("This order has a discount; take it off first.");
+    const c = normalizeDiscountCode_(code);
+    const em = normalizeCustomerEmail_(order.contact);
+    if (!c) return orderCodeRefusal_(DISCOUNT_CODE_INVALID_EMAIL_);
+    if (rows.some(r => r.code === c)) return orderCodeRefusal_(DISCOUNT_SAME_CODE_);
+    if (rows.length && !(await getDiscountRules(db)).multiple) return orderCodeRefusal_(DISCOUNT_ONE_CODE_);
+    const row = await discountCodeRow_(db, { code: c, email: em });
+    const reason = discountRefusal_(row, { orgId: order.orgId, email: em, today, subtotalCents: goodsCents });
+    if (reason) return orderCodeRefusal_(reason);
+    const claim = await claimDiscountCode(db, { codeId: row.id, orderId, email: em, amountCents: 0, now });
+    if (!claim.ok) return orderCodeRefusal_(claim.reason);
+    // Read again so the codes are in the order their uses were taken (what every loader shows).
+    return await applyCodesToOrder_(db, orderId, await orderCodeState_(db, orderId), now);
+  } catch (e) { if (noDiscountCodesYet_(e)) return orderCodeRefusal_(DISCOUNT_CODES_NOT_READY_); throw e; }
+}
+// Takes one code off an existing order (its use is given back) and works the discount out again from the rest.
+export async function removeOrderDiscountCode(db, { orderId, code, now = new Date().toISOString() } = {}) {
+  try {
+    const state = await orderCodeState_(db, orderId);
+    if (!state) return orderCodeRefusal_("That order wasn't found.");
+    const { order, goodsCents, rows } = state;
+    if (order.voidedAt || order.completedAt || order.refundedAt) return orderCodeRefusal_(ORDER_NO_CODE_NOW_);
+    const c = normalizeDiscountCode_(code);
+    const gone = rows.find(r => r.code === c);
+    if (!c || !gone) return orderCodeRefusal_("That code isn't on this order.");
+    await releaseDiscountCodeUseFor_(db, orderId, gone.id, now);
+    return { ...(await applyCodesToOrder_(db, orderId, { order, goodsCents, rows: rows.filter(r => r.id !== gone.id) }, now)), removed: gone.code };
+  } catch (e) { if (noDiscountCodesYet_(e)) return orderCodeRefusal_(DISCOUNT_CODES_NOT_READY_); throw e; }
+}
+// An order's shipping changed (set after it was placed, or re-quoted): free shipping from a code follows it. The
+// discount is the whole of the new shipping while any live code makes shipping free; 0 otherwise. Safe before 0120.
+async function syncShippingDiscount_(db, orderId) {
+  try {
+    await db.prepare(`UPDATE orders SET shippingDiscountCents = CASE WHEN EXISTS (
+        SELECT 1 FROM discount_code_uses u JOIN discount_codes c ON c.id = u.codeId
+         WHERE u.orderId = orders.orderId AND u.releasedAt IS NULL AND c.freeShipping = 1) THEN shippingCostCents ELSE shippingDiscountCents END
+      WHERE orderId = ?`).bind(String(orderId)).run();
+  } catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; }
+}
+// True when the order has a live use of a discount code.
+async function orderHasLiveCode_(db, orderId) {
+  try { return !!(await db.prepare("SELECT 1 AS x FROM discount_code_uses WHERE orderId = ? AND releasedAt IS NULL LIMIT 1").bind(String(orderId)).first()); }
+  catch (e) { if (noDiscountCodesYet_(e)) return false; throw e; }
 }
 
 // Atomic insert: order header + all items in one batch.
@@ -12677,7 +13045,8 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   const productRow = Object.fromEntries(prodRows.map(r => [r.productId, r]));
   const fillFromStock = !!opts.fillFromStock && !order.isTest && await hasFromStockColumn_(db);
   const productTaxable = Object.fromEntries(prodRows.map(r => [r.productId, !!r.taxable]));
-  const lineTaxable = (it) => (it.productId && it.productId in productTaxable) ? productTaxable[it.productId] : it.taxable !== false;
+  // A gift card sold online is never taxed (it is money held, not a sale: migrations/0120).
+  const lineTaxable = (it) => it.productId === GIFT_CARD_PRODUCT_ID ? false : (it.productId && it.productId in productTaxable) ? productTaxable[it.productId] : it.taxable !== false;
 
   const taxed = lines.map(({ it, lineCents }) => {
     const taxable = lineTaxable(it), rate = taxable ? lineRateBps : 0;
@@ -12704,10 +13073,15 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   if (order.source) { extraCols.push("source", "externalOrderId"); extraBinds.push(order.source, order.externalOrderId || null); }
   // Its customer (migrations/0108), named only when there is one, so an older database still takes the order.
   if (customer.id) { extraCols.push("customerId"); extraBinds.push(customer.id); }
-  // order.discount = { cents, note }: a discount code's (migrations/0115), written with the order rather than after it.
+  // order.discount = { cents, note, shippingCents }: the order's discount codes' (migrations/0115, 0120), written with
+  // the order rather than after it. shippingCents is what free-shipping codes take off shipping (never more than
+  // shipping): orders.shippingDiscountCents, which orderAmounts subtracts from shipping.
   // Stored as setOrderDiscount stores one, with the tax share recomputeOrderTax_ would give it: the discount, no more
   // than the goods, reduces tax only in proportion to the taxable goods it's taken off.
   const discountCents = order.discount ? Math.min(subtotalCents, Math.max(0, Math.round(Number(order.discount.cents) || 0))) : 0;
+  const shippingDiscountCents = order.discount ? Math.min(shippingCents, Math.max(0, Math.round(Number(order.discount.shippingCents) || 0))) : 0;
+  if (shippingDiscountCents > 0) { extraCols.push("shippingDiscountCents"); extraBinds.push(shippingDiscountCents); }
+  if (order.reorderOf) { extraCols.push("reorderOf"); extraBinds.push(String(order.reorderOf).slice(0, 100)); }
   let discountTaxCents = 0;
   if (discountCents > 0) {
     const taxableGross = lines.reduce((sum, l, n) => sum + (taxed[n].taxable ? l.lineCents : 0), 0);
@@ -12719,7 +13093,7 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   }
   // What the customer owes: goods, shipping and the rush fee, plus the tax on the goods and on the fee when tax is
   // added on top. Stored on the order and answered below — one figure, so the two can't differ.
-  const totalCents = subtotalCents + shippingCents + rushCents + taxAddedCents + (mode === "exclusive" ? rushTaxCents : 0);
+  const totalCents = subtotalCents + (shippingCents - shippingDiscountCents) + rushCents + taxAddedCents + (mode === "exclusive" ? rushTaxCents : 0);
   stmts.push(db.prepare(`INSERT INTO orders
     (orderId,orgId,customerName,contact,paymentMethod,subtotalCents,shippingCostCents,totalCents,
      shippingMethod,shippingAddress,totalWeightOz,placedAt,taxExempt,taxRateBps,isTest${extraCols.map(c => "," + c).join("")})
@@ -12781,12 +13155,12 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   // tax in it — the rush fee and its tax counted in both, as getOrderById reads the same order back (the storefront
   // shows this total and asks for it by Venmo or Zelle; a repeated submit is answered from getOrderById).
   const taxCents = taxed.reduce((sum, t) => sum + t.taxCents, 0);
-  if (discountCents > 0) {
+  if (discountCents > 0 || shippingDiscountCents > 0) {
     // With a discount, what's owed is orderAmounts' (the stored totalCents is before any discount, as always).
-    const amounts = orderAmounts({ itemsCents: subtotalCents, itemsTaxCents: taxCents, shippingCents, discountCents, discountTaxCents, taxMode: mode,
+    const amounts = orderAmounts({ itemsCents: subtotalCents, itemsTaxCents: taxCents, shippingCents, shippingDiscountCents, discountCents, discountTaxCents, taxMode: mode,
       rushCents, rushTaxCents });
     return { taxMode: mode, subtotal: fromCents(subtotalCents), shippingCost: fromCents(shippingCents), salesTax: fromCents(amounts.taxCents),
-      discount: fromCents(discountCents), total: fromCents(amounts.owedCents) };
+      discount: fromCents(discountCents), shippingDiscount: fromCents(shippingDiscountCents), total: fromCents(amounts.owedCents) };
   }
   return { taxMode: mode, subtotal: fromCents(subtotalCents), shippingCost: fromCents(shippingCents), salesTax: fromCents(taxCents + rushTaxCents),
     discount: 0, total: fromCents(totalCents) };
@@ -13375,6 +13749,7 @@ export async function updateOrderShipping(db, orderId, { shippingAddress, totalW
     Number(parcelHeight) || 0,
     orderId
   ).run();
+  await syncShippingDiscount_(db, orderId);   // a code's free shipping follows the new cost (migrations/0120)
   await recomputeOrderTax_(db, orderId);   // ship-to state decides whether it's taxed
   await refreshPaidStatus(db, orderId);
 }
@@ -14134,11 +14509,24 @@ export async function voidOrder(db, orderId, reason) {
 }
 
 // Voids a mistaken payment-ledger entry: stays visible, excluded from totals.
+// A payment made by gift card (migrations/0120) gives its money back to the card in the same batch — and only when this
+// call is the one that voided it (changes() chains from the UPDATE), so a second void can't credit the card twice: the
+// balance goes up, with a ledger 'refund' row ("Payment voided"). A void card isn't credited.
 export async function voidPayment(db, id, reason) {
-  const row = await db.prepare("SELECT orderId FROM order_payments WHERE id=?").bind(Number(id)).first();
+  let row;
+  try { row = await db.prepare("SELECT orderId, giftCardId, amountCents, kind, voidedAt FROM order_payments WHERE id=?").bind(Number(id)).first(); }
+  catch (e) { if (!noGiftCardsYet_(e)) throw e; row = await db.prepare("SELECT orderId FROM order_payments WHERE id=?").bind(Number(id)).first(); }
   if (!row) return null;
-  await db.prepare("UPDATE order_payments SET voidedAt = ?, voidReason = ? WHERE id = ? AND voidedAt IS NULL")
-    .bind(new Date().toISOString(), String(reason || "").slice(0, 300), Number(id)).run();
+  const now = new Date().toISOString();
+  const stmts = [db.prepare("UPDATE order_payments SET voidedAt = ?, voidReason = ? WHERE id = ? AND voidedAt IS NULL")
+    .bind(now, String(reason || "").slice(0, 300), Number(id))];
+  const back = row.giftCardId != null && row.kind === "payment" && !row.voidedAt ? Number(row.amountCents) || 0 : 0;
+  if (back > 0) {
+    stmts.push(db.prepare("UPDATE gift_cards SET balanceCents = balanceCents + ? WHERE id = ? AND status = 'active' AND changes() > 0").bind(back, Number(row.giftCardId)));
+    stmts.push(db.prepare("INSERT INTO gift_card_ledger (cardId, kind, deltaCents, orderId, paymentId, note, at, by) SELECT ?, 'refund', ?, ?, ?, 'Payment voided', ?, '' WHERE changes() > 0")
+      .bind(Number(row.giftCardId), back, row.orderId, Number(id), now));
+  }
+  await db.batch(stmts);
   await refreshPaidStatus(db, row.orderId);
   return row.orderId;
 }
@@ -14218,20 +14606,27 @@ export async function getCashReport(db, dateFrom, dateTo) {
 // date money moved (cash). Voided and test rows are included but flagged,
 // so every number can be reconciled.
 export async function getAccountantExport(db, dateFrom, dateTo) {
-  const { results: lines } = await withTaxMode_((tm) => db.prepare(`
+  // A gift card sold online is a liability, not a sale: its line is left out (its payment is in the ledger below).
+  // `shippingDiscountCents` = what free-shipping codes took off shipping (shipping charged = shippingCostCents − it).
+  const { results: lines } = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
     SELECT o.placedAt, o.orderId, o.orgId, o.customerName, o.paymentMethod, o.taxExempt, o.isTest, o.voidedAt, ${tm} AS taxMode,
-           o.shipState, o.discountCents, o.discountTaxCents, o.shippingCostCents,
+           o.shipState, o.discountCents, o.discountTaxCents, o.shippingCostCents, o.shippingDiscountCents,
            i.id AS itemId, i.productId, i.name, i.size, i.qty, i.lineTotalCents, i.taxCents, i.taxRateBps,
            i.cogsCents, i.cogsSource, i.cancelDate
     FROM orders o JOIN order_items i ON i.orderId = o.orderId
-    WHERE o.placedAt >= ? AND o.placedAt <= ? ORDER BY o.placedAt, o.orderId, i.id
-  `).bind(dateFrom, dateTo).all());
-  const { results: ledger } = await db.prepare(`
+    WHERE o.placedAt >= ? AND o.placedAt <= ? AND i.productId <> '__giftcard__' ORDER BY o.placedAt, o.orderId, i.id
+  `)).bind(dateFrom, dateTo).all());
+  // giftCardId (migrations/0120): a gift-card payment is not money received — it is a card's balance spent — so it is
+  // left out of the receipts below (and is never a deposit); it stays in the ledger rows, marked giftCard.
+  const ledgerSql = (gc) => `
     SELECT p.receivedAt, p.orderId, o.orgId, p.kind, p.method, p.reference, p.amountCents, p.feeCents, p.note,
-           p.externalRef, p.voidedAt, o.isTest, o.voidedAt AS orderVoidedAt
+           p.externalRef, p.voidedAt, o.isTest, o.voidedAt AS orderVoidedAt, ${gc ? "p.giftCardId" : "NULL"} AS giftCardId
     FROM order_payments p JOIN orders o ON o.orderId = p.orderId
     WHERE p.receivedAt >= ? AND p.receivedAt <= ? ORDER BY p.receivedAt, p.id
-  `).bind(dateFrom, dateTo).all();
+  `;
+  let ledger;
+  try { ({ results: ledger } = await db.prepare(ledgerSql(true)).bind(dateFrom, dateTo).all()); }
+  catch (e) { if (!noGiftCardsYet_(e)) throw e; ({ results: ledger } = await db.prepare(ledgerSql(false)).bind(dateFrom, dateTo).all()); }
   const { results: labels } = await db.prepare(`
     SELECT l.purchasedAt, l.orderId, o.orgId, l.carrier, l.service, l.amountCents, l.trackingNumber, l.voidedAt, o.isTest
     FROM shipping_labels l JOIN orders o ON o.orderId = l.orderId
@@ -14261,7 +14656,7 @@ export async function getAccountantExport(db, dateFrom, dateTo) {
     if (p.voidedAt || p.orderVoidedAt) continue;
     const m = M(monthOf(p.receivedAt));
     if (p.isTest) { if (p.method === "card" && p.kind === "payment") m.testCardCharges += Number(p.amountCents); continue; }
-    if (p.kind === "payment") { if (p.method === "card") m.cardReceipts += Number(p.amountCents); else m.otherReceipts += Number(p.amountCents); }
+    if (p.kind === "payment" && p.giftCardId == null) { if (p.method === "card") m.cardReceipts += Number(p.amountCents); else m.otherReceipts += Number(p.amountCents); }
     m.stripeFees += Number(p.feeCents);
   }
   for (const l of labels) if (!l.voidedAt && !l.isTest) M(monthOf(l.purchasedAt)).postage += Number(l.amountCents);
@@ -14322,6 +14717,7 @@ export async function getAccountantExport(db, dateFrom, dateTo) {
       date: p.receivedAt, orderId: p.orderId, orgId: p.orgId, kind: p.kind, method: p.method, reference: p.reference || "",
       amount: fromCents(p.amountCents), fee: fromCents(p.feeCents), note: p.note || "", stripeRef: p.externalRef || "",
       status: p.voidedAt ? "void" : p.orderVoidedAt ? "order void" : p.isTest ? "test" : "",
+      ...(p.giftCardId != null ? { giftCard: true } : {}),
     })),
     income: incomeRows.slice().reverse().map(i => ({ date: i.date, description: i.description, type: OTHER_INCOME_TYPES[i.type] || i.type,
       amount: i.amount, account: accountName[i.accountId] || "", reference: i.reference })),
@@ -15087,11 +15483,15 @@ export async function getMoneySummary(db, dateFrom, dateTo) {
   const personalExp = await q(`SELECT COALESCE(SUM(amountCents), 0) c FROM expenses WHERE deletedAt IS NULL AND paidPersonally = 1 AND expenseDate >= ? AND expenseDate <= ?`, dateFrom, dateTo);
   const personalBlanks = await q(`SELECT COALESCE(SUM(qtyDelta * unitCostCents), 0) c FROM inventory_movements WHERE kind = 'purchase' AND paidPersonally = 1 AND voidedAt IS NULL AND substr(occurredAt, 1, 10) >= ? AND substr(occurredAt, 1, 10) <= ?`, dateFrom, dateTo);
   const personalTransfers = await q(`SELECT COALESCE(SUM(qtyDelta * unitCostCents), 0) c FROM transfer_movements WHERE kind = 'purchase' AND paidPersonally = 1 AND voidedAt IS NULL AND substr(occurredAt, 1, 10) >= ? AND substr(occurredAt, 1, 10) <= ?`, dateFrom, dateTo);
-  const unassigned = await q(`SELECT
+  // (A payment made by gift card has no account by design — migrations/0120 — so it isn't "unassigned".)
+  const unassignedSql = (gc) => `SELECT
       (SELECT count(*) FROM expenses WHERE deletedAt IS NULL AND accountId IS NULL AND paidPersonally = 0) +
       (SELECT count(*) FROM inventory_movements WHERE kind = 'purchase' AND accountId IS NULL AND paidPersonally = 0 AND voidedAt IS NULL) +
       (SELECT count(*) FROM transfer_movements WHERE kind = 'purchase' AND accountId IS NULL AND paidPersonally = 0 AND voidedAt IS NULL) +
-      (SELECT count(*) FROM order_payments WHERE voidedAt IS NULL AND accountId IS NULL) AS n`);
+      (SELECT count(*) FROM order_payments WHERE voidedAt IS NULL AND accountId IS NULL${gc ? " AND giftCardId IS NULL" : ""}) AS n`;
+  let unassigned;
+  try { unassigned = await q(unassignedSql(true)); }
+  catch (e) { if (!noGiftCardsYet_(e)) throw e; unassigned = await q(unassignedSql(false)); }
   const cents = (arr, key) => Number((arr.find(r => r.type === key || r.kind === key) || {}).c || 0);
   const contributed = cents(own, "contribution"), personal = Number(personalExp.c) + Number(personalBlanks.c) + Number(personalTransfers.c);
   return {
@@ -15988,6 +16388,7 @@ export const SYSTEM_ISSUE_LABELS = {
   card_fees_failed: "Card fees couldn't be read from Stripe (card payments keep a $0 fee until they can; check the Stripe key)",
   migrations_pending: "Database updates this version needs that haven't been applied (until they are, some pages can show $0 or empty lists; see Global settings → Setup status)",
   api_error: "Requests that failed with an unexpected error (the page showed \"Something went wrong\")",
+  gift_card_email_failed: "Gift cards sold online whose email to the recipient did not send (the card exists: use Resend on the Gift cards page)",
   desktop_menu: "Sign-in reset or a backup restored from the desktop program's menu (if that wasn't you or someone you asked, see Reports → Audit log)",
 };
 export async function recordSystemIssue(db, kind, sample) {
@@ -16270,6 +16671,7 @@ function parseOrder_(row, items, payments, labels) {
   const feesCents = live.reduce((s, p) => s + toCents(p.fee || 0), 0);
   const discountCents = Number(row.discountCents) || 0;
   const shippingCents = Number(row.shippingCostCents) || 0;
+  const shippingDiscountCents = Math.min(shippingCents, Math.max(0, Number(row.shippingDiscountCents) || 0));   // migrations/0120
   // Derive from items (same formula as the top-bar grandTotal) — row.subtotal and
   // row.total can be stale when items are cancelled or shipping is added post-placement.
   const activeItems = items.filter(it => !it.cancelDate);
@@ -16280,7 +16682,7 @@ function parseOrder_(row, items, payments, labels) {
   const taxMode = taxMode_(row.taxMode);
   // parseItem_ doesn't know the order's mode: with tax on top, a line's net is its listed total.
   if (taxMode === "exclusive") for (const it of items) { it.netAmount = it.lineTotal; it.taxIncluded = false; }
-  const amounts = orderAmounts({ itemsCents: activeItemsCents, itemsTaxCents, shippingCents, discountCents, discountTaxCents: row.discountTaxCents, taxMode,
+  const amounts = orderAmounts({ itemsCents: activeItemsCents, itemsTaxCents, shippingCents, shippingDiscountCents, discountCents, discountTaxCents: row.discountTaxCents, taxMode,
     rushCents: row.rushFeeCents, rushTaxCents: row.rushFeeTaxCents });
   const salesTaxCents = amounts.taxCents, netSalesCents = amounts.netSalesCents, effectiveCents = amounts.owedCents;
   const amountReceived = fromCents(receivedCents);
@@ -16304,7 +16706,9 @@ function parseOrder_(row, items, payments, labels) {
     disputeStatus: row.disputeStatus || "",
     subtotal: fromCents(row.subtotalCents),
     itemsSubtotal: activeItemsTotal,
-    shippingCost,
+    shippingCost,   // the shipping rate; what free-shipping codes took off it is shippingDiscount (so charged = shippingCost − shippingDiscount)
+    shippingDiscount: fromCents(shippingDiscountCents),
+    shippingCharged: fromCents(amounts.shippingCents),   // 0 once every line is cancelled
     shippingPaidAmount,
     // Rush (migrations/0082): asked for, the fee (0 while still to follow), the tax in it, and "paid for
     // everything but the rush fee" — production doesn't wait for the rush fee.
@@ -16318,7 +16722,9 @@ function parseOrder_(row, items, payments, labels) {
     payOnDelivery: !!row.payOnDelivery,             // migrations/0105: the steps go on before it's paid
     discountAmount,
     discountNote: row.discountNote || "",
-    discountCode: "",   // the code it used (migrations/0115), filled in by the loaders; "" = none, or given back
+    discountCode: "",   // the codes it used (migrations/0115), joined with ", ", filled in by the loaders; "" = none, or given back
+    discountCodes: [],  // …as a list (several when the shop allows more than one code)
+    reorderOf: row.reorderOf || "",   // migrations/0120: the order a Local sale was copied from
     discountTax: fromCents(Number(row.discountTaxCents) || 0),   // the tax inside the discount (inclusive prices)
     taxExempt: !!row.taxExempt,
     voidedAt: row.voidedAt || "",
@@ -16945,9 +17351,10 @@ export async function getRevenueData(db, dateFrom, dateTo, { basis } = {}) {
     SELECT
       o.orderId,
       o.orgId,
-      o.discountCents, o.discountTaxCents, o.shippingCostCents, o.rushFeeCents, o.rushFeeTaxCents, ${tm} AS taxMode,
-      COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL THEN oi.lineTotalCents ELSE 0 END), 0) AS itemsCents,
-      COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL THEN oi.taxCents ELSE 0 END), 0) AS itemsTaxCents,
+      o.discountCents, o.discountTaxCents, o.shippingCostCents, o.shippingDiscountCents, o.rushFeeCents, o.rushFeeTaxCents, ${tm} AS taxMode,
+      -- A gift card sold online is a liability, not a sale (GIFT_CARD_PRODUCT_ID): its line is left out of the goods.
+      COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL AND oi.productId <> '__giftcard__' THEN oi.lineTotalCents ELSE 0 END), 0) AS itemsCents,
+      COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL AND oi.productId <> '__giftcard__' THEN oi.taxCents ELSE 0 END), 0) AS itemsTaxCents,
       -- Net of refunds and lost disputes (negative rows): a refund — e.g. shipping overcharged then
       -- refunded, after the order's shipping was lowered to match — must not leave "received" above
       -- what the order now costs.
@@ -16955,7 +17362,7 @@ export async function getRevenueData(db, dateFrom, dateTo, { basis } = {}) {
     FROM orders o
     LEFT JOIN order_items oi ON oi.orderId = o.orderId
     WHERE ${sale} >= ? AND ${sale} <= ?
-      AND o.isTest = 0 AND o.voidedAt IS NULL
+      AND o.isTest = 0 AND o.voidedAt IS NULL AND NOT ${GIFT_ONLY_ORDER_SQL_}
     GROUP BY o.orderId
   `)).bind(dateFrom, dateTo).all());
   // Dollars out; effectiveTotal is what the order comes to (orderAmounts), shipping what it charges.
@@ -17006,11 +17413,11 @@ export async function getFundraisingReport(db, { dateFrom, dateTo, orgId = null,
       db.prepare(`SELECT orgId, name, fundraiserJson FROM orgs${only ? " WHERE orgId = ?" : ""}`).bind(...orgBinds).all().then(r => r.results || []),
       // The range's paid orders, a row each (shops without a fundraiser are dropped below, once it's known which count).
       withTaxMode_((tm) => db.prepare(`SELECT o.orderId, o.orgId, o.placedAt, o.customerName,
-          COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL AND oi.productId <> '' AND oi.productId <> '__custom__' THEN oi.qty ELSE 0 END), 0) AS pieces,
-          COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL THEN ${FUNDRAISER_SALES_SQL_("oi", tm)} ELSE 0 END), 0) AS salesCents,
-          COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL THEN ${FUNDRAISER_RAISED_SQL_("oi")} ELSE 0 END), 0) AS raisedCents
+          COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL AND oi.productId <> '' AND oi.productId <> '__custom__' AND oi.productId <> '__giftcard__' THEN oi.qty ELSE 0 END), 0) AS pieces,
+          COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL AND oi.productId <> '__giftcard__' THEN ${FUNDRAISER_SALES_SQL_("oi", tm)} ELSE 0 END), 0) AS salesCents,
+          COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL AND oi.productId <> '__giftcard__' THEN ${FUNDRAISER_RAISED_SQL_("oi")} ELSE 0 END), 0) AS raisedCents
         FROM orders o LEFT JOIN order_items oi ON oi.orderId = o.orderId
-        WHERE ${sale} >= ? AND ${sale} <= ? AND o.paid = 1 AND o.isTest = 0 AND o.voidedAt IS NULL${orgFilter}
+        WHERE ${sale} >= ? AND ${sale} <= ? AND o.paid = 1 AND o.isTest = 0 AND o.voidedAt IS NULL AND NOT ${GIFT_ONLY_ORDER_SQL_}${orgFilter}
         GROUP BY o.orderId ORDER BY ${sale}, o.orderId`).bind(dayStart_(dateFrom), dayEnd_(dateTo), ...orgBinds).all()).then(r => r.results || []),
       // Everything raised up to dateTo, per shop — for what's owed.
       db.prepare(`SELECT o.orgId, COALESCE(SUM(${FUNDRAISER_RAISED_SQL_("oi")}), 0) AS c
@@ -17284,15 +17691,17 @@ export async function getMoneyInOutByMonth(db, { yearFrom, to }) {
     try { return (await db.prepare(sql).bind(...binds).all()).results || []; }
     catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return []; throw e; }
   };
-  const [pays, other, owner, exp, blanks, sheets] = await Promise.all([
-    // Each order's payments in a month, with what the order comes to and its tax (orderAmounts).
-    withTaxMode_((tm) => db.prepare(rushSql_(tm, `
+  // A payment made by gift card (migrations/0120) is a card's balance spent, not money that moved: left out.
+  const paysOf = (gc) => withTaxMode_((tm) => db.prepare(rushSql_(tm, `
       SELECT substr(p.receivedAt, 1, 7) AS month, SUM(p.amountCents) AS amountCents, SUM(p.feeCents) AS feeCents,
              SUM(CASE WHEN p.amountCents < 0 THEN COALESCE(p.shippingCents, 0) ELSE 0 END) AS refundShippingCents,
              ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")}
       FROM order_payments p JOIN orders o ON o.orderId = p.orderId
-      WHERE p.voidedAt IS NULL AND p.receivedAt >= ? AND p.receivedAt <= ? AND o.isTest = 0 AND o.voidedAt IS NULL
-      GROUP BY o.orderId, substr(p.receivedAt, 1, 7)`)).bind(a, b).all()).then(r => r.results || []),
+      WHERE p.voidedAt IS NULL AND p.receivedAt >= ? AND p.receivedAt <= ? AND o.isTest = 0 AND o.voidedAt IS NULL${gc ? " AND p.giftCardId IS NULL" : ""}
+      GROUP BY o.orderId, substr(p.receivedAt, 1, 7)`)).bind(a, b).all()).then(r => r.results || []);
+  const [pays, other, owner, exp, blanks, sheets] = await Promise.all([
+    // Each order's payments in a month, with what the order comes to and its tax (orderAmounts).
+    paysOf(true).catch(e => { if (!noGiftCardsYet_(e)) throw e; return paysOf(false); }),
     books ? rows("SELECT substr(incomeDate, 1, 7) AS month, SUM(amountCents) AS c FROM other_income WHERE deletedAt IS NULL AND incomeDate >= ? AND incomeDate <= ? GROUP BY month", yearFrom, to) : [],
     books ? rows("SELECT substr(txDate, 1, 7) AS month, kind, SUM(amountCents) AS c FROM owner_transactions WHERE deletedAt IS NULL AND txDate >= ? AND txDate <= ? GROUP BY month, kind", yearFrom, to) : [],
     books ? capitalRows_(db, `SELECT substr(e.expenseDate, 1, 7) AS month, (c.systemKey IS NOT NULL AND c.systemKey = '${SALES_TAX_PAID_KEY}') AS tax,
@@ -17345,12 +17754,12 @@ export async function getSalesTaxReport(db, dateFrom, dateTo) {
     WITH per AS (
       SELECT o.orderId, substr(o.placedAt, 1, 7) AS month, o.taxExempt AS exempt, ${tm} AS mode,
              COALESCE(o.shipState, '') AS state, o.orgId,
-             o.discountCents AS disc, o.discountTaxCents AS discTax, o.shippingCostCents AS ship,
+             o.discountCents AS disc, o.discountTaxCents AS discTax, MAX(0, o.shippingCostCents - ${SHIP_DISC_SQL_}) AS ship,
              o.rushFeeCents AS rush, o.rushFeeTaxCents AS rushTax,
-             COALESCE(SUM(CASE WHEN i.cancelDate IS NULL THEN i.lineTotalCents END), 0) AS gross,
-             COALESCE(SUM(CASE WHEN i.cancelDate IS NULL THEN i.taxCents END), 0) AS tax
+             COALESCE(SUM(CASE WHEN i.cancelDate IS NULL AND i.productId <> '__giftcard__' THEN i.lineTotalCents END), 0) AS gross,
+             COALESCE(SUM(CASE WHEN i.cancelDate IS NULL AND i.productId <> '__giftcard__' THEN i.taxCents END), 0) AS tax
       FROM orders o LEFT JOIN order_items i ON i.orderId = o.orderId
-      WHERE o.placedAt >= ? AND o.placedAt <= ? AND o.isTest = 0 AND o.voidedAt IS NULL
+      WHERE o.placedAt >= ? AND o.placedAt <= ? AND o.isTest = 0 AND o.voidedAt IS NULL AND NOT ${GIFT_ONLY_ORDER_SQL_}
       GROUP BY o.orderId
     )
     SELECT month, exempt, state,
@@ -17392,9 +17801,9 @@ export async function getSalesTaxReturn(db, dateFrom, dateTo) {
   const settings = await getSalesTaxSettings(db);
   const { results: lines } = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
     SELECT substr(o.placedAt, 1, 7) AS month, o.orderId, o.taxExempt, o.shipState, o.discountCents, o.discountTaxCents,
-           o.shippingCostCents, o.rushFeeCents, o.rushFeeTaxCents, i.lineTotalCents, i.taxCents, i.taxable, ${tm} AS taxMode
+           o.shippingCostCents, o.shippingDiscountCents, o.rushFeeCents, o.rushFeeTaxCents, i.lineTotalCents, i.taxCents, i.taxable, ${tm} AS taxMode
     FROM orders o JOIN order_items i ON i.orderId = o.orderId
-    WHERE o.placedAt >= ? AND o.placedAt <= ? AND o.isTest = 0 AND o.voidedAt IS NULL AND i.cancelDate IS NULL
+    WHERE o.placedAt >= ? AND o.placedAt <= ? AND o.isTest = 0 AND o.voidedAt IS NULL AND i.cancelDate IS NULL AND i.productId <> '__giftcard__'
     ORDER BY o.orderId`)).bind(dateFrom, dateTo).all());
   const months = {};
   // taxable = taxable sales as listed; taxIncl = the tax that is INSIDE that figure (inclusive orders
@@ -17410,7 +17819,7 @@ export async function getSalesTaxReturn(db, dateFrom, dateTo) {
     const after = line - discShare;
     if (!m.orders.has(l.orderId)) {
       m.orders.add(l.orderId);
-      if (gross > 0) m.shipping += Number(l.shippingCostCents) || 0;
+      if (gross > 0) m.shipping += Math.max(0, (Number(l.shippingCostCents) || 0) - (Number(l.shippingDiscountCents) || 0));   // shipping as charged (migrations/0120)
       m.tax -= Number(l.discountTaxCents) || 0;   // tax taken off with the discount (once per order)
       if (incl) m.taxIncl -= Number(l.discountTaxCents) || 0;
       // The rush fee (migrations/0082) is a sale too, once per order: taxable when it carries tax, else where the
@@ -17535,9 +17944,9 @@ export async function getTaxPacketExtras(db, dateFrom, dateTo) {
   const { results: ex } = await db.prepare(
     `SELECT o.orgId, COALESCE(g.name, o.orgId) AS shop, COALESCE(g.taxExemptCertificate, '') AS certificate, COALESCE(g.taxExemptExpires, '') AS expires,
             COUNT(*) AS orders,
-            SUM(MAX(0, COALESCE((SELECT SUM(i.lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL), 0) - COALESCE(o.discountCents, 0))) AS salesCents
+            SUM(MAX(0, COALESCE((SELECT SUM(i.lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND i.productId <> '__giftcard__'), 0) - COALESCE(o.discountCents, 0))) AS salesCents
      FROM orders o LEFT JOIN orgs g ON g.orgId = o.orgId
-     WHERE o.taxExempt = 1 AND o.isTest = 0 AND o.voidedAt IS NULL AND o.placedAt >= ? AND o.placedAt <= ?
+     WHERE o.taxExempt = 1 AND o.isTest = 0 AND o.voidedAt IS NULL AND NOT ${GIFT_ONLY_ORDER_SQL_} AND o.placedAt >= ? AND o.placedAt <= ?
      GROUP BY o.orgId ORDER BY shop`).bind(dateFrom, dateTo).all();
   const end = dateTo.slice(0, 10);
   const exempt = ex.map(r => ({ orgId: r.orgId, shop: r.shop, orders: Number(r.orders), sales: fromCents(r.salesCents),
@@ -17575,11 +17984,11 @@ export async function getSalesTaxRefunds(db, dateFrom, dateTo) {
   const { results } = await withTaxMode_((tm) => db.prepare(`
     SELECT p.orderId, p.receivedAt, substr(p.receivedAt, 1, 7) AS month, -p.amountCents AS refundCents, COALESCE(p.shippingCents, 0) AS shippingCents,
            o.taxExempt, o.taxRateBps, o.shipState, ${tm} AS taxMode, COALESCE(o.discountCents, 0) AS discountCents,
-           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL), 0) AS grossCents,
-           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND i.taxable = 1), 0) AS taxableCents,
-           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NOT NULL), 0) AS cancelledCents,
-           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NOT NULL AND i.taxable = 1), 0) AS cancelledTaxableCents,
-           (SELECT COUNT(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NOT NULL) AS cancelledLines
+           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND i.productId <> '__giftcard__'), 0) AS grossCents,
+           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND i.taxable = 1 AND i.productId <> '__giftcard__'), 0) AS taxableCents,
+           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NOT NULL AND i.productId <> '__giftcard__'), 0) AS cancelledCents,
+           COALESCE((SELECT SUM(lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NOT NULL AND i.taxable = 1 AND i.productId <> '__giftcard__'), 0) AS cancelledTaxableCents,
+           (SELECT COUNT(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NOT NULL AND i.productId <> '__giftcard__') AS cancelledLines
     FROM order_payments p JOIN orders o ON o.orderId = p.orderId
     WHERE p.kind IN ('refund', 'dispute') AND p.receivedAt <= ?
       AND p.voidedAt IS NULL AND o.isTest = 0 AND o.voidedAt IS NULL
@@ -17724,6 +18133,367 @@ export async function getAuditLog(db, { orgId, orderId, action, dateFrom, dateTo
   ).bind(...params).all();
   const entries = results.slice(0, cap).map(r => ({ ...r, detail: r.detail ? tryParse_(r.detail, { truncated: true, preview: String(r.detail).slice(0, 200) }) : null }));
   return paged ? { entries, more: results.length > cap } : entries;
+}
+
+// ---- Gift cards (migrations/0120) ----------------------------------------------------------------------------------
+// A gift card is a PAYMENT METHOD, never a discount: tax is worked out on the goods after any discount codes, and the
+// card then pays part or all of what is owed (an order_payments row, method 'other', giftCardId set, accountId NULL —
+// so it is never a deposit and is in no account's balance). Until it is spent a card is a liability, not revenue; a card
+// sold online is an order line (productId GIFT_CARD_PRODUCT_ID) the revenue, sales-tax, fundraising, cost and dashboard
+// reports leave out. Cards never expire and can't be cashed out. A balance only ever moves with a ledger row beside it,
+// in the same batch, and the balance is taken by ONE conditional UPDATE, so two spends can't both have the last cents.
+// Cents in the functions' inputs; the parsed card reads dollars (initial, balance) like every other reader.
+export const GIFT_CARD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const GIFT_CARD_BAD_ = "That gift card number isn't right.";
+const GIFT_CARD_EMPTY_ = "This gift card has no balance left.";
+const noGiftCardsYet_ = (e) => /no such table: (main\.)?gift_card|no such column: (\w+\.)?giftCardId|has no column named giftCardId/i.test(String(e && e.message));
+const GIFT_CARDS_NOT_READY_ = "Gift cards need the latest database update. Apply the migrations, then try again.";
+// Whether the Gift card payment method is on in `enabledPayments` (Global settings): on unless saved as false.
+export const giftCardPaymentOn = (enabledPayments) => !(enabledPayments && typeof enabledPayments === "object" && enabledPayments.giftCard === false);
+
+// 16 characters, none of 0/O/1/I; 256 is a multiple of 32, so each is equally likely.
+export function generateGiftCardCode_() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => GIFT_CARD_ALPHABET[b % GIFT_CARD_ALPHABET.length]).join("");
+}
+// "abcd-efgh ijkl-mnpq" → "ABCDEFGHIJKLMNPQ", or "" when it isn't 16 characters from the alphabet.
+export function normalizeGiftCardCode_(s) {
+  const c = String(s == null ? "" : s).toUpperCase().replace(/[\s-]+/g, "");
+  return c.length === 16 && [...c].every(ch => GIFT_CARD_ALPHABET.includes(ch)) ? c : "";
+}
+// "XXXX-XXXX-XXXX-XXXX" for a normalized code.
+export const formatGiftCardCode_ = (code) => String(code || "").replace(/(.{4})(?=.)/g, "$1-");
+
+function parseGiftCard_(r) {
+  return {
+    id: Number(r.id), last4: r.last4 || "", codeMasked: "••••-••••-••••-" + (r.last4 || ""),
+    initial: fromCents(r.initialCents), balance: fromCents(r.balanceCents), initialCents: Number(r.initialCents) || 0, balanceCents: Number(r.balanceCents) || 0,
+    recipientName: r.recipientName || "", recipientEmail: r.recipientEmail || "", buyerName: r.buyerName || "", buyerEmail: r.buyerEmail || "",
+    message: r.message || "", sourceOrderId: r.sourceOrderId || "", status: r.status === "void" ? "void" : "active", note: r.note || "",
+    createdAt: r.createdAt || "", createdBy: r.createdBy || "", voidedAt: r.voidedAt || null,
+  };
+}
+const giftCardRow_ = async (db, { id, code }) => {
+  if (id != null && id !== "") {
+    const n = Number(id);
+    return Number.isSafeInteger(n) && n > 0 ? db.prepare("SELECT * FROM gift_cards WHERE id = ?").bind(n).first() : null;
+  }
+  const c = normalizeGiftCardCode_(code);
+  return c ? db.prepare("SELECT * FROM gift_cards WHERE code = ?").bind(c).first() : null;
+};
+
+// Makes a card (staff, or a payment for one sold online). { amountCents (100–100,000,000: $1 to $1,000,000; the online
+// limits are the caller's), recipientName, recipientEmail, buyerName, buyerEmail, message (300), note (500),
+// sourceOrderId, by, now }. With sourceOrderId set, one card per order: a second call (a webhook replay) returns the
+// card already made, `created: false`. → { id, code (the full code — shown once), last4, balanceCents, created } or { error }.
+export async function issueGiftCard(db, p = {}) {
+  const cents = Number(p.amountCents);
+  if (!Number.isInteger(cents) || cents < 100 || cents > 100000000) return { error: "A gift card is from $1 to $1,000,000." };
+  const clean = (v, max) => String(v == null ? "" : v).trim().slice(0, max);
+  const email = (v) => { const t = String(v == null ? "" : v).trim(); return t ? normalizeCustomerEmail_(t) : ""; };
+  const recipientEmail = email(p.recipientEmail), buyerEmail = email(p.buyerEmail);
+  if (String(p.recipientEmail || "").trim() && !recipientEmail) return { error: "The recipient's email address doesn't look right." };
+  if (String(p.buyerEmail || "").trim() && !buyerEmail) return { error: "The buyer's email address doesn't look right." };
+  const source = clean(p.sourceOrderId, 100), now = p.now || new Date().toISOString(), by = clean(p.by, 200);
+  try {
+    if (source) {
+      const had = await db.prepare("SELECT * FROM gift_cards WHERE sourceOrderId = ?").bind(source).first();
+      if (had) return { id: Number(had.id), code: had.code, last4: had.last4, balanceCents: Number(had.balanceCents) || 0, created: false };
+    }
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = generateGiftCardCode_(), last4 = code.slice(-4);
+      try {
+        const res = await db.batch([
+          db.prepare(`INSERT INTO gift_cards (code, last4, initialCents, balanceCents, recipientName, recipientEmail, buyerName, buyerEmail, message, sourceOrderId, status, note, createdAt, createdBy)
+                      VALUES (?,?,?,?,?,?,?,?,?,?,'active',?,?,?)`)
+            .bind(code, last4, cents, cents, clean(p.recipientName, 100), recipientEmail, clean(p.buyerName, 100), buyerEmail, clean(p.message, 300), source, clean(p.note, 500), now, by),
+          db.prepare("INSERT INTO gift_card_ledger (cardId, kind, deltaCents, orderId, paymentId, note, at, by) VALUES (last_insert_rowid(), 'issue', ?, ?, NULL, ?, ?, ?)")
+            .bind(cents, source, source ? "Sold online" : "Issued", now, by),
+        ]);
+        return { id: Number(res[0].meta.last_row_id), code, last4, balanceCents: cents, created: true };
+      } catch (e) {
+        if (!isUniqueError_(e)) throw e;
+        // A second card for the same order (a replay racing this one): hand back the first. Else the code was taken: try another.
+        if (source) { const had = await db.prepare("SELECT * FROM gift_cards WHERE sourceOrderId = ?").bind(source).first();
+          if (had) return { id: Number(had.id), code: had.code, last4: had.last4, balanceCents: Number(had.balanceCents) || 0, created: false }; }
+      }
+    }
+    return { error: "Couldn't make a card number that isn't taken. Try again." };
+  } catch (e) { if (noGiftCardsYet_(e)) return { error: GIFT_CARDS_NOT_READY_, notReady: true }; throw e; }
+}
+
+// One card by id or by its code (typed any way: spaces, dashes, lower case). The full code is NOT in the answer — see
+// revealGiftCardCode. null when there is none (or no migrations/0120 yet).
+export async function getGiftCard(db, { id, code } = {}) {
+  try { const r = await giftCardRow_(db, { id, code }); return r ? parseGiftCard_(r) : null; }
+  catch (e) { if (noGiftCardsYet_(e)) return null; throw e; }
+}
+// The card's full code, grouped "XXXX-XXXX-XXXX-XXXX" — for the admin's Show (the caller audits it), or null.
+export async function revealGiftCardCode(db, id) {
+  try { const r = await giftCardRow_(db, { id }); return r ? formatGiftCardCode_(r.code) : null; }
+  catch (e) { if (noGiftCardsYet_(e)) return null; throw e; }
+}
+// The Gift cards page's list, newest first: q matches the last 4, the names, the emails and the order that sold it;
+// status "active" | "void" | "empty" (active, nothing left) | "all". { cards, total }.
+export async function listGiftCards(db, { q = "", status = "all", limit = 50, offset = 0 } = {}) {
+  const where = [], binds = [];
+  const st = status || "all";
+  if (st === "active") where.push("g.status = 'active' AND g.balanceCents > 0");
+  else if (st === "void") where.push("g.status = 'void'");
+  else if (st === "empty") where.push("g.status = 'active' AND g.balanceCents = 0");
+  else if (st !== "all") return { cards: [], total: 0 };
+  const needle = String(q == null ? "" : q).trim().slice(0, 200).trim();
+  if (needle) {
+    const cols = ["g.last4", "g.recipientName", "g.recipientEmail", "g.buyerName", "g.buyerEmail", "g.sourceOrderId"];
+    where.push("(" + cols.map(c => `instr(lower(${c}), lower(?)) > 0`).join(" OR ") + ")");
+    for (let i = 0; i < cols.length; i++) binds.push(needle);
+  }
+  const lim = Math.min(200, Math.max(1, Math.floor(Number(limit)) || 50)), off = Math.max(0, Math.floor(Number(offset)) || 0);
+  const w = where.length ? " WHERE " + where.join(" AND ") : "";
+  try {
+    const [{ results }, totalRow] = await Promise.all([
+      db.prepare(`SELECT g.* FROM gift_cards g${w} ORDER BY g.createdAt DESC, g.id DESC LIMIT ? OFFSET ?`).bind(...binds, lim, off).all(),
+      db.prepare(`SELECT count(*) AS n FROM gift_cards g${w}`).bind(...binds).first(),
+    ]);
+    return { cards: (results || []).map(parseGiftCard_), total: Number(totalRow && totalRow.n) || 0 };
+  } catch (e) { if (noGiftCardsYet_(e)) return { cards: [], total: 0 }; throw e; }
+}
+// A card's history, oldest first: [{ id, kind, delta (dollars), orderId, paymentId, note, at, by }].
+export async function giftCardLedger(db, cardId) {
+  const n = Number(cardId);
+  if (!Number.isSafeInteger(n) || n < 1) return [];
+  try {
+    const { results } = await db.prepare("SELECT * FROM gift_card_ledger WHERE cardId = ? ORDER BY id").bind(n).all();
+    return (results || []).map(r => ({ id: Number(r.id), kind: r.kind, delta: fromCents(r.deltaCents), deltaCents: Number(r.deltaCents) || 0, orderId: r.orderId || "",
+      paymentId: r.paymentId == null ? null : Number(r.paymentId), note: r.note || "", at: r.at || "", by: r.by || "" }));
+  } catch (e) { if (noGiftCardsYet_(e)) return []; throw e; }
+}
+// What a customer typing a number is told: { ok: true, card: { id, last4, balance (dollars), balanceCents } } or { ok: false,
+// reason } — an unknown number and a void card say the same thing, so nothing is learned about which exist.
+export async function checkGiftCard(db, code) {
+  let r;
+  try { r = await giftCardRow_(db, { code }); }
+  catch (e) { if (noGiftCardsYet_(e)) return { ok: false, reason: GIFT_CARD_BAD_, notReady: true }; throw e; }
+  if (!r || r.status !== "active") return { ok: false, reason: GIFT_CARD_BAD_ };
+  if (Number(r.balanceCents) <= 0) return { ok: false, reason: GIFT_CARD_EMPTY_ };
+  return { ok: true, card: { id: Number(r.id), last4: r.last4, balance: fromCents(r.balanceCents), balanceCents: Number(r.balanceCents) } };
+}
+
+// Spends a card on an order: takes the least of amountCents (all it can when left out), the card's balance and what the
+// order still owes (its balance due), with ONE conditional UPDATE of the card — batched with the ledger 'redeem' row, the
+// order_payments row (method 'other', giftCardId, reference "Gift card ••1234", note "Paid by gift card", accountId NULL)
+// and the paid refresh — so if the card no longer has it, nothing else is written. The card change also needs the order's
+// payments to be what was just read, so two cards (or a card and a card payment) racing for the last of a balance can't
+// both book it. requestKey: one per Save, so a double click or retry takes nothing twice (as addOrderPayment's).
+// → { ok: true, takenCents, balanceCents (the card's now), paymentId, last4 [, duplicate: true] } or { ok: false, reason }.
+export async function redeemGiftCard(db, { code, cardId, orderId, amountCents, by = "", now = new Date().toISOString(), requestKey } = {}) {
+  try {
+    const card = await giftCardRow_(db, cardId != null && cardId !== "" ? { id: cardId } : { code });
+    if (!card || card.status !== "active") return { ok: false, reason: GIFT_CARD_BAD_ };
+    if (Number(card.balanceCents) <= 0) return { ok: false, reason: GIFT_CARD_EMPTY_ };
+    const oid = String(orderId == null ? "" : orderId);
+    const key = requestKey ? String(requestKey).slice(0, 100) : null;
+    if (key) {
+      const had = await db.prepare("SELECT id, amountCents, giftCardId FROM order_payments WHERE requestKey = ?").bind(key).first();
+      if (had) return { ok: true, duplicate: true, takenCents: Number(had.amountCents) || 0, balanceCents: Number(card.balanceCents) || 0, paymentId: Number(had.id), last4: card.last4 };
+    }
+    const state = await getOrderCheckoutState(db, oid);
+    if (!state) return { ok: false, reason: "That order wasn't found." };
+    if (state.voided) return { ok: false, reason: "This order is voided." };
+    const dueCents = toCents(state.total);
+    if (dueCents <= 0) return { ok: false, reason: "Nothing is owed on this order." };
+    const wanted = amountCents == null || amountCents === "" ? Infinity : Math.round(Number(amountCents));
+    if (!(wanted > 0)) return { ok: false, reason: "Enter an amount to take from the gift card." };
+    const take = Math.min(wanted, Number(card.balanceCents), dueCents);
+    const seen = await db.prepare(`SELECT ${paymentsSql_("?")} AS paid`).bind(oid).first();
+    const ref = "Gift card ••" + card.last4;
+    const res = await db.batch([
+      db.prepare(`UPDATE gift_cards SET balanceCents = balanceCents - ? WHERE id = ? AND status = 'active' AND balanceCents >= ?
+                    AND ${paymentsSql_("?")} = ?${key ? " AND NOT EXISTS (SELECT 1 FROM order_payments WHERE requestKey = ?)" : ""}`)
+        .bind(take, card.id, take, oid, Number(seen && seen.paid) || 0, ...(key ? [key] : [])),
+      db.prepare(`INSERT INTO order_payments (orderId, amountCents, note, receivedAt, externalRef, method, reference, feeCents, kind, accountId, giftCardId${key ? ", requestKey" : ""})
+                  SELECT ?, ?, 'Paid by gift card', ?, '', 'other', ?, 0, 'payment', NULL, ?${key ? ", ?" : ""} WHERE changes() > 0`)
+        .bind(oid, take, now, ref, card.id, ...(key ? [key] : [])),
+      db.prepare("INSERT INTO gift_card_ledger (cardId, kind, deltaCents, orderId, paymentId, note, at, by) SELECT ?, 'redeem', ?, ?, last_insert_rowid(), ?, ?, ? WHERE changes() > 0")
+        .bind(card.id, -take, oid, "Order " + oid, now, String(by || "").slice(0, 200)),
+      await paidRefreshStmt_(db, oid),
+    ]);
+    if (!tookRow_(res[0])) {
+      const again = await db.prepare("SELECT status, balanceCents FROM gift_cards WHERE id = ?").bind(card.id).first();
+      if (!again || again.status !== "active") return { ok: false, reason: GIFT_CARD_BAD_ };
+      if (Number(again.balanceCents) < take) return { ok: false, reason: Number(again.balanceCents) > 0 ? "This gift card doesn't have enough left." : GIFT_CARD_EMPTY_ };
+      return { ok: false, reason: "That order just changed. Try again." };
+    }
+    const left = await db.prepare("SELECT balanceCents FROM gift_cards WHERE id = ?").bind(card.id).first();
+    return { ok: true, takenCents: take, balanceCents: Number(left && left.balanceCents) || 0, paymentId: Number(res[1].meta.last_row_id) || 0, last4: card.last4 };
+  } catch (e) { if (noGiftCardsYet_(e)) return { ok: false, reason: GIFT_CARDS_NOT_READY_, notReady: true }; throw e; }
+}
+
+// Puts money back on the gift card that paid part of an order: a negative order_payments refund row (kind 'refund',
+// the same giftCardId) and the card's balance up, with a ledger 'refund' row — one batch. At most what that payment
+// paid less what has already gone back for it. { paymentId (the gift-card payment), amountCents (all that is left when
+// left out), by, now } → { ok: true, refundedCents, balanceCents, refundPaymentId } or { ok: false, reason }.
+export async function refundToGiftCard(db, { paymentId, amountCents, by = "", now = new Date().toISOString() } = {}) {
+  try {
+    const pay = await db.prepare("SELECT id, orderId, amountCents, kind, voidedAt, giftCardId FROM order_payments WHERE id = ?").bind(Number(paymentId)).first();
+    if (!pay || pay.giftCardId == null || pay.kind !== "payment" || pay.voidedAt) return { ok: false, reason: "That payment wasn't paid by a gift card." };
+    const card = await giftCardRow_(db, { id: pay.giftCardId });
+    if (!card) return { ok: false, reason: GIFT_CARD_BAD_ };
+    if (card.status !== "active") return { ok: false, reason: "This gift card has been voided, so nothing can be put back on it." };
+    const tag = "gcpay:" + Number(pay.id);
+    const gone = await db.prepare("SELECT COALESCE(-SUM(amountCents), 0) AS n FROM order_payments WHERE externalRef = ? AND kind = 'refund' AND voidedAt IS NULL").bind(tag).first();
+    const left = Number(pay.amountCents) - (Number(gone && gone.n) || 0);
+    const cents = amountCents == null || amountCents === "" ? left : Math.round(Number(amountCents));
+    if (!(cents > 0)) return { ok: false, reason: "Enter an amount to put back on the gift card." };
+    if (cents > left) return { ok: false, reason: left > 0 ? "That's more than this gift card payment has left to give back." : "This gift card payment has already been given back." };
+    const ref = "Gift card ••" + card.last4;
+    const res = await db.batch([
+      db.prepare(`INSERT INTO order_payments (orderId, amountCents, note, receivedAt, externalRef, method, reference, feeCents, kind, accountId, giftCardId)
+                  SELECT ?, ?, 'Refunded to gift card', ?, ?, 'other', ?, 0, 'refund', NULL, ?
+                   WHERE ? <= ${Number(pay.amountCents)} - COALESCE((SELECT -SUM(amountCents) FROM order_payments WHERE externalRef = ? AND kind = 'refund' AND voidedAt IS NULL), 0)
+                     AND EXISTS (SELECT 1 FROM order_payments WHERE id = ? AND voidedAt IS NULL)`)
+        .bind(pay.orderId, -cents, now, tag, ref, card.id, cents, tag, pay.id),
+      db.prepare("UPDATE gift_cards SET balanceCents = balanceCents + ? WHERE id = ? AND status = 'active' AND changes() > 0").bind(cents, card.id),
+      db.prepare("INSERT INTO gift_card_ledger (cardId, kind, deltaCents, orderId, paymentId, note, at, by) SELECT ?, 'refund', ?, ?, (SELECT MAX(id) FROM order_payments WHERE externalRef = ? AND kind = 'refund'), ?, ?, ? WHERE changes() > 0")
+        .bind(card.id, cents, pay.orderId, tag, "Refund of order " + pay.orderId, now, String(by || "").slice(0, 200)),
+      await paidRefreshStmt_(db, pay.orderId),
+    ]);
+    if (!tookRow_(res[0])) return { ok: false, reason: "That payment was just changed. Reload and try again." };
+    const after = await db.prepare("SELECT balanceCents FROM gift_cards WHERE id = ?").bind(card.id).first();
+    return { ok: true, refundedCents: cents, balanceCents: Number(after && after.balanceCents) || 0, refundPaymentId: Number(res[0].meta.last_row_id) || 0 };
+  } catch (e) { if (noGiftCardsYet_(e)) return { ok: false, reason: GIFT_CARDS_NOT_READY_, notReady: true }; throw e; }
+}
+
+// Changes a card's balance by hand (+ or −; the balance can't go below 0, and a void card can't be changed). A note is
+// required — it is the ledger's reason. { id, deltaCents, note, by, now } → { ok, balanceCents } or { error }.
+export async function adjustGiftCard(db, { id, deltaCents, note, by = "", now = new Date().toISOString() } = {}) {
+  const d = Number(deltaCents), why = String(note == null ? "" : note).trim().slice(0, 500);
+  if (!Number.isInteger(d) || d === 0 || Math.abs(d) > 100000000) return { error: "Enter an amount to add or take off." };
+  if (!why) return { error: "Say why the balance is being changed." };
+  try {
+    const card = await giftCardRow_(db, { id });
+    if (!card) return { error: "That gift card wasn't found." };
+    if (card.status !== "active") return { error: "This gift card has been voided." };
+    const res = await db.batch([
+      db.prepare("UPDATE gift_cards SET balanceCents = balanceCents + ? WHERE id = ? AND status = 'active' AND balanceCents + ? >= 0").bind(d, card.id, d),
+      db.prepare("INSERT INTO gift_card_ledger (cardId, kind, deltaCents, orderId, paymentId, note, at, by) SELECT ?, 'adjust', ?, '', NULL, ?, ?, ? WHERE changes() > 0")
+        .bind(card.id, d, why, now, String(by || "").slice(0, 200)),
+    ]);
+    if (!tookRow_(res[0])) return { error: d < 0 ? "That's more than the card has left." : "This gift card has been voided." };
+    const after = await db.prepare("SELECT balanceCents FROM gift_cards WHERE id = ?").bind(card.id).first();
+    return { ok: true, balanceCents: Number(after && after.balanceCents) || 0, before: parseGiftCard_(card) };
+  } catch (e) { if (noGiftCardsYet_(e)) return { error: GIFT_CARDS_NOT_READY_, notReady: true }; throw e; }
+}
+// Voids a card: its balance goes to 0 (a 'void' ledger row says how much) and it can't be spent or changed again.
+// { id, note, by, now } → { ok, voidedCents } or { error }. The money is not given back to anyone — it is staff's call what to do.
+export async function voidGiftCard(db, { id, note, by = "", now = new Date().toISOString() } = {}) {
+  const why = String(note == null ? "" : note).trim().slice(0, 500);
+  if (!why) return { error: "Say why the gift card is being voided." };
+  try {
+    const card = await giftCardRow_(db, { id });
+    if (!card) return { error: "That gift card wasn't found." };
+    if (card.status !== "active") return { error: "This gift card is already voided." };
+    const res = await db.batch([
+      db.prepare("INSERT INTO gift_card_ledger (cardId, kind, deltaCents, orderId, paymentId, note, at, by) SELECT id, 'void', -balanceCents, '', NULL, ?, ?, ? FROM gift_cards WHERE id = ? AND status = 'active'")
+        .bind(why, now, String(by || "").slice(0, 200), card.id),
+      db.prepare("UPDATE gift_cards SET status = 'void', balanceCents = 0, voidedAt = ? WHERE id = ? AND status = 'active'").bind(now, card.id),
+    ]);
+    if (!tookRow_(res[1])) return { error: "This gift card is already voided." };
+    return { ok: true, voidedCents: Number(card.balanceCents) || 0, before: parseGiftCard_(card) };
+  } catch (e) { if (noGiftCardsYet_(e)) return { error: GIFT_CARDS_NOT_READY_, notReady: true }; throw e; }
+}
+// The Gift cards page's strip, in dollars: sold (cards made, in the range), redeemed (spent on orders), adjusted (by hand
+// and voided), refunded (put back) — each over dateFrom..dateTo (ISO timestamps, as the reports take them); outstanding =
+// what active cards still hold, now. outstanding is a liability, not revenue.
+export async function giftCardTotals(db, { dateFrom, dateTo } = {}) {
+  const from = String(dateFrom || "0000"), to = String(dateTo || "9999");
+  try {
+    const [{ results }, held] = await Promise.all([
+      db.prepare("SELECT kind, COALESCE(SUM(deltaCents), 0) AS n FROM gift_card_ledger WHERE at >= ? AND at <= ? GROUP BY kind").bind(from, to).all(),
+      db.prepare("SELECT COALESCE(SUM(balanceCents), 0) AS n FROM gift_cards WHERE status = 'active'").first(),
+    ]);
+    const by = Object.fromEntries((results || []).map(r => [r.kind, Number(r.n) || 0]));
+    return { sold: fromCents(by.issue || 0), redeemed: fromCents(-(by.redeem || 0)), adjusted: fromCents((by.adjust || 0) + (by.void || 0)), refunded: fromCents(by.refund || 0),
+      outstanding: fromCents(Number(held && held.n) || 0) };
+  } catch (e) { if (noGiftCardsYet_(e)) return { sold: 0, redeemed: 0, adjusted: 0, refunded: 0, outstanding: 0 }; throw e; }
+}
+
+// ---- Global settings: discount rules and gift cards -----------------------------------------------------------------
+// global_settings "giftCards": { sellOnline, amounts (cents: the buttons), minCents, maxCents (custom amount) }.
+const GIFT_CARD_SETTINGS_DEFAULT_ = { sellOnline: false, amounts: [2500, 5000, 10000], minCents: 500, maxCents: 50000 };
+export async function getGiftCardSettings(db) {
+  const v = await getSettingJson_(db, "giftCards", null);
+  const d = GIFT_CARD_SETTINGS_DEFAULT_, o = v && typeof v === "object" ? v : {};
+  const whole = (n, lo, hi, dflt) => Number.isInteger(n) && n >= lo && n <= hi ? n : dflt;
+  const amounts = Array.isArray(o.amounts) ? o.amounts.filter(a => Number.isInteger(a) && a >= 100 && a <= 1000000).slice(0, 6) : [];
+  return { sellOnline: o.sellOnline === true, amounts: amounts.length ? amounts : d.amounts.slice(),
+    minCents: whole(o.minCents, 100, 1000000, d.minCents), maxCents: whole(o.maxCents, 100, 1000000, d.maxCents) };
+}
+// The build step (see writeSettingBuilds). Left-out fields keep their value; checks first, writes nothing.
+export async function buildGiftCardSettings(db, v) {
+  const cur = await getGiftCardSettings(db), p = v && typeof v === "object" ? v : {};
+  const next = { ...cur };
+  if (p.sellOnline !== undefined) { if (typeof p.sellOnline !== "boolean") throw pricingError_("Say whether gift cards are sold online"); next.sellOnline = p.sellOnline; }
+  if (p.amounts !== undefined) {
+    if (!Array.isArray(p.amounts) || p.amounts.length < 1 || p.amounts.length > 6) throw pricingError_("Give 1 to 6 amounts for the gift card buttons");
+    const list = [];
+    for (const a of p.amounts) {
+      if (!Number.isInteger(a) || a < 100 || a > 1000000) throw pricingError_("Each gift card amount must be between $1 and $10,000");
+      if (!list.includes(a)) list.push(a);
+    }
+    next.amounts = list;
+  }
+  for (const k of ["minCents", "maxCents"]) if (p[k] !== undefined) {
+    if (!Number.isInteger(p[k]) || p[k] < 100 || p[k] > 1000000) throw pricingError_("The smallest and largest gift card amount must be between $1 and $10,000");
+    next[k] = p[k];
+  }
+  if (next.minCents > next.maxCents) throw pricingError_("The smallest gift card amount can't be more than the largest");
+  return { value: next, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('giftCards', ?)").bind(JSON.stringify(next))] };
+}
+export async function setGiftCardSettings(db, v) {
+  const b = await buildGiftCardSettings(db, v);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
+}
+
+// ---- Reorder (Local sale copied from a past order) ------------------------------------------------------------------
+// What the Local sale window needs to start a new sale from an old order: its shop, customer and lines. Lines that were
+// cancelled, gift cards and fees (a quote's setup / digitizing / art / other fee) are left out. A catalog line keeps its
+// size, quantity, personalization and choices (`config`: the saved snapshot, which priceItem takes as typed; a plain
+// product's own-design tick as customDesign); a custom line (productId "__custom__") keeps its name, type, taxability and
+// price (customUnitPrice). priceThen is what one piece cost then (price + personalization), for "Prices are today's".
+// null when there is no such order.
+const REORDER_FEE_NAME_ = /^(Setup fee|Digitizing fee|Art fee|Fee)( — |$)/;
+export async function orderForReorder_(db, orderId) {
+  const oid = String(orderId == null ? "" : orderId);
+  const order = await db.prepare("SELECT orderId, orgId, customerId, customerName, contact, shippingAddress FROM orders WHERE orderId = ?").bind(oid).first();
+  if (!order) return null;
+  const { results } = await db.prepare("SELECT * FROM order_items WHERE orderId = ? AND cancelDate IS NULL ORDER BY id").bind(oid).all();
+  const lines = [];
+  for (const r of results || []) {
+    const productId = r.productId || "";
+    if (productId === GIFT_CARD_PRODUCT_ID) continue;
+    const custom = productId === "__custom__" || !productId;
+    if (custom && REORDER_FEE_NAME_.test(String(r.name || ""))) continue;
+    const cfg = r.configJson ? tryParse_(r.configJson, null) : null;
+    const plain = !!(cfg && cfg.plain);
+    const qty = Math.max(1, Number(r.qty) || 1);
+    const line = { productId: custom ? "__custom__" : productId, size: r.size || "", qty, personalized: !!Number(r.personalized), persName: r.persName || "",
+      config: custom || plain || !cfg ? null : cfg,
+      customDesign: !custom && plain && Array.isArray(cfg.locations) && cfg.locations.some(l => l && l.custom),
+      name: r.name || "", type: r.type || "", taxable: !!Number(r.taxable),
+      priceThen: fromCents((Number(r.unitPriceCents) || 0) + (Number(r.personalizationFeeCents) || 0)) };
+    if (custom) { line.customUnitPrice = fromCents(r.unitPriceCents); line.personalized = false; line.persName = ""; }
+    lines.push(line);
+  }
+  let customer = { name: order.customerName || "", email: normalizeCustomerEmail_(order.contact) || "", phone: "", company: "" };
+  const cid = customerId_(order.customerId);
+  if (cid) {
+    try { const c = await liveCustomerRow_(db, cid); if (c) { const pc = parseCustomer_(c); customer = { name: pc.name || order.customerName || "", email: pc.email, phone: pc.phone, company: pc.company }; } }
+    catch (e) { if (!noCustomersYet_(e)) throw e; }
+  }
+  return { orgId: order.orgId, customerId: cid || null, customer, lines, reorderOf: oid };
 }
 
 function tryParse_(str, fallback) {

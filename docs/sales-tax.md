@@ -159,7 +159,14 @@ you type on an order: the tax is worked out as for any discount. Its share of th
 it — the part of the discount that falls on taxable goods, in proportion — so with prices that include
 tax the tax collected is less, and with tax added on top the tax added is less. It never comes off
 shipping or the rush fee. The cart's tax estimate at checkout shrinks the same way; the order's real
-figure is the server's.
+figure is the server's. With more than one code on an order the discounts are added first, then the tax
+is worked out on what is left. A **free-shipping code** takes the delivery charge off, and tax on delivery
+(where delivery is taxed) is on the lower figure.
+
+**A gift card is not a discount.** Tax is worked out on the goods after codes; a gift card then pays part
+or all of what is owed and changes no tax. Selling a gift card is not a sale: it has no sales tax, and
+isn't in the sales tax report's gross sales. The sale and its tax belong to the order the card later pays
+for ([operations.md](operations.md#gift-cards)).
 
 ## The reports
 

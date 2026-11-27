@@ -164,6 +164,9 @@ const ok = (desc, v) => { if (!v) failed++; console.log(desc + ":", !!v); };
   ok("unticking a section remembers it and redraws the preview without it", JSON.parse(w.localStorage.getItem("odd.taxPacket.sections")).indexOf("decisions") === -1 &&
     !/First-year decisions/.test(w.document.getElementById("tpPreview").srcdoc));
   ok("the preview frame can't run anything", w.document.getElementById("tpPreview").getAttribute("sandbox") === "");
+  const renderSrc = adminJs.slice(adminJs.indexOf("async function renderTaxPacket("), adminJs.indexOf("async function renderBooks("));
+  ok("printing writes the packet as it is and prints it from this page (no script in the packet)", /printPopupWhenReady_\(packetWin\);/.test(renderSrc) && /packetWin\.document\.write\(html\(\)\);/.test(renderSrc));
+  ok("dates use the business's calendar: To defaults to the report day", /const today = reportToDay_\(\)/.test(renderSrc));
 
   console.log(`\n${failed ? failed + " failed" : "all passed"}`);
   if (failed) process.exit(1);

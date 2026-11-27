@@ -14523,15 +14523,45 @@ export async function voidOrder(db, orderId, reason) {
 // A payment made by gift card (migrations/0120) gives its money back to the card in the same batch — and only when this
 // call is the one that voided it (changes() chains from the UPDATE), so a second void can't credit the card twice: the
 // balance goes up, with a ledger 'refund' row ("Payment voided"). A void card isn't credited.
+// A refund put back on a gift card (refundToGiftCard: kind 'refund', giftCardId set) is voided by taking that credit
+// back off the card, in the same batch, with a ledger 'refund' row (negative, "Refund voided"); when the card no
+// longer has it (spent, or voided) the void is refused — { error } and nothing changes. When the payment it refunded
+// is already voided, that void already settled the card, so nothing is taken.
 export async function voidPayment(db, id, reason) {
   let row;
-  try { row = await db.prepare("SELECT orderId, giftCardId, amountCents, kind, voidedAt FROM order_payments WHERE id=?").bind(Number(id)).first(); }
+  try { row = await db.prepare("SELECT orderId, giftCardId, amountCents, kind, voidedAt, externalRef FROM order_payments WHERE id=?").bind(Number(id)).first(); }
   catch (e) { if (!noGiftCardsYet_(e)) throw e; row = await db.prepare("SELECT orderId FROM order_payments WHERE id=?").bind(Number(id)).first(); }
   if (!row) return null;
   const now = new Date().toISOString();
-  const stmts = [db.prepare("UPDATE order_payments SET voidedAt = ?, voidReason = ? WHERE id = ? AND voidedAt IS NULL")
-    .bind(now, String(reason || "").slice(0, 300), Number(id))];
-  const back = row.giftCardId != null && row.kind === "payment" && !row.voidedAt ? Number(row.amountCents) || 0 : 0;
+  const voidStmt = db.prepare("UPDATE order_payments SET voidedAt = ?, voidReason = ? WHERE id = ? AND voidedAt IS NULL")
+    .bind(now, String(reason || "").slice(0, 300), Number(id));
+  if (row.giftCardId != null && row.kind === "refund" && !row.voidedAt) {
+    const parent = gcRefundParent_(row.externalRef) ? await db.prepare("SELECT voidedAt FROM order_payments WHERE id = ?").bind(gcRefundParent_(row.externalRef)).first() : null;
+    const take = parent && !parent.voidedAt ? -Number(row.amountCents) || 0 : 0;
+    if (take > 0) {
+      const res = await db.batch([
+        db.prepare("UPDATE gift_cards SET balanceCents = balanceCents - ? WHERE id = ? AND status = 'active' AND balanceCents >= ? AND EXISTS (SELECT 1 FROM order_payments WHERE id = ? AND voidedAt IS NULL)")
+          .bind(take, Number(row.giftCardId), take, Number(id)),
+        db.prepare("UPDATE order_payments SET voidedAt = ?, voidReason = ? WHERE id = ? AND voidedAt IS NULL AND changes() > 0")
+          .bind(now, String(reason || "").slice(0, 300), Number(id)),
+        db.prepare("INSERT INTO gift_card_ledger (cardId, kind, deltaCents, orderId, paymentId, note, at, by) SELECT ?, 'refund', ?, ?, ?, 'Refund voided', ?, '' WHERE changes() > 0")
+          .bind(Number(row.giftCardId), -take, row.orderId, Number(id), now),
+      ]);
+      if (!tookRow_(res[0])) {
+        const again = await db.prepare("SELECT voidedAt FROM order_payments WHERE id = ?").bind(Number(id)).first();
+        if (!again || !again.voidedAt) return { error: giftCardRefundVoidRefusal_(take) };
+      }
+      await refreshPaidStatus(db, row.orderId);
+      return row.orderId;
+    }
+  }
+  const stmts = [voidStmt];
+  // What goes back for a voided gift-card payment: what it paid less what has already been refunded to the card for it.
+  let back = row.giftCardId != null && row.kind === "payment" && !row.voidedAt ? Number(row.amountCents) || 0 : 0;
+  if (back > 0) {
+    const gone = await db.prepare(`SELECT COALESCE(-SUM(amountCents), 0) AS n FROM order_payments WHERE ${GC_REFUND_OF_} AND kind = 'refund' AND voidedAt IS NULL`).bind("gcpay:" + Number(id), "gcpay:" + Number(id) + ":%").first();
+    back = Math.max(0, back - (Number(gone && gone.n) || 0));
+  }
   if (back > 0) {
     stmts.push(db.prepare("UPDATE gift_cards SET balanceCents = balanceCents + ? WHERE id = ? AND status = 'active' AND changes() > 0").bind(back, Number(row.giftCardId)));
     stmts.push(db.prepare("INSERT INTO gift_card_ledger (cardId, kind, deltaCents, orderId, paymentId, note, at, by) SELECT ?, 'refund', ?, ?, ?, 'Payment voided', ?, '' WHERE changes() > 0")
@@ -14540,6 +14570,19 @@ export async function voidPayment(db, id, reason) {
   await db.batch(stmts);
   await refreshPaidStatus(db, row.orderId);
   return row.orderId;
+}
+const giftCardRefundVoidRefusal_ = (cents) => "The gift card no longer has the $" + (cents / 100).toFixed(2) + " this refund put on it, so the refund can't be voided.";
+// For the Void button, before anything is written: the reason voidPayment would refuse this entry, or "" (see above).
+export async function giftCardVoidRefusal(db, id) {
+  let row;
+  try { row = await db.prepare("SELECT giftCardId, amountCents, kind, voidedAt, externalRef FROM order_payments WHERE id=?").bind(Number(id)).first(); }
+  catch (e) { if (noGiftCardsYet_(e)) return ""; throw e; }
+  if (!row || row.giftCardId == null || row.kind !== "refund" || row.voidedAt || !gcRefundParent_(row.externalRef)) return "";
+  const parent = await db.prepare("SELECT voidedAt FROM order_payments WHERE id = ?").bind(gcRefundParent_(row.externalRef)).first();
+  const take = parent && !parent.voidedAt ? -Number(row.amountCents) || 0 : 0;
+  if (take <= 0) return "";
+  const card = await db.prepare("SELECT status, balanceCents FROM gift_cards WHERE id = ?").bind(Number(row.giftCardId)).first();
+  return card && card.status === "active" && Number(card.balanceCents) >= take ? "" : giftCardRefundVoidRefusal_(take);
 }
 
 // ---- Closed (filed) periods ------------------------------------------------
@@ -18345,6 +18388,8 @@ export async function redeemGiftCard(db, { code, cardId, orderId, amountCents, b
 // the same giftCardId) and the card's balance up, with a ledger 'refund' row — one batch. At most what that payment
 // paid less what has already gone back for it. { paymentId (the gift-card payment), amountCents (all that is left when
 // left out), by, now } → { ok: true, refundedCents, balanceCents, refundPaymentId } or { ok: false, reason }.
+const GC_REFUND_OF_ = "(externalRef = ? OR externalRef LIKE ?)";   // bind: "gcpay:<id>", "gcpay:<id>:%"
+const gcRefundParent_ = (ref) => { const m = /^gcpay:(\d+)(?::|$)/.exec(ref || ""); return m ? Number(m[1]) : 0; };
 export async function refundToGiftCard(db, { paymentId, amountCents, by = "", now = new Date().toISOString() } = {}) {
   try {
     const pay = await db.prepare("SELECT id, orderId, amountCents, kind, voidedAt, giftCardId FROM order_payments WHERE id = ?").bind(Number(paymentId)).first();
@@ -18352,8 +18397,10 @@ export async function refundToGiftCard(db, { paymentId, amountCents, by = "", no
     const card = await giftCardRow_(db, { id: pay.giftCardId });
     if (!card) return { ok: false, reason: GIFT_CARD_BAD_ };
     if (card.status !== "active") return { ok: false, reason: "This gift card has been voided, so nothing can be put back on it." };
-    const tag = "gcpay:" + Number(pay.id);
-    const gone = await db.prepare("SELECT COALESCE(-SUM(amountCents), 0) AS n FROM order_payments WHERE externalRef = ? AND kind = 'refund' AND voidedAt IS NULL").bind(tag).first();
+    // Each refund row is tagged "gcpay:<payment id>:<its own suffix>" (externalRef is unique, so a second refund of the
+    // same payment needs its own); what has gone back is every live row with that payment's prefix.
+    const tag = "gcpay:" + Number(pay.id), mine = tag + ":" + crypto.randomUUID();
+    const gone = await db.prepare(`SELECT COALESCE(-SUM(amountCents), 0) AS n FROM order_payments WHERE ${GC_REFUND_OF_} AND kind = 'refund' AND voidedAt IS NULL`).bind(tag, tag + ":%").first();
     const left = Number(pay.amountCents) - (Number(gone && gone.n) || 0);
     const cents = amountCents == null || amountCents === "" ? left : Math.round(Number(amountCents));
     if (!(cents > 0)) return { ok: false, reason: "Enter an amount to put back on the gift card." };
@@ -18362,12 +18409,12 @@ export async function refundToGiftCard(db, { paymentId, amountCents, by = "", no
     const res = await db.batch([
       db.prepare(`INSERT INTO order_payments (orderId, amountCents, note, receivedAt, externalRef, method, reference, feeCents, kind, accountId, giftCardId)
                   SELECT ?, ?, 'Refunded to gift card', ?, ?, 'other', ?, 0, 'refund', NULL, ?
-                   WHERE ? <= ${Number(pay.amountCents)} - COALESCE((SELECT -SUM(amountCents) FROM order_payments WHERE externalRef = ? AND kind = 'refund' AND voidedAt IS NULL), 0)
+                   WHERE ? <= ${Number(pay.amountCents)} - COALESCE((SELECT -SUM(amountCents) FROM order_payments WHERE ${GC_REFUND_OF_} AND kind = 'refund' AND voidedAt IS NULL), 0)
                      AND EXISTS (SELECT 1 FROM order_payments WHERE id = ? AND voidedAt IS NULL)`)
-        .bind(pay.orderId, -cents, now, tag, ref, card.id, cents, tag, pay.id),
+        .bind(pay.orderId, -cents, now, mine, ref, card.id, cents, tag, tag + ":%", pay.id),
       db.prepare("UPDATE gift_cards SET balanceCents = balanceCents + ? WHERE id = ? AND status = 'active' AND changes() > 0").bind(cents, card.id),
       db.prepare("INSERT INTO gift_card_ledger (cardId, kind, deltaCents, orderId, paymentId, note, at, by) SELECT ?, 'refund', ?, ?, (SELECT MAX(id) FROM order_payments WHERE externalRef = ? AND kind = 'refund'), ?, ?, ? WHERE changes() > 0")
-        .bind(card.id, cents, pay.orderId, tag, "Refund of order " + pay.orderId, now, String(by || "").slice(0, 200)),
+        .bind(card.id, cents, pay.orderId, mine, "Refund of order " + pay.orderId, now, String(by || "").slice(0, 200)),
       await paidRefreshStmt_(db, pay.orderId),
     ]);
     if (!tookRow_(res[0])) return { ok: false, reason: "That payment was just changed. Reload and try again." };

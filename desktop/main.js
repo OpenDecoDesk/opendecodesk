@@ -390,13 +390,15 @@ ipcMain.handle("odd:apply-settings", async (e, s) => {
   return { ok, message: ok ? "" : "The program's settings couldn't be saved." };
 });
 
-// Orders → Save invoice PDF…: the invoice page the admin got from the server (orders.js
-// getInvoiceDocument) made into a PDF, saved where the owner chooses. { ok, path } or { ok: false }.
-ipcMain.handle("odd:save-invoice-pdf", async (e, doc) => {
+// A page made into a PDF and saved where the owner chooses. { ok, path } or { ok: false }.
+//   Orders → Save invoice PDF…: the invoice page the admin got from the server (orders.js getInvoiceDocument).
+//   Reports → Tax packet → Save PDF…: the packet the admin built (admin.js taxPacketHtml_).
+// Either way the page is drawn by renderPdf: no JavaScript, no requests.
+async function savePagePdf_(e, doc, title, notOne) {
   if (!isOurs(e.senderFrame && e.senderFrame.url)) return { ok: false, message: "Not allowed." };
   const d = cleanPdf(doc);
-  if (!d) return { ok: false, message: "That isn't an invoice." };
-  const r = await dialog.showSaveDialog(win, { title: "Save the invoice", buttonLabel: "Save", defaultPath: path.join(app.getPath("documents"), d.filename), filters: [{ name: "PDF", extensions: ["pdf"] }] });
+  if (!d) return { ok: false, message: notOne };
+  const r = await dialog.showSaveDialog(win, { title, buttonLabel: "Save", defaultPath: path.join(app.getPath("documents"), d.filename), filters: [{ name: "PDF", extensions: ["pdf"] }] });
   if (r.canceled || !r.filePath) return { ok: false, canceled: true };
   try {
     fs.writeFileSync(r.filePath, await renderPdf(d.html, d.pageSize));
@@ -406,7 +408,9 @@ ipcMain.handle("odd:save-invoice-pdf", async (e, doc) => {
     log("Couldn't save " + d.filename + ": " + ((err && err.message) || err));
     return { ok: false, message: "Couldn't save the PDF: " + ((err && err.message) || err) };
   }
-});
+}
+ipcMain.handle("odd:save-invoice-pdf", (e, doc) => savePagePdf_(e, doc, "Save the invoice", "That isn't an invoice."));
+ipcMain.handle("odd:save-report-pdf", (e, doc) => savePagePdf_(e, doc, "Save the tax packet", "That isn't a report."));
 
 // The backup reminder in the admin (admin.js adminDesktopBackupNudge_): when this data folder was first
 // used and last backed up, and a button that opens File → Back up….

@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld("oddDesktop", {
   // Orders → Save invoice PDF…: the invoice page from the server (orders.js getInvoiceDocument),
   // made into a PDF and saved where the owner chooses. { ok, path } or { ok: false, canceled | message }.
   saveInvoicePdf: (doc) => ipcRenderer.invoke("odd:save-invoice-pdf", doc),
+  // Reports → Tax packet → Save PDF…: the packet page the admin built, the same way. { ok, path } or { ok: false, canceled | message }.
+  saveReportPdf: (doc) => ipcRenderer.invoke("odd:save-report-pdf", doc),
   // The backup reminder: { createdAt, lastBackupAt } (ISO times or null), and File → Back up….
   backupStatus: () => ipcRenderer.invoke("odd:backup-status"),
   backUp: () => ipcRenderer.invoke("odd:back-up"),

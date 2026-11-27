@@ -74,7 +74,8 @@ export const PERMISSION_AREAS = [
     { hash: "cogs", label: "Inventory and COGS", fns: [["reports.cogs", "Inventory and COGS"]] },
     { hash: "runreport", label: "Run times", fns: [["reports.runtimes", "Run times"]] },
     { hash: "fundraising", label: "Fundraising", fns: [["reports.fundraising", "Fundraising report"]] },
-    { hash: "books", label: "Periods and export", fns: [["reports.books", "Closed periods and accountant's export"]] } ] },
+    { hash: "books", label: "Periods and export", fns: [["reports.books", "Closed periods and accountant's export"]] },
+    { hash: "taxpacket", label: "Tax packet", fns: [["reports.taxpacket", "Printable tax packet for the accountant"]] } ] },
   { key: "settings", label: "Settings", items: [
     { hash: "settings", label: "Global settings", fns: [["settings.global", "Global settings"]] },
     { hash: "vendors", label: "Vendor integrations", fns: [["settings.vendors", "Vendor connections"]] },
@@ -216,6 +217,8 @@ const BY_FN = {
   // a payout is an expense, so it is Expenses' (finance.expenses Edit), not this report's.
   "reports.fundraising": { read: ["getFundraisingReport", "listFundraiserPayouts"] },
   "reports.books": { read: ["listClosedPeriods", "getAccountantExport"], edit: ["closePeriod"], full: ["reopenPeriod"] },
+  // The packet is drawn from the other reports, so it needs to read them too (renderTaxPacket says which are missing).
+  "reports.taxpacket": { read: ["getTaxPacketExtras"] },
   "settings.global": {
     read: ["getGlobalSettings", "getFeatures", "getBusinessProfile", "getLocaleSettings", "getSalesTaxSettings", "getShipFromAddress", "getSetupStatus",
       "getRushSettings", "getEmailSettings", "getDigitalSettings", "previewCustomerEmail", "samplePdf", "getAccountingSettings"],

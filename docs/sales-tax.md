@@ -182,6 +182,11 @@ Things to know when reading it:
 **Reports → Periods & Export** (Bookkeeping feature) produces the accountant's CSV files, which
 include the sales tax collected and refunded per month.
 
+**Reports → Tax packet** (Bookkeeping feature) prints these figures for your accountant, along with
+the rest of the year's numbers ([tax-packet.md](tax-packet.md)). It also lists stock the shop used
+itself (resale blanks used for testing, and testing blanks bought without tax) that **may** owe use
+tax. That list is for review only and is never added to the use tax due.
+
 ## What it does not do
 
 - Local (city or county) rates on top of the state rate.

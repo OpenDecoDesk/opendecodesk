@@ -16926,6 +16926,96 @@ export async function getSalesTaxReturn(db, dateFrom, dateTo) {
   return { months: rows.map(out), total: out(total), useTaxItems, ratePct: rate / 100, jurisdiction: settings.jurisdiction || "" };
 }
 
+// ---- Tax packet (Reports → Tax packet): the few lists no other report has -----------------------
+// The printable packet for the accountant is built in the browser from the existing reports
+// (expenses, sales tax, revenue, inventory, the accountant export); this adds only:
+//   selfUsed       stock bought for resale (tax-free) and then used by the shop itself, or bought for
+//                  testing / shop use without the vendor charging tax — what MAY owe use tax. It is a
+//                  list FOR REVIEW: nothing here is added to the use tax any other report shows.
+//   receivables    orders placed by the end date that still had money owing at the end date
+//   exempt         tax-exempt sales in the range, by shop, with whether a certificate is on file
+//   firstSaleDate  the first real (not test, not void) order ever — expenses before it may be start-up costs
+// dateFrom / dateTo are ISO times (the start and end of the days). Dollars out.
+export async function getTaxPacketExtras(db, dateFrom, dateTo) {
+  const settings = await getSalesTaxSettings(db);
+  const rate = Number(settings.rateBps) || 0;
+  const useTaxOf = (cents) => Math.round(Math.max(0, cents) * rate / 10000);
+  const current = await currentBlankNames_(db);
+  const selfUsed = [];
+  // Blanks for sale written off for testing or other use (damaged / lost stock wasn't used, so it's left out),
+  // and blanks kept for testing / shop use bought without tax.
+  let testingIds = new Set();
+  try { testingIds = new Set((await db.prepare("SELECT id FROM blanks WHERE forTesting = 1").all()).results.map(r => Number(r.id))); }
+  catch (e) { if (!/no such column/i.test(String(e && e.message))) throw e; }
+  const { results: blankMv } = await db.prepare(
+    `SELECT occurredAt, blankId, blankName, color, size, qtyDelta, unitCostCents, kind, reason, vendor, vendorChargedTax, note
+     FROM inventory_movements
+     WHERE voidedAt IS NULL AND occurredAt >= ? AND occurredAt <= ?
+       AND ((kind = 'writeoff' AND reason IN ('testing', 'other')) OR (kind = 'purchase' AND vendorChargedTax = 0))
+     ORDER BY occurredAt, id`).bind(dateFrom, dateTo).all();
+  for (const m of blankMv) {
+    const testing = testingIds.has(Number(m.blankId));
+    if (m.kind === "purchase" && !testing) continue;          // bought for resale: no use tax until it's used
+    if (m.kind === "writeoff" && testing) continue;           // its purchase is already on the list
+    const qty = Math.abs(Number(m.qtyDelta)), cost = qty * Number(m.unitCostCents);
+    selfUsed.push({ date: String(m.occurredAt).slice(0, 10), item: [current.get(Number(m.blankId)) || m.blankName, m.color, m.size].filter(Boolean).join(" "),
+      qty, cost: fromCents(cost), useTax: fromCents(useTaxOf(cost)),
+      why: m.kind === "purchase" ? "Bought for testing / shop use, no tax charged" : m.reason === "testing" ? "Resale blanks used for testing" : "Resale blanks written off (other)",
+      note: m.note || "" });
+  }
+  // Transfer sheets written off: the reason isn't recorded, so each is listed for the accountant to decide.
+  try {
+    const { results: tMv } = await db.prepare(
+      `SELECT occurredAt, transferName, qtyDelta, unitCostCents, note FROM transfer_movements
+       WHERE voidedAt IS NULL AND kind = 'writeoff' AND occurredAt >= ? AND occurredAt <= ? ORDER BY occurredAt, id`).bind(dateFrom, dateTo).all();
+    for (const t of tMv) {
+      const qty = Math.abs(Number(t.qtyDelta)), cost = qty * Number(t.unitCostCents);
+      selfUsed.push({ date: String(t.occurredAt).slice(0, 10), item: t.transferName || "Transfer", qty, cost: fromCents(cost), useTax: fromCents(useTaxOf(cost)),
+        why: "Transfers written off (reason not recorded)", note: t.note || "" });
+    }
+  } catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
+  selfUsed.sort((a, b) => a.date.localeCompare(b.date));
+
+  // Money owed at the end date: every real order placed by then (what it comes to now — orderAmounts), less the
+  // payments received by then. Refunds aren't counted against it: money given back (a return, a goodwill refund)
+  // isn't money the customer still owes.
+  const owed = await getRevenueData(db, "0000-01-01T00:00:00.000Z", dateTo, { basis: "placed" });
+  const { results: paid } = await db.prepare(
+    `SELECT orderId, SUM(amountCents) AS cents FROM order_payments
+     WHERE kind = 'payment' AND voidedAt IS NULL AND receivedAt <= ? GROUP BY orderId`).bind(dateTo).all();
+  const paidBy = Object.fromEntries(paid.map(r => [r.orderId, Number(r.cents)]));
+  const open = owed.map(r => ({ orderId: r.orderId, orgId: r.orgId, totalCents: toCents(r.effectiveTotal), receivedCents: paidBy[r.orderId] || 0 }))
+    .filter(r => r.totalCents - r.receivedCents > 0);
+  const info = {};
+  for (let i = 0; i < open.length; i += 200) {
+    const ids = open.slice(i, i + 200).map(r => r.orderId);
+    const { results } = await db.prepare(
+      `SELECT o.orderId, o.placedAt, o.customerName, COALESCE(g.name, o.orgId) AS shop FROM orders o LEFT JOIN orgs g ON g.orgId = o.orgId
+       WHERE o.orderId IN (${ids.map(() => "?").join(",")})`).bind(...ids).all();
+    for (const r of results) info[r.orderId] = r;
+  }
+  const receivables = open.map(r => ({ orderId: r.orderId, date: String((info[r.orderId] || {}).placedAt || "").slice(0, 10),
+    customer: (info[r.orderId] || {}).customerName || "", shop: (info[r.orderId] || {}).shop || r.orgId,
+    total: fromCents(r.totalCents), received: fromCents(r.receivedCents), balance: fromCents(r.totalCents - r.receivedCents) }))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.orderId.localeCompare(b.orderId));
+
+  // Tax-exempt sales by shop: goods after the discount, tax excluded (an exempt order carries none).
+  const { results: ex } = await db.prepare(
+    `SELECT o.orgId, COALESCE(g.name, o.orgId) AS shop, COALESCE(g.taxExemptCertificate, '') AS certificate, COALESCE(g.taxExemptExpires, '') AS expires,
+            COUNT(*) AS orders,
+            SUM(MAX(0, COALESCE((SELECT SUM(i.lineTotalCents) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL), 0) - COALESCE(o.discountCents, 0))) AS salesCents
+     FROM orders o LEFT JOIN orgs g ON g.orgId = o.orgId
+     WHERE o.taxExempt = 1 AND o.isTest = 0 AND o.voidedAt IS NULL AND o.placedAt >= ? AND o.placedAt <= ?
+     GROUP BY o.orgId ORDER BY shop`).bind(dateFrom, dateTo).all();
+  const end = dateTo.slice(0, 10);
+  const exempt = ex.map(r => ({ orgId: r.orgId, shop: r.shop, orders: Number(r.orders), sales: fromCents(r.salesCents),
+    certificateOnFile: !!r.certificate, certificateExpires: r.expires || "", certificateExpired: !!r.expires && String(r.expires).slice(0, 10) < end }));
+
+  const first = await db.prepare("SELECT MIN(placedAt) AS d FROM orders WHERE isTest = 0 AND voidedAt IS NULL").first();
+  return { selfUsed, receivables, exempt, firstSaleDate: first && first.d ? String(first.d).slice(0, 10) : "",
+    ratePct: rate / 100, jurisdiction: settings.jurisdiction || "" };
+}
+
 // How much of a refund (or lost dispute) was shipping (migrations/0035) — between $0 and the whole
 // refund. Shipping isn't taxed, so that part carries no sales tax (getSalesTaxRefunds).
 export async function setRefundShipping(db, paymentId, shippingAmount) {

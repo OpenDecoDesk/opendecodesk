@@ -185,7 +185,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
 
   await setF({ bookkeeping: false });
   const bookActions = ["listExpenses", "saveExpense", "deleteExpense", "listExpenseCategories", "getExpenseReport", "importExpenses", "listRecurringExpenses", "saveRecurringExpense", "listAccounts", "saveAccount", "listMoney", "saveMoneyEntry", "setPaymentAccount",
-    "getReconciliation", "importStatement", "createFromStatementLine", "reconcileMonth", "listClosedPeriods", "closePeriod", "reopenPeriod", "getAccountantExport"];
+    "getReconciliation", "importStatement", "createFromStatementLine", "reconcileMonth", "listClosedPeriods", "closePeriod", "reopenPeriod", "getAccountantExport", "getTaxPacketExtras"];
   refused.length = 0; for (const a of bookActions) refused.push(off403(await admin({ action: a, month: "2020-03", expense: { date: "2024-01-01" } }), "Bookkeeping"));
   ok("off: expenses, accounts & money, reconcile, periods and the accountant export all answer 403 naming the feature", refused.every(Boolean));
   ok("off: no month can be closed", (await lib.getClosedPeriods(d1)).length === 1 && d1.q("SELECT count(*) n FROM expenses")[0].n === 1);
@@ -407,6 +407,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
       "getReconciliation", "importStatement", "autoMatchStatement", "matchStatementLine", "unmatchStatementLine", "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth", "listCashoutPayments", // Reconcile
       "listClosedPeriods", "closePeriod", "reopenPeriod", "getAccountantExport",                              // Periods & Export
       "recordFundraiserPayout",                                                                               // Fundraising → Record payout… (an expense)
+      "getTaxPacketExtras",                                                                                      // Tax packet
     ],
     shipping: [
       "updateShipFromAddress",                         // Global settings → Ship-from address

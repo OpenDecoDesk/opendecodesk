@@ -761,6 +761,7 @@ async function adminRoute() {
   if (raw === "cogs")      { renderInventoryReport(app); return; }
   if (raw === "blankorder") { renderBlanksToOrder(app); return; }
   if (raw === "books")     { renderBooks(app); return; }
+  if (raw === "taxpacket") { renderTaxPacket(app); return; }
   if (raw === "comms")     { renderCommunications(app); return; }
   if (raw === "expenses")  { renderExpenses(app); return; }
   if (raw === "money")     { renderMoney(app); return; }
@@ -2192,7 +2193,7 @@ const ADMIN_NAV_GROUPS = [
   ]},
   { label: "Inventory", items: [ ["inventory", "Blanks"], ["blankorder", "Blanks to order"], ["transfers", "Transfers"] ]},
   { label: "Finance", items: [ ["expenses", "Expenses"], ["money", "Accounts & money"], ["reconcile", "Reconcile"], ["accountviewer", "Account viewer"], ["shoprate", "Shop rate"] ]},
-  { label: "Reports", items: [ ["audit", "Audit log"], ["revenue", "Revenue report"], ["salestax", "Sales tax report"], ["fundraising", "Fundraising"], ["cogs", "Inventory & COGS"], ["runreport", "Run times"], ["books", "Periods & export"] ]},
+  { label: "Reports", items: [ ["audit", "Audit log"], ["revenue", "Revenue report"], ["salestax", "Sales tax report"], ["fundraising", "Fundraising"], ["cogs", "Inventory & COGS"], ["runreport", "Run times"], ["books", "Periods & export"], ["taxpacket", "Tax packet"] ]},
   { label: "Settings", items: [
     ["settings", "Global settings"], ["vendors", "Vendor integrations"], ["comms", "Communications"], ["orphans", "Orphaned images"],
     ["users", "Users"], ["security", "Security (2FA)"], ["password", "Change password"],
@@ -2209,7 +2210,7 @@ const ADMIN_NAV_TOOLS = ADMIN_NAV_GROUPS.flatMap(g => g.items.filter(Array.isArr
 const ADMIN_PAGE_FEATURE = {
   runorder: "production", machines: "production", maintenance: "production", machinefiles: "production", hoops: "production", threads: "production",
   abortreasons: "production", runreport: "production", designs: "production",
-  expenses: "bookkeeping", money: "bookkeeping", reconcile: "bookkeeping", books: "bookkeeping", accountviewer: "bookkeeping", shoprate: "bookkeeping",
+  expenses: "bookkeeping", money: "bookkeeping", reconcile: "bookkeeping", books: "bookkeeping", taxpacket: "bookkeeping", accountviewer: "bookkeeping", shoprate: "bookkeeping",
   packages: "shipping",
   quotes: "quotes",
   discounts: "discounts",
@@ -21483,6 +21484,448 @@ function downloadCsv_(filename, rows, columns){
   a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ---- Reports → Tax packet ------------------------------------------------------------------------
+// One printable document for the accountant (docs/tax-packet.md): the year's expenses by Schedule C
+// line, the sales & use tax return figures, revenue, cost of goods sold, and — for a first year —
+// the choices the accountant has to make. Built here from the reports the admin already has
+// (getExpenseReport, getSalesTaxReport, getRevenueReport, getInventoryReport, getAccountantExport)
+// plus getTaxPacketExtras (db.js), so every figure is the same one those screens show. The owner
+// ticks which sections to print. Printing opens the document in a window of its own (any browser:
+// Print → Save as PDF); the desktop program can also save it as a PDF directly.
+const TAX_PACKET_SECTIONS_ = [
+  ["cover", "Cover page and totals"],
+  ["expenses", "Expenses by Schedule C line"],
+  ["salestax", "Sales & use tax"],
+  ["revenue", "Revenue"],
+  ["cogs", "Cost of goods sold"],
+  ["decisions", "First-year decisions for the accountant"],
+  ["owner", "Owner money in & out, start-up costs"],
+  ["receivables", "Money owed at the end date, 1099-K check"],
+  ["exempt", "Tax-exempt sales, sales by state"],
+];
+// Costs the app keeps outside Expenses, shown on the Schedule C line they usually go on — marked
+// "proposed" in the packet so the accountant can move them.
+const TAX_PACKET_PROPOSED_ = {
+  cardFees: { line: "10", label: "Commissions and fees", what: "Card processing fees" },
+  postage: { line: "27a", label: "Other expenses", what: "Postage and shipping labels" },
+};
+const TAX_PACKET_KEY_ = "odd.taxPacket.sections";
+
+function taxPacketSelected_(){
+  try {
+    const v = JSON.parse(localStorage.getItem(TAX_PACKET_KEY_) || "null");
+    if (Array.isArray(v)) return v.filter(k => TAX_PACKET_SECTIONS_.some(s => s[0] === k));
+  } catch (_) {}
+  return TAX_PACKET_SECTIONS_.map(s => s[0]);
+}
+
+// The figures for the packet: every report at once. A report that fails (or that this user may not
+// open) leaves its section saying so instead of stopping the rest.
+async function loadTaxPacket_(dateFrom, dateTo){
+  const range = { dateFrom, dateTo };
+  const calls = {
+    expenses: { action: "getExpenseReport", ...range },
+    tax: { action: "getSalesTaxReport", ...range },
+    revenue: { action: "getRevenueReport", ...range },
+    cash: { action: "getRevenueReport", basis: "cash", ...range },
+    inventory: { action: "getInventoryReport", ...range },
+    books: { action: "getAccountantExport", ...range },
+    extras: { action: "getTaxPacketExtras", ...range },
+  };
+  const keys = Object.keys(calls);
+  const settled = await Promise.allSettled(keys.map(k => hoopApi_(calls[k])));
+  const data = { dateFrom, dateTo, errors: {} };
+  settled.forEach((r, i) => { if (r.status === "fulfilled") data[keys[i]] = r.value; else data.errors[keys[i]] = (r.reason && r.reason.message) || "Couldn't load"; });
+  return data;
+}
+
+// The packet as a complete HTML page (no scripts: the desktop program prints it with JavaScript off).
+// `sections` is the list of section keys to include, in TAX_PACKET_SECTIONS_ order.
+function taxPacketHtml_(data, sections, opts){
+  opts = opts || {};
+  const on = (k) => sections.includes(k);
+  const esc = escapeHtml;
+  const num = (v) => Math.round((Number(v) || 0) * 100) / 100;
+  const sum = (list, f) => Math.round(list.reduce((a, x) => a + (Number(f(x)) || 0) * 100, 0)) / 100;
+  const $ = (v) => { const n = num(v); return (n < 0 ? "−$" : "$") + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+  const day = (d) => d ? new Date(String(d).slice(0, 10) + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : "";
+  const mon = (m) => new Date(m + "-15T12:00:00Z").toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" });
+  const biz = opts.business || "";
+  const period = day(data.dateFrom) + " – " + day(data.dateTo);
+  const printed = day(opts.today || new Date().toISOString());
+  const proposed = `<span class="prop">proposed</span>`;
+  const missing = (k, what) => data[k] ? "" : `<p class="warn">The ${esc(what)} couldn't be loaded: ${esc(data.errors[k] || "not available")}. This section is incomplete.</p>`;
+  const table = (head, rows, opt) => {
+    opt = opt || {};
+    if (!rows.length) return `<p class="none">${esc(opt.empty || "Nothing in this period.")}</p>`;
+    const cls = (i) => (opt.right || []).includes(i) ? ' class="r"' : "";
+    return `<table><thead><tr>${head.map((h, i) => `<th${cls(i)}>${esc(h)}</th>`).join("")}</tr></thead><tbody>${
+      rows.map(r => `<tr${r.total ? ' class="tot"' : ""}>${(r.cells || r).map((c, i) => `<td${cls(i)}>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+  };
+  const top = (title) => `<div class="top">${esc(biz)} · Tax packet · ${esc(period)}</div><h1>${esc(title)}</h1>`;
+
+  const books = data.books || {}, summary = books.summary || [];
+  const exp = (data.expenses || {}).summary || { byLine: [], byCategory: [], assets: [], totals: {} };
+  const cardFees = sum(summary, m => m.stripeFees), postage = sum(summary, m => m.postage);
+  const ret = ((data.tax || {}).taxReturn) || { months: [], total: {}, useTaxItems: [] };
+  const taxTotals = (data.tax || {}).totals || {};
+  const extras = data.extras || { selfUsed: [], receivables: [], exempt: [] };
+  const state = (data.tax && data.tax.jurisdiction) || extras.jurisdiction || "";
+  const ratePct = (data.tax && data.tax.ratePercent) || extras.ratePct || 0;
+  const inv = data.inventory;
+
+  // ---- Figures the cover repeats ----
+  const deductibleAll = num(num(exp.totals.deductible) + cardFees + postage);
+  const line1 = num(num(ret.total.grossSales) + num(ret.total.shipping));
+  const line2 = num(num(taxTotals.refunded) - num(taxTotals.taxRefunded));
+  const otherIncome = books.income || [];
+  const incomeOn = (re) => sum(otherIncome.filter(i => re.test(String(i.type))), i => i.amount);
+  // Schedule C Part III from the inventory roll-forward: blanks, finished stock and transfer sheets together.
+  const part3 = (() => {
+    if (!inv) return null;
+    const t = inv.transfers || { beginning: {}, ending: {}, totals: {}, notYetSold: {} };
+    const tNys = t.notYetSold || {};
+    const beginning = num(num(inv.rollForward.beginning) + num(t.beginning.value) + num(tNys.beginning));
+    const purchases = num(num(inv.totals.purchases) + num(t.totals.purchases));
+    const other = num(inv.totals.corrections);
+    const ending = num(num(inv.rollForward.ending) + num(t.ending.value) + num(tNys.ending));
+    const l40 = num(beginning + purchases + other);
+    return { beginning, purchases, other, l40, ending, l42: num(l40 - ending),
+      cogs: num(num(inv.totals.cogs) + num(t.totals.cogs)), estimated: num(inv.totals.estimatedPart),
+      writeoffs: num(num(inv.totals.writeoffs) + num(t.totals.writeoffs)), check: num(inv.rollForward.check) };
+  })();
+
+  const out = [];
+
+  if (on("cover")) {
+    const glance = [];
+    if (on("revenue")) glance.push([`Gross receipts (Schedule C line 1) ${proposed}`, $(line1)]);
+    if (on("cogs") && part3) glance.push(["Cost of goods sold (Schedule C line 4 / line 42)", $(part3.l42)]);
+    if (on("expenses")) glance.push([`Deductible expenses, including card fees and postage ${proposed}`, $(deductibleAll)]);
+    if (on("expenses") && exp.assets.length) glance.push(["Equipment to depreciate or expense (cost)", $(exp.totals.capital)]);
+    if (on("salestax")) glance.push([`${esc(state || "State")} sales & use tax due for the period`, $(taxTotals.netTaxDue)]);
+    if (on("salestax") && extras.selfUsed.length) glance.push(["Possible extra use tax on stock used by the shop (for review)", $(sum(extras.selfUsed, x => x.useTax))]);
+    const saleDate = (data.revenue && data.revenue.saleDate) === "placed" ? "the date it was ordered" : "the date it shipped";
+    out.push(`<section class="cover">
+      <div class="top">Prepared ${esc(printed)}</div>
+      <h1 class="big">${esc(biz)}</h1>
+      <h2>Tax packet for ${esc(period)}</h2>
+      <p>This packet was printed from the shop's own records. Figures marked ${proposed} are a suggestion for where they go on the return — please move them as you see fit.</p>
+      ${glance.length ? `<h3>At a glance</h3>${table(["", "Amount"], glance, { right: [1] })}` : ""}
+      <h3>How the figures are counted</h3>
+      <ul>
+        <li>Revenue and cost of goods count each order on ${saleDate} (an accrual view). Sales tax counts each order on the date it was ordered.</li>
+        <li>Money actually received in the period (a cash view) is shown on the Revenue page for comparison.</li>
+        <li>Test orders and voided orders are left out everywhere.</li>
+      </ul>
+      <h3>Also bring to the meeting</h3>
+      <ul class="check">
+        <li>1099-K from the card processor and any 1099-NEC / 1099-MISC received</li>
+        <li>Names and amounts paid to any contractors (they may need a 1099-NEC)</li>
+        <li>Mileage log for business driving</li>
+        <li>Home office: square footage of the work area and of the whole home</li>
+        <li>Health insurance premiums paid</li>
+        <li>Estimated tax payments made (federal and state) and their dates</li>
+        <li>Bank and credit card statements for the business accounts</li>
+        <li>Last year's tax return</li>
+        <li>The year-end stock count</li>
+      </ul>
+      <h3>What's in this packet</h3>
+      <ol>${TAX_PACKET_SECTIONS_.filter(s => s[0] !== "cover" && on(s[0])).map(s => `<li>${esc(s[1])}</li>`).join("")}</ol>
+    </section>`);
+  }
+
+  if (on("expenses")) {
+    const lines = exp.byLine.map(l => [esc(l.line), esc(l.label) + (l.line === "24b" ? " " + proposed : ""), $(l.amount), $(l.deductible)]);
+    lines.push([TAX_PACKET_PROPOSED_.cardFees.line, esc(TAX_PACKET_PROPOSED_.cardFees.label + " — " + TAX_PACKET_PROPOSED_.cardFees.what) + " " + proposed, $(cardFees), $(cardFees)]);
+    if (postage) lines.push([TAX_PACKET_PROPOSED_.postage.line, esc(TAX_PACKET_PROPOSED_.postage.label + " — " + TAX_PACKET_PROPOSED_.postage.what) + " " + proposed, $(postage), $(postage)]);
+    lines.push({ total: true, cells: ["", "Total", $(num(sum(exp.byLine, l => l.amount) + cardFees + postage)), $(deductibleAll)] });
+    const treat = { deductible: "Deduct", depreciation: "Depreciate", none: "Not deductible" };
+    out.push(`<section>${top("1. Expenses and how they may be treated")}
+      ${missing("expenses", "expense report")}${missing("books", "card fee and postage totals")}
+      <p>Business expenses for the period, grouped by the Schedule C line each category is set up for. "Deductible" is the amount after any business-use % and the 50% meals limit.</p>
+      <h3>By Schedule C line</h3>
+      ${table(["Line", "What it is", "Spent", "Deductible"], lines, { right: [2, 3] })}
+      <p class="note">${proposed} Card processing fees come from the payment records, and postage from shipping labels bought in the app — they aren't entered as expenses. Meals are shown at 50%.</p>
+      <h3>By category</h3>
+      ${table(["Category", "Line", "Treatment", "Count", "Spent", "Deductible"], exp.byCategory.map(c => [esc(c.category), esc(c.scheduleCLine || ""), esc(treat[c.deductionType] || c.deductionType), esc(String(c.count)), $(c.amount), $(c.deductible)]), { right: [3, 4, 5] })}
+      ${num(exp.totals.nonDeductible) ? `<p class="note">Not deductible (personal, or the part above business use / the meals limit): ${$(exp.totals.nonDeductible)}.</p>` : ""}
+      <h3>Equipment and other things to depreciate</h3>
+      <p class="note">These are not in the totals above. Choose for each: deduct it all this year (Section 179 or bonus) or spread it over several years.</p>
+      ${table(["Placed in service", "What", "Category", "Cost", "Business use", "Method noted"], exp.assets.map(a => [esc(day(a.placedInService)), esc(a.description + (a.vendor ? " (" + a.vendor + ")" : "")), esc(a.category), $(a.cost), esc(a.businessUsePct + "%"), esc(a.method)]), { right: [3, 4], empty: "No equipment purchases recorded." })}
+    </section>`);
+  }
+
+  if (on("salestax")) {
+    const t = ret.total || {};
+    const reviewTotal = sum(extras.selfUsed, x => x.useTax);
+    out.push(`<section>${top("2. " + (state ? state + " " : "") + "sales & use tax")}
+      ${missing("tax", "sales tax report")}${missing("extras", "use tax review list")}
+      <p>Laid out like the annual sales and use tax return. Rate on file: ${esc(String(ratePct))}%. Sales are shown without the tax in them.</p>
+      <h3>Annual summary</h3>
+      ${table(["", "Amount"], [
+        ["Gross sales (goods and rush fees, before tax)", $(t.grossSales)],
+        ["Less: sales to tax-exempt customers", $(t.exemptSales)],
+        ["Less: sales shipped out of state", $(t.interstateSales)],
+        ["Less: non-taxable sales", $(t.nonTaxableSales)],
+        { total: true, cells: ["Taxable sales", $(t.taxableSales)] },
+        ["Sales tax collected", $(t.taxCollected)],
+        ["Less: sales tax given back with refunds", $(t.taxRefunded)],
+        ["Purchases subject to use tax (vendor didn't charge tax)", $(t.useTaxablePurchases)],
+        ["Use tax on those purchases", $(t.useTax)],
+        { total: true, cells: ["Total tax due for the period", $(t.totalDue)] },
+        ["Shipping charged (not taxed, not in the figures above)", $(t.shipping)],
+      ], { right: [1] })}
+      <h3>By month</h3>
+      ${table(["Month", "Gross sales", "Taxable sales", "Tax collected", "Tax refunded", "Use tax", "Due"],
+        (ret.months || []).map(m => [esc(mon(m.month)), $(m.grossSales), $(m.taxableSales), $(m.taxCollected), $(m.taxRefunded), $(m.useTax), $(m.totalDue)]), { right: [1, 2, 3, 4, 5, 6] })}
+      <h3>Purchases that owe use tax</h3>
+      ${table(["Date", "What", "Vendor", "Category", "Cost", "Use tax"], (ret.useTaxItems || []).map(x => [esc(day(x.date)), esc(x.description), esc(x.vendor), esc(x.category), $(x.amount), $(x.useTax)]), { right: [4, 5], empty: "None — every taxable purchase was charged sales tax." })}
+      <h3>For review: stock used by the shop itself</h3>
+      <p class="note">Blanks bought tax-free for resale but then used by the shop (testing, samples, shop use), blanks bought for shop use with no tax charged, and transfer sheets written off. These may owe use tax at ${esc(String(ratePct))}% of cost. <b>They are not included in the total above</b> — please decide which belong on the return.</p>
+      ${table(["Date", "Item", "Qty", "Why it's listed", "Cost", "Use tax if owed"],
+        extras.selfUsed.map(x => [esc(day(x.date)), esc(x.item) + (x.note ? `<div class="sub">${esc(x.note)}</div>` : ""), esc(String(x.qty)), esc(x.why), $(x.cost), $(x.useTax)])
+          .concat(extras.selfUsed.length ? [{ total: true, cells: ["", "Total", "", "", $(sum(extras.selfUsed, x => x.cost)), $(reviewTotal)] }] : []),
+        { right: [2, 4, 5], empty: "Nothing to review." })}
+    </section>`);
+  }
+
+  if (on("revenue")) {
+    const refundsBy = Object.fromEntries(summary.map(m => [m.month, m.refunds]));
+    const months = (ret.months || []).map(m => [esc(mon(m.month)), esc(String(m.orders)), $(m.grossSales), $(m.shipping), $(m.taxCollected), $(refundsBy[m.month] || 0)]);
+    const cash = (data.cash || {}).total || {};
+    const services = incomeOn(/line 1\)/), line6 = incomeOn(/line 6\)/), interest = incomeOn(/Schedule B/);
+    out.push(`<section>${top("3. Revenue")}
+      ${missing("tax", "sales figures")}${missing("books", "refund and other-income figures")}
+      <h3>Proposed Schedule C income lines</h3>
+      ${table(["Line", "", "Amount"], [
+        ["1", `Gross receipts: sales before tax ${$(ret.total.grossSales)} + shipping charged ${$(ret.total.shipping)} ${proposed}`, $(line1)],
+        ...(services ? [["1", `Services income (entered under Accounts & money) ${proposed}`, $(services)]] : []),
+        ["2", `Returns and allowances: refunds less the sales tax in them ${proposed}`, $(line2)],
+        ["6", "Other business income", $(line6)],
+      ], { right: [2] })}
+      ${interest ? `<p class="note">Interest earned (goes on Schedule B, not Schedule C): ${$(interest)}.</p>` : ""}
+      <h3>By month (by the date ordered)</h3>
+      ${table(["Month", "Orders", "Sales before tax", "Shipping charged", "Sales tax collected", "Refunds paid"], months, { right: [1, 2, 3, 4, 5] })}
+      <h3>Cash view: money actually received in the period</h3>
+      ${data.cash ? table(["", "Amount"], [["Received from customers", $(cash.received)], ["Refunded to customers", $(cash.refunded)], ["Card processing fees", $(cash.fees)], { total: true, cells: ["Net received", $(cash.net)] }], { right: [1] }) : missing("cash", "cash figures")}
+      <p class="note">Received amounts include sales tax and shipping. The difference from the lines above is mostly tax collected, unpaid invoices and timing.</p>
+    </section>`);
+  }
+
+  if (on("cogs")) {
+    const rows = ((inv && inv.cogs && inv.cogs.rows) || []).map(r => [esc(mon(r.month)), $(r.purchases), $(r.cogs), $(r.writeoffs), $(r.corrections)]);
+    const groups = books.inventoryGroups || [];
+    out.push(`<section>${top("4. Cost of goods sold")}
+      ${missing("inventory", "inventory report")}
+      ${part3 ? `<h3>Schedule C Part III</h3>
+      ${table(["Line", "", "Amount"], [
+        ["35", "Inventory at beginning of period", $(part3.beginning)],
+        ["36", "Purchases (blanks and transfer sheets)", $(part3.purchases)],
+        ["37", "Cost of labor", "—"],
+        ["38", "Materials and supplies", "—"],
+        ["39", `Other costs: stock count corrections ${proposed}`, $(part3.other)],
+        { total: true, cells: ["40", "Add lines 35 through 39", $(part3.l40)] },
+        ["41", "Inventory at end of period", $(part3.ending)],
+        { total: true, cells: ["42", "Cost of goods sold (line 40 minus line 41) — goes on line 4", $(part3.l42)] },
+      ], { right: [2] })}
+      <p class="note">Inventory is valued at average cost. Line 42 includes stock written off (${$(part3.writeoffs)}); stock used for testing or shop use could instead be deducted as supplies. Thread, backing and other supplies are in Expenses, not here.</p>
+      ${Math.abs(part3.check) > 1 ? `<p class="warn">The inventory records are ${$(part3.check)} out of balance (stock went below zero somewhere). Line 42 above uses the counted ending inventory.</p>` : ""}
+      ${part3.estimated ? `<p class="warn">${$(part3.estimated)} of cost is an estimate (orders made before stock was tracked). It's not in the inventory figures above; the app's cost-of-goods figure including it is ${$(part3.cogs)}.</p>` : ""}` : ""}
+      ${groups.length ? `<h3>Inventory by group</h3>${table(["Group", "Beginning", "End"], groups.map(g => [esc(g.group), $(g.beginning), $(g.ending)]), { right: [1, 2] })}` : ""}
+      <h3>By month</h3>
+      ${table(["Month", "Purchases", "Cost of goods sold", "Written off", "Count corrections"], rows, { right: [1, 2, 3, 4] })}
+      ${inv && inv.cogs && inv.cogs.missingCost && inv.cogs.missingCost.length ? `<p class="warn">${inv.cogs.missingCost.length} item${inv.cogs.missingCost.length === 1 ? " was" : "s were"} sold with no cost recorded, so cost of goods may be understated.</p>` : ""}
+    </section>`);
+  }
+
+  if (on("decisions")) {
+    const items = [
+      ["How the business is set up", "With no partners or corporation, it's a sole proprietorship (or single-member LLC) reported on Schedule C."],
+      ["Cash or accrual accounting", "The first return sets the method. A small business with inventory can usually use cash and treat blanks as materials and supplies (§471(c))."],
+      ["Start-up costs", "Costs before the first sale: up to $5,000 deducted, the rest spread over 15 years (§195). See the start-up list in this packet."],
+      ["Equipment", "Deduct it all now (Section 179 or bonus depreciation) or depreciate it over several years. Small items may use the $2,500 de minimis election (a statement attached to the return)."],
+      ["Vehicle", "Standard mileage rate or actual costs. Standard mileage generally has to be chosen the first year the vehicle is used for the business."],
+      ["Home office", "Simplified method ($5 per square foot, up to 300 sq ft) or actual expenses."],
+      ["Self-employment tax and estimated payments", "Quarterly estimates for next year, federal and state."],
+      ["State and local", "Sales tax license and filing frequency; city income tax where the business is located, if any."],
+      ["Other", "Qualified business income deduction (§199A); a retirement plan (SEP or Solo 401(k)); 1099-NEC forms owed to contractors; the 1099-K expected from the card processor."],
+    ];
+    out.push(`<section>${top("5. First-year decisions")}
+      <p>This is the business's first year. These choices are made on the first return and some are hard to change later. Space is left to note each decision.</p>
+      ${items.map(([h, t]) => `<div class="dec"><div class="box"></div><div><b>${esc(h)}</b><br>${esc(t)}<div class="line">Decision:</div></div></div>`).join("")}
+    </section>`);
+  }
+
+  if (on("owner")) {
+    const ownerMonths = summary.filter(m => num(m.ownerContributions) || num(m.ownerDraws)).map(m => [esc(mon(m.month)), $(m.ownerContributions), $(m.ownerDraws)]);
+    if (ownerMonths.length) ownerMonths.push({ total: true, cells: ["Total", $(sum(summary, m => m.ownerContributions)), $(sum(summary, m => m.ownerDraws))] });
+    const first = extras.firstSaleDate || "";
+    const startup = (books.expenses || []).filter(x => !x.status && (!first || x.date < first));
+    out.push(`<section>${top("6. Owner money and start-up costs")}
+      ${missing("books", "owner and expense records")}
+      <h3>Money the owner put in and took out</h3>
+      <p class="note">These are not income or expenses. "Put in" includes business expenses paid with personal money.</p>
+      ${table(["Month", "Put in", "Taken out"], ownerMonths, { right: [1, 2], empty: "No owner money recorded." })}
+      <h3>Possible start-up costs</h3>
+      <p class="note">${first ? `The first sale was on ${esc(day(first))}. Expenses before that date may be start-up costs (§195).` : "No sale has been recorded yet, so every expense is listed."}</p>
+      ${table(["Date", "What", "Category", "Line", "Amount"], startup.map(x => [esc(day(x.date)), esc(x.description + (x.vendor ? " (" + x.vendor + ")" : "")), esc(x.category), esc(x.scheduleCLine || ""), $(x.amount)])
+        .concat(startup.length ? [{ total: true, cells: ["", "Total", "", "", $(sum(startup, x => x.amount))] }] : []), { right: [4], empty: "None in this period." })}
+    </section>`);
+  }
+
+  if (on("receivables")) {
+    const r = extras.receivables;
+    const cardRefunds = {};
+    for (const p of (books.ledger || [])) if (!p.status && p.method === "card" && (p.kind === "refund" || p.kind === "dispute")) cardRefunds[String(p.date).slice(0, 7)] = (cardRefunds[String(p.date).slice(0, 7)] || 0) + num(p.amount);
+    const cardMonths = summary.filter(m => num(m.cardReceipts) || num(m.stripeFees) || cardRefunds[m.month]).map(m => [esc(mon(m.month)), $(m.cardReceipts), $(cardRefunds[m.month] || 0), $(m.stripeFees)]);
+    if (cardMonths.length) cardMonths.push({ total: true, cells: ["Total", $(sum(summary, m => m.cardReceipts)), $(Object.values(cardRefunds).reduce((a, v) => a + v, 0)), $(sum(summary, m => m.stripeFees))] });
+    out.push(`<section>${top("7. Money owed at the end date; 1099-K check")}
+      ${missing("extras", "unpaid orders")}${missing("books", "card payment records")}
+      <h3>Unpaid orders on ${esc(day(data.dateTo))}</h3>
+      <p class="note">Orders placed by the end date that still had a balance owing then. Under accrual these are already income; under cash they count when paid.</p>
+      ${table(["Ordered", "Order", "Customer", "Total", "Paid", "Owing"], r.map(o => [esc(day(o.date)), esc(o.orderId), esc(o.customer || o.shop), $(o.total), $(o.received), $(o.balance)])
+        .concat(r.length ? [{ total: true, cells: ["", "", "Total", "", "", $(sum(r, o => o.balance))] }] : []), { right: [3, 4, 5], empty: "Nothing owing." })}
+      <h3>Card payments (to check against the 1099-K)</h3>
+      <p class="note">The 1099-K shows card payments before refunds and fees. Test charges aren't included here.</p>
+      ${table(["Month", "Card payments", "Card refunds", "Processing fees"], cardMonths, { right: [1, 2, 3], empty: "No card payments in this period." })}
+    </section>`);
+  }
+
+  if (on("exempt")) {
+    const ex = extras.exempt;
+    const byState = {};
+    for (const row of ((data.tax || {}).rows || [])) {
+      const s = row.state || "—";
+      const x = (byState[s] = byState[s] || { orders: 0, sales: 0, tax: 0 });
+      x.orders += row.orders; x.sales = num(x.sales + num(row.netSales)); x.tax = num(x.tax + num(row.taxCollected));
+    }
+    const states = Object.entries(byState).sort((a, b) => b[1].sales - a[1].sales);
+    out.push(`<section>${top("8. Tax-exempt sales; sales by state")}
+      ${missing("extras", "exempt sales")}${missing("tax", "sales by state")}
+      <h3>Sales to tax-exempt customers</h3>
+      <p class="note">Keep an exemption certificate on file for each of these in case of an audit.</p>
+      ${table(["Customer", "Orders", "Sales", "Certificate"], ex.map(x => [esc(x.shop), esc(String(x.orders)), $(x.sales),
+        x.certificateOnFile ? (x.certificateExpired ? `<b class="bad">Expired ${esc(day(x.certificateExpires))}</b>` : "On file" + (x.certificateExpires ? " (expires " + esc(day(x.certificateExpires)) + ")" : "")) : `<b class="bad">MISSING</b>`]), { right: [1, 2], empty: "No tax-exempt sales." })}
+      <h3>Sales by ship-to state</h3>
+      ${table(["State", "Orders", "Sales before tax", "Tax collected"], states.map(([s, x]) => [esc(s === "—" ? "Not shipped (picked up / delivered)" : s), esc(String(x.orders)), $(x.sales), $(x.tax)]), { right: [1, 2, 3] })}
+    </section>`);
+  }
+
+  const css = `@page{size:letter;margin:0.6in;}
+*{box-sizing:border-box;}
+body{margin:0;font-family:Georgia,"Times New Roman",serif;font-size:12.5pt;line-height:1.4;color:#000;background:#fff;}
+section{page-break-before:always;break-before:page;}
+section:first-of-type{page-break-before:auto;break-before:auto;}
+.top{font-family:Helvetica,Arial,sans-serif;font-size:9pt;color:#555;border-bottom:1px solid #999;padding-bottom:3pt;margin-bottom:10pt;}
+h1{font-size:19pt;margin:0 0 8pt;}
+h1.big{font-size:28pt;margin-top:1in;}
+h2{font-size:16pt;font-weight:normal;margin:0 0 14pt;}
+h3{font-family:Helvetica,Arial,sans-serif;font-size:12pt;margin:16pt 0 5pt;break-after:avoid;}
+p{margin:4pt 0 8pt;}
+table{width:100%;border-collapse:collapse;font-family:Helvetica,Arial,sans-serif;font-size:10.5pt;margin:2pt 0 8pt;}
+th{text-align:left;border-bottom:1.5px solid #000;padding:4pt 5pt;font-size:9.5pt;}
+td{border-bottom:1px solid #ccc;padding:4pt 5pt;vertical-align:top;}
+tr{break-inside:avoid;}
+.r{text-align:right;white-space:nowrap;}
+tr.tot td{font-weight:bold;border-top:1.5px solid #000;border-bottom:none;}
+.prop{display:inline-block;font-family:Helvetica,Arial,sans-serif;font-size:7.5pt;font-weight:bold;letter-spacing:.04em;text-transform:uppercase;border:1px solid #000;border-radius:3px;padding:0 3pt;vertical-align:1pt;}
+.note{font-size:10.5pt;color:#333;}
+.none{font-style:italic;color:#555;}
+.warn{border:1.5px solid #000;padding:6pt 8pt;font-weight:bold;}
+.bad{text-decoration:underline;}
+.sub{font-size:9pt;color:#555;}
+ul.check{list-style:none;padding-left:0;}
+ul.check li::before{content:"☐  ";}
+.dec{display:flex;gap:10pt;margin:0 0 12pt;break-inside:avoid;}
+.dec .box{flex:0 0 14pt;height:14pt;border:1.5px solid #000;margin-top:2pt;}
+.dec > div:last-child{flex:1;}
+.dec .line{margin-top:6pt;border-bottom:1px solid #000;height:20pt;font-family:Helvetica,Arial,sans-serif;font-size:9pt;color:#555;}`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(biz + " — Tax packet " + data.dateFrom + " to " + data.dateTo)}</title><style>${css}</style></head><body>${
+    out.join("") || `<p class="none">No sections are ticked.</p>`}</body></html>`;
+}
+
+async function renderTaxPacket(app){
+  adminSetHash("taxpacket");
+  document.title = adminTitle_("Tax packet");
+  const today = new Date().toISOString().slice(0, 10), y = Number(today.slice(0, 4));
+  const inp = "font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;";
+  const quick = "padding:6px 10px;font-size:12px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:var(--surface,#fff);";
+  const picked = taxPacketSelected_();
+  const desktopPdf = typeof window !== "undefined" && window.oddDesktop && typeof window.oddDesktop.saveReportPdf === "function";
+  app.innerHTML = `
+    ${adminPageHead_("Tax packet")}
+    <div class="admin-panel" style="--org-accent:var(--accent);max-width:1000px;margin:8px auto 60px;">
+      <p style="font-size:13px;color:#555;margin:0 0 12px;">One printable document for your accountant: expenses with their proposed Schedule C lines, the sales &amp; use tax return figures, revenue, cost of goods sold and, for a first year, the decisions to make. Tick what to include, then print it (or save it as a PDF from the print window).</p>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px;">
+        <label style="font-size:12px;font-weight:600;">From<br><input type="date" id="tpFrom" value="${y}-01-01" style="${inp}"></label>
+        <label style="font-size:12px;font-weight:600;">To<br><input type="date" id="tpTo" value="${today}" style="${inp}"></label>
+        <button type="button" class="tpQuick" data-from="${y}-01-01" data-to="${today}" style="${quick}">This year to date</button>
+        <button type="button" class="tpQuick" data-from="${y}-01-01" data-to="${y}-12-31" style="${quick}">All of ${y}</button>
+        <button type="button" class="tpQuick" data-from="${y - 1}-01-01" data-to="${y - 1}-12-31" style="${quick}">All of ${y - 1}</button>
+      </div>
+      <fieldset style="border:1px solid #ddd;border-radius:6px;padding:8px 12px;margin:0 0 12px;">
+        <legend style="font-size:12px;font-weight:600;padding:0 4px;">Include</legend>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:4px 16px;font-size:13px;">
+          ${TAX_PACKET_SECTIONS_.map(([k, label]) => `<label><input type="checkbox" class="tpSec" value="${k}"${picked.includes(k) ? " checked" : ""}> ${escapeHtml(label)}</label>`).join("")}
+        </div>
+        <div style="margin-top:6px;display:flex;gap:8px;">
+          <button type="button" id="tpAll" style="${quick}">Select all</button>
+          <button type="button" id="tpNone" style="${quick}">Clear</button>
+        </div>
+      </fieldset>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <button type="button" class="admin-pass-submit" id="tpPrint" style="padding:6px 16px;font-size:13px;" disabled>Print / Save as PDF</button>
+        ${desktopPdf ? `<button type="button" class="admin-btn" id="tpSave" disabled>Save PDF…</button>` : ""}
+        <span id="tpStatus" style="font-size:13px;color:#555;">Loading…</span>
+      </div>
+      <iframe id="tpPreview" title="Tax packet preview" sandbox="" style="width:100%;height:900px;border:1px solid #ccc;border-radius:6px;margin-top:12px;background:#fff;"></iframe>
+    </div>`;
+
+  let data = null, seq = 0;
+  const sections = () => [...document.querySelectorAll(".tpSec")].filter(c => c.checked).map(c => c.value);
+  const html = () => taxPacketHtml_(data, sections(), { business: bizName_() });
+  const draw = () => { if (data) document.getElementById("tpPreview").srcdoc = html(); };
+  const load = async () => {
+    const from = document.getElementById("tpFrom").value, to = document.getElementById("tpTo").value;
+    const status = document.getElementById("tpStatus");
+    const btns = ["tpPrint", "tpSave"].map(id => document.getElementById(id)).filter(Boolean);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || from > to) { status.textContent = "Pick a From date on or before the To date."; return; }
+    const mine = ++seq;
+    status.textContent = "Loading…"; btns.forEach(b => b.disabled = true);
+    const d = await loadTaxPacket_(from, to);
+    if (mine !== seq) return;
+    data = d;
+    const failed = Object.keys(d.errors);
+    status.textContent = failed.length ? "Some figures couldn't be loaded — the packet says which." : "";
+    btns.forEach(b => b.disabled = false);
+    draw();
+  };
+  document.querySelectorAll(".tpQuick").forEach(b => b.onclick = () => {
+    document.getElementById("tpFrom").value = b.dataset.from; document.getElementById("tpTo").value = b.dataset.to; load(); });
+  document.getElementById("tpFrom").onchange = load;
+  document.getElementById("tpTo").onchange = load;
+  const remember = () => { try { localStorage.setItem(TAX_PACKET_KEY_, JSON.stringify(sections())); } catch (_) {} draw(); };
+  document.querySelectorAll(".tpSec").forEach(c => c.onchange = remember);
+  document.getElementById("tpAll").onclick = () => { document.querySelectorAll(".tpSec").forEach(c => c.checked = true); remember(); };
+  document.getElementById("tpNone").onclick = () => { document.querySelectorAll(".tpSec").forEach(c => c.checked = false); remember(); };
+  document.getElementById("tpPrint").onclick = () => {
+    if (!data) return;
+    const pw = window.open("", "_blank", "width=900,height=900");
+    if (!pw) { showToast("Allow pop-ups to print the packet.", true); return; }
+    pw.document.write(html().replace("</body>", "<script>window.onload=function(){window.print();};<\/script></body>"));
+    pw.document.close();
+  };
+  const save = document.getElementById("tpSave");
+  if (save) save.onclick = async () => {
+    if (!data) return;
+    const r = await window.oddDesktop.saveReportPdf({ filename: "Tax packet " + data.dateFrom + " to " + data.dateTo + ".pdf", html: html(), pageSize: "Letter" });
+    if (r && r.ok) showToast("Saved " + String(r.path || "").split(/[\\/]/).pop() + ".");
+    else if (r && !r.canceled) showToast(r.message || "Couldn't save the PDF.", true);
+  };
+  load();
 }
 
 async function renderBooks(app){

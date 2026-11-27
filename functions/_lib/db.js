@@ -12843,7 +12843,11 @@ export async function claimDiscountCode(db, { codeId, orderId, email, amountCent
     // Refused: say why as checkDiscountCode would (the shop, expiry and minimum aside — they were checked just before).
     const reason = row ? discountRefusal_(row, { orgId: row.orgId, email: em, today: "0000-00-00" }) : DISCOUNT_CODE_INVALID_;
     return { ok: false, reason: reason || (Number(row.oncePerEmail) ? "You've already used this code." : "This code has reached its limit.") };
-  } catch (e) { if (noDiscountCodesYet_(e)) return { ok: false, reason: DISCOUNT_CODE_INVALID_, notReady: true }; throw e; }
+  } catch (e) {
+    // Before migrations/0120 the uses have no (order, code) index for the ON CONFLICT above: not ready yet, not a crash.
+    if (noDiscountCodesYet_(e) || /ON CONFLICT clause does not match/i.test(String(e && e.message))) return { ok: false, reason: DISCOUNT_CODE_INVALID_, notReady: true };
+    throw e;
+  }
 }
 // Claims each of uses [{ codeId, amountCents }] in turn for the order. If one is refused, the ones this call took are
 // given back (one that was already the order's is left alone) and that refusal is returned: all or none.

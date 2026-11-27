@@ -455,8 +455,9 @@
         <div class="cust-note" id="qtCodeMsg" role="status">${escapeHtml(keep)}</div>`;
     }
     async function codeRule() {
-      if (codeRules || !adminCan_("settings.global", "read")) return;
-      try { const r = await adminApi_({ action: "getDiscountRules" }); codeRules = { multiple: !!(r && (r.multiple != null ? r.multiple : r.rules && r.rules.multiple)) }; }
+      // Readable with Quotes (permissions.js lets the screens with a code box read it), not only with Global settings.
+      if (codeRules) return;
+      try { const r = await adminApi_({ action: "getDiscountRules" }); const v = r && (r.discountRules || r.rules || r); codeRules = { multiple: !!(v && v.multiple) }; }
       catch (ex) { codeRules = null; }
       if (stillOn(hash, root)) paintCodes();
     }

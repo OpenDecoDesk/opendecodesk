@@ -12907,6 +12907,9 @@ async function discountCodesByOrder_(db, sub, binds) {
 // ---- Codes on an order that already exists (the order page, the invoice page) ---------------------------------------
 const ORDER_NO_CODE_NOW_ = "This order can't take a code now.";
 const orderCodeRefusal_ = (reason) => ({ ok: false, reason, error: reason });
+// Before migrations/0120 (no one-use-per-(order, code) index, no shipping discount column) as well as before 0115: not ready.
+const orderCodesNotReady_ = (e) => noDiscountCodesYet_(e) || /ON CONFLICT clause does not match|no such column: (\w+\.)?shippingDiscountCents/i.test(String(e && e.message));
+const orderCodesNotReadyAnswer_ = () => ({ ...orderCodeRefusal_(DISCOUNT_CODES_NOT_READY_), notReady: true });
 // The order and the codes it carries, for working out its discount from all of them: { order, goodsCents, rows }.
 async function orderCodeState_(db, orderId) {
   const o = await db.prepare(`SELECT orderId, orgId, contact, voidedAt, completedAt, refundedAt, shippingCostCents, discountCents, discountNote,
@@ -12930,6 +12933,8 @@ async function applyCodesToOrder_(db, orderId, state, now) {
   }
   await db.batch(stmts);
   await recomputeOrderTax_(db, orderId);
+  // The stored total has the shipping discount taken off (recomputeOrderTax_ stores it only when tax is added on top).
+  await storeOrderTotals_(db, orderId);
   await refreshPaidStatus(db, orderId);
   return { ok: true, codes: rows.map(r => r.code), discountCents: combined.goodsOffCents, discountNote: note, shippingDiscountCents: combined.shippingOffCents, perCode: combined.perCode };
 }
@@ -12956,7 +12961,7 @@ export async function applyOrderDiscountCode(db, { orderId, code, today = "", no
     if (!claim.ok) return orderCodeRefusal_(claim.reason);
     // Read again so the codes are in the order their uses were taken (what every loader shows).
     return await applyCodesToOrder_(db, orderId, await orderCodeState_(db, orderId), now);
-  } catch (e) { if (noDiscountCodesYet_(e)) return orderCodeRefusal_(DISCOUNT_CODES_NOT_READY_); throw e; }
+  } catch (e) { if (orderCodesNotReady_(e)) return orderCodesNotReadyAnswer_(); throw e; }
 }
 // Takes one code off an existing order (its use is given back) and works the discount out again from the rest.
 export async function removeOrderDiscountCode(db, { orderId, code, now = new Date().toISOString() } = {}) {
@@ -12968,9 +12973,11 @@ export async function removeOrderDiscountCode(db, { orderId, code, now = new Dat
     const c = normalizeDiscountCode_(code);
     const gone = rows.find(r => r.code === c);
     if (!c || !gone) return orderCodeRefusal_("That code isn't on this order.");
+    // The order's discount first, then the use given back: a write that can't be done (before 0120) gives back nothing.
+    const done = await applyCodesToOrder_(db, orderId, { order, goodsCents, rows: rows.filter(r => r.id !== gone.id) }, now);
     await releaseDiscountCodeUseFor_(db, orderId, gone.id, now);
-    return { ...(await applyCodesToOrder_(db, orderId, { order, goodsCents, rows: rows.filter(r => r.id !== gone.id) }, now)), removed: gone.code };
-  } catch (e) { if (noDiscountCodesYet_(e)) return orderCodeRefusal_(DISCOUNT_CODES_NOT_READY_); throw e; }
+    return { ...done, removed: gone.code };
+  } catch (e) { if (orderCodesNotReady_(e)) return orderCodesNotReadyAnswer_(); throw e; }
 }
 // An order's shipping changed (set after it was placed, or re-quoted): free shipping from a code follows it. The
 // discount is the whole of the new shipping while any live code makes shipping free; 0 otherwise. Safe before 0120.

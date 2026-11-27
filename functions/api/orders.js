@@ -222,9 +222,6 @@ function discountCodesOf_(b) {
   if (codes.length > CODES_PER_ORDER_MAX_) return { error: `At most ${CODES_PER_ORDER_MAX_} discount codes can be used on an order.` };
   return { codes };
 }
-// What an order's discount note says of its codes: "Code SAVE10", or "Codes SAVE10, TEAM5" (as db.js writes it when
-// a code is put on an existing order).
-const discountNoteOf_ = (names) => (names.length === 1 ? "Code " : "Codes ") + names.join(", ");
 // A quote's goods for a code's minimum order: its lines without the fee lines (setup, digitizing, art — not goods), in
 // cents — the same basis the quote editor checks a code against before it is saved.
 const estimateGoodsCents_ = (items) => (Array.isArray(items) ? items : []).filter(it => it && it.kind !== "fee")
@@ -329,7 +326,7 @@ function giftCardsOf_(b) {
     if (!g || typeof g !== "object" || typeof g.code !== "string" || !g.code.trim() || g.code.length > 64) return { error: "That gift card number isn't right." };
     const amount = g.amount == null || g.amount === "" ? 0 : Number(g.amount);
     if (!Number.isFinite(amount) || amount < 0 || amount > 1000000) return { error: "That gift card amount isn't valid." };
-    const key = (typeof normalizeGiftCardCode_ === "function" ? normalizeGiftCardCode_(g.code) : "") || g.code.trim().toUpperCase();
+    const key = normalizeGiftCardCode_(g.code) || g.code.trim().toUpperCase();
     if (seen.has(key)) continue;   // the same card typed twice is spent once
     seen.add(key);
     cards.push({ code: g.code.trim(), amountCents: Math.round(amount * 100) || 100000000 });
@@ -3386,7 +3383,7 @@ async function handleOrdersPost_(context, listBefore = null) {
           return {
             // A catalog line's name and type come from the catalog (with a version's label — "Club Tee
             // (Long sleeve)"), as on a storefront order; only a custom line names itself.
-            productId: it.productId, name: isCustomItem ? String(it.name || "").slice(0, 200) : (catalogName || it.name), type: isCustomItem ? String(it.type || "custom").slice(0, 50) : String(catalogType || it.type || ""), size: String(it.size || ""),
+            productId: it.productId, name: isCustomItem ? String(it.name).slice(0, 200) : (catalogName || it.name), type: isCustomItem ? String(it.type || "custom").slice(0, 50) : String(catalogType || it.type || ""), size: String(it.size || ""),
             qty, unitPrice, personalized: hasCustom ? false : !!it.personalized,
             persName: String(it.persName || "").slice(0, 200),
             personalizationFee, lineTotal,
@@ -4426,9 +4423,11 @@ async function handleOrdersPost_(context, listBefore = null) {
     // The range is whole days on the business's clock (Region time zone): from the first moment of dateFrom to the last of dateTo.
     const tz = await resolveTimeZone(env);
     const dayBefore = (d) => new Date(Date.parse(d + "T12:00:00Z") - 86400000).toISOString().slice(0, 10);
-    const from = dateFrom ? new Date(Date.parse(localDayEndInstant(dayBefore(dateFrom), tz) || "") + 1).toISOString() : "";
+    // (No end for the day before — the first day there is — is no lower limit, never an invalid date.)
+    const fromAt = dateFrom ? Date.parse(localDayEndInstant(dayBefore(dateFrom), tz) || "") + 1 : NaN;
+    const from = Number.isFinite(fromAt) ? new Date(fromAt).toISOString() : "";
     const to = dateTo ? localDayEndInstant(dateTo, tz) : "";
-    return jsonResponse({ status: "ok", totals: await giftCardTotals(env.DB, { ...(from && !from.startsWith("Invalid") ? { dateFrom: from } : {}), ...(to ? { dateTo: to } : {}) }) });
+    return jsonResponse({ status: "ok", totals: await giftCardTotals(env.DB, { ...(from ? { dateFrom: from } : {}), ...(to ? { dateTo: to } : {}) }) });
   }
 
   // ---- redeemGiftCard — spend a card on an order (the payment form's Gift card choice) ----

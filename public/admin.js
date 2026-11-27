@@ -26580,10 +26580,14 @@ function runTypeLabel_(key){ const t = RUN_TYPES_.find(x => x[0] === key); retur
 function runTypeChip_(key, off){
   return `<span class="ro-chip ro-t-${escapeHtml(key)}">${escapeHtml(runTypeLabel_(key))}${off ? " (switched off)" : ""}</span>`;
 }
+// Where a choice is held when the browser won't keep it (a private window): this visit only, but the buttons still work.
+const runPrefMem_ = {};
 function runPref_(name, allowed, dflt){
-  try { const v = localStorage.getItem("odd_runorder_" + name); return allowed.includes(v) ? v : dflt; } catch (e) { return dflt; }
+  let v = null;
+  try { v = localStorage.getItem("odd_runorder_" + name); } catch (e) { v = runPrefMem_[name]; }
+  return allowed.includes(v) ? v : dflt;
 }
-function runPrefSet_(name, value){ try { localStorage.setItem("odd_runorder_" + name, value); } catch (e) { /* private window: this visit only */ } }
+function runPrefSet_(name, value){ runPrefMem_[name] = value; try { localStorage.setItem("odd_runorder_" + name, value); } catch (e) { /* private window: this visit only */ } }
 // The pictures on a printed card: one tile per location (a graphic, or the customer's own file, which is private so a
 // signed link fills the picture in after the page draws).
 function runLocsHtml_(list){

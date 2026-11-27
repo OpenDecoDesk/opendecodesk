@@ -7028,8 +7028,9 @@ async function showPaymentsModal(orgId, orderId) {
       const payRequestId = newRequestId_(), refundRequestId = newRequestId_();
       const defaultMethod  = (String(o.paymentMethod || "").toLowerCase() in METHOD_LABEL) ? String(o.paymentMethod).toLowerCase() : "other";
       // A payment made with a gift card (migrations/0120): method "other" with the card on it. Shown as a gift card; its money
-      // goes back on the card when it is voided or refunded to the card, and it never goes into an account.
-      const isGiftPay = (p) => !!p && (!!p.giftCardId || /^Gift card ••\d{4}$/.test(String(p.reference || "")));
+      // goes back on the card when it is voided or refunded to the card, and it never goes into an account. The order's
+      // payments don't carry giftCardId, so the reference ("Gift card ••W5TX": a card's last four are letters and digits) tells.
+      const isGiftPay = (p) => !!p && (!!p.giftCardId || /^Gift card ••[A-Z0-9]{4}$/.test(String(p.reference || "")));
       const giftOn = adminFeatureOn_("giftCards");
       const codesOn = adminFeatureOn_("discounts");
       const orderCodes = Array.isArray(o.discountCodes) ? o.discountCodes.filter(Boolean) : (o.discountCode ? String(o.discountCode).split(",").map(x => x.trim()).filter(Boolean) : []);
@@ -8652,7 +8653,7 @@ function lsCombineCodes_(codes, goodsCents, shippingCents){
 let _lsRulesPromise = null;
 function lsDiscountRules_(){
   if (!_lsRulesPromise) _lsRulesPromise = adminApi_({ action: "getDiscountRules" })
-    .then(d => (d && d.rules && typeof d.rules === "object" ? d.rules : d && typeof d.multiple === "boolean" ? { multiple: d.multiple } : null))
+    .then(d => (d && d.discountRules && typeof d.discountRules === "object" ? d.discountRules : d && d.rules && typeof d.rules === "object" ? d.rules : d && typeof d.multiple === "boolean" ? { multiple: d.multiple } : null))
     .catch(() => { _lsRulesPromise = null; return null; });
   return _lsRulesPromise;
 }

@@ -71,7 +71,6 @@
   // The server's answer for one decoration's price: { unitCents, setupCents, note }.
   const priceDeco = (type, params) => adminApi_({ action: "priceDecoration", type, params });
   const centsToDollars = (c) => ((Number(c) || 0) / 100).toFixed(2);
-  const dollarsToCents = (d) => Math.round(Number(d) * 100);
 
   // A configurable line's picks as plain text: "Navy · Front: Lockup (White)". Mirrors admin.js cfgSummary_ (the
   // invisible reorder-QR application and auto-added entries are left out); "" when the line has no picks.

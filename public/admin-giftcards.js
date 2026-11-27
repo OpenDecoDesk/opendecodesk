@@ -180,6 +180,7 @@
   function showIssue(onChanged) {
     const canEmail = !(typeof adminDesktopNoEmail_ === "function" && adminDesktopNoEmail_());
     const requestId = newRequestId_();   // one key for this window: a double click or a retry makes one card
+    const modalOpts = { guard: true };   // switched off once the card is made, so Done and ✕ close without asking
     const { ov, close } = inventoryModal_("Issue gift card", `
       <form id="gcIssueForm" class="cust-form" data-need-form="${GC_FN}:edit" novalidate>
         <div class="cust-note">Makes a card with a balance, ready to spend. The number is shown once the card is made.</div>
@@ -199,7 +200,7 @@
           <button type="submit" class="admin-btn" id="gcIssueSave">Issue card</button>
         </div>
       </form>
-      <div id="gcIssued" hidden></div>`, 540, { guard: true });
+      <div id="gcIssued" hidden></div>`, 540, modalOpts);
     const $ = (sel) => ov.querySelector(sel);
     const err = $("#gcIssueErr");
     $("#gcIssueCancel").onclick = () => $("[data-modal-close]").click();
@@ -221,6 +222,7 @@
         const code = grouped(d.code || card.code || "");
         // The form is replaced by the result, so the window can't send a second card; Done closes it.
         $("#gcIssueForm").hidden = true;
+        modalOpts.guard = false;
         const box = $("#gcIssued");
         box.hidden = false;
         box.innerHTML = `<div class="gc-issued">
@@ -228,7 +230,7 @@
           ${code ? `<div class="gc-code" id="gcIssuedCode" data-gc-code>${escapeHtml(code)}</div>
           <div class="cust-note">Give this number to the customer. It can be shown again from the card's window.</div>
           <div class="cust-dialog-actions"><button type="button" class="admin-btn admin-btn-secondary" id="gcCopy">Copy number</button></div>` : ""}
-          ${send ? `<div class="cust-note">${d.emailed === false ? "The email couldn't be sent. Use Resend on the card to try again." : "It was emailed to " + escapeHtml(email) + "."}</div>` : ""}
+          ${send ? `<div class="cust-note">${d.emailSent === false ? "The email couldn't be sent. Use Resend on the card to try again." : "It was emailed to " + escapeHtml(email) + "."}</div>` : ""}
           <div class="cust-dialog-actions"><button type="button" class="admin-btn" id="gcIssuedDone">Done</button></div>
         </div>`;
         if (code) $("#gcCopy").onclick = () => copyText(code, "Card number copied.");
@@ -332,7 +334,7 @@
         b.disabled = true;
         try {
           const d = await adminApi_({ action: "resendGiftCard", id: card.id, email });
-          showToast(d && d.emailed === false ? "The email couldn't be sent." : "Gift card emailed to " + email + ".", !!(d && d.emailed === false));
+          showToast(d && d.emailSent === false ? "The email couldn't be sent." : "Gift card emailed to " + email + ".", !!(d && d.emailSent === false));
         } catch (ex) { say(ex.message); }
         b.disabled = false;
         return;

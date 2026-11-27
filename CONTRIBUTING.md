@@ -12,7 +12,7 @@ npm test                                 # every test; takes a few minutes
 bash scripts/scan-private.sh --strict    # must exit 0
 ```
 
-GitHub runs the same three on every push and pull request, and the end-to-end browser tests too
+GitHub runs the same three on every pull request and every push to main, and the end-to-end browser tests too
 (`npm run e2e`, see [e2e/README.md](e2e/README.md)). On Linux, so on GitHub, `npm test` stops any one test file
 after 5 minutes and fails it as timed out (macOS has no `timeout` command, so a run there has no limit).
 

@@ -212,7 +212,7 @@ ok("the test workflow runs the scan in strict mode", /scan-private\.sh --strict/
   ok("a desktop release can't be published unless the test suite passes on the same run", /^on:\n(?:  .*\n)*  workflow_call:/m.test(tw) &&
     /if: inputs\.release\n/.test(job("tests")) && /uses: \.\/\.github\/workflows\/test\.yml\n/.test(job("tests")) && /needs: \[version, build, tests\]/.test(job("release")));
 
-  // The end-to-end suite runs in test.yml as a second job, so every push and pull request runs it, and a release
+  // The end-to-end suite runs in test.yml as a second job, so every pull request and every push to main runs it, and a release
   // (whose `tests` job waits for every job of test.yml) can't be published past a failing one. Both jobs have a
   // time limit, so a hang ends the run instead of holding it for GitHub's six hours.
   const twJob = (name) => (tw.match(new RegExp("\\n  " + name + ":\\n((?:    .*\\n|\\s*\\n)+)")) || [])[1] || "";

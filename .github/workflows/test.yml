@@ -1,7 +1,10 @@
 name: Test suite
 
 on:
+  # Pushes to main only: a pull request's branch is tested by its pull_request run, so a push to it would run the
+  # same commit twice.
   push:
+    branches: [main]
   pull_request:
   # Desktop builds (desktop.yml) runs this same suite before it publishes a release.
   workflow_call:

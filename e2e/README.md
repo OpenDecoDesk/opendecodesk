@@ -37,7 +37,7 @@ Useful variables:
 
 A full run takes a little over two minutes on a recent Mac.
 
-GitHub runs the whole suite on every push and pull request, as the `e2e` job of the test workflow
+GitHub runs the whole suite on every pull request and every push to main, as the `e2e` job of the test workflow
 (`.github/workflows/test.yml`), one file at a time (with two workers the runner's one local server fell behind);
 a desktop release waits for it too. When it fails, the run's Artifacts hold `e2e-report`: the HTML report, the
 traces and screenshots of the failed tests, and the local server's log.

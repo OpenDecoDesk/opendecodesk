@@ -138,7 +138,7 @@ const named = (db, type) => db.q(`SELECT name FROM sqlite_master WHERE type='${t
   const ordersSrc = read("functions/api/orders.js");
   const listed = (name) => (((ordersSrc.match(new RegExp("const " + name + " = new Set\\(\\[([\\s\\S]*?)\\]\\)")) || [])[1] || "").match(/"([A-Za-z]+)"/g) || []).map(n => n.slice(1, -1));
   const names = [...listed("DESKTOP_REFUSED_ACTIONS"), ...listed("DESKTOP_SUPPLIER_ACTIONS"), ...listed("DESKTOP_EMAIL_ACTIONS")];
-  ok("every refused action is a real admin action", listed("DESKTOP_REFUSED_ACTIONS").length >= 5 && listed("DESKTOP_SUPPLIER_ACTIONS").length >= 10 && listed("DESKTOP_EMAIL_ACTIONS").length === 3 && names.every(n => ordersSrc.includes(`body.action === "${n}"`)));
+  ok("every refused action is a real admin action", listed("DESKTOP_REFUSED_ACTIONS").length >= 5 && listed("DESKTOP_SUPPLIER_ACTIONS").length >= 10 && listed("DESKTOP_EMAIL_ACTIONS").length === 6 && names.every(n => ordersSrc.includes(`body.action === "${n}"`)));
 
   console.log("\n=== D2. Supplier connections: off until turned on in the program ===");
   ok("they are on only in the desktop edition with DESKTOP_SUPPLIERS=on", host.desktopSuppliersOn({ EDITION: "desktop", DESKTOP_SUPPLIERS: "on" }) && !host.desktopSuppliersOn({ EDITION: "desktop" }) && !host.desktopSuppliersOn({ DESKTOP_SUPPLIERS: "on" }));

@@ -333,6 +333,12 @@ async function startServer({ dataDir, port, protect, unprotect, log = () => {}, 
       const worker = await mf.getWorker();
       return worker.scheduled({ scheduledTime: new Date(), cron: "desktop" });
     },
+    // Email campaigns (migrations/0117): scheduled ones that are due start and the next emails go — called every
+    // minute by main.js while email is set up (the Worker's scheduled handler, cron "campaigns", does only that).
+    async runCampaigns() {
+      const worker = await mf.getWorker();
+      return worker.scheduled({ scheduledTime: new Date(), cron: "campaigns" });
+    },
     async stop() { await mf.dispose(); },
   };
 }

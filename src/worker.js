@@ -39,6 +39,8 @@ import * as stripeWebhook from "../functions/api/stripe-webhook.js";
 import * as uploadVerify from "../functions/api/upload-verify.js";
 import * as upload from "../functions/api/upload.js";
 import * as verify from "../functions/api/verify.js";
+import * as unsubscribe from "../functions/api/unsubscribe.js";
+import { runCampaignQueue } from "../functions/_lib/campaigns.js";
 import { recordSystemIssue, resolveTimeZone, getDigestRun, ensureSigningSecret } from "../functions/_lib/db.js";
 import { getSettingRaw, setSettingRaw, dropStoredSigningSecret } from "../functions/_lib/db.js";
 import { localHour, localDay, digestHour, housekeepingHour, scheduledJobDue, scheduledAttempt } from "../functions/_lib/schedule.js";
@@ -77,6 +79,7 @@ export const ROUTES = {
   "upload-verify": uploadVerify,
   "upload": upload,
   "verify": verify,
+  "unsubscribe": unsubscribe,
 };
 
 const text = (body, status, extra = {}) =>
@@ -234,6 +237,13 @@ async function saveScheduledEntry_(env, key, entry) {
 // time zone is the install's one zone: Global settings → Region, else TIMEZONE, else UTC.
 export async function handleScheduled(event, env) {
   env = await withSigningSecret(env);
+  // Email campaigns (migrations/0117): scheduled ones that are due start, and the next few emails go. Every tick, on
+  // the web and in the desktop program (whose timer also calls this with cron "campaigns", every minute while open,
+  // for this alone). Never stops the jobs below.
+  let campaigns = null;
+  try { campaigns = await runCampaignQueue(env, { limit: 20 }); }
+  catch (e) { console.error("Email campaigns run failed:", e); campaigns = { error: String(e && e.message) }; }
+  if (event && event.cron === "campaigns") return { ran: true, campaigns };
   // The desktop program has no cron: desktop/main.js calls this while it is open (a minute after it
   // opens, then every two hours). Of the jobs below only these apply there (no Stripe, no customer
   // uploads): carrier tracking with a Shippo key (both check functions also skip themselves while

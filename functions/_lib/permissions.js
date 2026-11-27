@@ -36,7 +36,7 @@ export const PERMISSION_AREAS = [
   { key: "quotes", label: "Quotes", items: [
     { hash: "quotes", label: "Quotes", fns: [["quotes.estimates", "Quotes"]] } ] },
   { key: "discounts", label: "Discount codes", items: [
-    { hash: "discounts", label: "Discount codes", fns: [["discounts.codes", "Discount codes"]] } ] },
+    { hash: "discounts", label: "Discount codes", fns: [["discounts.codes", "Discount codes"], ["discounts.campaigns", "Email campaigns"]] } ] },
   { key: "runorder", label: "Run Order", items: [
     { hash: "runorder", label: "Run Order", fns: [["run.queue", "Production queue"], ["run.runs", "Start, finish and abort runs"], ["run.markMade", "Mark pieces made"]] } ] },
   { key: "runtransfer", label: "Run Transfer Sheets", items: [
@@ -111,7 +111,7 @@ const BY_FN = {
   "orders.details": {
     read: ["getOrders", "getOrdersByIds", "getOrdersAllShops", "getOpenOrders", "getOrderItemFiles", "getOrderItemDesigns", "listDesignVerifications"],
     edit: ["updateCustomerInfo", "editOrder", "updateOrderDate", "setOrderDates", "setOrderDueDate", "bulkSetDueDate", "refreshOrderFromCatalog",
-      "saveOrderItemFile", "saveOrderItemDesign", "createLocalSale", "sendDesignVerification"],
+      "saveOrderItemFile", "saveOrderItemDesign", "createLocalSale", "checkLocalSaleCode", "sendDesignVerification"],
     full: ["deleteOrderItemFile", "cancelLineItem", "bulkCancelLineItems", "deleteOrder", "voidOrder"] },
   "orders.stepsEarly": { read: ["getBlankShipments"], edit: ["useBlanksFromStock", "addBlankShipment", "updateBlankShipment", "checkBlankShipments"], full: ["deleteBlankShipment"] },
   "orders.stepsLate": { edit: ["setOrderCompleted", "checkDeliveries"] },
@@ -129,7 +129,7 @@ const BY_FN = {
   // changes one. Merging moves a customer's orders and retires the record: Full.
   "customers.records": {
     read: ["listCustomers", "getCustomer"],
-    edit: ["saveCustomer", "setCustomerArchived", "setOrderCustomer"],
+    edit: ["saveCustomer", "setCustomerArchived", "setOrderCustomer", "setMarketingOptOut"],
     full: ["mergeCustomers"] },
   // Quotes (migrations/0109; "estimates" in code). Converting one makes an order, so convertEstimate also asks for
   // orders.details Edit itself (as a Local sale needs). Cancelling can't be taken back from the page: Full.
@@ -143,6 +143,13 @@ const BY_FN = {
     read: ["listDiscountCodes", "getDiscountCode"],
     edit: ["saveDiscountCode", "createDiscountCodes", "setDiscountCodeActive"],
     full: ["deleteDiscountCode"] },
+  // Email campaigns (migrations/0117): read sees them and who they'd go to; edit writes them and sends tests; full
+  // sends, schedules, cancels and deletes — emailing customers is the owner's call. Recording a customer's "no
+  // marketing email" is the customer record's (Edit).
+  "discounts.campaigns": {
+    read: ["getCampaignStatus", "listCampaigns", "getCampaign", "previewAudience"],
+    edit: ["saveCampaign", "copyCampaign", "sendCampaignTest", "runCampaignQueue"],
+    full: ["scheduleCampaign", "cancelCampaign", "deleteCampaign"] },
   "run.queue": { read: ["getProductionQueue", "listActiveRuns", "getRunStats", "getBlankReadyCounts"] },
   "run.runs": { edit: ["startRun", "completeRun", "abortRun", "markHoopingDone"] },
   "run.markMade": { edit: ["markManufacturedOnMachine"] },

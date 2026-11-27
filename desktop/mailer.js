@@ -105,7 +105,7 @@ class Mailer {
 
   // One message, from the mailbox's own address (a mailbox rewrites or refuses any other) under
   // the business's name. { ok, message }.
-  async send({ to, fromName, replyTo, bcc, subject, html, text, attachments, pdf } = {}) {
+  async send({ to, fromName, replyTo, bcc, subject, html, text, attachments, pdf, listUnsubscribe } = {}) {
     to = String(to || "").trim();
     if (!EMAIL_RE.test(to)) return { ok: false, message: "That isn't an email address: " + to.slice(0, 100) };
     const att = cleanAttachments(attachments);
@@ -128,6 +128,8 @@ class Mailer {
       subject: String(subject || "").replace(/[\r\n]+/g, " ").slice(0, 300),
       text: text || "(no plain-text body)", ...(html ? { html } : {}),
       ...(att.attachments.length ? { attachments: att.attachments } : {}),
+      // A marketing email's unsubscribe addresses (email campaigns): "<mailto:…>", one header line.
+      ...(listUnsubscribe ? { headers: { "List-Unsubscribe": String(listUnsubscribe).replace(/[\r\n]+/g, " ").slice(0, 900) } } : {}),
     };
     try {
       const info = await this.transport.sendMail(message);

@@ -14,6 +14,7 @@
   const CUST_FN = "customers.records";
   const PAGE_SIZE = 50;
   const SEARCH_WAIT_MS = 250;      // typing pauses this long before a search is sent
+  const MKT_SOURCE = { checkout: "unticked at checkout", unsubscribe: "the unsubscribe link", reply: "asked by reply", admin: "set here" };
   const ORDERS_SHOWN_MAX = 500;    // getCustomer sends at most this many orders
   // What the list was showing, kept while the admin is open so coming back from a customer returns to the same search.
   const listView = { q: "", includeArchived: false, offset: 0 };
@@ -184,6 +185,8 @@
       if (!stillOn(hash)) return;
     }
     const c = d.customer, orders = d.orders || [], totals = d.totals || {};
+    // Marketing email (migrations/0117): shown with the Email campaigns feature on and an email to keep it for.
+    const mkt = c.email && d.marketing && typeof featureOn_ === "function" && featureOn_("emailCampaigns") ? d.marketing : null;
     // A customer that was merged away answers as the one it was merged into: the address follows.
     if (Number(c.id) !== id) { hash = "customers/" + c.id; adminSetHash(hash); }
     document.title = adminTitle_(custLabel(c));
@@ -219,6 +222,10 @@
           ${totals.totalSpent != null ? `<div class="cust-total"><b>${adminMoney_(totals.totalSpent)}</b><span>Spent</span></div>` : ""}
           ${totals.balanceDue != null ? `<div class="cust-total${Number(totals.balanceDue) > 0 ? " cust-total-due" : ""}"><b>${adminMoney_(totals.balanceDue)}</b><span>Balance due</span></div>` : ""}
         </div>
+
+        ${mkt ? `<div class="cust-note cust-mkt" id="custMkt">Shop news and discounts: <b>${mkt.optedOut ? "unsubscribed" : "subscribed"}</b>${mkt.optedOut && MKT_SOURCE[mkt.source] ? " (" + MKT_SOURCE[mkt.source] + (mkt.at ? ", " + escapeHtml(adminDate_(mkt.at)) : "") + ")" : ""}
+          <button type="button" class="admin-btn admin-btn-secondary" id="custMktBtn" data-need="${CUST_FN}:edit" style="margin-left:8px;">${mkt.optedOut ? "Subscribe again" : "Stop marketing email"}</button>
+          <span class="dc-hint" style="display:block;margin-top:4px;">Use “Stop marketing email” when a customer replies asking to stop. Order emails always go.</span></div>` : ""}
 
         <form id="custForm" class="cust-form" data-need-form="${CUST_FN}:edit" novalidate>
           <h3 class="cust-h">Details</h3>
@@ -288,6 +295,12 @@
     const root = document.getElementById("custPage");
     const reload = () => { if (stillOn(hash)) renderOne(app, Number(c.id), { quotes }); };
     const val = (fid) => root.querySelector("#" + fid).value.trim();
+    const mktBtn = root.querySelector("#custMktBtn");
+    if (mktBtn) mktBtn.addEventListener("click", async () => {
+      mktBtn.disabled = true;
+      try { await adminApi_({ action: "setMarketingOptOut", email: c.email, optedOut: !mkt.optedOut }); showToast(mkt.optedOut ? "Subscribed again." : "Marketing email stopped for this customer."); reload(); }
+      catch (e) { showToast(e.message, true); mktBtn.disabled = false; }
+    });
 
     root.querySelector("#custForm").addEventListener("submit", async (e) => {
       e.preventDefault();

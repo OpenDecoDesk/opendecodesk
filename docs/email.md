@@ -112,6 +112,11 @@ To customers, as things happen:
 - **Quote** — when you send a quote (Quotes feature): your message, the lines, fees and totals, the
   expiry date, and the link where the customer accepts it or asks for changes.
 - **Cancellation** — when you cancel items on an order that has an email address.
+- **Email campaigns** — marketing emails you write and send yourself (Discount codes → Email
+  campaigns; see docs/operations.md). Each goes to one customer, with no copy to your receipts inbox,
+  and ends with your business details and a way to unsubscribe: a link on the website (with a
+  List-Unsubscribe header for mail programs that show one), or "reply with UNSUBSCRIBE" in the desktop
+  program, which has no address customers can open. Order emails never check the unsubscribe list.
 
 ### What's in the order emails
 

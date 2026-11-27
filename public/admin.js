@@ -743,6 +743,23 @@ async function adminRoute() {
   }
   // Discount codes (migrations/0115): one list; a code opens in a window over it.
   if (raw === "discounts") { await renderDiscountCodes(app); return; }
+  // Its Email campaigns tab (migrations/0117): #discounts/campaigns, /new and /<id>. Its own script (public/admin-campaigns.js,
+  // with public/campaign-render.js), loaded the first time; only once email is set up and for a role that may see it.
+  const campaignsMatch = raw.match(/^discounts\/campaigns(?:\/([^/]*))?$/);
+  if (campaignsMatch) {
+    const sub = campaignsMatch[1] === "new" ? "new" : /^[1-9]\d{0,14}$/.test(campaignsMatch[1] || "") ? Number(campaignsMatch[1]) : null;
+    if (!(await dcCampaignsOn_())) { await renderDiscountCodes(app); return; }
+    try { await ensureCampaignsPage_(); }
+    catch (e) {
+      adminSetHash(raw);
+      document.title = adminTitle_("Email campaigns");
+      app.innerHTML = adminPageHead_("Discount codes") + `<div class="admin-panel" style="--org-accent:var(--accent);"><div class="admin-empty">${escapeHtml(e.message)}. Check your connection and reload the page.</div></div>`;
+      return;
+    }
+    if (location.hash.replace(/^#\/?/, "") !== raw) return;
+    await renderCampaigns(app, sub);
+    return;
+  }
   if (raw === "packages")  { renderPackageSizes(app); return; }
   if (raw === "orphans")   { renderOrphanImages(app); return; }
   if (raw === "vendors")   { renderVendorIntegrations(app); return; }
@@ -2216,7 +2233,7 @@ const ADMIN_PAGE_FEATURE = {
   discounts: "discounts",
 };
 // Names for the "turned off" page; replaced by the server's own list once Global settings has loaded it.
-let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products", quotes: "Quotes", discounts: "Discount codes" };
+let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products", quotes: "Quotes", discounts: "Discount codes", emailCampaigns: "Email campaigns" };
 function adminFeatureOn_(key){ return typeof featureOn_ !== "function" || featureOn_(key); }
 function adminPageFeature_(hash){ return ADMIN_PAGE_FEATURE[String(hash || "").replace(/^#\/?/, "").split("/")[0]] || ""; }
 function adminPageOn_(hash){ const f = adminPageFeature_(hash); return !adminDesktopHides_(hash) && (!f || adminFeatureOn_(f)); }
@@ -7381,6 +7398,7 @@ async function renderDiscountCodes(app){
   if (_dcView.org && !shops.some(o => o.orgId === _dcView.org)) _dcView.org = "";
   app.innerHTML = `
     ${adminPageHead_("Discount codes")}
+    ${dcTabsHtml_("codes")}
     <div class="admin-panel cust-page dc-page" id="dcPage" style="--org-accent:var(--accent);">
       <div class="cust-bar">
         <label class="cust-field cust-search"><span>Search</span>
@@ -7407,9 +7425,19 @@ async function renderDiscountCodes(app){
   const root = document.getElementById("dcPage");
   const body = root.querySelector("#dcBody"), count = root.querySelector("#dcCount"), pager = root.querySelector("#dcPager");
   const stillOn = () => _currentAdminHash === hash && root.isConnected;
-  let codes = [], timer = null;
+  let codes = [], timer = null, campaignsOn = false;
+  // The Email campaigns tab, and "Email this code" on each usable code, once email is set up (migrations/0117).
+  dcCampaignsOn_().then((on) => {
+    if (!on || !stillOn()) return;
+    campaignsOn = true;
+    const tab = document.getElementById("dcTabCampaigns"); if (tab) tab.hidden = false;
+    if (codes.length) draw(lastTotal);
+  });
+  let lastTotal = 0;
 
   function draw(total){
+    lastTotal = total;
+    const emailCol = campaignsOn && adminCan_("discounts.campaigns", "edit");
     if (!codes.length) {
       count.textContent = ""; pager.innerHTML = "";
       const filtered = _dcView.q || _dcView.org || _dcView.status !== "all";
@@ -7419,7 +7447,7 @@ async function renderDiscountCodes(app){
     const from = _dcView.offset + 1, to = _dcView.offset + codes.length;
     count.textContent = total > codes.length ? `Showing ${from}–${to} of ${dcPlural_(total, "code")}` : dcPlural_(total, "code");
     body.innerHTML = `<div class="admin-table-wrap"><table class="stack-mobile cust-table dc-table">
-      <thead><tr><th>Code</th><th>Discount</th><th>Shop</th><th>For</th><th class="cust-num">Used</th><th>Expires</th><th>Status</th></tr></thead>
+      <thead><tr><th>Code</th><th>Discount</th><th>Shop</th><th>For</th><th class="cust-num">Used</th><th>Expires</th><th>Status</th>${emailCol ? "<th></th>" : ""}</tr></thead>
       <tbody>${codes.map((c, i) => `<tr class="cust-row${c.status === "active" ? "" : " cust-row-archived"}" data-dc-row="${i}">
         <td class="stack-title"><a class="cust-link dc-code" href="#discounts" data-dc-open="${i}">${escapeHtml(c.code)}</a></td>
         <td>${escapeHtml(c.label || "")}</td>
@@ -7428,6 +7456,7 @@ async function renderDiscountCodes(app){
         <td class="cust-num">${Number(c.used) || 0} of ${Number(c.maxUses) || 0}</td>
         <td>${escapeHtml(c.expiresOn ? adminDate_(c.expiresOn) : "Never")}</td>
         <td>${dcStatusTag_(c)}</td>
+        ${emailCol ? `<td>${c.status === "active" && !c.email ? `<button type="button" class="admin-btn admin-btn-secondary dc-email-btn" data-dc-email="${i}">Email this code</button>` : ""}</td>` : ""}
       </tr>`).join("")}</tbody></table></div>`;
     pager.innerHTML = total > DC_PAGE_SIZE_ || _dcView.offset > 0 ? `
       <button type="button" class="admin-btn admin-btn-secondary" data-dc-page="prev" ${_dcView.offset > 0 ? "" : "disabled"}>‹ Previous</button>
@@ -7464,6 +7493,11 @@ async function renderDiscountCodes(app){
     const btn = e.target.closest("button");
     if (btn && btn.id === "dcNew") { dcShowCode_(null, reload); return; }
     if (btn && btn.id === "dcBulk") { dcShowBulk_(reload); return; }
+    if (btn && btn.dataset.dcEmail != null) {
+      const c = codes[Number(btn.dataset.dcEmail)];
+      if (c) { window._campaignPreset = { codeId: c.id, code: c.code, label: c.label }; location.hash = "discounts/campaigns/new"; }
+      return;
+    }
     if (btn && btn.dataset.dcPage) {
       _dcView.offset = Math.max(0, _dcView.offset + (btn.dataset.dcPage === "next" ? DC_PAGE_SIZE_ : -DC_PAGE_SIZE_));
       load();
@@ -7480,17 +7514,22 @@ async function renderDiscountCodes(app){
   await load();
 }
 
-// The discount part of a form (both windows): Percent off / Amount off and the number.
+// The discount part of a form (both windows): Percent off / Amount off and the number, and for a percent the most it
+// takes off (migrations/0116; blank = no limit).
 function dcValueHtml_(c, locked){
   const off = locked ? " disabled" : "";
   const kind = c && c.kind === "amount" ? "amount" : "percent";
   const val = !c ? "" : kind === "amount" ? (c.amount != null ? Number(c.amount).toFixed(2) : "") : (c.percent != null ? String(c.percent) : "");
+  const cap = c && c.maxDiscount != null ? Number(c.maxDiscount).toFixed(2) : "";
   return `<div class="cust-grid">
       <label class="cust-field"><span>Discount</span>
         <select id="dcKind"${off}><option value="percent"${kind === "percent" ? " selected" : ""}>Percent off</option><option value="amount"${kind === "amount" ? " selected" : ""}>Amount off</option></select></label>
       <label class="cust-field"><span id="dcValueLabel">${kind === "amount" ? "Amount ($)" : "Percent (%)"}</span>
         <input type="number" id="dcValue" inputmode="decimal" step="0.01" min="0.01" max="${kind === "amount" ? 10000 : 100}" value="${escapeHtml(val)}" autocomplete="off"${off}></label>
-    </div>`;
+    </div>
+    <label class="cust-field dc-max" id="dcMaxWrap"${kind === "amount" ? " hidden" : ""}><span>Max discount ($, optional)</span>
+      <input type="number" id="dcMaxOff" inputmode="decimal" step="0.01" min="0.01" max="10000" placeholder="No limit" value="${escapeHtml(cap)}" autocomplete="off"${off}>
+      <small class="dc-hint" id="dcMaxHint">The most this code takes off one order. 20% off a $300 order with a $25 max takes off $25.</small></label>`;
 }
 function dcShopHtml_(orgId, locked){
   const shops = (adminOrgs || []).slice().sort((a, b) => String(a.name || a.orgId).localeCompare(String(b.name || b.orgId)));
@@ -7506,16 +7545,22 @@ function dcReadValue_(ov){
   const n = dcNum_(ov.querySelector("#dcValue").value);
   if (kind === "percent") {
     if (!(n >= 0.01 && n <= 100)) return { error: "Enter a percent from 0.01 to 100." };
-    return { kind, percent: n };
+    const capEl = ov.querySelector("#dcMaxOff"), rawCap = capEl ? capEl.value.trim() : "";
+    if (!rawCap) return { kind, percent: n, maxDiscount: null };
+    const cap = dcNum_(rawCap);
+    if (!(cap >= 0.01 && cap <= 10000)) return { error: "Enter a max discount from $0.01 to $10,000, or leave it blank.", field: "#dcMaxOff" };
+    return { kind, percent: n, maxDiscount: cap };
   }
   if (!(n >= 0.01 && n <= 10000)) return { error: "Enter an amount from $0.01 to $10,000." };
   return { kind, amount: n };
 }
 function dcWireValue_(ov){
   const kind = ov.querySelector("#dcKind"), value = ov.querySelector("#dcValue"), label = ov.querySelector("#dcValueLabel");
+  const capWrap = ov.querySelector("#dcMaxWrap");
   kind.addEventListener("change", () => {
     label.textContent = kind.value === "amount" ? "Amount ($)" : "Percent (%)";
     value.max = kind.value === "amount" ? "10000" : "100";
+    if (capWrap) capWrap.hidden = kind.value === "amount";
   });
 }
 
@@ -7637,8 +7682,8 @@ async function dcShowCode_(c, onChanged){
     const who = (ov.querySelector('input[name="dcWho"]:checked') || {}).value || "any";
     const typedCode = codeInput.value.trim().toUpperCase();
     if (typedCode && !/^[A-Z0-9_-]{3,32}$/.test(typedCode)) return fail("A code is 3–32 letters, digits, “-” or “_” — or leave it blank to make one.", "#dcCode");
-    const value = locked ? { kind: code.kind, percent: code.percent, amount: code.amount } : dcReadValue_(ov);
-    if (value.error) return fail(value.error, "#dcValue");
+    const value = locked ? { kind: code.kind, percent: code.percent, amount: code.amount, maxDiscount: code.maxDiscount } : dcReadValue_(ov);
+    if (value.error) return fail(value.error, value.field || "#dcValue");
     const email = $("#dcEmail").value.trim().toLowerCase();
     if (who === "one" && !locked && !dcLooksLikeEmail_(email)) return fail("Enter the email address of the person it's for.", "#dcEmail");
     const max = Number($("#dcMax").value);
@@ -7647,6 +7692,7 @@ async function dcShowCode_(c, onChanged){
     const input = {
       code: typedCode, kind: value.kind,
       percent: value.kind === "percent" ? value.percent : null, amount: value.kind === "amount" ? value.amount : null,
+      maxDiscount: value.kind === "percent" ? (value.maxDiscount != null ? value.maxDiscount : null) : null,
       orgId: $("#dcOrg").value || null,
       email: who === "one" ? (locked ? code.email : email) : "",
       maxUses: who === "one" ? 1 : max,
@@ -7662,7 +7708,7 @@ async function dcShowCode_(c, onChanged){
       const same = (k, a, b) => String(a == null ? "" : a) === String(b == null ? "" : b);
       const onlyActive = !isNew && input.active !== !!code.active &&
         same("code", input.code, code.code) && input.kind === code.kind && same("p", input.percent, code.kind === "percent" ? code.percent : null) &&
-        same("a", input.amount, code.kind === "amount" ? code.amount : null) && same("o", input.orgId, code.orgId) && same("e", input.email, code.email) &&
+        same("a", input.amount, code.kind === "amount" ? code.amount : null) && same("m", input.maxDiscount, code.maxDiscount) && same("o", input.orgId, code.orgId) && same("e", input.email, code.email) &&
         Number(input.maxUses) === Number(code.maxUses) && !!input.oncePerEmail === !!code.oncePerEmail && same("x", input.expiresOn, code.expiresOn) && same("n", input.note, code.note);
       let saved;
       if (onlyActive) await adminApi_({ action: "setDiscountCodeActive", id: code.id, active: input.active });
@@ -7726,13 +7772,14 @@ function dcShowBulk_(onChanged){
     const p = prefix.value.trim();
     if (p && !/^[A-Z0-9_-]{1,12}$/.test(p)) return fail("The start of the code can only have letters, digits, “-” or “_”.", "#dcPrefix");
     const value = dcReadValue_(ov);
-    if (value.error) return fail(value.error, "#dcValue");
+    if (value.error) return fail(value.error, value.field || "#dcValue");
     const save = $("#dcSave");
     save.disabled = true; err.textContent = "";
     let d;
     try {
       d = await adminApi_({ action: "createDiscountCodes", emails, prefix: p, kind: value.kind,
         percent: value.kind === "percent" ? value.percent : null, amount: value.kind === "amount" ? value.amount : null,
+        maxDiscount: value.kind === "percent" ? value.maxDiscount : null,
         org: $("#dcOrg").value || "", expiresOn: $("#dcExpires").value || "", note: $("#dcNote").value.trim() });
     } catch (ex) { err.textContent = ex.message; save.disabled = false; return; }
     if (onChanged) onChanged();
@@ -7794,6 +7841,39 @@ function ensureQuotesPage_(){
     document.head.appendChild(sc);
   });
   return _quotesPagePromise;
+}
+// The Email campaigns tab (migrations/0117) is public/admin-campaigns.js, with public/campaign-render.js (the renderer the
+// server sends with), loaded the same way: it defines renderCampaigns(app, sub).
+let _campaignsPagePromise = null;
+function ensureCampaignsPage_(){
+  if (typeof renderCampaigns === "function" && window.OddCampaignRender) return Promise.resolve();
+  const load = (src) => new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = src;
+    sc.onload = () => resolve();
+    sc.onerror = () => { sc.remove(); reject(new Error("Couldn't load the Email campaigns page")); };
+    document.head.appendChild(sc);
+  });
+  if (!_campaignsPagePromise) _campaignsPagePromise = (window.OddCampaignRender ? Promise.resolve() : load("/campaign-render.js"))
+    .then(() => typeof renderCampaigns === "function" ? null : load("/admin-campaigns.js"))
+    .catch((e) => { _campaignsPagePromise = null; throw e; });
+  return _campaignsPagePromise;
+}
+// Whether the Email campaigns tab shows: the feature on, a role that may see campaigns, and email set up (asked of the
+// server once per page load: getCampaignStatus). A discount code picked with "Email this code" waits in _campaignPreset.
+let _campaignsStatus = null;
+window._campaignPreset = null;
+async function dcCampaignsOn_(){
+  if (!adminFeatureOn_("emailCampaigns") || !adminCan_("discounts.campaigns", "read")) return false;
+  if (!_campaignsStatus) _campaignsStatus = adminApi_({ action: "getCampaignStatus" }).catch(() => { _campaignsStatus = null; return { emailReady: false }; });
+  return !!(await _campaignsStatus).emailReady;
+}
+// The Discount codes page's two tabs. The campaigns one starts hidden until dcCampaignsOn_ says yes.
+function dcTabsHtml_(active){
+  return `<div class="dc-tabs" role="tablist">
+    <a role="tab" href="#discounts" class="dc-tab${active === "codes" ? " on" : ""}" aria-selected="${active === "codes"}">Codes</a>
+    <a role="tab" href="#discounts/campaigns" class="dc-tab${active === "campaigns" ? " on" : ""}" id="dcTabCampaigns" aria-selected="${active === "campaigns"}"${active === "campaigns" ? "" : " hidden"}>Email campaigns</a>
+  </div>`;
 }
 // "From quote Q-00012" on an order made from a quote (migrations/0109): a link to the quote for a role that may
 // open Quotes, else the number alone. Nothing for any other order, or from a server older than quotes.
@@ -8066,7 +8146,7 @@ async function createLocalSaleOnce_(orgId, opts){
   // The window stays open, with everything typed in it, until the server has answered: a session that ended asks
   // to sign in and sends the same sale again, and any other problem is shown in the window.
   let data = null;
-  const result = await showLocalSaleModal(products, blanks, { customer: opts.customer, payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"), graphics, tiersCents, submit: async (typed) => {
+  const result = await showLocalSaleModal(products, blanks, { orgId, customer: opts.customer, payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"), graphics, tiersCents, submit: async (typed) => {
     const { sendInvoice: _later, ...sale } = typed;
     const send = () => adminSave_({action:"createLocalSale", org:orgId, requestId, ...sale});
     let r;
@@ -8220,6 +8300,15 @@ function showLocalSaleModal(products, blanks, opts = {}){
         <div id="lsPricePreview" style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:5px;padding:8px 12px;font-size:14px;margin-bottom:8px;font-weight:600;"></div>
         <div id="lsBreakNote" role="status" style="display:none;font-size:12px;color:var(--ink-soft,#666);margin:-4px 0 10px;"></div>
 
+        ${adminFeatureOn_("discounts") ? `<div id="lsCodeWrap" class="ls-code" style="margin-bottom:10px;">
+          ${LS("Discount code", true, "lsCode")}
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="lsCode" class="dc-code" maxlength="32" autocomplete="off" spellcheck="false" placeholder="FALL20" style="${IS()}margin-bottom:0;flex:1;text-transform:uppercase;">
+            <button type="button" id="lsCodeApply" style="font-size:13px;padding:6px 14px;border:1px solid var(--border,#ccc);border-radius:5px;cursor:pointer;background:var(--surface,#fff);color:var(--ink,#111);">Apply</button>
+          </div>
+          <div id="lsCodeMsg" role="status" aria-live="polite" style="font-size:13px;margin-top:4px;"></div>
+        </div>` : ""}
+
         ${LS("Payment method")}
         <select id="lsPayment" style="${IS()}">
           <option value="">— select —</option>
@@ -8247,6 +8336,10 @@ function showLocalSaleModal(products, blanks, opts = {}){
             <input type="text" id="lsName" maxlength="200" placeholder="Customer name" style="${IS()}">
             ${LS("Email", true)}
             <input type="email" id="lsEmail" maxlength="200" placeholder="customer@example.com" style="${IS()}">
+            ${adminFeatureOn_("emailCampaigns") ? `<label class="ls-optin" style="font-size:13px;display:flex;align-items:flex-start;gap:8px;cursor:pointer;margin:-4px 0 10px;">
+              <input type="checkbox" id="lsMarketing" checked style="width:auto;margin:3px 0 0;">
+              <span>Email them shop news and discounts <span style="display:block;color:var(--ink-soft,#888);font-size:12px;">Ask the customer. Their information is never sold or shared, and every email has a way to unsubscribe.</span></span>
+            </label>` : ""}
             ${LS("Phone", true)}
             <input type="tel" id="lsPhone" maxlength="50" placeholder="${adminIsUS_() ? "(555) 555-5555" : ""}" style="${IS()}">
           </div>
@@ -8548,6 +8641,22 @@ function showLocalSaleModal(products, blanks, opts = {}){
 
     // The price box: one item, its price as before; several, each item's price on its own block and the running
     // total here. The shipping charge follows when the order ships.
+    // A discount code (Apply checks it with the server; Record sale checks it again against the goods as the server
+    // prices them). What it takes off here is worked out from what Apply answered, so the preview follows the items.
+    let appliedCode = null, goodsSum = 0;
+    function codeOff(sum){
+      if (!appliedCode) return 0;
+      const cents = Math.round(sum * 100);
+      let off = appliedCode.kind === "percent" ? Math.round(cents * (Number(appliedCode.percent) || 0) / 100) : Math.round((Number(appliedCode.amount) || 0) * 100);
+      if (appliedCode.kind === "percent" && appliedCode.maxDiscount != null) off = Math.min(off, Math.round(Number(appliedCode.maxDiscount) * 100));
+      return Math.max(0, Math.min(cents, off)) / 100;
+    }
+    function showCodeMsg(){
+      const m = overlay.querySelector("#lsCodeMsg");
+      if (!m || !appliedCode) return;
+      m.style.color = "#1b5e20";
+      m.textContent = `✓ ${appliedCode.code}: ${appliedCode.label} — $${codeOff(goodsSum).toFixed(2)} off`;
+    }
     function updatePricePreview(){
       const all = lines();
       const many = all.length > 1;
@@ -8561,9 +8670,13 @@ function showLocalSaleModal(products, blanks, opts = {}){
         el.textContent = many ? lp.text : "";
         el.style.display = many && lp.text ? "" : "none";
       });
-      const text = many ? `Total for ${all.length} items: $${sum.toFixed(2)}` : linePrice(all[0], pieces).text;
+      const text0 = many ? `Total for ${all.length} items: $${sum.toFixed(2)}` : linePrice(all[0], pieces).text;
+      goodsSum = sum;
+      const off = text0 ? codeOff(sum) : 0;
+      const text = off > 0 ? text0 + ` − $${off.toFixed(2)} code ${appliedCode.code}` : text0;
       const shipCost = overlay.querySelector("#lsShip").checked ? (parseFloat(overlay.querySelector("#lsShipCost").value) || 0) : 0;
       overlay.querySelector("#lsPricePreview").textContent = text && shipCost > 0 ? text + ` + $${shipCost.toFixed(2)} shipping` : text;
+      if (appliedCode) showCodeMsg();
       const note = overlay.querySelector("#lsBreakNote");
       note.textContent = broke ? "Quantity breaks count every piece of a product in this sale. They're worked out again from the shop's published prices when the sale is recorded." : "";
       note.style.display = broke ? "" : "none";
@@ -8677,6 +8790,32 @@ function showLocalSaleModal(products, blanks, opts = {}){
       });
       lsField("#lsEmail").addEventListener("input", () => { if (pickedCustomer && lsField("#lsEmail").value.trim().toLowerCase() !== pickedCustomer.email) forgetCustomer(); });
       if (opts.customer) pickCustomer(opts.customer);
+    }
+
+    // Apply: the code, the shop, the customer (a code for one person is checked against their email) and the goods.
+    const codeInput = overlay.querySelector("#lsCode");
+    async function applyCode(quiet){
+      const m = overlay.querySelector("#lsCodeMsg");
+      const typed = codeInput.value.trim().toUpperCase();
+      if (!typed) { appliedCode = null; m.textContent = quiet ? "" : "Enter a code first."; m.style.color = "#b03a2e"; updatePricePreview(); return; }
+      if (!goodsSum) updatePricePreview();
+      const btn = overlay.querySelector("#lsCodeApply");
+      btn.disabled = true;
+      try {
+        const d = await adminApi_({ action: "checkLocalSaleCode", org: opts.orgId || "", code: typed, subtotal: Math.round(goodsSum * 100) / 100,
+          contact: overlay.querySelector("#lsEmail").value.trim(), ...(pickedCustomer ? { customerId: pickedCustomer.id } : {}) });
+        if (d && d.ok && d.code) { appliedCode = d.code; codeInput.value = d.code.code; }
+        else { appliedCode = null; m.style.color = "#b03a2e"; m.textContent = (d && d.reason) || "This code isn't valid."; }
+      } catch (ex) { appliedCode = null; m.style.color = "#b03a2e"; m.textContent = (ex && ex.message) || "Couldn't check the code."; }
+      finally { btn.disabled = false; }
+      updatePricePreview();
+    }
+    if (codeInput) {
+      overlay.querySelector("#lsCodeApply").addEventListener("click", () => applyCode(false));
+      codeInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); applyCode(false); } });
+      codeInput.addEventListener("input", () => { if (appliedCode && codeInput.value.trim().toUpperCase() !== appliedCode.code) { appliedCode = null; overlay.querySelector("#lsCodeMsg").textContent = ""; updatePricePreview(); } });
+      // A different customer may change whether a one-person code is theirs: checked again.
+      overlay.querySelector("#lsEmail").addEventListener("change", () => { if (appliedCode) applyCode(true); });
     }
 
     const finish = (result) => { if(sending && !result) return; document.body.removeChild(overlay); resolve(result); };
@@ -8815,6 +8954,9 @@ function showLocalSaleModal(products, blanks, opts = {}){
         ...(podBox && podBox.checked ? { payOnDelivery: true } : {}),
         placedAt:  (readWhen_(overlay.querySelector("#lsDate")).at) || null,   // when the sale happened — also when it was paid / handed over
         sendInvoice: wantsInvoice,
+        ...(codeInput && codeInput.value.trim() ? { discountCode: codeInput.value.trim().toUpperCase() } : {}),
+        // Shop news and discounts (migrations/0117): only with an email to keep it for.
+        ...(overlay.querySelector("#lsMarketing") && (contact || pickedCustomer) ? { marketingOptIn: overlay.querySelector("#lsMarketing").checked } : {}),
       };
       if(submit){
         const btns = [overlay.querySelector(".admin-pass-submit"), overlay.querySelector(".admin-pass-cancel")];

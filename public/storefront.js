@@ -2062,6 +2062,19 @@ async function recheckDiscountCode_(){
   }
   renderTicket(currentOrg, currentOrgId);
 }
+// Shop news and discounts (email campaigns, migrations/0117): a box under the email address, ticked to start with.
+// Unticked, the order puts the address on the no-marketing list; ticked takes off only what an earlier checkout put
+// there. Kept across redraws; shown while the Email campaigns feature is on (never on a preview).
+let marketingOptIn_ = true;
+function marketingBoxOn_(org){ return !!(org && featureOn_("emailCampaigns") && !org.preview); }
+function marketingBoxHtml_(org){
+  if(!marketingBoxOn_(org)) return "";
+  return `<label class="marketing-optin">
+        <input type="checkbox" id="custMarketing" data-change="marketing"${marketingOptIn_ ? " checked" : ""}>
+        <span><span class="marketing-optin-title">Email me shop news and discounts</span>
+        <span class="marketing-optin-note">We'll never sell your information or share it with anyone else. You can unsubscribe from any email.</span></span>
+      </label>`;
+}
 // The box, above the totals: the code field with Apply, or (once applied) the code, its label and Remove.
 function discountSectionHtml_(org){
   if(!discountBoxOn_(org) || !cart.length) return "";
@@ -2217,6 +2230,7 @@ document.addEventListener("change", (e)=>{
     if(ch === "rush") setRush_(e.target.checked);
     else if(ch === "rush-date"){ rushNeededBy = e.target.value; renderTicket(currentOrg, currentOrgId); }
     else if(ch === "payment-method") updatePaymentHint(e.target.value);
+    else if(ch === "marketing") marketingOptIn_ = !!e.target.checked;
     else if(ch === "dv-upload") window.handleCustVerifyUpload(e.target);
     return;
   }
@@ -2890,6 +2904,7 @@ function renderTicket(org, orgId){
     <div class="checkout-fields">
       <input type="text" id="custName" placeholder="Your name" aria-label="Your name" value="${escapeHtml(savedName)}">
       <input type="email" id="custContact" required placeholder="Email address" aria-label="Email address" value="${escapeHtml(savedContact)}">
+      ${marketingBoxHtml_(currentOrg)}
       ${(function(){
         const methods = currentOrg.enabledPayments || [];
         if(methods.length === 0) return '<div class="form-hint">Payment is handled separately — your order will be recorded and we\'ll follow up with payment details.</div>';
@@ -3084,6 +3099,8 @@ async function placeOrder(orgId){
     total: Math.round((cartSubtotal - discountNow_(cartSubtotal) + orderShippingCost + (rush ? rush.fee : 0) + cartTax_(currentOrg, delivery, rush ? rush.fee : 0, discountNow_(cartSubtotal)).tax) * 100) / 100,
     // The discount code (migrations/0115): the server checks it again, works out the discount and records the use.
     ...(discountCode ? { discountCode, discount: discountNow_(cartSubtotal) } : {}),
+    // Shop news and discounts (migrations/0117): only sent when the box was shown.
+    ...(marketingBoxOn_(currentOrg) ? { marketingOptIn: !!marketingOptIn_ } : {}),
     ...(rush ? { rush: true, rushFee: rush.fee, rushFeePending: rush.pending } : {}),
     ...(rush && rushNeededBy ? { neededBy: rushNeededBy } : {}),
     placedAt: new Date().toISOString(),

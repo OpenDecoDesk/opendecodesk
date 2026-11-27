@@ -89,7 +89,7 @@ function smtpAttachments_(list) {
 
 // The whole message (headers + body), CRLF line ends. BCC addresses are never written into it: they
 // only go in the envelope (RCPT TO).
-export function smtpBuildMessage({ from, fromName, to, replyTo, subject, text, html, attachments = [], now = new Date(), messageId } = {}) {
+export function smtpBuildMessage({ from, fromName, to, replyTo, subject, text, html, attachments = [], now = new Date(), messageId, listUnsubscribe } = {}) {
   const domain = String(from).split("@")[1] || "localhost";
   const head = [
     "From: " + smtpAddress_(fromName, from),
@@ -99,6 +99,8 @@ export function smtpBuildMessage({ from, fromName, to, replyTo, subject, text, h
     "Date: " + now.toUTCString().replace(/GMT$/, "+0000"),
     "Message-ID: <" + (messageId || (crypto.randomUUID() + "@" + domain)) + ">",
     "MIME-Version: 1.0",
+    // A marketing email's unsubscribe addresses (email campaigns): "<mailto:…>, <https://…>", one line.
+    ...(listUnsubscribe ? ["List-Unsubscribe: " + String(listUnsubscribe).replace(/[\r\n]+/g, " ").slice(0, 900)] : []),
   ];
   const textPart = ["Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: base64", "", smtpWrap76_(smtpB64_(text || "(no plain-text body)"))].join("\r\n");
   let body;
@@ -259,7 +261,7 @@ export async function smtpVerify(settings, password, opts = {}) {
 
 // One message, from the mailbox's own address (a mailbox rewrites or refuses any other) under the
 // business's name. { ok, message }.
-export async function smtpSend(settings, password, { to, fromName, replyTo, bcc, subject, html, text, attachments } = {}, opts = {}) {
+export async function smtpSend(settings, password, { to, fromName, replyTo, bcc, subject, html, text, attachments, listUnsubscribe } = {}, opts = {}) {
   let s;
   try { s = smtpCleanSettings(settings); } catch (e) { return { ok: false, message: e.message }; }
   to = String(to || "").trim();
@@ -268,7 +270,7 @@ export async function smtpSend(settings, password, { to, fromName, replyTo, bcc,
   if (att.error) return { ok: false, message: att.error };
   const bccList = (Array.isArray(bcc) ? bcc : bcc ? [bcc] : []).map(String).filter(a => SMTP_EMAIL_RE.test(a) && a.toLowerCase() !== to.toLowerCase());
   const reply = SMTP_EMAIL_RE.test(String(replyTo || "")) && String(replyTo).toLowerCase() !== s.from.toLowerCase() ? String(replyTo) : "";
-  const raw = smtpBuildMessage({ from: s.from, fromName, to, replyTo: reply, subject, text, html, attachments: att.attachments, now: opts.now, messageId: opts.messageId });
+  const raw = smtpBuildMessage({ from: s.from, fromName, to, replyTo: reply, subject, text, html, attachments: att.attachments, now: opts.now, messageId: opts.messageId, listUnsubscribe });
   let conn;
   try {
     conn = await smtpOpen_(s, password, opts);

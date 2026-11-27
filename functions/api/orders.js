@@ -3518,6 +3518,8 @@ async function handleOrdersPost_(context, listBefore = null) {
                           "Local sale" + (order.paymentMethod ? " (" + order.paymentMethod + ")" : ""), placedAt, saleKey);
     if (body.payOnDelivery) await setOrderPayOnDelivery(env.DB, orderId, true);
     if (body.delivered) await setFulfillmentStage(env.DB, orderId, "delivered", { at: placedAt });
+    // Gift cards that leave the sale paid: its downloads go out, as when a payment pays an order in full (redeemGiftCard).
+    if (cardResults.some(c => c.ok)) { const after = await getOrderById(env.DB, orderId); if (after && after.paid) await deliverDigital_(orderId); }
 
     audit({ orgId: org, orderId, action: "order.created_local_sale",
       detail: { customerName: order.customerName, total: subtotal, paid: !!body.paid, payOnDelivery: !!body.payOnDelivery, items: pricedItems.length, ...(saleCustomerId ? { customerId: saleCustomerId } : {}),
@@ -4255,6 +4257,8 @@ async function handleOrdersPost_(context, listBefore = null) {
     const got = await orderForReorder_(env.DB, orderId);
     if (!got || (body.org && got.orgId !== body.org)) return jsonResponse({ status: "error", message: "Order not found" }, 404);
     if (got.error) return jsonResponse({ status: "error", message: got.error }, 409);
+    // Every line cancelled (or only gift cards and fees): there is nothing to copy, so no empty sale is opened.
+    if (!Array.isArray(got.lines) || !got.lines.length) return jsonResponse({ status: "error", message: "Nothing on this order can be reordered." }, 409);
     const reorder = can_("customers.records", "read") ? got : (({ customerId, ...rest }) => rest)(got);
     return jsonResponse({ status: "ok", ...reorder, reorder });
   }

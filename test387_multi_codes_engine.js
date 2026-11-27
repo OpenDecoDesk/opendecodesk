@@ -99,7 +99,7 @@ const shares = (r) => r.perCode.map(p => [p.goodsOffCents, p.shippingOffCents]);
     idx_discount_uses_order: "CREATE INDEX idx_discount_uses_order ON discount_code_uses(orderId)",
     idx_gift_cards_code: "CREATE UNIQUE INDEX idx_gift_cards_code ON gift_cards(code)",
     idx_gift_cards_source: "CREATE UNIQUE INDEX idx_gift_cards_source ON gift_cards(sourceOrderId) WHERE sourceOrderId <> ''",
-    idx_gift_cards_request: "CREATE UNIQUE INDEX idx_gift_cards_request ON gift_cards(requestKey) WHERE requestKey IS NOT NULL",
+    idx_gift_cards_request: "CREATE UNIQUE INDEX idx_gift_cards_request ON gift_cards(issueRequestId) WHERE issueRequestId IS NOT NULL",
     idx_gift_card_ledger_card: "CREATE INDEX idx_gift_card_ledger_card ON gift_card_ledger(cardId, id)",
     idx_order_payments_giftcard: "CREATE INDEX idx_order_payments_giftcard ON order_payments(giftCardId) WHERE giftCardId IS NOT NULL",
   };
@@ -159,9 +159,9 @@ const shares = (r) => r.perCode.map(p => [p.goodsOffCents, p.shippingOffCents]);
     ok(`the same card number twice is refused (UNIQUE code), ${built}`, /UNIQUE constraint failed: gift_cards\.code/.test(card({ code: "ABCDEFGHJKLMNPQR" })));
     ok(`two staff cards (sourceOrderId '') are fine, but one order can't make two cards, ${built}`,
       card({}) === "" && card({ sourceOrderId: "CLUB-GC-1" }) === "" && /UNIQUE constraint failed: gift_cards\.sourceOrderId/.test(card({ sourceOrderId: "CLUB-GC-1" })));
-    ok(`a card's requestKey is unset (NULL) by default, and one Issue window's key can't make two cards, ${built}`,
-      card({}) === "" && card({}) === "" && card({ requestKey: "giftcard:win387aa" }) === "" && /UNIQUE constraint failed: gift_cards\.requestKey/.test(card({ requestKey: "giftcard:win387aa" })) &&
-      d1.q("SELECT count(*) AS n FROM gift_cards WHERE requestKey IS NULL")[0].n >= 2);
+    ok(`a card's issueRequestId is unset (NULL) by default, and one Issue window's key can't make two cards, ${built}`,
+      card({}) === "" && card({}) === "" && card({ issueRequestId: "giftcard:win387aa" }) === "" && /UNIQUE constraint failed: gift_cards\.issueRequestId/.test(card({ issueRequestId: "giftcard:win387aa" })) &&
+      d1.q("SELECT count(*) AS n FROM gift_cards WHERE issueRequestId IS NULL")[0].n >= 2);
     ok(`a card needs its code, last4, amounts and when it was made (NOT NULL), ${built}`,
       ["code", "last4", "initialCents", "balanceCents", "createdAt"].every(k => new RegExp("NOT NULL constraint failed: gift_cards\\." + k).test(card({ [k]: null }))));
     const led = (extra) => insertRow(d1, "gift_card_ledger", Object.assign({ cardId: gc.id, kind: "issue", deltaCents: 5000, at: "t0" }, extra));

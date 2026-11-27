@@ -126,7 +126,7 @@ import {
   planDiscardShopChanges, discardShopChanges, applyProductPrices, priceRuleFor_, priceRuleMinCents_,
   getBrandRules, setBrandRules, DEFAULT_BRAND_RULES, brandRuleFor_, listBrandApprovals, addBrandApproval, revokeBrandApproval, getBrandApproval,
   nextSupplierPoNumber, insertSupplierOrder, claimSupplierOrderRetry, setSupplierOrderResult, getSupplierOrder, listSupplierOrders, markItemsBlankOrdered, cancelSupplierOrder, getInventoryValuation, getInventoryValuations, getCogsReport, planBlankCatchUp, applyBlankCatchUp, planTransferCatchUp, applyTransferCatchUp, voidInventoryMovement, getInventoryMovementById, restoreInventoryMovement, getInventoryRestoreBlocker, removeBlankColorImages, analyzePricing, planProductPreview, getPricingSettingsView, pricingBelowTargetForBlanks, setPricingSettings, getShopRate, computeShopRate, setShopRate,
-  voidOrder, voidPayment, getClosedPeriods, isMonthClosed, closePeriod, reopenPeriod, monthOf,
+  voidOrder, voidPayment, giftCardVoidRefusal, getClosedPeriods, isMonthClosed, closePeriod, reopenPeriod, monthOf,
   orderMonth, itemOrderMonth, paymentMonth, movementMonth, getCashReport, getAccountantExport, getTaxPacketExtras,
   bumpCatalogVersion, listStockPurchases,
   getAccountRegister, getReceiptRecords, receiptTargets, getRecordReceipt, setReceiptFile, receiptAccountBlockers, setReceiptAccount,
@@ -3075,12 +3075,15 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (payment.method === "card" && payment.externalRef) {
       return jsonResponse({ status: "error", message: "This is a real Stripe transaction — refund it in Stripe instead; the refund will appear here automatically." }, 400);
     }
+    // A refund put back on a gift card can only be voided while the card still has it (db.js voidPayment).
+    if (payment.kind === "refund") { const why = await giftCardVoidRefusal(env.DB, paymentId); if (why) return jsonResponse({ status: "error", message: why }, 409); }
     const reason = String(body.reason || "Entered by mistake").trim().slice(0, 300);
     const auditErr = await auditStrict({ orgId: body.org, orderId: payment.orderId, action: "payment.voided",
       detail: { paymentId, amount: payment.amount, kind: payment.kind, method: payment.method, reference: payment.reference,
         note: payment.note, receivedAt: payment.receivedAt, reason } });
     if (auditErr) return auditErr;
-    await voidPayment(env.DB, paymentId, reason);
+    const voided = await voidPayment(env.DB, paymentId, reason);
+    if (voided && voided.error) return jsonResponse({ status: "error", message: voided.error }, 409);
     const orderId = payment.orderId;
     const updated = orderId ? await getOrderById(env.DB, orderId) : null;
     return jsonResponse({ status: "ok",

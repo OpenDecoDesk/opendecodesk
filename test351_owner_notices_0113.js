@@ -45,7 +45,7 @@ const refused = (fn) => { try { fn(); return false; } catch (e) { return /CHECK 
   ok("schema.sql allows 'picked_up' and refuses an unknown kind", fresh.q("SELECT COUNT(*) AS n FROM owner_notices")[0].n === 1
     && refused(() => fresh._raw.run("INSERT INTO owner_notices (kind, summary, createdAt) VALUES ('nonsense', 'x', 't')")));
   const def = (sql) => (/CREATE TABLE (?:IF NOT EXISTS )?owner_notices \(([\s\S]*?)\n\);/.exec(sql) || [])[1].replace(/\s+/g, " ").trim();
-  ok("…with the same table definition as the migration", def(read("schema.sql")) === def(read("migrations/0113_picked_up_notices.sql")));
+  ok("…with the same table definition as the newest migration that rebuilt it (0119, which added quote, gift_card and po)", def(read("schema.sql")) === def(read("migrations/0119_quote_notices.sql")));
   const { MIGRATIONS } = await import("./functions/_lib/migrationList.js");
   ok("the Worker's migration list has it", MIGRATIONS.includes("0113_picked_up_notices.sql"));
 

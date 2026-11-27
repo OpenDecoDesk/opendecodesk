@@ -36,7 +36,7 @@ Free plan). A clean-up that fails is recorded and reported in the roll-up an hou
 2. Collects what is new since the last roll-up: orders (not test or voided ones), payments, refunds
    and disputes, customers' answers to design proofs, deliveries and pickups, failed admin sign-ins,
    and problems (an email that couldn't be sent, a Stripe webhook that failed, a roll-up that
-   failed). With the Production feature on, it also lists machine maintenance that's due (never a
+   failed). A customer's answer to a quote shows as **Quote** (not Invoice). With the Production feature on, it also lists machine maintenance that's due (never a
    reason to send on its own).
 3. Sends one email. If there is **nothing new**, the scheduled run sends a short "nothing new"
    email instead, so a quiet morning can't be mistaken for "it didn't run".

@@ -275,6 +275,8 @@ const migrationsUpTo = (upTo) => fs.readdirSync(__dirname + "/migrations").filte
           const ok = (o) => ({ ok: true, status: 200, json: async () => Object.assign({ status: "ok" }, o) });
           if (String(url).includes("/api/catalog")) return ok({ status: "admin" });
           if (b.action === "getProductionQueue") return ok(queueResp);
+          // The one Run order asks getRunQueue: the same embroidery queue, with nothing else to run.
+          if (b.action === "getRunQueue") return ok({ embroidery: queueResp.queue, transfers: { ready: [], waiting: [] }, other: { ready: [], waiting: [] }, types: ["embroidery", "dtf"], counts: {}, paidUnrun: queueResp.paidUnrun || [], waitingOnBlanks: queueResp.waitingOnBlanks || [], needleSizes: queueResp.needleSizes || [] });
           if (b.action === "listMachines") return ok({ machines: [{ id: 1, name: "M1", currentHoopId: capFrame, hoopIds: [capFrame, flat], needles: {} }, { id: 2, name: "M2", currentHoopId: flat, hoopIds: [flat], needles: {} }] });
           if (b.action === "listHoops") return ok({ hoops: [{ id: capFrame, name: "Cap frame", isCapFrame: true }, { id: flat, name: "Flat 4in", isCapFrame: false }] });
           if (b.action === "listThreads") return ok({ threads: [] });

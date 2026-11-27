@@ -20,6 +20,145 @@
  * anything that changes what's owed or what's been received.
  */
 
+// ---- Decoration types (formerly decoration.js; kept in this file so every harness that loads db.js has it) ----
+// The kinds of decoration a shop can do (Global settings → Decoration types) and how each is priced.
+// Pure: no database, no imports, so db.js, orders.js, catalog.js and the tests can all load it (a file with no
+// imports is the easiest thing for a test harness to glue in). Money is whole cents everywhere in here.
+//
+// A type switched off in Global settings is hidden from pickers, filters and the storefront, never from records:
+// old lines and graphics keep their type (the screens say "(switched off)").
+
+export const DECORATION_TYPES = [
+  { key: "embroidery",  label: "Embroidery",            made: "Embroidered",    graphicKind: "embroidery", machine: true,  sheets: false },
+  { key: "dtf",         label: "DTF transfer",          made: "Printed (DTF)",  graphicKind: "transfer",   machine: false, sheets: true },
+  { key: "screenprint", label: "Screen print",          made: "Screen printed", graphicKind: "transfer",   machine: false, sheets: false },
+  { key: "vinyl",       label: "Vinyl / heat transfer", made: "Vinyl",          graphicKind: "transfer",   machine: false, sheets: false },
+  { key: "dtg",         label: "DTG",                   made: "DTG printed",    graphicKind: "transfer",   machine: false, sheets: false },
+  { key: "sublimation", label: "Sublimation",           made: "Sublimated",     graphicKind: "transfer",   machine: false, sheets: false },
+];
+export const DECORATION_KEYS = DECORATION_TYPES.map(t => t.key);
+// Today's behaviour; an existing install starts here.
+export const DEFAULT_DECORATIONS = ["embroidery", "dtf"];
+
+// An array of known keys in registry order, de-duplicated; unknown ones dropped; nothing usable -> the default.
+export function normalizeDecorationTypes(v) {
+  let list = v;
+  if (typeof list === "string") { try { list = JSON.parse(list); } catch (e) { list = null; } }
+  if (!Array.isArray(list)) return DEFAULT_DECORATIONS.slice();
+  const out = DECORATION_KEYS.filter(k => list.includes(k));
+  return out.length ? out : DEFAULT_DECORATIONS.slice();
+}
+
+export function decorationLabel(key) {
+  const t = DECORATION_TYPES.find(x => x.key === key);
+  return t ? t.label : "";
+}
+
+// The storefront's word for it ("Embroidered", "Printed (DTF)", ...).
+export function decorationMadeLabel(key) {
+  const t = DECORATION_TYPES.find(x => x.key === key);
+  return t ? t.made : "";
+}
+
+// A graphic's type: an embroidery graphic is "embroidery"; a transfer graphic is its decoration column when that
+// names a printed type, else "dtf" ('' on a transfer graphic always meant DTF).
+export function graphicDecoration(g) {
+  if (g && g.kind === "embroidery") return "embroidery";
+  const d = g && g.decoration;
+  if (g && g.kind === "transfer" && d && d !== "embroidery" && DECORATION_KEYS.includes(d)) return d;
+  return "dtf";
+}
+
+export const DEFAULT_DECORATION_PRICING = {
+  embroidery:  { stitchPricing: false, centsPer1000: 0, minStitches: 0, minCents: 0 },
+  dtf:         { costCents: 0, priceCents: 0, setupCents: 0 },
+  screenprint: { inkColorCents: 0, screenSetupCents: 0, reorderSetupCents: 0, costCents: 0, maxColors: 6 },
+  vinyl:       { costCents: 0, priceCents: 0, setupCents: 0 },
+  dtg:         { costCents: 0, priceCents: 0, setupCents: 0 },
+  sublimation: { costCents: 0, priceCents: 0, setupCents: 0 },
+};
+
+const DEC_MAX_ = 100000000;
+// A whole number 0..100,000,000; anything else (text, negative, fractions of a cent) is 0 or rounded down.
+function decInt_(v) {
+  const n = typeof v === "string" && v.trim() !== "" ? Number(v) : v;
+  if (typeof n !== "number" || !isFinite(n) || n < 0) return 0;
+  return Math.min(Math.floor(n), DEC_MAX_);
+}
+
+// Fills missing keys from the defaults; every figure a whole number in range; maxColors 1..12.
+export function normalizeDecorationPricing(v) {
+  let src = v;
+  if (typeof src === "string") { try { src = JSON.parse(src); } catch (e) { src = null; } }
+  if (!src || typeof src !== "object" || Array.isArray(src)) src = {};
+  const out = {};
+  for (const key of Object.keys(DEFAULT_DECORATION_PRICING)) {
+    const def = DEFAULT_DECORATION_PRICING[key];
+    const given = src[key] && typeof src[key] === "object" && !Array.isArray(src[key]) ? src[key] : {};
+    const o = {};
+    for (const f of Object.keys(def)) {
+      if (f === "stitchPricing") o[f] = given[f] === true || given[f] === 1 || given[f] === "1";
+      else if (f === "maxColors") {
+        const n = decInt_(given[f] === undefined ? def[f] : given[f]);
+        o[f] = Math.min(12, Math.max(1, n || def[f]));
+      } else o[f] = decInt_(given[f]);
+    }
+    out[key] = o;
+  }
+  return out;
+}
+
+const decRound_ = (n) => Math.floor(n + 0.5);   // half up; every figure here is >= 0
+const decCount_ = (v, dflt) => { const n = Math.floor(Number(v)); return isFinite(n) && n >= 1 ? n : dflt; };
+const decMoney_ = (c) => "$" + (c / 100).toFixed(2);
+
+// What the decoration adds, per piece and once: { unitCents, setupCents, note }.
+export function priceDecoration(type, params, pricing) {
+  const p = params || {};
+  const all = normalizeDecorationPricing(pricing);
+  if (type === "embroidery") {
+    const e = all.embroidery;
+    if (!e.stitchPricing) return { unitCents: 0, setupCents: 0, note: "Stitch pricing is off" };
+    const stitches = decInt_(p.stitches);
+    const billable = Math.max(stitches, e.minStitches);
+    const unit = Math.max(decRound_(billable * e.centsPer1000 / 1000), e.minCents);
+    return { unitCents: unit, setupCents: 0,
+      note: billable.toLocaleString("en-US") + " stitches × " + decMoney_(e.centsPer1000) + " per 1,000" };
+  }
+  if (type === "screenprint") {
+    const s = all.screenprint;
+    const colors = Math.min(s.maxColors, decCount_(p.colors, 1));
+    const locations = decCount_(p.locations, 1);
+    const reorder = p.reorder === true;
+    const unit = colors * s.inkColorCents * locations;
+    const setup = colors * locations * (reorder ? s.reorderSetupCents : s.screenSetupCents);
+    return { unitCents: unit, setupCents: setup,
+      note: colors + (colors === 1 ? " colour" : " colours") + " × " + locations + (locations === 1 ? " location" : " locations") +
+        (reorder ? ", reorder" : "") };
+  }
+  if (type === "dtf" || type === "vinyl" || type === "dtg" || type === "sublimation") {
+    const d = all[type];
+    const locations = decCount_(p.locations, 1);
+    return { unitCents: d.priceCents * locations, setupCents: d.setupCents,
+      note: locations + (locations === 1 ? " location" : " locations") + " × " + decMoney_(d.priceCents) };
+  }
+  return { unitCents: 0, setupCents: 0, note: "" };
+}
+
+// What the decoration costs the shop per piece. Embroidery's cost stays run minutes plus supplies, as today.
+export function decorationCostCents(type, params, pricing) {
+  const p = params || {};
+  const all = normalizeDecorationPricing(pricing);
+  const locations = decCount_(p.locations, 1);
+  if (type === "screenprint") {
+    const colors = Math.min(all.screenprint.maxColors, decCount_(p.colors, 1));
+    return all.screenprint.costCents * colors * locations;
+  }
+  if (type === "dtf" || type === "vinyl" || type === "dtg" || type === "sublimation") return all[type].costCents * locations;
+  return 0;
+}
+// ---- end decoration types ----
+
 // ---- Money helpers -------------------------------------------------------
 const toCents = (dollars) => {
   const n = Number(dollars);
@@ -1117,6 +1256,7 @@ async function productsFromRows_(db, orgId, results, onlyIds, pre) {
   } catch (e) { /* pre-0032 database */ }
   products.forEach(p => {
     p.designs = byProduct[p.productId] || [];
+    p.decoration = productDecoration_(p);   // migrations/0118
     if (p.customDesign) p.customDesignRequired = customDesignRequired(p);   // migrations/0054
   });
   // Shipping weight (migrations/0077): the product's own weightOz is an override; otherwise its linked blank sizes'.
@@ -1180,6 +1320,7 @@ export async function createProduct(db, orgId, p) {
       now, now, p.taxable === false ? 0 : 1
     ).run();
   if (p.noDesignNeeded !== undefined) await setProductNoDesignNeeded_(db, orgId, p.productId, !!p.noDesignNeeded);
+  if (p.decorationType !== undefined) await setProductDecorationType_(db, orgId, p.productId, p.decorationType);
   if (p.noBlankNeeded !== undefined) await setProductNoBlankNeeded_(db, orgId, p.productId, !!p.noBlankNeeded);
   if (p.digital !== undefined || p.digitalDelivery !== undefined) await setProductDigital_(db, orgId, p.productId, p.digital, p.digitalDelivery);
   if (p.versionGroup !== undefined || p.versionLabel !== undefined) await setProductVersion(db, orgId, p.productId, { group: p.versionGroup, label: p.versionLabel });
@@ -1396,6 +1537,30 @@ async function digitalLine_(db) {
 }
 
 // migrations/0034 — a product that never needs an embroidery design (DTF, …).
+// migrations/0118 — the product's own decoration type: '' (worked out, see productDecoration_) or a known key. The
+// caller (orders.js) has checked it is switched on. Safe before 0118.
+async function setProductDecorationType_(db, orgId, productId, type) {
+  const t = DECORATION_KEYS.includes(type) ? type : "";
+  await db.prepare("UPDATE products SET decorationType=? WHERE orgId=? AND productId=?").bind(t, orgId, productId).run()
+    .catch((e) => { if (!/no such column/i.test(String(e && e.message))) throw e; });
+}
+
+// The decoration a product is made with. The product's own choice (decorationType) when it has one; otherwise worked
+// out as before: embroidery when it has a design (a main one or product_designs) or is an ordinary product that needs
+// one (not "no design needed", not digital, no fixed transfers); DTF when it has fixed transfers or needs no design;
+// "" when it is nothing to decorate (a digital product). `p` is a parsed product — its `designs` list is only there
+// once productsFromRows_ has read it, so designId and designCount stand in.
+export function productDecoration_(p) {
+  if (!p) return "";
+  if (DECORATION_KEYS.includes(p.decorationType)) return p.decorationType;
+  const hasDesign = p.designId != null || (Array.isArray(p.designs) ? p.designs.length : Number(p.designCount) || 0) > 0;
+  const hasTransfers = Array.isArray(p.fixedTransfers) && p.fixedTransfers.length > 0;
+  if (hasDesign) return "embroidery";
+  if (!p.noDesignNeeded && !p.digital && !hasTransfers) return "embroidery";
+  if (hasTransfers || p.noDesignNeeded) return "dtf";
+  return "";
+}
+
 async function setProductNoDesignNeeded_(db, orgId, productId, on) {
   await db.prepare("UPDATE products SET noDesignNeeded=? WHERE orgId=? AND productId=?").bind(on ? 1 : 0, orgId, productId).run()
     .catch((e) => { if (!/no such column/i.test(String(e && e.message))) throw e; });
@@ -1620,6 +1785,7 @@ export async function updateProduct(db, orgId, p) {
   if (p.colorGroupsCents !== undefined) await setProductColorGroups_(db, orgId, p.productId, p.colorGroupsCents);
   if (p.qtyBreaks !== undefined) await setProductQtyBreaks_(db, orgId, p.productId, p.qtyBreaks);
   if (p.noDesignNeeded !== undefined) await setProductNoDesignNeeded_(db, orgId, p.productId, !!p.noDesignNeeded);
+  if (p.decorationType !== undefined) await setProductDecorationType_(db, orgId, p.productId, p.decorationType);
   if (p.noBlankNeeded !== undefined) await setProductNoBlankNeeded_(db, orgId, p.productId, !!p.noBlankNeeded);
   if (p.digital !== undefined || p.digitalDelivery !== undefined) await setProductDigital_(db, orgId, p.productId, p.digital, p.digitalDelivery);
   if (p.versionGroup !== undefined || p.versionLabel !== undefined) await setProductVersion(db, orgId, p.productId, { group: p.versionGroup, label: p.versionLabel });
@@ -1652,7 +1818,7 @@ export async function setProductVisible(db, orgId, productId, visible) {
 }
 
 function parseProduct_(row) {
-  return {
+  const p = {
     productId: row.productId,
     orgId: row.orgId,
     type: row.type,
@@ -1705,6 +1871,11 @@ function parseProduct_(row) {
     // migrations/0109 — quantity breaks, in dollars: [{minQty, off}] by minQty ([] before 0109).
     qtyBreaks: qtyBreaksOf_(row.qtyBreaksJson).map(b => ({ minQty: b.minQty, off: fromCents(b.offCents) })),
   };
+  // migrations/0118 — the stored choice ('' = none) and the worked-out type (productsFromRows_ works it out again once
+  // the product's designs are read).
+  p.decorationType = DECORATION_KEYS.includes(row.decorationType) ? row.decorationType : "";
+  p.decoration = productDecoration_(p);
+  return p;
 }
 
 // ---- Brand rules: brands a supplier restricts (migrations/0075) ----------------------------------
@@ -2444,9 +2615,25 @@ async function fixedTransferEntries_(db, orgId, row, lk) {
     const ink = g.inkColors.includes(String(f.ink || "")) ? String(f.ink) : (g.inkColors[0] || "");
     out.push({ location: "fixed" + (Number(f.locationId) || out.length), label, graphicId: g.id, kind: "transfer",
       designId: null, transferId: g.transferId, graphicName: g.name, ink, tier: null, addOnCents: 0,
-      imageUrl: g.imageUrl, thumbUrl: g.thumbUrl, fixed: true });
+      imageUrl: g.imageUrl, thumbUrl: g.thumbUrl, fixed: true, decoration: "dtf" });   // fixed transfers are DTF (migrations/0118)
   }
   return out;
+}
+
+// The decoration of one location entry on an order line (migrations/0118): what it says, else — lines placed before
+// it — "embroidery" for an embroidery entry and "dtf" for a transfer one.
+export function locationDecoration_(loc) {
+  if (loc && DECORATION_KEYS.includes(loc.decoration)) return loc.decoration;
+  return loc && loc.kind === "embroidery" ? "embroidery" : "dtf";
+}
+// The sorted, unique decoration keys on an order line: every config location's, and — for a line with none — its
+// product's own (productDecoration_), when it has one. `item` is an order_items row (or parsed) with its config.
+export function lineDecorations_(item, product) {
+  const cfg = item && (item.config || (item.configJson ? tryParse_(item.configJson, null) : null));
+  const locs = cfg && Array.isArray(cfg.locations) ? cfg.locations.filter(l => l && l.location) : [];
+  const set = new Set(locs.map(locationDecoration_));
+  if (!locs.length) { const d = productDecoration_(product); if (d) set.add(d); }
+  return DECORATION_KEYS.filter(k => set.has(k));
 }
 
 // ---- Color price groups (migrations/0064) ----------------------------------------------------------
@@ -2776,6 +2963,7 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
   const { results: grows } = await db.prepare("SELECT id, name, kind, transferId, tier FROM graphics").all().catch(() => ({ results: [] }));
   const graphicById = new Map((grows || []).map(g => [Number(g.id), g]));
   const brandRules = await getBrandRules(db).catch(() => null);
+  const decPricing = await getDecorationPricing(db);   // migrations/0118: what a printed type costs per piece
   const tierCache = {}, runCache = {};
   const tiersOf = async (org) => tierCache[org] || (tierCache[org] = await getTierPrices(db, org));
   const runsOf = async (org) => runCache[org] || (runCache[org] = await avgRunMinutesByProduct_(db, org, { productId: orgId ? productId : null }));   // one product: only its runs
@@ -2799,6 +2987,11 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
     let fixedCents = 0;
     for (const f of Array.isArray(p.fixedTransfers) ? p.fixedTransfers : []) { const g = graphicById.get(Number(f.graphicId)); if (g && g.kind === "transfer" && g.transferId) fixedCents += transferCents(g.transferId); }
     const ownTransfer = toCentsOrNull(p.transferCost) || 0;
+    // A screen print, vinyl, DTG or sublimation product: that type's cost per piece (Global settings → Decoration types)
+    // for one colour at one location — a row is a price, and the colours and locations are the order's. Embroidery's
+    // and DTF's costs stay as they were (run minutes and supplies; the transfer).
+    const decType = OTHER_DECORATIONS_.includes(p.decoration) ? p.decoration : "";
+    const decCents = decType ? decorationCostCents(decType, { colors: 1, locations: 1 }, decPricing) : 0;
     const supplies = p.suppliesCost != null ? toCents(p.suppliesCost) : settings.suppliesCents;
     const blankFor = (colors, size, flat) => {
       if (p.noBlankNeeded) return { cents: 0, source: "none", map: null, mapOf: "", ruleMin: null, ruleOf: "" };
@@ -2838,7 +3031,7 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
         const at = (pr) => {
           const taxIn = p.taxable === false ? 0 : taxOnTop ? addTaxExclusive(pr, rateBps).taxCents : splitTaxInclusive(pr, rateBps).taxCents;
           const card = cardOf(taxOnTop ? pr + taxIn : pr), tax = taxOnTop ? 0 : taxIn;
-          const costs = (b.cents || 0) + card + tax + transfer + supplies + overhead;
+          const costs = (b.cents || 0) + card + tax + transfer + decCents + supplies + overhead;
           return { card, tax, costs, income: pr - costs };
         };
         const { card, tax, costs, income } = at(price);
@@ -2860,7 +3053,7 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
           if (settings.targetIncomeCents != null) flags.push("income");
           if (settings.targetHourlyCents != null && hourly != null) flags.push("hourly");
         }
-        rows.push({ group: g.label, size, price, blank: b.cents, blankSource: b.source, map: b.map, mapOf: b.mapOf, mapBlank: b.mapBlank, mapBrand: b.mapBrand, ruleMin: b.ruleMin, ruleOf: b.ruleOf, card, tax, transfer, supplies, overhead, costs, income, hourly, flags,
+        rows.push({ group: g.label, size, price, blank: b.cents, blankSource: b.source, map: b.map, mapOf: b.mapOf, mapBlank: b.mapBlank, mapBrand: b.mapBrand, ruleMin: b.ruleMin, ruleOf: b.ruleOf, card, tax, transfer, decoration: decCents, supplies, overhead, costs, income, hourly, flags,
           ...(deepest ? { breakPrice, breakIncome } : {}) });
       }
     }
@@ -2897,10 +3090,10 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
     const ruleProblems = rows.filter(r => r.flags.includes("mapRule")).map(r => `${label(r) === "the price" ? "The price" : label(r)} $${fromCents(r.price).toFixed(2)} is under the price rule of $${fromCents(r.ruleMin).toFixed(2)} (${r.ruleOf})`);
     const run = runs[p.productId] || null;
     out.push({ orgId: p.orgId, productId: p.productId, name: p.name, visible: p.visible, runMinutes: minutes,
-      avgRunMinutes: run ? run.minutes : null, avgRunPieces: run ? run.pieces : 0, reorderQr: qrName, transferOwn: $(ownTransfer), transferFixed: $(fixedCents),
+      avgRunMinutes: run ? run.minutes : null, avgRunPieces: run ? run.pieces : 0, reorderQr: qrName, decoration: p.decoration, decorationLabel: decorationLabel(p.decoration), decorationCost: $(decCents), transferOwn: $(ownTransfer), transferFixed: $(fixedCents),
       suppliesFromProduct: p.suppliesCost != null,
       belowMap: mapProblems.length > 0, mapProblems, belowPriceRule: ruleProblems.length > 0, ruleProblems, deepestBreak,
-      rows: rows.map(r => ({ ...r, price: $(r.price), blank: $(r.blank), map: $(r.map), ruleMin: $(r.ruleMin), card: $(r.card), tax: $(r.tax), transfer: $(r.transfer), supplies: $(r.supplies), overhead: $(r.overhead), costs: $(r.costs), income: $(r.income), hourly: $(r.hourly),
+      rows: rows.map(r => ({ ...r, price: $(r.price), blank: $(r.blank), map: $(r.map), ruleMin: $(r.ruleMin), card: $(r.card), tax: $(r.tax), transfer: $(r.transfer), decoration: $(r.decoration), supplies: $(r.supplies), overhead: $(r.overhead), costs: $(r.costs), income: $(r.income), hourly: $(r.hourly),
         ...(deepest ? { breakPrice: $(r.breakPrice), breakIncome: $(r.breakIncome) } : {}) })),
       addOns: addOns.map(a => ({ ...a, price: $(a.price), transfer: $(a.transfer), income: $(a.income) })),
       minIncome: incomes.length ? $(Math.min(...incomes)) : null, maxIncome: incomes.length ? $(Math.max(...incomes)) : null,
@@ -2956,6 +3149,8 @@ function customDesignEntry_(row, location, label, upload, locCents) {
   const addOnCents = offered ? Math.max(0, own != null ? own : Number(row.customDesignPriceCents) || 0) : Math.max(0, Number(u.addOnCents) || 0);
   return { location: String(location), label: String(label || location), custom: true, kind, graphicId: null, designId: null, transferId: null,
     graphicName: "Your own design", ink: "", tier: null, addOnCents,
+    // migrations/0118: a printed product's own type when it has one, else by what the customer uploads.
+    decoration: DECORATION_KEYS.includes(row.decorationType) && row.decorationType !== "embroidery" ? row.decorationType : (kind === "embroidery" ? "embroidery" : "dtf"),
     uploadId: u && u.uploadId ? String(u.uploadId) : null, fileKey: u ? String(u.fileKey || "") : "",
     fileName: u ? String(u.fileName || "") : "", fileExt: u ? String(u.fileExt || "") : "",
     imageUrl: "", thumbUrl: "" };
@@ -2985,13 +3180,13 @@ async function reorderQrEntry_(db, orgId, productReorderQr, orgDefault, lk) {
     const t = await looked_(lk, "transfer\u0001" + qr.transferId, () => db.prepare("SELECT id, name, visible FROM transfers WHERE id=?").bind(qr.transferId).first());
     return t && Number(t.visible) ? { location: "reorderqr", label: "Reorder QR", graphicId: null, kind: "transfer",
       designId: null, transferId: Number(t.id), graphicName: t.name || "Reorder QR", ink: "", tier: null, addOnCents: 0,
-      imageUrl: "", thumbUrl: "", auto: true } : null;
+      imageUrl: "", thumbUrl: "", auto: true, decoration: "dtf" } : null;
   }
   if (qr && qr.graphicId) {   // chosen the old way, through a graphic
     const qg = await lookedGraphic_(db, qr.graphicId, lk);
     return qg && qg.visible ? { location: "reorderqr", label: "Reorder QR", graphicId: qg.id, kind: qg.kind,
       designId: qg.designId, transferId: qg.transferId, graphicName: qg.name, ink: "", tier: null, addOnCents: 0,
-      imageUrl: qg.imageUrl, thumbUrl: qg.thumbUrl, auto: true } : null;
+      imageUrl: qg.imageUrl, thumbUrl: qg.thumbUrl, auto: true, decoration: graphicDecoration(qg) } : null;
   }
   return null;
 }
@@ -3043,9 +3238,10 @@ export async function refreshOrderLinesFromCatalog(db, orderId, apply = true, pi
       if (l.auto || l.fixed) continue;   // re-read below
       const g = l.graphicId ? await getGraphic(db, Number(l.graphicId)) : null;
       if (!g) { graphics.push({ l, n: l }); continue; }
-      const n = Object.assign({}, l, { kind: g.kind, designId: g.designId, transferId: g.transferId, graphicName: g.name, imageUrl: g.imageUrl, thumbUrl: g.thumbUrl });
+      const n = Object.assign({}, l, { kind: g.kind, designId: g.designId, transferId: g.transferId, graphicName: g.name, imageUrl: g.imageUrl, thumbUrl: g.thumbUrl, decoration: graphicDecoration(g) });
       let text = "";
       if (l.kind !== n.kind) text = `${n.graphicName}: ${how(l)} → ${how(n)}`;
+      else if (n.kind === "transfer" && locationDecoration_(l) !== n.decoration) text = `${n.graphicName}: now ${decorationLabel(n.decoration) || n.decoration}`;
       else if (n.kind === "transfer" && Number(l.transferId || 0) !== Number(n.transferId || 0)) text = `${n.graphicName}: ${n.transferId ? "transfer linked" : "transfer unlinked"}`;
       else if (n.kind === "embroidery" && Number(l.designId || 0) !== Number(n.designId || 0)) text = `${n.graphicName}: design changed`;
       else if ((l.graphicName || "") !== n.graphicName) text = `"${l.graphicName || ""}" is now "${n.graphicName}"`;
@@ -3161,7 +3357,7 @@ async function priceConfigurable_(db, orgId, productRow, size, config, custom = 
     addOnCents += add;
     snapLocs.push({ location: String(loc.key), label: loc.label || loc.key, graphicId: gid, kind: g.kind,
       designId: g.designId, transferId: g.transferId, graphicName: g.name, ink, tier: g.tier || null,
-      addOnCents: add, imageUrl: g.imageUrl, thumbUrl: g.thumbUrl });
+      addOnCents: add, imageUrl: g.imageUrl, thumbUrl: g.thumbUrl, decoration: graphicDecoration(g) });
   }
   // The product's own printed transfers (migrations/0068) decorate it too, so with any of them every location
   // may be left at None.
@@ -3792,6 +3988,55 @@ export async function setFeatures(db, p) {
   await writeSettingBuilds(db, [b]);
   return b.value;
 }
+// ---- Decoration types (Global settings → Decoration types; the list is at the top of this file) ------------
+// Two global_settings values: decorationTypes (a JSON array of the types the shop does) and decorationPricing (what
+// each is priced and costed at, in cents). Nothing saved = today's behaviour: embroidery and DTF, no pricing. Turning
+// a type off hides it from pickers, filters and the storefront; records that use it are never touched.
+async function getSettingJson_(db, key, fallback) {
+  if (!db) return fallback;
+  try { const row = await db.prepare("SELECT value FROM global_settings WHERE key = ?").bind(key).first(); return row ? tryParse_(row.value, fallback) : fallback; }
+  catch (e) { return fallback; }   // no table yet
+}
+export async function getDecorationTypes(db) {
+  return normalizeDecorationTypes(await getSettingJson_(db, "decorationTypes", null));
+}
+export async function getDecorationPricing(db) {
+  return normalizeDecorationPricing(await getSettingJson_(db, "decorationPricing", null));
+}
+// What to store for a list of types: it must be an array of known keys with at least one (throws userFacing).
+function checkedDecorationTypes_(list) {
+  if (!Array.isArray(list) || !list.length) throw pricingError_("Tick at least one decoration type");
+  for (const k of list) if (!DECORATION_KEYS.includes(k)) throw pricingError_("Unknown decoration type: " + String(k).slice(0, 40));
+  return normalizeDecorationTypes(list);
+}
+// The build step (see writeSettingBuilds): `types` and / or `pricing`, whichever is passed; one left out keeps its
+// value. Checks first, writes nothing. The shop's catalog version goes up afterwards so a shop page already open
+// sees the new list at its next catalog read.
+export async function buildDecorationSettings(db, { types, pricing } = {}) {
+  const stmts = [], value = { types: await getDecorationTypes(db), pricing: await getDecorationPricing(db) };
+  if (types !== undefined) value.types = checkedDecorationTypes_(types);
+  if (pricing !== undefined) {
+    if (!pricing || typeof pricing !== "object" || Array.isArray(pricing)) throw pricingError_("The decoration prices aren't readable");
+    value.pricing = normalizeDecorationPricing(pricing);
+  }
+  const put = (key, v) => db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES (?, ?)").bind(key, JSON.stringify(v));
+  if (types !== undefined) stmts.push(put("decorationTypes", value.types));
+  if (pricing !== undefined) stmts.push(put("decorationPricing", value.pricing));
+  return { value, stmts, after: stmts.length ? [db.prepare(
+    "INSERT INTO global_settings (key, value) VALUES ('catalogVersion', '1') " +
+    "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)")] : [] };
+}
+export async function setDecorationTypes(db, list) {
+  const b = await buildDecorationSettings(db, { types: list });
+  await writeSettingBuilds(db, [b]);
+  return b.value.types;
+}
+export async function setDecorationPricing(db, obj) {
+  const b = await buildDecorationSettings(db, { pricing: obj });
+  await writeSettingBuilds(db, [b]);
+  return b.value.pricing;
+}
+
 // SQL: true unless the feature was saved as false. For rules that live in a query (which orders
 // need design approval / digitizing), so they can't disagree with the setting.
 const featureOnSql_ = (key) => `(COALESCE((SELECT json_extract(gs.value, '$.${key}') FROM global_settings gs WHERE gs.key = 'features' AND json_valid(gs.value)), 1) <> 0)`;
@@ -6960,8 +7205,9 @@ export async function getPaidUnrunOrders(db) {
   for (const org of await getAllOrgs(db)) orgNames[org.orgId] = org.name || org.orgId;
   // Whose waiting blanks the stock on hand covers — soonest due first, the same order as the list.
   const stock = await getBlankStockCoverage(db, orders.filter(o => !o.blankOrderedAt).map(o => o.orderId));
+  const typesBy = await orderDecorationTypes_(db, orders);   // migrations/0118
   return orders.map(o => ({
-    orderId: o.orderId, orgId: o.orgId, orgName: orgNames[o.orgId] || o.orgId,
+    orderId: o.orderId, orgId: o.orgId, orgName: orgNames[o.orgId] || o.orgId, types: typesBy.get(o.orderId) || [],
     customerName: o.customerName, placedAt: o.placedAt, dueDate: o.dueDate || "",
     blankReceived: !!o.blankReceivedAt, blankOrdered: !!o.blankOrderedAt,
     blanksInStock: !o.blankOrderedAt && !!(stock[o.orderId] && stock[o.orderId].covered),
@@ -6969,6 +7215,26 @@ export async function getPaidUnrunOrders(db) {
     allFromStock: !!o.allFromStock,         // every line comes from finished stock (migrations/0060)
     items: o.items.filter(it => !it.cancelDate && !it.digital).map(it => ({ name: it.name, size: it.size, qty: it.qty })),
   }));
+}
+
+// The decoration types of each order (migrations/0118): the union of its live lines' lineDecorations_. `orders` are
+// parsed orders with their items. A database before 0118 (no decorationType column) answers no types.
+async function orderDecorationTypes_(db, orders) {
+  const out = new Map();
+  if (!orders.length) return out;
+  let rows = [];
+  try {
+    ({ results: rows } = await db.prepare(
+      `SELECT i.id, ${PRODUCT_DECORATION_COLS_} FROM order_items i LEFT JOIN products p ON p.orgId = i.orgId AND p.productId = i.productId
+       WHERE i.cancelDate IS NULL AND i.orderId IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(orders.map(o => o.orderId))).all());
+  } catch (e) { if (!/no such (table|column)/i.test(String(e && e.message))) throw e; return out; }
+  const prod = new Map(rows.map(r => [Number(r.id), productFromCols_(r)]));
+  for (const o of orders) {
+    const set = new Set();
+    for (const it of o.items || []) if (!it.cancelDate && !it.digital) for (const k of lineDecorations_(it, prod.get(Number(it.id)))) set.add(k);
+    out.set(o.orderId, DECORATION_KEYS.filter(k => set.has(k)));
+  }
+  return out;
 }
 
 // ---- Inventory movements & COGS (migrations/0009) -------------------------
@@ -9169,7 +9435,8 @@ function parseGraphic_(r) {
     designId: r.designId == null ? null : Number(r.designId), transferId: r.transferId == null ? null : Number(r.transferId),
     tier: r.tier || null, inkColors: tryParse_(r.inkColorsJson, []) || [], imageUrl: r.imageUrl || "", thumbUrl: r.thumbUrl || "",
     allowedLocations: tryParse_(r.allowedLocationsJson, []) || [], allowedGarmentColors: tryParse_(r.allowedGarmentColorsJson, []) || [],
-    visible: !!r.visible, sortOrder: Number(r.sortOrder) || 0, isGlobal: !!Number(r.isGlobal) };
+    visible: !!r.visible, sortOrder: Number(r.sortOrder) || 0, isGlobal: !!Number(r.isGlobal),
+    decoration: graphicDecoration(r) };   // migrations/0118: always a key — "embroidery", or what prints a transfer ("dtf" when unset)
 }
 // A shop may use its own graphics and every global one (migrations/0078).
 const graphicUsableBy_ = (g, orgId) => !!g && (g.orgId === orgId || !!Number(g.isGlobal));
@@ -9229,6 +9496,21 @@ function graphicBinds_(g) {
     g.visible === false ? 0 : 1, Number(g.sortOrder) || 0];
 }
 
+// What a graphic stores as its decoration (migrations/0118): only a transfer graphic carries one, and DTF — the
+// default — is stored as ''. The caller (orders.js) has checked the type is switched on.
+function graphicDecorationColumn_(g) {
+  if (!g || g.kind === "embroidery") return "";
+  const d = String(g.decoration || "");
+  return d !== "dtf" && d !== "embroidery" && DECORATION_KEYS.includes(d) ? d : "";
+}
+// Written apart from the main save, like isGlobal: only when the caller sent `decoration` (or the kind became
+// embroidery), so a caller that doesn't know the column can't clear it. Safe before migrations/0118.
+async function setGraphicDecoration_(db, id, g) {
+  if (g.decoration === undefined && g.kind !== "embroidery") return;
+  await db.prepare("UPDATE graphics SET decoration=? WHERE id=?").bind(graphicDecorationColumn_(g), Number(id)).run()
+    .catch((e) => { if (!/no such column/i.test(String(e && e.message))) throw e; });
+}
+
 export async function createGraphic(db, orgId, g) {
   const now = new Date().toISOString();
   const r = await db.prepare(
@@ -9238,6 +9520,7 @@ export async function createGraphic(db, orgId, g) {
   ).bind(orgId, ...graphicBinds_(g), now, now).run();
   const id = Number(r.meta && r.meta.last_row_id) || 0;
   if (g.isGlobal && id) await db.prepare("UPDATE graphics SET isGlobal=1 WHERE id=?").bind(id).run();
+  if (id) await setGraphicDecoration_(db, id, g);
   return id;
 }
 
@@ -9247,6 +9530,7 @@ export async function updateGraphic(db, id, g) {
        allowedLocationsJson=?, allowedGarmentColorsJson=?, visible=?, sortOrder=?, updatedAt=? WHERE id=?`
   ).bind(...graphicBinds_(g), new Date().toISOString(), Number(id)).run();
   if (g.isGlobal !== undefined) await db.prepare("UPDATE graphics SET isGlobal=? WHERE id=?").bind(g.isGlobal ? 1 : 0, Number(id)).run();
+  await setGraphicDecoration_(db, id, g);
 }
 
 // Switch a graphic off (or back on) for ONE color of ONE product — the mockup table's "don't offer
@@ -9349,7 +9633,7 @@ export async function getTransferQueue(db) {
     `SELECT i.id AS itemId, i.orderId, i.orgId, i.name AS itemName, i.size AS itemSize, i.qty, i.configJson,
             COALESCE(i.manufacturedQty,0) AS manufacturedQty, i.transfersAppliedAt, o.manufacturedAt AS orderMadeAt,
             i.transferReceivedAt, COALESCE(i.blankReceivedAt, o.blankReceivedAt) AS blankReceivedAt, ${nb("i")} AS noBlank,
-            org.name AS orgName, o.customerName, o.dueDate,
+            org.name AS orgName, o.customerName, o.dueDate, o.placedAt,
             l.blankId, l.blankSize, b.name AS blankName, COALESCE(NULLIF(l.blankColor, ''), b.color) AS blankColor
      FROM order_items i
      JOIN orders o ON o.orderId = i.orderId
@@ -9369,7 +9653,8 @@ export async function getTransferQueue(db) {
   const rows = [];
   for (const r of results) {
     const cfg = tryParse_(r.configJson, null);
-    const transfers = cfg ? (cfg.locations || []).filter(l => l.kind === "transfer") : [];
+    // DTF only (migrations/0118): a screen print, vinyl, DTG or sublimation pick is on the run order's other cards.
+    const transfers = cfg ? (cfg.locations || []).filter(l => l.kind === "transfer" && locationDecoration_(l) === "dtf") : [];
     if (transfers.length) rows.push({ r, cfg, transfers });   // embroidery-only lines belong to Run Order alone
   }
   const embroidered = await linesWithEmbroidery_(db, rows.map(x => Number(x.r.itemId)));
@@ -9386,7 +9671,7 @@ export async function getTransferQueue(db) {
     const card = {
       itemId: Number(r.itemId), orderId: r.orderId, orgId: r.orgId, orgName: r.orgName || r.orgId,
       customerName: r.customerName, itemName: r.itemName, itemSize: r.itemSize || "", qty: Number(r.qty) || 1,
-      dueDate: r.dueDate || "", garmentColor: cfg.garmentColor || "",
+      dueDate: r.dueDate || "", placedAt: r.placedAt || "", garmentColor: cfg.garmentColor || "",
       blank: r.blankId == null ? null : { id: Number(r.blankId), name: r.blankName || "", color: r.blankColor || "", size: r.blankSize || "" },
       transfers: transfers.map((t, i) => ({ location: t.label || t.location, graphicName: t.graphicName, ink: t.ink || "",
         imageUrl: t.imageUrl || "", thumbUrl: t.thumbUrl || "", auto: !!t.auto,
@@ -9522,6 +9807,125 @@ export async function makeTransferLine(db, orderId, itemId, at = null) {
   if (Number(item.manufacturedQty) >= qty) return { alreadyDone: true, orderComplete: false };
   let res = { orderComplete: false };
   for (let made = Number(item.manufacturedQty); made < qty; made++) res = await markItemPieceManufactured(db, orderId, Number(itemId), at);
+  return { orderComplete: !!res.orderComplete };
+}
+
+// ---- The one Run order: every kind of work in one answer (migrations/0118) ------------------------------------
+// Embroidery and DTF keep their own queues (getProductionQueue, getTransferQueue — same answers as before, DTF now
+// meaning a location whose decoration is "dtf"). The other printed types (screen print, vinyl, DTG, sublimation)
+// have no machine or stock to track, so each line is one card per type with Start and Mark made.
+// A product's columns that productDecoration_ needs, read in the same query as its lines (alias p = products, i = the line).
+const PRODUCT_DECORATION_COLS_ = `p.decorationType AS pDecorationType, p.designId AS pDesignId, p.noDesignNeeded AS pNoDesign, p.digital AS pDigital,
+  p.fixedTransfersJson AS pFixed,
+  (SELECT count(*) FROM product_designs pd WHERE pd.orgId = i.orgId AND pd.productId = i.productId) AS pDesignCount`;
+function productFromCols_(r) {
+  if (!r || r.pDesignId === undefined) return null;
+  return { decorationType: r.pDecorationType || "", designId: r.pDesignId == null ? null : Number(r.pDesignId),
+    designCount: Number(r.pDesignCount) || 0, noDesignNeeded: !!Number(r.pNoDesign), digital: !!Number(r.pDigital),
+    fixedTransfers: tryParse_(r.pFixed, []) || [] };
+}
+const OTHER_DECORATIONS_ = DECORATION_KEYS.filter(k => k !== "embroidery" && k !== "dtf");
+
+// The cards of the other printed types: one per (line, type). The same lines as getTransferQueue (cleared for work,
+// not test / void / completed / shipped / delivered, not from stock, not cancelled), still to do when the line is not
+// made, or is also embroidered and its printing hasn't been marked made.
+async function getOtherDecorationCards_(db) {
+  const nb = await noBlankLine_(db), fs = await fromStockLine_(db), cleared = await workClearedSql_(db);
+  let results;
+  try {
+    ({ results } = await db.prepare(
+      `SELECT i.id AS itemId, i.orderId, i.orgId, i.productId, i.name AS itemName, i.size AS itemSize, i.qty, i.configJson,
+              COALESCE(i.manufacturedQty,0) AS manufacturedQty, o.manufacturedAt AS orderMadeAt, i.decStartedAt, i.decMadeAt,
+              COALESCE(i.blankReceivedAt, o.blankReceivedAt) AS blankReceivedAt, ${nb("i")} AS noBlank,
+              org.name AS orgName, o.customerName, o.dueDate, o.placedAt, ${PRODUCT_DECORATION_COLS_},
+              l.blankId, l.blankSize, b.name AS blankName, COALESCE(NULLIF(l.blankColor, ''), b.color) AS blankColor
+       FROM order_items i
+       JOIN orders o ON o.orderId = i.orderId
+       JOIN orgs org ON org.orgId = i.orgId
+       LEFT JOIN products p ON p.orgId = i.orgId AND p.productId = i.productId
+       LEFT JOIN product_blank_links l ON l.orgId = i.orgId AND l.productId = i.productId AND l.productSize = i.size
+              AND l.productColor = (CASE WHEN i.configJson LIKE '{%' THEN COALESCE(json_extract(i.configJson,'$.garmentColor'),'') ELSE '' END)
+       LEFT JOIN blanks b ON b.id = l.blankId
+       WHERE i.cancelDate IS NULL AND ${cleared()} AND o.isTest = 0 AND o.voidedAt IS NULL AND NOT ${fs("i")}
+         AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL
+       ORDER BY (o.dueDate IS NULL), o.dueDate, o.placedAt, i.id`).all());
+  } catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return []; throw e; }   // before migrations/0118
+  const lines = [];
+  for (const r of results) {
+    const cfg = tryParse_(r.configJson, null);
+    const types = lineDecorations_({ config: cfg }, productFromCols_(r)).filter(k => OTHER_DECORATIONS_.includes(k));
+    if (types.length) lines.push({ r, cfg, types });
+  }
+  if (!lines.length) return [];
+  const embroidered = await linesWithEmbroidery_(db, lines.map(x => Number(x.r.itemId)));
+  const cards = [];
+  for (const { r, cfg, types } of lines) {
+    const hasEmbroidery = embroidered.has(Number(r.itemId));
+    const made = !!r.orderMadeAt || Number(r.manufacturedQty) >= (Number(r.qty) || 1);
+    if (!(!made || (hasEmbroidery && !r.decMadeAt))) continue;
+    for (const type of types) {
+      cards.push({
+        type, itemId: Number(r.itemId), orderId: r.orderId, orgId: r.orgId, orgName: r.orgName || r.orgId,
+        customerName: r.customerName, itemName: r.itemName, itemSize: r.itemSize || "", qty: Number(r.qty) || 1,
+        dueDate: r.dueDate || "", placedAt: r.placedAt || "", garmentColor: (cfg && cfg.garmentColor) || "",
+        blank: r.blankId == null ? null : { id: Number(r.blankId), name: r.blankName || "", color: r.blankColor || "", size: r.blankSize || "" },
+        locations: ((cfg && cfg.locations) || []).filter(l => l && l.location && locationDecoration_(l) === type).map(l => ({
+          location: l.label || l.location, graphicName: l.graphicName || "", ink: l.ink || "", imageUrl: l.imageUrl || "", thumbUrl: l.thumbUrl || "",
+          ...(l.custom ? { custom: true, fileKey: l.fileKey || "", fileName: l.fileName || "" } : {}) })),
+        blankReceived: !!r.blankReceivedAt || !!Number(r.noBlank),
+        started: !!r.decStartedAt, hasEmbroidery, embroideryDone: hasEmbroidery && made,
+      });
+    }
+  }
+  return cards;
+}
+
+// Everything the Run order page lists, in one answer. `today` is accepted for callers that pass it (the page works
+// out its own due badges); nothing here depends on it.
+export async function getRunQueue(db, { today } = {}) {
+  const [embroidery, transfers, cards, types] = await Promise.all([
+    getProductionQueue(db), getTransferQueue(db), getOtherDecorationCards_(db), getDecorationTypes(db)]);
+  const counts = {};
+  for (const k of DECORATION_KEYS) counts[k] = 0;
+  counts.embroidery = embroidery.length;
+  counts.dtf = transfers.ready.length + transfers.waiting.length;
+  const other = { ready: [], waiting: [] };
+  for (const c of cards) { counts[c.type]++; (c.blankReceived ? other.ready : other.waiting).push(c); }
+  return { embroidery, transfers, other, types, counts };
+}
+
+// Start / Undo on a screen print, vinyl, DTG or sublimation line (decStartedAt).
+export async function setDecorationStarted(db, orderId, itemId, on = true, at = null) {
+  const item = await db.prepare("SELECT id, cancelDate FROM order_items WHERE id=? AND orderId=?").bind(Number(itemId), orderId).first();
+  if (!item) throw new Error("Line item not found");
+  if (item.cancelDate) throw new Error("That line item is cancelled");
+  await db.prepare("UPDATE order_items SET decStartedAt=? WHERE id=?").bind(on ? (at || new Date().toISOString()) : null, Number(itemId)).run();
+}
+
+// Mark made on those cards. A line that is also embroidered: only the printing is recorded (decMadeAt); the piece is
+// made by finishing its embroidery on the Run order. Any other line: every remaining piece is marked made — which
+// takes the blanks out of stock as always — and decMadeAt is set. Idempotent.
+export async function makeDecoratedLine(db, orderId, itemId, at = null) {
+  const item = await db.prepare(
+    "SELECT id, qty, COALESCE(manufacturedQty,0) AS manufacturedQty, decMadeAt, cancelDate FROM order_items WHERE id=? AND orderId=?"
+  ).bind(Number(itemId), orderId).first();
+  if (!item) throw new Error("Line item not found");
+  if (item.cancelDate) throw new Error("That line item is cancelled");
+  const stamp = at || new Date().toISOString();
+  const markPrinted = () => db.prepare("UPDATE order_items SET decMadeAt=COALESCE(decMadeAt, ?) WHERE id=?").bind(stamp, Number(itemId)).run();
+  if (await lineHasEmbroidery(db, itemId)) {
+    if (item.decMadeAt) return { alreadyDone: true, applied: true, orderComplete: false };
+    await markPrinted();
+    return { applied: true, orderComplete: false };
+  }
+  const qty = Math.max(1, Number(item.qty) || 1);
+  if (Number(item.manufacturedQty) >= qty) {
+    if (!item.decMadeAt) await markPrinted();
+    return { alreadyDone: true, orderComplete: false };
+  }
+  let res = { orderComplete: false };
+  for (let made = Number(item.manufacturedQty); made < qty; made++) res = await markItemPieceManufactured(db, orderId, Number(itemId), at);
+  await markPrinted();
   return { orderComplete: !!res.orderComplete };
 }
 
@@ -9753,7 +10157,7 @@ const VENDOR_NAME_COLUMNS_ = [
   ["blanks", "vendor", "blanks"], ["inventory_movements", "vendor", "blank receipts"], ["transfer_movements", "vendor", "transfer receipts"],
   ["expenses", "vendor", "expenses"], ["order_items", "blankVendor", "order lines"], ["orders", "blankVendor", "orders"],
   ["blank_shipments", "vendor", "blank shipments"], ["supplier_orders", "vendor", "supplier orders"], ["blank_restock_orders", "vendor", "restock orders"],
-  ["recurring_expenses", "vendor", "recurring expenses"],
+  ["recurring_expenses", "vendor", "recurring expenses"], ["digitizing_jobs", "vendor", "digitizing jobs"],
 ];
 const vendorErr_ = (m) => Object.assign(new Error(m), { userFacing: true });
 // {overCents, minQty, isDefault} — free shipping for a vendor row, or null when it has none. overCents 0 = always free.
@@ -9764,7 +10168,7 @@ function vendorFreeShipping_(v) {
   return overCents != null || minQty != null ? { overCents, minQty, isDefault: false } : null;
 }
 function vendorView_(r) {
-  return { id: Number(r.id), name: r.name, forBlanks: !!Number(r.forBlanks), hidden: !!Number(r.hidden), noFreeShipping: !!Number(r.noFreeShipping),
+  return { id: Number(r.id), name: r.name, forBlanks: !!Number(r.forBlanks), forDigitizing: !!Number(r.forDigitizing), hidden: !!Number(r.hidden), noFreeShipping: !!Number(r.noFreeShipping),
     freeShipOverCents: r.freeShipOverCents == null ? null : Number(r.freeShipOverCents), freeShipMinQty: r.freeShipMinQty == null ? null : Number(r.freeShipMinQty),
     freeShipping: vendorFreeShipping_(r) };
 }
@@ -9867,6 +10271,9 @@ export async function saveVendor(db, input = {}) {
       .bind(...vals, now, now).first();
     newId = Number(r.id);
   }
+  // Digitizes designs (migrations/0118): written apart so a caller that doesn't send it keeps the vendor's setting.
+  if (input.forDigitizing !== undefined) await db.prepare("UPDATE vendors SET forDigitizing=? WHERE id=?").bind(input.forDigitizing ? 1 : 0, newId).run()
+    .catch((e) => { if (!/no such column/i.test(String(e && e.message))) throw e; });
   const after = await db.prepare("SELECT * FROM vendors WHERE id=?").bind(newId).first();
   return { vendor: vendorView_(after), before: before ? vendorView_(before) : null, renamed };
 }
@@ -13252,7 +13659,7 @@ async function catalogPrefetch_(db) {
     const r = snapOf.get(org.orgId), rows = r ? await snapshotRows_(db, org.orgId, r.json, partsOf[org.orgId] || []) : null;
     if (rows) shopRows.push(rows); else { unpublished.push(org.orgId); shopRows.push({ org, products: null }); }
   }
-  const [liveProducts, productDesigns, weights, links, colors, mockups, locations, graphics, designs] = await Promise.all([
+  const [liveProducts, productDesigns, weights, links, colors, mockups, locations, graphics, designs, decorationTypes] = await Promise.all([
     unpublished.length ? all("SELECT * FROM products WHERE orgId IN (SELECT value FROM json_each(?)) ORDER BY productId", JSON.stringify(unpublished)) : [],
     orElse(all("SELECT * FROM product_designs ORDER BY sortOrder, id"), null),
     getBlankWeights(db, null),
@@ -13265,6 +13672,7 @@ async function catalogPrefetch_(db) {
     orElse(listLocations(db), null),
     withFallback("SELECT * FROM graphics ORDER BY isGlobal, sortOrder, name", "SELECT * FROM graphics ORDER BY sortOrder, name").then(rows => rows.map(parseGraphic_), e => ({ error: e })),
     orElse(withFallback("SELECT id, orgId, name, isGlobal FROM designs ORDER BY isGlobal, name", "SELECT id, orgId, name FROM designs ORDER BY name"), null),
+    getDecorationTypes(db),   // the decoration types switched on, read once for every shop (attachDecorations_)
   ]);
   const liveOf = byOrg(liveProducts);
   for (const rows of shopRows) if (!rows.products) rows.products = liveOf[rows.org.orgId] || [];
@@ -13272,7 +13680,7 @@ async function catalogPrefetch_(db) {
     liveOrgs: Object.fromEntries(orgRows.map(o => [o.orgId, o])),
     productDesigns: productDesigns && byOrg(productDesigns), weights,
     blankLinkImages: links && colors ? byOrg(links) : null, blankColors: links && colors ? colors : null,
-    mockups: mockups && byOrg(mockups), locations,
+    mockups: mockups && byOrg(mockups), locations, decorationTypes,
     // A shop's own graphics and every global one (listGraphics), in its order.
     graphicsFor: (orgId) => { if (graphics.error) throw graphics.error; return graphics.filter(g => g.orgId === orgId || g.isGlobal); },
     // A shop's own designs and every global one (listDesigns), for their names.
@@ -13283,7 +13691,7 @@ async function catalogPrefetch_(db) {
 // business shown to visitors, the region, the features and the sections. Shared by the whole-install build below and
 // the catalog's meta entry (getPublicCatalogMeta), so the two can't drift apart.
 async function catalogSiteParts_(db) {
-  const [baseSettings, salesTax, business, locale, features, categories, rushFee] = await Promise.all([
+  const [baseSettings, salesTax, business, locale, features, categories, rushFee, decorationTypes] = await Promise.all([
     getGlobalSettings(db),
     getSalesTaxSettings(db),
     getBusinessProfile(db),
@@ -13291,6 +13699,7 @@ async function catalogSiteParts_(db) {
     getFeatures(db),
     listProductCategories(db),
     getRushSettings(db),
+    getDecorationTypes(db),
   ]);
   return {
     globalSettings: { ...baseSettings, salesTax, rushFee },
@@ -13299,6 +13708,7 @@ async function catalogSiteParts_(db) {
     // shop's order deadline ends (functions/api/catalog.js orderClosesAt).
     locale: { country: locale.country, timeZone: locale.timeZone || "" },
     features,                                    // which optional parts of the site are on (Features)
+    decorationTypes,                             // the kinds of decoration the shop does (Global settings → Decoration types)
     // The storefront's sections, in order (migrations/0056): key + heading only.
     categories: categories.map(c => ({ key: c.key, label: c.plural || c.name })),
   };
@@ -13326,6 +13736,7 @@ export async function getPublicCatalogData(db) {
     business: site.business,
     locale: site.locale,
     features: site.features,
+    decorationTypes: site.decorationTypes,
     categories: site.categories,
     version: "d1", // static — the cache is keyed by global_settings.catalogVersion
   };
@@ -13551,14 +13962,16 @@ async function attachProductGraphicImages_(db, orgId, products, pre) {
   return out;
 }
 
-// What decorates each product, in words, for the shop page (2026-10): `decorations` [{kind: "Embroidered" | "Printed",
-// name, location}] — shown whether or not there's a picture of it. The embroidered graphics placed for mockups name the
+// What decorates each product, in words, for the shop page (2026-10): `decorations` [{kind: "Embroidered" | "Printed (DTF)" |
+// "Screen printed" | …, name, location}] — the type's storefront word (decorationMadeLabel), and only for the types switched
+// on in Global settings — shown whether or not there's a picture of it. The embroidered graphics placed for mockups name the
 // embroidery where it sits (else the product's own designs with their placement), and its printed transfers what's
 // printed where. A configurable product's options are the customer's picks, so they aren't listed here.
 async function attachDecorations_(db, orgId, products, pre) {
   const has = (p) => (p.designs || []).length || p.designId || (p.fixedTransfers || []).length || (p.mockupGraphics || []).length;
   if (!products.some(has)) return products;
   const graphics = {}, designs = {}, locs = {};
+  const on = pre && pre.decorationTypes ? pre.decorationTypes : await getDecorationTypes(db);
   try { for (const g of (pre ? pre.graphicsFor(orgId) : await listGraphics(db, orgId))) graphics[Number(g.id)] = g; } catch (e) {}
   try { for (const d of (pre ? pre.designsFor(orgId) : await listDesigns(db, orgId))) designs[Number(d.id)] = d; } catch (e) {}
   try { for (const l of (pre ? pre.locations || [] : await listLocations(db))) locs[Number(l.id)] = l.name; } catch (e) {}
@@ -13570,13 +13983,14 @@ async function attachDecorations_(db, orgId, products, pre) {
       if (!name || out.some(x => x.kind === kind && x.name === name && x.location === location)) return;
       out.push({ kind, name, location });
     };
+    const addType = (type, name, location) => { if (on.includes(type)) add(decorationMadeLabel(type), name, location); };
     const mock = (p.mockupGraphics || []).filter(m => graphics[Number(m.graphicId)]);
-    for (const m of mock) add("Embroidered", graphics[Number(m.graphicId)].name, locs[Number(m.locationId)]);
+    for (const m of mock) addType("embroidery", graphics[Number(m.graphicId)].name, locs[Number(m.locationId)]);
     if (!mock.length && !Number(p.noDesignNeeded)) {
       const ds = (p.designs || []).length ? p.designs : (p.designId ? [{ designId: p.designId, placement: "" }] : []);
-      for (const d of ds) { const x = designs[Number(d.designId)]; if (x) add("Embroidered", x.name, d.placement); }
+      for (const d of ds) { const x = designs[Number(d.designId)]; if (x) addType("embroidery", x.name, d.placement); }
     }
-    for (const f of p.fixedTransfers || []) { const g = graphics[Number(f.graphicId)]; if (g) add("Printed", g.name, locs[Number(f.locationId)]); }
+    for (const f of p.fixedTransfers || []) { const g = graphics[Number(f.graphicId)]; if (g) addType(graphicDecoration(g), g.name, locs[Number(f.locationId)]); }
     return out.length ? { ...p, decorations: out } : p;
   });
 }
@@ -14033,6 +14447,7 @@ function parseExpense_(r) {
     isRefund: Number(r.amountCents) < 0, refundOfId: r.refundOfId == null ? null : Number(r.refundOfId),
     recurringId: r.recurringId == null ? null : Number(r.recurringId),   // recorded from a recurring expense (0085)
     fundraiserOrgId: r.fundraiserOrgId == null ? null : String(r.fundraiserOrgId),   // a payout to this shop's fundraiser (0110)
+    orderId: r.orderId || "",   // the order it was recorded for (0118), e.g. an outside digitizing fee
   };
 }
 
@@ -14116,10 +14531,12 @@ function expenseVals_(x) {
 function insertExpenseStmt_(db, x, now) {
   // A fundraiser payout (recordFundraiserPayout, migrations/0110) is tied to its shop as it's written; the column is
   // named only then, so every other expense still saves on a database from before 0110. An edit keeps the tie.
+  // The same for the order an expense was recorded for (migrations/0118, an outside digitizing fee).
   const fr = x.fundraiserOrgId ? [String(x.fundraiserOrgId)] : [];
+  const ord = x.orderId ? [String(x.orderId).slice(0, 64)] : [];
   return db.prepare(`INSERT INTO expenses (expenseDate, description, categoryId, amountCents, vendor, businessUsePct,
-    receiptKey, receiptName, placedInService, depMethod, vendorChargedTax, accountId, paidPersonally, refundOfId, createdAt, updatedAt, receiptGroup${fr.length ? ", fundraiserOrgId" : ""}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${fr.length ? ", ?" : ""}) RETURNING id`)
-    .bind(...expenseVals_(x), now, now, x.receiptGroup ? String(x.receiptGroup).slice(0, 64) : null, ...fr);
+    receiptKey, receiptName, placedInService, depMethod, vendorChargedTax, accountId, paidPersonally, refundOfId, createdAt, updatedAt, receiptGroup${fr.length ? ", fundraiserOrgId" : ""}${ord.length ? ", orderId" : ""}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${fr.length ? ", ?" : ""}${ord.length ? ", ?" : ""}) RETURNING id`)
+    .bind(...expenseVals_(x), now, now, x.receiptGroup ? String(x.receiptGroup).slice(0, 64) : null, ...fr, ...ord);
 }
 // Several new expenses (the CSV import) as one batch: one round trip, and all of them or none — a row that fails
 // leaves nothing behind, so importing the file again can't make duplicates. Returns their ids in the list's order.
@@ -14339,6 +14756,97 @@ export async function linkPaymentsToCashout(db, allocations, transferId) {
 export async function deleteExpense(db, id) {
   await db.prepare("UPDATE expenses SET deletedAt = ? WHERE id = ? AND deletedAt IS NULL").bind(new Date().toISOString(), Number(id)).run();
 }
+
+// ---- Outside digitizing (migrations/0118) ----------------------------------------------------------------------
+// A design sent to an outside digitizer: what, to whom, when it went and came back, and what it cost. The cost can also
+// be recorded as an expense (category "Digitizing", tied to the order) in the same batch, so the two never disagree on
+// whether it was written; deleting the job then needs that expense deleted first. Money in cents. Soft-deleted.
+const parseDigitizingJob_ = (r) => ({
+  id: Number(r.id), orderId: r.orderId || "", itemId: r.itemId == null ? null : Number(r.itemId),
+  designId: r.designId == null ? null : Number(r.designId), estimateId: r.estimateId == null ? null : Number(r.estimateId),
+  name: r.name || "", vendor: r.vendor || "", sentAt: r.sentAt || "", returnedAt: r.returnedAt || "",
+  costCents: Number(r.costCents) || 0, expenseId: r.expenseId == null ? null : Number(r.expenseId), note: r.note || "",
+  createdAt: r.createdAt || "", createdBy: r.createdBy || "" });
+const realDay_ = (v) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || "")); if (!m) return false;
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])); return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3]; };
+const optionalId_ = (v, label) => {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) throw pricingError_(`${label} isn't a valid id.`);
+  return n;
+};
+
+export async function listDigitizingJobs(db, { orderId, estimateId } = {}) {
+  const where = ["deletedAt IS NULL"], binds = [];
+  if (orderId != null && orderId !== "") { where.push("orderId = ?"); binds.push(String(orderId)); }
+  if (estimateId != null && estimateId !== "") { where.push("estimateId = ?"); binds.push(Number(estimateId)); }
+  try {
+    const { results } = await db.prepare(`SELECT * FROM digitizing_jobs WHERE ${where.join(" AND ")} ORDER BY sentAt DESC, id DESC`).bind(...binds).all();
+    return (results || []).map(parseDigitizingJob_);
+  } catch (e) { if (/no such table/i.test(String(e && e.message))) return []; throw e; }   // before migrations/0118
+}
+
+// Adds a job (no id) or changes one (id). `by` = who did it. Throws userFacing errors, nothing written. With
+// job.recordExpense === true, costCents > 0 and no expense yet, the cost is also written as an expense. A job's expense,
+// once recorded, is an ordinary expense: changing the cost here doesn't rewrite it (edit the expense).
+export async function saveDigitizingJob(db, job, { by = "" } = {}) {
+  const j = job || {};
+  const name = String(j.name == null ? "" : j.name).trim();
+  if (name.length > 200) throw pricingError_("What was sent can be at most 200 characters.");
+  let vendor = String(j.vendor == null ? "" : j.vendor).trim().replace(/\s+/g, " ");
+  if (vendor.length > 120) throw pricingError_("The digitizer's name can be at most 120 characters.");
+  if (vendor) vendor = await resolveVendorName(db, vendor, { label: "Digitizer" });
+  const sentAt = String(j.sentAt || "").slice(0, 10), returnedAt = j.returnedAt ? String(j.returnedAt).slice(0, 10) : "";
+  if (!realDay_(sentAt)) throw pricingError_("Pick the date it was sent.");
+  if (returnedAt && !realDay_(returnedAt)) throw pricingError_("The date it came back isn't a real date.");
+  if (returnedAt && returnedAt < sentAt) throw pricingError_("It can't come back before it was sent.");
+  const costCents = j.costCents == null || j.costCents === "" ? 0 : Number(j.costCents);
+  if (!Number.isInteger(costCents) || costCents < 0 || costCents > 100000000) throw pricingError_("The cost must be a whole number of cents from 0 to 100,000,000.");
+  const note = String(j.note == null ? "" : j.note).slice(0, 500);
+  const orderId = String(j.orderId == null ? "" : j.orderId).trim().slice(0, 64);
+  const itemId = optionalId_(j.itemId, "The order line"), designId = optionalId_(j.designId, "The design"), estimateId = optionalId_(j.estimateId, "The quote");
+  const id = Number(j.id) || 0;
+  const before = id ? await db.prepare("SELECT * FROM digitizing_jobs WHERE id = ? AND deletedAt IS NULL").bind(id).first() : null;
+  if (id && !before) throw pricingError_("That digitizing record no longer exists — reload and try again.");
+  const now = new Date().toISOString(), who = String(by || "").slice(0, 200);
+  const stmts = [];
+  let expenseSql = false;
+  if (j.recordExpense === true && costCents > 0 && !(before && before.expenseId != null)) {
+    let cat = (await db.prepare("SELECT id FROM expense_categories WHERE name = ? COLLATE NOCASE").bind("Digitizing").first());
+    const catId = cat ? Number(cat.id) : await saveExpenseCategory(db, null, { name: "Digitizing", deductionType: "deductible", scheduleCLine: "11", deductiblePct: 100, useTaxable: false });
+    stmts.push(insertExpenseStmt_(db, { date: returnedAt || sentAt, description: "Digitizing: " + (name || "design").slice(0, 200), categoryId: catId,
+      amount: fromCents(costCents), vendor, businessUsePct: 100, vendorChargedTax: true, paidPersonally: false,
+      accountId: j.accountId ? Number(j.accountId) : null, orderId }, now));
+    expenseSql = true;
+  }
+  const expenseRef = expenseSql ? "last_insert_rowid()" : "NULL";
+  if (id) {
+    stmts.push(db.prepare(`UPDATE digitizing_jobs SET orderId=?, itemId=?, designId=?, estimateId=?, name=?, vendor=?, sentAt=?, returnedAt=?, costCents=?, note=?,
+      expenseId = COALESCE(expenseId, ${expenseRef}) WHERE id=? AND deletedAt IS NULL`)
+      .bind(orderId, itemId, designId, estimateId, name, vendor, sentAt, returnedAt || null, costCents, note, id));
+  } else {
+    stmts.push(db.prepare(`INSERT INTO digitizing_jobs (orderId, itemId, designId, estimateId, name, vendor, sentAt, returnedAt, costCents, expenseId, note, createdAt, createdBy)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${expenseRef}, ?, ?, ?) RETURNING id`)
+      .bind(orderId, itemId, designId, estimateId, name, vendor, sentAt, returnedAt || null, costCents, note, now, who));
+  }
+  const res = await db.batch(stmts);
+  const savedId = id || Number(res[res.length - 1].results[0].id);
+  return parseDigitizingJob_(await db.prepare("SELECT * FROM digitizing_jobs WHERE id = ?").bind(savedId).first());
+}
+
+// Takes a job off the lists (soft). Refused while the expense recorded for it is still live — delete that first, so
+// the books and the list agree.
+export async function deleteDigitizingJob(db, id) {
+  const r = await db.prepare("SELECT * FROM digitizing_jobs WHERE id = ? AND deletedAt IS NULL").bind(Number(id) || 0).first();
+  if (!r) throw pricingError_("That digitizing record no longer exists.");
+  if (r.expenseId != null) {
+    const e = await db.prepare("SELECT 1 AS live FROM expenses WHERE id = ? AND deletedAt IS NULL").bind(Number(r.expenseId)).first();
+    if (e) throw pricingError_("Delete its expense first");
+  }
+  await db.prepare("UPDATE digitizing_jobs SET deletedAt = ? WHERE id = ? AND deletedAt IS NULL").bind(new Date().toISOString(), Number(r.id)).run();
+  return parseDigitizingJob_(r);
+}
+
 export async function expenseMonth(db, id) {
   const r = await db.prepare("SELECT expenseDate FROM expenses WHERE id = ?").bind(Number(id)).first();
   return r ? String(r.expenseDate).slice(0, 7) : "";

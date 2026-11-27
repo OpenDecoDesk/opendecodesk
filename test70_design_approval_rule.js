@@ -160,6 +160,8 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
           const ok = (o) => ({ ok: true, status: 200, json: async () => Object.assign({ status: "ok" }, o) });
           if (String(url).includes("/api/catalog")) return ok({ status: "admin" });
           if (b.action === "getProductionQueue") return ok(qResp);
+          // The one Run order asks getRunQueue: the same embroidery queue, with nothing else to run.
+          if (b.action === "getRunQueue") return ok({ embroidery: qResp.queue, transfers: { ready: [], waiting: [] }, other: { ready: [], waiting: [] }, types: ["embroidery", "dtf"], counts: {}, paidUnrun: qResp.paidUnrun || [], waitingOnBlanks: qResp.waitingOnBlanks || [], needleSizes: qResp.needleSizes || [] });
           if (b.action === "listMachines") return ok({ machines: [] });
           if (b.action === "listHoops") return ok({ hoops: [] });
           if (b.action === "listThreads") return ok({ threads: [] });

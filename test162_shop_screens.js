@@ -140,7 +140,7 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const page = JSON.parse(await (await catalogGet({ request: new Request(shopOrigin("acmerowing") + "/api/catalog"), env: ENV })).text());
   const tee = ((page.catalog && page.catalog.products) || []).find(p => p.id === r.body.productId) || {};
   ok("the catalog sends what decorates it, in words: the embroidery and where, the print and where", JSON.stringify(tee.decorations) ===
-    JSON.stringify([{ kind: "Embroidered", name: "Acme oar logo", location: "Left chest" }, { kind: "Printed", name: "Club crest print", location: "Back" }]));
+    JSON.stringify([{ kind: "Embroidered", name: "Acme oar logo", location: "Left chest" }, { kind: "Printed (DTF)", name: "Club crest print", location: "Back" }]));
   const html = w.decorationsHtml_({ decorations: [{ kind: "Printed", name: "<b>Crest</b>", location: "Back" }] });
   ok("the shop page lists each one (“Printed: Crest — Back”), escaped, with no picture needed", /Printed:<\/span> &lt;b&gt;Crest&lt;\/b&gt; — Back/.test(html) && w.decorationsHtml_({}) === "");
   ok("…on both kinds of product card", (storefrontPage().match(/\$\{decorationsHtml_\(p\)\}/g) || []).length === 2);

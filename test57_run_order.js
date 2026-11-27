@@ -274,8 +274,8 @@ const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + st
     (() => { const b = (pu.body.paidUnrun || []).find(o => o.orderId === "DUEB"); return b && b.dueDate === "2026-07-12" && b.customerName === "Cust DUEB" && Array.isArray(b.items) && typeof b.blankReceived === "boolean"; })());
   const tq = await call({ action: "getTransferQueue" });
   console.log("getTransferQueue returns the same paidUnrun backlog:", Array.isArray(tq.body.paidUnrun) && tq.body.paidUnrun.some(o => o.orderId === "DUEB"));
-  console.log("both run pages render it via paidUnrunHtml_:",
-    /function paidUnrunHtml_/.test(adminJs) && /paidUnrunHtml_\(paidUnrun\)/.test(adminJs) && /paidUnrunHtml_\(data\.paidUnrun \|\| \[\]\)/.test(adminJs) &&
+  console.log("the one Run order (its #runtransfer address too) renders it via paidUnrunHtml_:",
+    /function paidUnrunHtml_/.test(adminJs) && /paidUnrunHtml_\(paid\)/.test(adminJs) &&
     /Paid, not yet run — by due date/.test(adminJs));
   console.log("run backlog shows 'Blanks not ordered yet' (not the old 'No blanks yet' status):",
     /Blanks not ordered yet<\/span>/.test(adminJs) && !/>No blanks yet<\/span>/.test(adminJs));

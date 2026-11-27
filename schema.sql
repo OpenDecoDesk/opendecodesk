@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS products (
   -- migrations/0109: quantity breaks — [{minQty, offCents}] sorted by minQty; from minQty pieces of this product in
   -- one order, each piece costs offCents less (the deepest break that applies). '[]' = none.
   qtyBreaksJson             TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(qtyBreaksJson)),
+  -- migrations/0118: the product's own decoration; '' = worked out from its design / transfers (productDecoration_).
+  decorationType            TEXT NOT NULL DEFAULT '' CHECK (decorationType IN ('', 'embroidery', 'dtf', 'screenprint', 'vinyl', 'dtg', 'sublimation')),
   PRIMARY KEY (orgId, productId)
 );
 
@@ -359,7 +361,10 @@ CREATE TABLE IF NOT EXISTS order_items (
   -- migrations/0080: the combination (ready_to_ship.variant) a line filled from stock came from.
   stockVariant        TEXT NOT NULL DEFAULT '',
   -- migrations/0110: what this line raises for its shop's fundraiser, worked out when it was priced; 0 = none.
-  fundraiserCents     INTEGER NOT NULL DEFAULT 0 CHECK (fundraiserCents >= 0)
+  fundraiserCents     INTEGER NOT NULL DEFAULT 0 CHECK (fundraiserCents >= 0),
+  -- migrations/0118: Start / Mark made of a screen print, vinyl, DTG or sublimation line (like transfersAppliedAt).
+  decStartedAt        TEXT,
+  decMadeAt           TEXT
 );
 
 CREATE TABLE IF NOT EXISTS design_verifications (
@@ -621,7 +626,8 @@ CREATE TABLE IF NOT EXISTS vendors (
   noFreeShipping    INTEGER NOT NULL DEFAULT 0 CHECK (noFreeShipping IN (0, 1)),
   hidden            INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
   createdAt         TEXT    NOT NULL,
-  updatedAt         TEXT    NOT NULL
+  updatedAt         TEXT    NOT NULL,
+  forDigitizing     INTEGER NOT NULL DEFAULT 0 CHECK (forDigitizing IN (0, 1))  -- digitizes designs (0118)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vendors_name ON vendors (name COLLATE NOCASE);
 
@@ -1276,10 +1282,10 @@ CREATE INDEX IF NOT EXISTS idx_orders_manufactured ON orders(manufacturedAt);
 CREATE INDEX IF NOT EXISTS idx_orders_sale_date ON orders(COALESCE(shippedAt, deliveredAt, completedAt));   -- migrations/0088
 
 -- Owner notices queued for the 6 AM daily roll-up (migrations/0011; 'delivered' added in 0016, 'invoice' in 0058,
--- 'picked_up' in 0113).
+-- 'picked_up' in 0113, 'quote' / 'gift_card' / 'po' in 0119).
 CREATE TABLE IF NOT EXISTS owner_notices (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind      TEXT NOT NULL CHECK (kind IN ('payment', 'refund', 'dispute', 'design', 'delivered', 'invoice', 'picked_up')),
+  kind      TEXT NOT NULL CHECK (kind IN ('payment', 'refund', 'dispute', 'design', 'delivered', 'invoice', 'picked_up', 'quote', 'gift_card', 'po')),
   orderId   TEXT NOT NULL DEFAULT '',
   orgId     TEXT NOT NULL DEFAULT '',
   summary   TEXT NOT NULL,
@@ -1290,6 +1296,26 @@ CREATE TABLE IF NOT EXISTS owner_notices (
   sentAt    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_owner_notices_unsent ON owner_notices(sentAt, id);
+
+-- Designs sent to an outside digitizer (migrations/0118): who, when, what it cost, and the expense recorded for it.
+CREATE TABLE IF NOT EXISTS digitizing_jobs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  orderId    TEXT NOT NULL DEFAULT '',
+  itemId     INTEGER,                       -- the order line, when it is for one
+  designId   INTEGER,                       -- the design, when there is one
+  estimateId INTEGER,                       -- the quote whose digitizing fee line it pays for, when there is one
+  name       TEXT NOT NULL DEFAULT '',      -- what was sent ("Example Club left chest logo")
+  vendor     TEXT NOT NULL DEFAULT '',      -- a vendors.name (names are what records store elsewhere)
+  sentAt     TEXT NOT NULL,                 -- YYYY-MM-DD
+  returnedAt TEXT,                          -- YYYY-MM-DD
+  costCents  INTEGER NOT NULL DEFAULT 0 CHECK (costCents >= 0),
+  expenseId  INTEGER,                       -- the expenses row recorded for its cost, when one was
+  note       TEXT NOT NULL DEFAULT '',
+  createdAt  TEXT NOT NULL,
+  createdBy  TEXT NOT NULL DEFAULT '',
+  deletedAt  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_digitizing_order ON digitizing_jobs(orderId);
 
 -- Business expenses + categories (migrations/0012). Seeds included.
 CREATE TABLE IF NOT EXISTS expense_categories (
@@ -1327,12 +1353,14 @@ CREATE TABLE IF NOT EXISTS expenses (
   paidPersonally  INTEGER NOT NULL DEFAULT 0 CHECK (paidPersonally IN (0, 1)),       -- owner's own money (0014)
   refundOfId      INTEGER REFERENCES expenses(id) ON DELETE SET NULL,                -- the purchase this refunds (0017)
   recurringId     INTEGER REFERENCES recurring_expenses(id),                         -- recorded from this rule (0085)
-  fundraiserOrgId TEXT REFERENCES orgs(orgId)                                        -- a payout to this shop's fundraiser (0110)
+  fundraiserOrgId TEXT REFERENCES orgs(orgId),                                       -- a payout to this shop's fundraiser (0110)
+  orderId         TEXT NOT NULL DEFAULT ''                                           -- the order it was recorded for, e.g. outside digitizing (0118)
 );
 CREATE INDEX IF NOT EXISTS idx_expenses_date     ON expenses(deletedAt, expenseDate);
 CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(categoryId);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_recurring ON expenses(recurringId, expenseDate) WHERE recurringId IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_expenses_fundraiser ON expenses(fundraiserOrgId) WHERE fundraiserOrgId IS NOT NULL;  -- 0110
+CREATE INDEX IF NOT EXISTS idx_expenses_order ON expenses(orderId) WHERE orderId <> '';  -- 0118
 
 -- Recurring expenses (migrations/0085): recorded automatically on each date they come due (frequency from startDate,
 -- the start's day of the month as the anchor; endDate NULL = no end; nextIndex = the occurrence that's next).
@@ -1636,7 +1664,9 @@ CREATE TABLE IF NOT EXISTS graphics (
   createdAt                TEXT NOT NULL,
   updatedAt                TEXT NOT NULL,
   -- migrations/0078: every shop can use it (its design must be global too).
-  isGlobal                 INTEGER NOT NULL DEFAULT 0 CHECK (isGlobal IN (0, 1))
+  isGlobal                 INTEGER NOT NULL DEFAULT 0 CHECK (isGlobal IN (0, 1)),
+  -- migrations/0118: what prints a transfer graphic; '' = DTF (and an embroidery graphic keeps '').
+  decoration               TEXT NOT NULL DEFAULT '' CHECK (decoration IN ('', 'dtf', 'screenprint', 'vinyl', 'dtg', 'sublimation'))
 );
 CREATE INDEX IF NOT EXISTS idx_graphics_org ON graphics(orgId);
 

@@ -66,9 +66,15 @@ and the tax and shipping features are built around a US business (see [Region](#
   orders export or a sheet of your own, matches each item to a product by SKU, and skips orders
   already imported.
 - Design approval: email a customer a proof, they approve or ask for changes from a link.
-- Embroidery production: threads, hoops, designs and their stitch files, machines, a Run Order queue
-  with timed runs, and a run-time report; stitch counts per run and machine maintenance by stitches or
-  run hours.
+- Embroidery production: threads, hoops, designs and their stitch files, machines, timed runs and a
+  run-time report; stitch counts per run and machine maintenance by stitches or run hours.
+- Decoration types: Global settings picks which kinds of work the shop does (embroidery, DTF transfer,
+  screen print, vinyl / heat transfer, DTG, sublimation) and prices each. One **Run order** page lists
+  every kind of work, soonest due first, with quick buttons to show one type and an **Order by** choice;
+  each card has its own Start and Mark made. Embroidery can be priced by stitch count, and screen print by
+  ink colour, on a quote or in the product form's price helper.
+- Outside digitizing: record a design sent to a digitizing vendor, when it went and came back, and what it
+  cost, on an order or a quote, and the cost can be filed as an expense.
 - A morning email to the owner with new orders, payments, deliveries and anything that went wrong.
 
 **Inventory and money**
@@ -210,8 +216,8 @@ change is written to the audit log.
   is hidden: orders are entered there (Local sale), payment links and design proofs you email still work,
   and Publish, a shop's "ready" box and custom-domain setup keep working for when it is turned back on.
 - **Production** — embroidery production: Threads (and needle settings), Hoops, Designs and their stitch
-  files, Machines, Machine maintenance, Machine Files, Run Order, Abort reasons, the Run Times report and
-  the send-agent relay.
+  files, Machines, Machine maintenance, Machine Files, the Run order (and its Start / Mark made on every
+  type of work), digitizing records, Abort reasons, the Run Times report and the send-agent relay.
   Off: orders are still moved through their stages by hand on the Orders page — including Mark
   manufactured, which uses up the blanks — no digitizing step or order-design upload is asked for, and the
   catalog health check stops flagging missing designs, hoops and stitch files.

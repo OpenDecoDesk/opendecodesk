@@ -16,7 +16,7 @@ const dbSrc = strip(read("functions/_lib/db.js"));
 const lib = new Function(dbSrc + `\nreturn { insertOrder, createProduct, createBlank, setBlankLink, createHoop, saveDesign, addDesignVersion, setProductDesign, saveMachine };`)();
 const fileUpload = strip(read("functions/_lib/fileUpload.js"));
 const api = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/catalogValidation.js")) + "\n" + fileUpload + "\n" + strip(read("functions/_lib/vendorImages.js")) + "\n" +
-  "const requireAdmin = async () => null; const adminActor = () => 'owner@test'; const adminUser = () => null;\n" +
+  "const requireAdmin = async () => null; const adminActor = () => 'owner@test'; " + require("./testlib/roles").adminAs() + "\n" +
   "const rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;\n" +
   "const verifyQuote = async () => ({ ok: false }); const canonicalItems = () => ''; const verifyTurnstile = async () => ({ ok: true });\n" +
   "const invalidateCatalogVersionCache = () => {}; const getCatalogData = async () => ({ subdomainMap: {}, orgs: {} });\n" +

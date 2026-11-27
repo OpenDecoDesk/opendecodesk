@@ -123,7 +123,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   ok("on: a production action works (a hoop is saved)", r.status === 200 && (await admin({ action: "listHoops" })).body.hoops.length === 1);
 
   await setF({ production: false });
-  const prodActions = ["listThreads", "listHoops", "listDesigns", "listMachines", "getProductionQueue", "listActiveRuns", "getRunReportByDesign", "listAbortReasons", "getNeedleSettings", "getMachineSettings", "startRun", "markManufacturedOnMachine", "saveDesignVersion", "setProductDesigns", "saveOrderItemDesign"];
+  const prodActions = ["listThreads", "listHoops", "listDesigns", "listMachines", "getProductionQueue", "getRunQueue", "listActiveRuns", "getRunReportByDesign", "listAbortReasons", "getNeedleSettings", "getMachineSettings", "startRun", "markManufacturedOnMachine", "saveDesignVersion", "setProductDesigns", "saveOrderItemDesign"];
   const refused = []; for (const a of prodActions) refused.push(off403(await admin({ action: a, org: "acme" }), "Production"));
   ok("off: threads, hoops, designs, machines, Run Order, runs, the run report, abort reasons and needle settings all answer 403 naming the feature", refused.every(Boolean));
   r = await post("admin", { action: "listThreads", key: "wrong" });
@@ -390,6 +390,8 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
       "listDesigns", "getDesign", "saveDesign", "deleteDesign", "saveDesignVersion", "updateDesignVersionColors", // Designs
       "setProductDesign", "listProductDesigns", "setProductDesigns", "previewProductHoopings",                // a product's designs
       "getOrderItemDesigns", "saveOrderItemDesign",                                                           // order-specific designs
+      "getRunQueue", "setDecorationStarted", "makeDecoratedLine",                                             // the one Run order: every decoration type
+      "getTransferQueue", "getGangSheet", "setTransferReceived", "setTransfersApplied", "makeTransferLine",   // its DTF cards (gated by Production since phase 5)
       "listMachines", "getMachine", "saveMachine", "deleteMachine", "setMachineHoop", "setMachineNeedle", "recordMachineDiscovery", // Machines
       "getMachineSettings", "updateMachineSettings",                                                          // Machine Files
       "getProductionQueue", "markManufacturedOnMachine",                                                      // Run Order
@@ -449,7 +451,9 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     "receiveBlanks", "receiveBlankOrder", "addBlankSizes", "readInvoiceWithAi", "markBlankPricesChecked", "setBlankArchived", "confirmProductPrices", "recomputeBlankAverageCosts", "getBlankVendorPriceHistory", "writeOffBlanks", "getBlankMovements", "voidInventoryMovement", "restoreInventoryMovement", "previewBlankCatchUp", "applyBlankCatchUp", "previewTransferCatchUp", "applyTransferCatchUp",
     "getBlankLinks", "setBlankLink", "saveBlankLinks", "deleteBlankLink", "getReadyToShip", "setReadyToShipQty", "countBlankStock", "makeForStock", "getFinishedGoodsMovements", "voidFinishedGoodsMovement",
     "listTransfers", "saveTransfer", "deleteTransfer", "receiveTransferSheet", "writeOffTransfers", "countTransferStock", "getTransferSheet", "editTransferSheet", "getTransferMovements", "voidTransferMovement", "restoreTransferMovement",
-    "getTransferQueue", "getGangSheet", "setTransferReceived", "setTransfersApplied", "refreshOrderFromCatalog", "makeTransferLine",
+    "refreshOrderFromCatalog",
+    // Decoration types (Global settings) and outside digitizing records: with any feature set
+    "getDecorationSettings", "updateDecorationSettings", "priceDecoration", "listDigitizingJobs", "saveDigitizingJob", "deleteDigitizingJob",
   ];
   const names = (text) => [...text.matchAll(/"(\w+)"/g)].map(m => m[1]);
   const mapSrc = ordersJs.match(/const FEATURE_ACTIONS = \{([\s\S]*?)\n\};/)[1];

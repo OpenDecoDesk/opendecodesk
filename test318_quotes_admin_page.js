@@ -505,7 +505,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   reset();
   ok("“+ Product” opens “Add a product”, with focus on the product", await openProduct() && pm().querySelector("[data-dialog-title]").textContent === "Add a product" && d.activeElement === pm().querySelector("#qtProd"));
   ok("…the shop's products are asked for, once", same(of("listProducts").map(b => b.org), ["acme"]));
-  ok("…every product of the shop, by name as text, a version with its label, a hidden one marked “(hidden)” — but not one with choices to make", same([...pm().querySelectorAll("#qtProd option")].map(o => o.value + "=" + o.textContent).sort(), ["beanie=Beanie — Winter", "cap=Club cap", "spare=Spare cap (hidden)", "tee=Club <tee>"]) && !pm().querySelector("#qtProd tee"));
+  ok("…every product of the shop, by name as text, a version with its label, a hidden one marked “(hidden)”, and one with choices to make too (its colour and graphics are picked in the window, phase 5)", same([...pm().querySelectorAll("#qtProd option")].map(o => o.value + "=" + o.textContent).sort(), ["beanie=Beanie — Winter", "cap=Club cap", "jacket=Build-a-jacket", "spare=Spare cap (hidden)", "tee=Club <tee>"]) && !pm().querySelector("#qtProd tee"));
   choose("#qtProd", "tee");
   ok("a product with sizes: a Size choice with each size's price", !pm().querySelector("#qtProdSizeWrap").hidden && same([...pm().querySelectorAll("#qtProdSize option")].map(o => o.textContent), ["S — $15.00", "M — $15.00", "XL — $18.00"]));
   ok("…no personalization for a product that has none", pm().querySelector("#qtProdPersWrap").hidden);
@@ -881,8 +881,9 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   scripted = { action: "listProducts", status: 500, body: { status: "error", message: "Try again in a moment." } };
   reset(); q("#qtAddProduct").click(); await wait(() => toasts.length === 1);
   ok("+ Product when the shop's products can't be loaded: “Couldn't load the shop's products: …”, and no window", lastToast().m === "Couldn't load the shop's products: Try again in a moment." && lastToast().err && !modal());
-  reset(); q("#qtAddProduct").click(); await wait(() => toasts.length === 1);
-  ok("+ Product in a shop whose every product has choices to make: “This shop has no products to quote. Add a custom line instead.”", lastToast().m === "This shop has no products to quote. Add a custom line instead." && lastToast().err && !modal() && of("listProducts").length === 1);
+  reset(); await openProduct();
+  ok("+ Product in a shop whose every product has choices to make: the window opens with that product (a quote can carry the picks), and no “no products” toast", [...pm().querySelectorAll("#qtProd option")].map(o => o.value + "=" + o.textContent).join() === "visor=League visor" && !toasts.length && of("listProducts").length === 1);
+  pm().querySelector("#qtProdCancel").click(); await wait(() => !modal());
   d1._raw.run("UPDATE estimates SET customerNote = '', respondedAt = NULL WHERE id = ?", [QREC]);
   await openQ(QREC);
   ok("asked for changes with no words and no day: just “The customer asked for changes.”", q(".qt-callout-changes b").textContent === "The customer asked for changes." && !q(".qt-quote-text"));

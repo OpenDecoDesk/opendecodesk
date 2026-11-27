@@ -242,7 +242,7 @@ test.describe("users and roles", () => {
   test("Production sees only its pages; others say Not available and the server refuses them", async ({ as, }, testInfo) => {
     const page = await as("production");
     await openAdmin(page, "home");
-    for (const name of ["Home", "Orders", "Run Order", "Run Transfer Sheets", "Production ▾", "Settings ▾"]) {
+    for (const name of ["Home", "Orders", "Run Order", "Production ▾", "Settings ▾"]) {
       await expect(menu(page).getByRole("button", { name, exact: true })).toBeVisible();
     }
     for (const name of ["Manage catalog", "Catalog ▾", "Inventory ▾", "Finance ▾", "Reports ▾"]) {

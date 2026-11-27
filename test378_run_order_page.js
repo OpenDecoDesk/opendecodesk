@@ -250,9 +250,9 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   ok("Type: embroidery, DTF, screen print, vinyl, DTG, sublimation, each by due date", same(cards(), "T3/embroidery G1/embroidery E1/embroidery E3/embroidery E2/embroidery T1/dtf T3/dtf S1/screenprint V1/vinyl G1/dtg M1/sublimation T2/dtf S2/screenprint".split(" ")));
   ok("Due date, Order date, Customer and Type are flat lists with no headings", qa("#roBody h2").length === 0);
   q("#roSort").value = "blank"; q("#roSort").dispatchEvent(new w.Event("change"));
-  ok("Blank: grouped with headings — blanks, no blank needed, nothing linked, then the blank types", same(qa("#roBody h2").map(text), ["Blanks", "No blank", "Unlinked", "cap"]));
-  ok("…each group by blank and size, cards by due date, waiting after ready within a group", same(cards(), "T3/dtf G1/dtg M1/sublimation S1/screenprint T1/dtf S2/screenprint T2/dtf E3/embroidery V1/vinyl T3/embroidery G1/embroidery E1/embroidery E2/embroidery".split(" ")));
-  ok("…with a line for each blank and size", same(qa("#roBody h2 ~ div > div:first-child").map(text), ["Cap 112 — Navy — OSFA", "Tee 5000 — Navy — M", "No blank needed — OSFA", "No blank linked — M", "Cap 112 — Navy — OSFA"]));
+  ok("Blank: grouped with headings — no blank needed, nothing linked, then the blank types (a DTF or other-type card under its blank's type, not a bare Blanks heading)", same(qa("#roBody h2").map(text), ["No blank", "Unlinked", "cap", "shirt"]));
+  ok("…each group by blank and size, cards by due date, waiting after ready within a group", same(cards(), "E3/embroidery V1/vinyl T3/embroidery T3/dtf G1/embroidery G1/dtg E1/embroidery E2/embroidery M1/sublimation S1/screenprint T1/dtf S2/screenprint T2/dtf".split(" ")));
+  ok("…with a line for each blank and size", same(qa("#roBody h2 ~ div > div:first-child").map(text), ["No blank needed — OSFA", "No blank linked — M", "Cap 112 — Navy — OSFA", "Tee 5000 — Navy — M"]));
   ok("…the choice is remembered", w.localStorage.getItem("odd_runorder_sort") === "blank");
   await load("all", "blank");
   ok("a remembered Order by is selected when the page opens again, and draws the headings", q("#roSort").value === "blank" && qa("#roBody h2").length === 4);
@@ -479,6 +479,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   const mk2 = of("makeDecoratedLine")[0];
   ok("Mark done on a line that is also embroidered asks in its own words and records only the decoration", asked.pop() === "Mark this decoration done? The piece is made when its embroidery is finished too." && mk2.orderId === "G1" && mk2.org === "band" && isoAt(mk2.at));
   ok("…says Marked done., records only the decoration, and the embroidery card stays", toasts.some(t => t.m === "Marked done.") && !!card("G1", "embroidery") && d1.q("SELECT decMadeAt t FROM order_items WHERE orderId='G1'")[0].t !== null && Number(d1.q("SELECT manufacturedQty n FROM order_items WHERE orderId='G1'")[0].n) === 0);
+  ok("…and the marked-done card leaves the Run order at once (its embroidery card stays until the embroidery is finished)", !card("G1", "dtg") && !!card("G1", "embroidery"));
   sent.length = 0; toasts.length = 0; asked.length = 0;
   btn(card("S1", "screenprint"), ".roDecMake").click();
   await wait(() => of("makeDecoratedLine").length === 1); await lastIdle();

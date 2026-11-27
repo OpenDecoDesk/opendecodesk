@@ -5066,6 +5066,9 @@ function adminActionCell(org, o){
     ? `<button class="admin-btn" ${dataAttrs} data-on="0" data-need="orders.payOnDelivery:edit" data-admin-action="setPayOnDelivery_" title="Back to the usual rule: the steps wait for payment" style="margin-top:4px;">Not pay on delivery</button>` : "";
   const podTag = o.payOnDelivery && !o.paid ? `<div class="mono" style="font-size:11px;color:#b45309;margin-bottom:4px;" title="The steps go on before it's paid; it's completed once paid in full">Pay on delivery</div>` : "";
 
+  // Digitizing is often sent out before the order is paid, so Digitizing… is offered on an unpaid order too.
+  const digitizingBtn = !can("production.digitizing", "read") ? "" : `<button class="admin-btn" ${dataAttrs} data-admin-action="showOrderDigitizing_" title="Designs sent to an outside digitizer for this order, and what they cost" style="margin-top:4px;">Digitizing…</button>`;
+
   // Paid for everything but a rush fee (migrations/0082) counts as paid for the work: the stages go on — and so does
   // an order set to pay on delivery (migrations/0105).
   if(!workCleared_(o)){
@@ -5073,7 +5076,7 @@ function adminActionCell(org, o){
       (adminDesktopNoEmail_() || !can("orders.invoices", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.invoices:edit" data-admin-action="resendEmail" style="margin-top:4px;">${resendLabel}</button>`) +
       (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") +
       (can("orders.details", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" data-admin-action="editOrder" style="margin-top:4px;">Edit items</button>` : "") +
-      rushBtn + dlBtn + customerBtn + paymentsBtn + deleteBtn;
+      digitizingBtn + rushBtn + dlBtn + customerBtn + paymentsBtn + deleteBtn;
   }
 
   const eligibleAll = FULFILLMENT_STAGES.filter(s => (s.prereqMet ? s.prereqMet(o) : s.prereqCheck(o[s.prereqField])) && (!s.prereq2 || s.prereq2(o)) && !o[FULFILLMENT_FIELD[s.stage]]);
@@ -5097,7 +5100,6 @@ function adminActionCell(org, o){
   const shipBtn = o.digitalOnly || !can("orders.shipping", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.shipping:edit" data-admin-action="setShippingInfo" style="margin-top:4px;">${hasAddr ? "Edit shipping" : "Set shipping"}</button>`;
   const editBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" data-admin-action="editOrder" style="margin-top:4px;">Edit items</button>`;
   const datesBtn = !can("orders.details", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-admin-action="showOrderDates_" title="Every date on this order — change or clear any of them" style="margin-top:4px;">Dates…</button>`;
-  const digitizingBtn = !can("production.digitizing", "read") ? "" : `<button class="admin-btn" ${dataAttrs} data-admin-action="showOrderDigitizing_" title="Designs sent to an outside digitizer for this order, and what they cost" style="margin-top:4px;">Digitizing…</button>`;
   const completeBtn = o.completedAt
     ? `<div class="mono" style="font-size:11px;color:var(--ink-soft);margin-top:4px;">Completed ${escapeHtml(adminDate_(o.completedAt))}</div><button class="admin-btn" ${dataAttrs} data-need="orders.stepsLate:edit" data-admin-action="completeOrders" style="margin-top:4px;">Reopen</button>`
     : canCompleteOrder(o) && can("orders.stepsLate", "edit")
@@ -10950,10 +10952,13 @@ function wizProductScreen_(step){
 
 // Add image…: upload a picture and make it a graphic of this shop behind the scenes (named after the file, no
 // design — the stitch file can be linked later on the Graphics screen). Returns the new graphic's id.
-async function wizAddGraphicImage_(kind, file){
+async function wizAddGraphicImage_(kind, file, decoration){
   const imageUrl = await uploadImage(file, _wiz.orgId);
   const name = String(file.name || "Graphic").replace(/\.[a-z0-9]+$/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "Graphic";
+  // A printed graphic carries the product's printed type (screenprint, vinyl, dtg, sublimation; dtf for dtf / both).
+  const printed = kind === "embroidery" ? "" : (decoration && decoration !== "embroidery" && decoration !== "both" ? decoration : "dtf");
   const r = await hoopApi_({ action: "saveGraphic", org: _wiz.orgId, graphic: { name, kind: kind === "embroidery" ? "embroidery" : "transfer", imageUrl,
+    ...(printed ? { decoration: printed } : {}),
     thumbUrl: typeof thumbUrl === "function" ? thumbUrl(imageUrl) : imageUrl, visible: true, inkColors: [], allowedLocations: [], allowedGarmentColors: [] } });
   return Number(r.id);
 }
@@ -11023,7 +11028,7 @@ function wizDesignsScreen_(p, i, markDone, rebuildIfSaved, nextStep){
         box.querySelectorAll("[data-add-img]").forEach(inp => inp.onchange = async () => {
           const file = inp.files && inp.files[0]; if (!file) return;
           const lbl = inp.closest("label"); if (lbl) lbl.classList.add("busy");
-          try { const id = await wizAddGraphicImage_(inp.dataset.addImg, file); showToast("Graphic added."); await placeNew(id, inp.dataset.for, inp.dataset.loc); }
+          try { const id = await wizAddGraphicImage_(inp.dataset.addImg, file, p.decoration); showToast("Graphic added."); await placeNew(id, inp.dataset.for, inp.dataset.loc); }
           catch (e) { showToast(e.message || "Couldn't add that image.", true); if (lbl) lbl.classList.remove("busy"); }
         });
         box.querySelectorAll("[data-wiz-new-graphic]").forEach(b => b.onclick = async () => {
@@ -21830,7 +21835,7 @@ async function renderCommunications(app, opts){
   const th = "padding:7px 10px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
   const td = "padding:8px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#111;background:#fff;";
   const sub = "color:#666;font-size:12px;";
-  const KIND = { payment: "Payment", refund: "Refund", dispute: "Dispute", design: "Design response", delivered: "Delivered", picked_up: "Picked up" };
+  const KIND = { payment: "Payment", refund: "Refund", dispute: "Dispute", design: "Design response", delivered: "Delivered", picked_up: "Picked up", quote: "Quote", gift_card: "Gift card", po: "PO" };
   const urgent = d.notices.filter(x => x.urgent);
   const delivered = d.notices.filter(x => !x.urgent && x.kind === "delivered");
   // Carrier pickups are queued notices (migrations/0113) until a roll-up reports them; one whose customer couldn't

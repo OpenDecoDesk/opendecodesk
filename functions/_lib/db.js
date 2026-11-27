@@ -1556,9 +1556,9 @@ export function productDecoration_(p) {
   const hasDesign = p.designId != null || (Array.isArray(p.designs) ? p.designs.length : Number(p.designCount) || 0) > 0;
   const hasTransfers = Array.isArray(p.fixedTransfers) && p.fixedTransfers.length > 0;
   if (hasDesign) return "embroidery";
-  if (!p.noDesignNeeded && !p.digital && !hasTransfers) return "embroidery";
-  if (hasTransfers || p.noDesignNeeded) return "dtf";
-  return "";
+  if (p.digital && !hasTransfers) return "";   // a digital product (which also sets noDesignNeeded) has nothing to decorate
+  if (!p.noDesignNeeded && !hasTransfers) return "embroidery";
+  return "dtf";
 }
 
 async function setProductNoDesignNeeded_(db, orgId, productId, on) {
@@ -2615,7 +2615,7 @@ async function fixedTransferEntries_(db, orgId, row, lk) {
     const ink = g.inkColors.includes(String(f.ink || "")) ? String(f.ink) : (g.inkColors[0] || "");
     out.push({ location: "fixed" + (Number(f.locationId) || out.length), label, graphicId: g.id, kind: "transfer",
       designId: null, transferId: g.transferId, graphicName: g.name, ink, tier: null, addOnCents: 0,
-      imageUrl: g.imageUrl, thumbUrl: g.thumbUrl, fixed: true, decoration: "dtf" });   // fixed transfers are DTF (migrations/0118)
+      imageUrl: g.imageUrl, thumbUrl: g.thumbUrl, fixed: true, decoration: graphicDecoration(g) });   // the linked graphic's printing (migrations/0118); dtf when unset
   }
   return out;
 }
@@ -9634,7 +9634,7 @@ export async function getTransferQueue(db) {
             COALESCE(i.manufacturedQty,0) AS manufacturedQty, i.transfersAppliedAt, o.manufacturedAt AS orderMadeAt,
             i.transferReceivedAt, COALESCE(i.blankReceivedAt, o.blankReceivedAt) AS blankReceivedAt, ${nb("i")} AS noBlank,
             org.name AS orgName, o.customerName, o.dueDate, o.placedAt,
-            l.blankId, l.blankSize, b.name AS blankName, COALESCE(NULLIF(l.blankColor, ''), b.color) AS blankColor
+            l.blankId, l.blankSize, b.name AS blankName, b.productType AS blankProductType, COALESCE(NULLIF(l.blankColor, ''), b.color) AS blankColor
      FROM order_items i
      JOIN orders o ON o.orderId = i.orderId
      JOIN orgs org ON org.orgId = i.orgId
@@ -9672,7 +9672,7 @@ export async function getTransferQueue(db) {
       itemId: Number(r.itemId), orderId: r.orderId, orgId: r.orgId, orgName: r.orgName || r.orgId,
       customerName: r.customerName, itemName: r.itemName, itemSize: r.itemSize || "", qty: Number(r.qty) || 1,
       dueDate: r.dueDate || "", placedAt: r.placedAt || "", garmentColor: cfg.garmentColor || "",
-      blank: r.blankId == null ? null : { id: Number(r.blankId), name: r.blankName || "", color: r.blankColor || "", size: r.blankSize || "" },
+      blank: r.blankId == null ? null : { id: Number(r.blankId), name: r.blankName || "", color: r.blankColor || "", size: r.blankSize || "", productType: r.blankProductType || "" },
       transfers: transfers.map((t, i) => ({ location: t.label || t.location, graphicName: t.graphicName, ink: t.ink || "",
         imageUrl: t.imageUrl || "", thumbUrl: t.thumbUrl || "", auto: !!t.auto,
         transferId: Number(t.transferId) || null, inStock: !!h.inStock[i],
@@ -9838,7 +9838,7 @@ async function getOtherDecorationCards_(db) {
               COALESCE(i.manufacturedQty,0) AS manufacturedQty, o.manufacturedAt AS orderMadeAt, i.decStartedAt, i.decMadeAt,
               COALESCE(i.blankReceivedAt, o.blankReceivedAt) AS blankReceivedAt, ${nb("i")} AS noBlank,
               org.name AS orgName, o.customerName, o.dueDate, o.placedAt, ${PRODUCT_DECORATION_COLS_},
-              l.blankId, l.blankSize, b.name AS blankName, COALESCE(NULLIF(l.blankColor, ''), b.color) AS blankColor
+              l.blankId, l.blankSize, b.name AS blankName, b.productType AS blankProductType, COALESCE(NULLIF(l.blankColor, ''), b.color) AS blankColor
        FROM order_items i
        JOIN orders o ON o.orderId = i.orderId
        JOIN orgs org ON org.orgId = i.orgId
@@ -9862,13 +9862,14 @@ async function getOtherDecorationCards_(db) {
   for (const { r, cfg, types } of lines) {
     const hasEmbroidery = embroidered.has(Number(r.itemId));
     const made = !!r.orderMadeAt || Number(r.manufacturedQty) >= (Number(r.qty) || 1);
-    if (!(!made || (hasEmbroidery && !r.decMadeAt))) continue;
+    // With embroidery the card leaves once Mark done sets decMadeAt (like DTF's transfersAppliedAt); without, once made.
+    if (hasEmbroidery ? r.decMadeAt : made) continue;
     for (const type of types) {
       cards.push({
         type, itemId: Number(r.itemId), orderId: r.orderId, orgId: r.orgId, orgName: r.orgName || r.orgId,
         customerName: r.customerName, itemName: r.itemName, itemSize: r.itemSize || "", qty: Number(r.qty) || 1,
         dueDate: r.dueDate || "", placedAt: r.placedAt || "", garmentColor: (cfg && cfg.garmentColor) || "",
-        blank: r.blankId == null ? null : { id: Number(r.blankId), name: r.blankName || "", color: r.blankColor || "", size: r.blankSize || "" },
+        blank: r.blankId == null ? null : { id: Number(r.blankId), name: r.blankName || "", color: r.blankColor || "", size: r.blankSize || "", productType: r.blankProductType || "" },
         locations: ((cfg && cfg.locations) || []).filter(l => l && l.location && locationDecoration_(l) === type).map(l => ({
           location: l.label || l.location, graphicName: l.graphicName || "", ink: l.ink || "", imageUrl: l.imageUrl || "", thumbUrl: l.thumbUrl || "",
           ...(l.custom ? { custom: true, fileKey: l.fileKey || "", fileName: l.fileName || "" } : {}) })),
@@ -13979,12 +13980,12 @@ async function attachDecorations_(db, orgId, products, pre) {
   return products.map(p => {
     if (!has(p)) return p;
     const out = [];
-    const add = (kind, name, location) => {
+    const add = (kind, name, location, type) => {
       name = String(name || "").trim().slice(0, 120); location = String(location || "").trim().slice(0, 80);
       if (!name || out.some(x => x.kind === kind && x.name === name && x.location === location)) return;
-      out.push({ kind, name, location });
+      out.push({ kind, name, location, type });
     };
-    const addType = (type, name, location) => { if (on.includes(type)) add(decorationMadeLabel(type), name, location); };
+    const addType = (type, name, location) => { if (on.includes(type)) add(decorationMadeLabel(type), name, location, type); };
     const mock = (p.mockupGraphics || []).filter(m => graphics[Number(m.graphicId)]);
     for (const m of mock) addType("embroidery", graphics[Number(m.graphicId)].name, locs[Number(m.locationId)]);
     if (!mock.length && !Number(p.noDesignNeeded)) {
@@ -14793,6 +14794,7 @@ export async function listDigitizingJobs(db, { orderId, estimateId } = {}) {
 export async function saveDigitizingJob(db, job, { by = "" } = {}) {
   const j = job || {};
   const name = String(j.name == null ? "" : j.name).trim();
+  if (!name) throw pricingError_("Say what was sent (its name)");
   if (name.length > 200) throw pricingError_("What was sent can be at most 200 characters.");
   let vendor = String(j.vendor == null ? "" : j.vendor).trim().replace(/\s+/g, " ");
   if (vendor.length > 120) throw pricingError_("The digitizer's name can be at most 120 characters.");

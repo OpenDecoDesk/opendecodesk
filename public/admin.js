@@ -21550,11 +21550,12 @@ function taxPacketHtml_(data, sections, opts){
   const num = (v) => Math.round((Number(v) || 0) * 100) / 100;
   const sum = (list, f) => Math.round(list.reduce((a, x) => a + (Number(f(x)) || 0) * 100, 0)) / 100;
   const $ = (v) => { const n = num(v); return (n < 0 ? "−$" : "$") + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
-  const day = (d) => d ? new Date(String(d).slice(0, 10) + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : "";
-  const mon = (m) => new Date(m + "-15T12:00:00Z").toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" });
+  // Days and months on the business's calendar (adminDay_ / adminDate_), never this computer's zone.
+  const day = (d) => d ? adminDate_(adminDay_(d), { month: "short", day: "numeric", year: "numeric" }, "en-US") : "";
+  const mon = (m) => adminDate_(m, { month: "short", year: "numeric" }, "en-US");
   const biz = opts.business || "";
   const period = day(data.dateFrom) + " – " + day(data.dateTo);
-  const printed = day(opts.today || new Date().toISOString());
+  const printed = day(opts.today || localToday_());
   const proposed = `<span class="prop">proposed</span>`;
   const missing = (k, what) => data[k] ? "" : `<p class="warn">The ${esc(what)} couldn't be loaded: ${esc(data.errors[k] || "not available")}. This section is incomplete.</p>`;
   const table = (head, rows, opt) => {
@@ -21850,7 +21851,8 @@ ul.check li::before{content:"☐  ";}
 async function renderTaxPacket(app){
   adminSetHash("taxpacket");
   document.title = adminTitle_("Tax packet");
-  const today = new Date().toISOString().slice(0, 10), y = Number(today.slice(0, 4));
+  // To defaults to the report day (reportToDay_): the server counts report days in UTC, so this evening's sales count.
+  const today = reportToDay_(), y = Number(localToday_().slice(0, 4));
   const inp = "font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;";
   const quick = "padding:6px 10px;font-size:12px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:var(--surface,#fff);";
   const picked = taxPacketSelected_();
@@ -21913,10 +21915,12 @@ async function renderTaxPacket(app){
   document.getElementById("tpNone").onclick = () => { document.querySelectorAll(".tpSec").forEach(c => c.checked = false); remember(); };
   document.getElementById("tpPrint").onclick = () => {
     if (!data) return;
-    const pw = window.open("", "_blank", "width=900,height=900");
-    if (!pw) { showToast("Allow pop-ups to print the packet.", true); return; }
-    pw.document.write(html().replace("</body>", "<script>window.onload=function(){window.print();};<\/script></body>"));
-    pw.document.close();
+    // The packet itself carries no script: this page prints it once it's drawn (printPopupWhenReady_).
+    const packetWin = window.open("", "_blank", "width=900,height=900");
+    if (!packetWin) { showToast("Allow pop-ups to print the packet.", true); return; }
+    packetWin.document.write(html());
+    packetWin.document.close();
+    printPopupWhenReady_(packetWin);
   };
   const save = document.getElementById("tpSave");
   if (save) save.onclick = async () => {

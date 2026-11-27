@@ -18046,6 +18046,8 @@ export async function getSalesTaxRefunds(db, dateFrom, dateTo) {
     FROM order_payments p JOIN orders o ON o.orderId = p.orderId
     WHERE p.kind IN ('refund', 'dispute') AND p.receivedAt <= ?
       AND p.voidedAt IS NULL AND o.isTest = 0 AND o.voidedAt IS NULL
+      -- A gift card sold online was never a sale: giving its money back takes no tax off (migrations/0120).
+      AND NOT ${GIFT_ONLY_ORDER_SQL_}
       AND p.orderId IN (SELECT orderId FROM order_payments WHERE kind IN ('refund', 'dispute') AND receivedAt >= ? AND receivedAt <= ? AND voidedAt IS NULL)
     ORDER BY p.receivedAt, p.id
   `).bind(dateTo, dateFrom, dateTo).all());

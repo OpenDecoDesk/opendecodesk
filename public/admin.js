@@ -8263,6 +8263,10 @@ function dcShowBulk_(onChanged){
     if (p && !/^[A-Z0-9_-]{1,12}$/.test(p)) return fail("The start of the code can only have letters, digits, “-” or “_”.", "#dcPrefix");
     const value = dcReadValue_(ov);
     if (value.error) return fail(value.error, value.field || "#dcValue");
+    // The minimum order and free shipping, as on one code (blank minimum = none).
+    const rawMin = $("#dcMinOrder").value.trim(), minOrder = rawMin ? dcNum_(rawMin) : null;
+    if (rawMin && !(minOrder >= 0.01 && minOrder <= 100000)) return fail("Enter a minimum order from $0.01 to $100,000, or leave it blank.", "#dcMinOrder");
+    const freeShipping = value.kind === "shipping" || $("#dcFreeShip").checked;
     const save = $("#dcSave");
     save.disabled = true; err.textContent = "";
     let d;
@@ -8270,6 +8274,7 @@ function dcShowBulk_(onChanged){
       d = await adminApi_({ action: "createDiscountCodes", emails, prefix: p, kind: value.kind,
         percent: value.kind === "percent" ? value.percent : null, amount: value.kind === "amount" ? value.amount : null,
         maxDiscount: value.kind === "percent" ? value.maxDiscount : null,
+        ...(minOrder != null ? { minOrder } : {}), ...(freeShipping ? { freeShipping: true } : {}),
         org: $("#dcOrg").value || "", expiresOn: $("#dcExpires").value || "", note: $("#dcNote").value.trim() });
     } catch (ex) { err.textContent = ex.message; save.disabled = false; return; }
     if (onChanged) onChanged();

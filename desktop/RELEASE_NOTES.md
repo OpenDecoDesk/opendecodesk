@@ -6,19 +6,28 @@ inventory and cost of goods, and the books, with everything kept on your own com
 
 **New in this release:**
 
-- **Import orders from Etsy, Shopify or a sheet** (Orders → Import orders…), from the store's own
-  CSV export. Every order is shown before anything is saved. Items are matched to your products by
-  SKU, with the store's size words read ("Large" → L). Paid orders come in with their payment,
-  shipped ones come in shipped, and no sales tax is added (the store charged it). Importing the
-  same file again skips the orders already in. Cancelled and refunded orders, and orders in a
-  closed month, aren't imported.
-- **Order screens stay fast as the history grows.** Open orders, the production, blanks and
-  transfer queues, changing the stage of many orders at once and the accountant export no longer
-  slow down with years of orders (tested up to 250,000). The Orders list shows the newest 2,000
-  orders of a shop at a time, and says so when there are more: narrow the dates to see older ones.
-- **Shop rate** (Finance → Shop rate): what an hour of production costs, worked out from your
-  expenses, equipment, hours and the pay and profit you want. Price analysis charges each item's
-  run time at that rate.
+- **Discount codes** (Discount codes, with the Discount codes feature on): percent or amount off,
+  for all shops or one, with an optional expiry. A percent code can have a most it takes off
+  ("20% off, up to $25.00"). Codes can be single-use for one customer's email, or good for a set
+  number of uses, and you can make one code each for a whole list of emails. Type a code on a
+  **Local sale** (Orders → + Local sale): the sale shows the discount before you save it, and
+  voiding the order gives the use back.
+- **Email campaigns** (Discount codes → Email campaigns, once email is set up): marketing emails
+  to your customers. Choose who gets one by shop, when they last ordered, how many orders they've
+  placed, or addresses you type in. Start from a theme (Black Friday, Christmas, Halloween,
+  Thanksgiving and others), build the email from blocks (banner, text, button, products, a
+  discount code) or edit its HTML, and add a code: one for everyone, or one of their own each.
+  Send yourself a test, then send it now or schedule it. A scheduled campaign goes out while the
+  program is open; one that came due while it was closed goes when you next open it. Each email
+  tells the customer to reply UNSUBSCRIBE; press **Stop marketing email** on their customer page
+  when they do. The Local sale form has a box for whether the customer wants these emails.
+  Receipts, invoices and other order emails always go.
+- **Tax packet** (Reports → Tax packet): one printable document for your accountant, for any date
+  range: expenses by Schedule C line, sales tax, revenue, cost of goods sold, money owed and
+  more, each part taken from the report it matches. **Save PDF…** saves it directly.
+- **Fixes:** refunds of cancelled lines now count in the balance due, and two refunds at once
+  can't both go through; transfer stock counts come from the history; the order deadline closes
+  at 11:59 pm in your business's time zone; and each role sees prices and costs as its setup says.
 
 ## Downloads
 
@@ -51,6 +60,7 @@ The downloads aren't signed yet, which is why Windows and macOS warn about them.
   - **Email:** from your own mailbox (Gmail, iCloud, Fastmail, Zoho or any SMTP server): order
     emails, invoices with a PDF of the invoice attached, and the morning roll-up.
     - **Design approval:** proofs emailed with the pictures attached, approved by reply.
+    - **Email campaigns:** marketing emails to your customers, with discount codes.
   - **Supplier connections:** a supplier's live product data and prices (PromoStandards),
     ordering blanks, and shipment notices.
 - **Save invoice PDF…** on any order, to print or send yourself.

@@ -215,7 +215,9 @@ function discountCodesOf_(b) {
     if (c == null || c === "") continue;
     if (typeof c !== "string" || c.length > 64) return { error: "This code isn't valid." };
     const t = c.trim();
-    if (t && !codes.some(x => x.toLowerCase() === t.toLowerCase())) codes.push(t);
+    // The same code twice is refused, as the code check refuses it (never silently dropped).
+    if (t && codes.some(x => x.toLowerCase() === t.toLowerCase())) return { error: "That code is already applied." };
+    if (t) codes.push(t);
   }
   if (codes.length > CODES_PER_ORDER_MAX_) return { error: `At most ${CODES_PER_ORDER_MAX_} discount codes can be used on an order.` };
   return { codes };

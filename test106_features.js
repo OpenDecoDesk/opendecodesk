@@ -412,6 +412,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
       "listClosedPeriods", "closePeriod", "reopenPeriod", "getAccountantExport",                              // Periods & Export
       "recordFundraiserPayout",                                                                               // Fundraising → Record payout… (an expense)
       "getTaxPacketExtras",                                                                                      // Tax packet
+      "getQuickBooksSettings", "updateQuickBooksSettings", "getQuickBooksExport",                             // QuickBooks export (phase 8)
     ],
     shipping: [
       "updateShipFromAddress",                         // Global settings → Ship-from address
@@ -425,7 +426,8 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     quotes: ["listEstimates", "getEstimate", "createEstimate", "saveEstimate", "sendEstimate", "convertEstimate", "cancelEstimate"],   // Quotes
     discounts: ["listDiscountCodes", "getDiscountCode", "saveDiscountCode", "createDiscountCodes", "setDiscountCodeActive", "deleteDiscountCode", "checkLocalSaleCode",
       "applyOrderDiscountCode", "removeOrderDiscountCode"],   // Discount codes (and codes on an order)
-    giftCards: ["listGiftCards", "getGiftCard", "revealGiftCardCode", "issueGiftCard", "adjustGiftCard", "voidGiftCard", "resendGiftCard", "giftCardTotals", "redeemGiftCard", "refundToGiftCard"],   // Gift cards
+    giftCards: ["listGiftCards", "getGiftCard", "revealGiftCardCode", "issueGiftCard", "adjustGiftCard", "voidGiftCard", "resendGiftCard", "giftCardTotals", "redeemGiftCard", "refundToGiftCard",
+      "getGiftCardLiability"],   // Gift cards (and the Gift card liability report, phase 8)
     emailCampaigns: ["getCampaignStatus", "listCampaigns", "getCampaign", "previewAudience", "saveCampaign", "copyCampaign", "deleteCampaign",   // Discount codes → Email campaigns
       "sendCampaignTest", "scheduleCampaign", "cancelCampaign", "runCampaignQueue", "setMarketingOptOut"],
     ownGarments: ["checkInGarments", "undoGarmentCheckin", "listGarmentCheckins"],   // an order line's Check in garments…
@@ -463,6 +465,8 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     "getDiscountRules", "updateDiscountRules", "getGiftCardSettings", "updateGiftCardSettings", "getOrderForReorder",
     // Net 30 terms with a PO (phase 7): a payment way, not a feature — it follows Global settings → Payment methods
     "getTermsSettings", "updateTermsSettings", "setOrderTerms", "acceptOrderPo", "getUnpaidPoReport",
+    // Phase 8 reports that aren't bookkeeping: sales by customer / product / shop / decoration, and profit per job
+    "getSalesReport", "getProfitReport", "getOrderProfit",
   ];
   const names = (text) => [...text.matchAll(/"(\w+)"/g)].map(m => m[1]);
   const mapSrc = ordersJs.match(/const FEATURE_ACTIONS = \{([\s\S]*?)\n\};/)[1];

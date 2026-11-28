@@ -130,6 +130,12 @@ and the tax and shipping features are built around a US business (see [Region](#
   the due date counts from the invoice, the order or its completion (a Global setting), and an Unpaid POs
   report, a Home block and the morning roll-up show what is still owed and what is late.
 - Reorder: a button that copies a past order into a new Local sale at today's prices.
+- Reports: sales by customer, product, shop or decoration type; profit per job (on the order and as a
+  report sorted by margin: revenue less blanks, transfers, decoration, supplies, outside digitizing, card
+  fees and postage, with estimates for lines not yet made); and gift card liability month by month (sold,
+  spent, outstanding).
+- QuickBooks export, for QuickBooks Online (CSV files) or QuickBooks Desktop (an IIF file): sales,
+  payments, expenses and deposits, with a screen to map each kind of money to your QuickBooks accounts.
 
 **Running it**
 - An admin panel on its own address, with a sign-in for each person, three roles (back office, manager, admin), two-step sign-in that can be required, and an audit log.
@@ -322,7 +328,7 @@ accepted, so the check catches a clearly wrong state, not every possible mismatc
 | [docs/email.md](docs/email.md) | Cloudflare email or Resend, verifying your domain, which inbox gets what |
 | [docs/sales-tax.md](docs/sales-tax.md) | The rate and home state, prices with or without tax, what is taxed, the reports |
 | [docs/tax-packet.md](docs/tax-packet.md) | The printable packet for your accountant: expenses by Schedule C line, sales & use tax, revenue, cost of goods, first-year decisions |
-| [docs/operations.md](docs/operations.md) | The morning roll-up, backups and restoring, migrations, upgrading |
+| [docs/operations.md](docs/operations.md) | The morning roll-up, backups and restoring, migrations, upgrading, users and roles, the reports and the QuickBooks export |
 | [docs/desktop.md](docs/desktop.md) | The desktop version: what it leaves out, where its data is, backups, building it |
 | [docs/architecture.md](docs/architecture.md) | How a request flows, the files, the data, the security model |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Running the tests, how they're written, the rules the code keeps |

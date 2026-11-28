@@ -813,6 +813,24 @@ async function adminRoute() {
     await renderUnpaidPos(app);
     return;
   }
+  // Phase 8: Sales by…, Profit per job and Gift card liability are public/admin-salesreports.js; the QuickBooks export is
+  // public/admin-quickbooks.js. Each is loaded the first time one of its pages is opened.
+  if (raw === "salesby" || raw === "profit" || raw === "giftliability" || raw === "quickbooks") {
+    const title = { salesby: "Sales by…", profit: "Profit per job", giftliability: "Gift card liability", quickbooks: "QuickBooks export" }[raw];
+    try { await (raw === "quickbooks" ? ensureQuickBooksPage_() : ensureSalesReportsPage_()); }
+    catch (e) {
+      adminSetHash(raw);
+      document.title = adminTitle_(title);
+      app.innerHTML = adminPageHead_(title) + `<div class="admin-panel" style="--org-accent:var(--accent);"><div class="admin-empty">${escapeHtml(e.message)}. Check your connection and reload the page.</div></div>`;
+      return;
+    }
+    if (location.hash.replace(/^#\/?/, "") !== raw) return;
+    if (raw === "salesby") await renderSalesBy(app);
+    else if (raw === "profit") await renderProfitReport(app);
+    else if (raw === "giftliability") await renderGiftCardLiability(app);
+    else await renderQuickBooks(app);
+    return;
+  }
   if (raw === "cogs")      { renderInventoryReport(app); return; }
   if (raw === "blankorder") { renderBlanksToOrder(app); return; }
   if (raw === "books")     { renderBooks(app); return; }
@@ -2281,7 +2299,9 @@ const ADMIN_NAV_GROUPS = [
   ]},
   { label: "Inventory", items: [ ["inventory", "Blanks"], ["blankorder", "Blanks to order"], ["transfers", "Transfers"] ]},
   { label: "Finance", items: [ ["expenses", "Expenses"], ["money", "Accounts & money"], ["reconcile", "Reconcile"], ["accountviewer", "Account viewer"], ["shoprate", "Shop rate"] ]},
-  { label: "Reports", items: [ ["audit", "Audit log"], ["revenue", "Revenue report"], ["salestax", "Sales tax report"], ["fundraising", "Fundraising"], ["unpaidpos", "Unpaid POs"], ["cogs", "Inventory & COGS"], ["runreport", "Run times"], ["books", "Periods & export"], ["taxpacket", "Tax packet"] ]},
+  { label: "Reports", items: [ ["audit", "Audit log"], ["revenue", "Revenue report"], ["salestax", "Sales tax report"], ["fundraising", "Fundraising"], ["unpaidpos", "Unpaid POs"],
+    ["salesby", "Sales by…"], ["profit", "Profit per job"], ["giftliability", "Gift card liability"], ["cogs", "Inventory & COGS"], ["runreport", "Run times"], ["books", "Periods & export"],
+    ["quickbooks", "QuickBooks export"], ["taxpacket", "Tax packet"] ]},
   { label: "Settings", items: [
     ["settings", "Global settings"], ["vendors", "Vendor integrations"], ["comms", "Communications"], ["orphans", "Orphaned images"],
     ["users", "Users"], ["security", "Security (2FA)"], ["password", "Change password"],
@@ -2303,6 +2323,8 @@ const ADMIN_PAGE_FEATURE = {
   quotes: "quotes",
   discounts: "discounts",
   giftcards: "giftCards",
+  // Phase 8: the QuickBooks export is Bookkeeping's; Gift card liability follows Gift cards.
+  quickbooks: "bookkeeping", giftliability: "giftCards",
 };
 // Names for the "turned off" page; replaced by the server's own list once Global settings has loaded it.
 let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products", quotes: "Quotes", discounts: "Discount codes", giftCards: "Gift cards", emailCampaigns: "Email campaigns", ownGarments: "Customer-supplied garments" };
@@ -3005,6 +3027,12 @@ function adminCanOpenPage_(hash){
   if (page === "discounts") return adminCanDiscounts_();       // and for Discount codes (migrations/0115)
   if (page === "giftcards") return adminCanGiftCards_();       // and for Gift cards (migrations/0120)
   if (page === "unpaidpos") return adminCanUnpaidPos_();       // and for Reports → Unpaid POs (migrations/0121)
+  // Phase 8 reports, each asked for by name too. Profit per job shows costs, so it also needs costs.view; Gift card
+  // liability is no menu item of its own: it is read on Gift cards (giftcards.cards).
+  if (page === "salesby") return adminCan_("reports.sales", "read");
+  if (page === "profit") return adminCanProfit_();
+  if (page === "giftliability") return adminCanGiftCards_();
+  if (page === "quickbooks") return adminCan_("reports.quickbooks", "read");
   // The one Run order is for a role that has the production queue or the transfer queue (#runtransfer is the DTF filter).
   if (page === "runorder" || page === "runtransfer") return adminCan_("run.queue", "read") || adminCan_("transfer.queue", "read");
   return adminItemOn_(adminPageItem_(hash));
@@ -3023,6 +3051,8 @@ function adminCanGiftCards_(){ return adminCan_("giftcards.cards", "read"); }
 // Net 30 payment method (Global settings → Payment methods), and says so when that is off and no order is on terms.
 // Accepting a PO from it needs Net 30 terms on orders (orders.terms, edit).
 function adminCanUnpaidPos_(){ return adminCan_("reports.receivables", "read"); }
+// May this user open Reports → Profit per job (reports.profit, read — and costs.view, which the server asks for too)?
+function adminCanProfit_(){ return adminCan_("reports.profit", "read") && adminCan_("costs.view", "read"); }
 // Customer-supplied garments (migrations/0121) is the one feature that starts OFF: a switch the catalog hasn't sent
 // (an older server, or one that never had it) is off, where featureOn_ would call it on.
 function ownGarmentsOn_(){ return typeof siteFeatures !== "undefined" && !!siteFeatures && siteFeatures.ownGarments === true; }
@@ -7192,6 +7222,38 @@ async function setFulfillmentStage(orgId, orderId, stage){
 // — the server decides (never a client-supplied guess, since this
 // ---- Payment recording & discount modal ------------------------------------
 
+// The order window's Profit box (phase 8, costs.view only): what the job brought in less what it cost, from
+// getOrderProfit (db.js), asked for each time the window draws (a payment, refund or discount changes it). A box the
+// window has since redrawn, or closed, is left alone; a failure is a quiet line, never an error over the money.
+const PM_PROFIT_PARTS_ = [["blanksCents", "Blanks"], ["transfersCents", "Transfers"], ["decorationCents", "Decoration"], ["suppliesCents", "Supplies"],
+  ["digitizingCents", "Outside digitizing"], ["cardFeesCents", "Card fees"], ["postageCents", "Postage"], ["laborCents", "Labor"]];
+async function pmLoadProfit_(box, orderId){
+  if (!box || !adminCan_("costs.view", "read")) return;
+  const fail = () => { if (box.isConnected) box.innerHTML = `<div class="pm-profit-h">Profit</div><div class="pm-profit-note">Profit isn't available right now.</div>`; };
+  let d;
+  try { d = await adminApi_({ action: "getOrderProfit", orderId }); } catch (_) { fail(); return; }
+  if (!box.isConnected) return;
+  const p = d && typeof d === "object" ? (d.profit && typeof d.profit === "object" ? d.profit : d) : null;
+  if (!p || p.profitCents == null) { fail(); return; }
+  box.innerHTML = pmProfitHtml_(p);
+}
+function pmProfitHtml_(p){
+  const m = (c) => adminMoney_((Number(c) || 0) / 100);
+  const costs = p.costs || {};
+  const row = (label, v, cls) => `<tr${cls ? ` class="${cls}"` : ""}><td>${escapeHtml(label)}</td><td class="pm-profit-n">${v}</td></tr>`;
+  const parts = PM_PROFIT_PARTS_.filter(([k]) => Number(costs[k]) > 0).map(([k, l]) => row(l, "−" + m(costs[k]), "pm-profit-cost")).join("");
+  const neg = Number(p.profitCents) < 0;
+  const notes = (Array.isArray(p.notes) ? p.notes : []).map(n => String(n).trim().replace(/\.+$/, "")).filter(Boolean);
+  const margin = p.marginPct == null || !isFinite(Number(p.marginPct)) ? "—" : Number(p.marginPct).toFixed(1) + "%";
+  return `<div class="pm-profit-h">Profit</div>
+    <table class="pm-profit-t">
+      ${row("Revenue", m(p.revenueCents))}
+      ${parts || row("Costs", m(0), "pm-profit-cost")}
+      <tr class="pm-profit-sum${neg ? " pm-profit-neg" : ""}"><td>Profit</td><td class="pm-profit-n">${m(p.profitCents)}</td></tr>
+      <tr class="pm-profit-cost"><td>Margin</td><td class="pm-profit-n${neg ? " pm-profit-neg" : ""}">${escapeHtml(margin)}</td></tr>
+    </table>
+    <div class="pm-profit-note">${p.estimated ? `<span class="sr-est">est.</span> Part of the cost is an estimate${notes.length ? ": " + escapeHtml(notes.join("; ")) : ""}. ` : notes.length ? escapeHtml(notes.join("; ")) + ". " : ""}Revenue leaves out sales tax and gift cards sold. Labor isn't counted yet.</div>`;
+}
 async function showPaymentsModal(orgId, orderId) {
   const cache = (window._ordersCache && window._ordersCache[orgId]) || [];
   let order = cache.find(o => o.orderId === orderId);
@@ -7273,6 +7335,7 @@ async function showPaymentsModal(orgId, orderId) {
             ? `<tr style="font-weight:700;border-top:1px solid #e5e7eb;color:#92400e;"><td style="padding:4px 0;" title="More was received than the order comes to — refund the difference, or keep it as a credit">Credit (paid more than owed)</td><td style="padding:4px 0;text-align:right;">$${credit.toFixed(2)}</td></tr>`
             : `<tr style="font-weight:700;border-top:1px solid #e5e7eb;color:${balanceDue > 0.005 ? "#b03a2e" : "#166534"};"><td style="padding:4px 0;">Balance due</td><td style="padding:4px 0;text-align:right;">${balanceDue > 0.005 ? "$" + balanceDue.toFixed(2) : "Settled ✓"}</td></tr>`}
         </table>
+        ${adminCan_("costs.view", "read") ? `<div class="pm-profit" id="pmProfit" aria-live="polite"><div class="pm-profit-h">Profit</div><div class="pm-profit-note">Working it out…</div></div>` : ""}
 
         ${o.payments && o.payments.length ? `
         <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:#666;">Payment history</div>
@@ -7397,6 +7460,7 @@ async function showPaymentsModal(orgId, orderId) {
         <div id="pmError" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:10px;"></div>
       `;
       ov.querySelector(".pm-inner").prepend(content);
+      pmLoadProfit_(content.querySelector("#pmProfit"), orderId);
 
       // Payment method → its usual account (still changeable)
       const pmMethodEl = ov.querySelector("#pmMethod"), pmAccountEl = ov.querySelector("#pmAccount");
@@ -8586,6 +8650,33 @@ function ensureReceivablesPage_(){
     document.head.appendChild(sc);
   });
   return _receivablesPagePromise;
+}
+// Reports → Sales by…, Profit per job and Gift card liability (phase 8) are public/admin-salesreports.js, loaded the same
+// way: it defines renderSalesBy(app), renderProfitReport(app) and renderGiftCardLiability(app).
+let _salesReportsPagePromise = null;
+function ensureSalesReportsPage_(){
+  if (typeof renderSalesBy === "function") return Promise.resolve();
+  if (!_salesReportsPagePromise) _salesReportsPagePromise = new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = "/admin-salesreports.js";
+    sc.onload = () => resolve();
+    sc.onerror = () => { _salesReportsPagePromise = null; sc.remove(); reject(new Error("Couldn't load the report page")); };
+    document.head.appendChild(sc);
+  });
+  return _salesReportsPagePromise;
+}
+// Reports → QuickBooks export (phase 8) is public/admin-quickbooks.js, loaded the same way: it defines renderQuickBooks(app).
+let _quickBooksPagePromise = null;
+function ensureQuickBooksPage_(){
+  if (typeof renderQuickBooks === "function") return Promise.resolve();
+  if (!_quickBooksPagePromise) _quickBooksPagePromise = new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = "/admin-quickbooks.js";
+    sc.onload = () => resolve();
+    sc.onerror = () => { _quickBooksPagePromise = null; sc.remove(); reject(new Error("Couldn't load the QuickBooks export page")); };
+    document.head.appendChild(sc);
+  });
+  return _quickBooksPagePromise;
 }
 // The Check in garments window (customer-supplied garments, migrations/0121) is public/admin-garments.js, loaded the first
 // time it is opened: it defines showGarmentCheckin_(orderId, item, ctx).

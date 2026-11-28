@@ -256,7 +256,8 @@ console.log("\n=== Menu paths name menus that exist ===");
       if (/→ $/.test(t.slice(Math.max(0, m.index - 2), m.index))) continue;   // inside another site's path (Etsy: Shop Manager → Settings → …)
       if (menu === "Settings" && /^(Secrets and variables|Variables and Secrets|Privacy & Security|API\b|Delete this repository|Domains & Routes)/.test(rest)) continue;
       const pages = menus[menu];
-      if (!pages || !pages.some(p => rest.toLowerCase().startsWith(p.toLowerCase()))) wrong.push(`${f}: ${menu} → ${rest.slice(0, 30)}`);
+      // A page named with a trailing "…" (Reports → Sales by…) is matched without it: the path's words stop before it.
+      if (!pages || !pages.some(p => rest.toLowerCase().startsWith(p.replace(/…$/, "").toLowerCase()))) wrong.push(`${f}: ${menu} → ${rest.slice(0, 30)}`);
     }
   }
   if (wrong.length) console.log("   wrong:", wrong.slice(0, 12).join("; "));

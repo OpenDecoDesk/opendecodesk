@@ -90,7 +90,10 @@ const pause = (ms) => new Promise(r => setTimeout(r, ms));
           return reply(200, purchaseAnswers.shift());
         }
         if (u.includes("/api/orders")) {
-          sent.push(b); inflight++;
+          // The Payments window's Profit box (phase 8) asks getOrderProfit each time it draws; it is a read beside the
+          // actions checked here, so it is answered but not counted among them.
+          if (b.action !== "getOrderProfit") sent.push(b);
+          inflight++;
           try {
             if (hold && hold.action === b.action) await hold.gate;
             if (refuseNext && refuseNext.action === b.action) { const r = refuseNext; refuseNext = null; return reply(r.status, r.body); }

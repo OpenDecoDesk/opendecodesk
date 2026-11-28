@@ -63,6 +63,8 @@ public/admin-customers.js the admin's Customers page (loaded by admin.js the fir
 public/admin-quotes.js    the admin's Quotes page (loaded the same way)
 public/admin-digitizing.js  the outside-digitizing records on an order and a quote (loaded the same way)
 public/admin-receivables.js the Unpaid POs report (loaded the same way)
+public/admin-salesreports.js the Sales by…, Profit per job and Gift card liability reports (loaded the same way)
+public/admin-quickbooks.js the QuickBooks export page and its account mapping (loaded the same way)
 public/admin-garments.js  the check-in window and slip for a customer's own garments (loaded the same way)
 public/admin.css          the admin panel's styles (loaded with admin.js)
 public/_headers           security headers and cache rules for every response
@@ -107,6 +109,8 @@ functions/_lib/           shared code
   deliveryCheck.js          tracking lookups
   setupStatus.js            what is configured
   desktop.js                the desktop version's start-up step (locked features, the default shop)
+  quickbooks.js             the QuickBooks files: Online CSV and Desktop IIF, built from plain rows (pure:
+                            no database, no imports), and the check that every IIF transaction balances
   …
 
 migrations/               every change to the database, in order
@@ -175,6 +179,20 @@ About fifty tables (`schema.sql`). The main groups:
   `net30DueDate_` in `db.js` works it out when an order is read. `getUnpaidPoReport` answers the Unpaid POs
   report, its late-bucket groups and per-customer totals, from the same owed and received figures as the
   order; Home's Unpaid POs block and the morning roll-up use its totals.
+- **Reports and QuickBooks** (no migration) — `getSalesReport`, `getOrderProfit` / `getProfitReport` and
+  `getGiftCardLiability` in `db.js` read the existing tables; all of them take their dates as business days
+  (`businessRange_`: the start of the first day to the end of the last, in the business time zone) and
+  months as business months. Sales and profit use the same orders and the same sale date (`saleDateSql_`),
+  and leave the `__giftcard__` lines out; costs and profit are only sent to a caller with the
+  `costs.view` permission. The profit costs come from the stock, finished-goods and transfer movements of
+  the order's lines (an estimate for a line not yet made), today's decoration prices, the products' supplies
+  cost, `digitizing_jobs`, the payments' `feeCents` and the shipping labels; labor is not counted yet. The
+  liability report sums `gift_card_ledger` by month. The setting `quickbooks` holds the export's form
+  (`online` or `desktop`), the QuickBooks account names (`accounts`, `bankAccounts` by account id,
+  `expenseAccounts` by category id), `salesAs` (`receipts` or `invoices`) and `customerName` (`customer` or
+  `shop`). `getQuickBooksData` gathers plain rows — sales (gift-card-only orders included, so a sold card
+  reaches the liability account), payments, expenses, deposits — and `functions/_lib/quickbooks.js` turns
+  them into files; it refuses to build an IIF file in which any transaction doesn't sum to zero.
 - **Customer-supplied garments** (migration 0121) — `order_items.customerOwned` and
   `estimate_items.customerOwned` mark a line as the customer's own garment; `order_items.ownReceivedAt` is set
   once some of its garments are checked in. `garment_checkins` has one row per size counted: expected and

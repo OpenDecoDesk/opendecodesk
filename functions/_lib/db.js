@@ -3581,12 +3581,12 @@ async function termsZone_(db) {
   return saved || _shopTimeZone_ || DEFAULT_TIME_ZONE;
 }
 // The terms columns of an order row, as the readers give them (one place, so parseOrder_ and the report agree).
-function orderTermsFields_(row, terms) {
+function orderTermsFields_(row, terms, tz) {
   const t = { net30: !!Number(row.net30), poNumber: row.poNumber || "", poAcceptedAt: row.poAcceptedAt || "",
     poAcceptedBy: row.poAcceptedBy || "", poTypedAt: row.poTypedAt || "",
     termsDays: termsDaysOk_(Number(row.termsDays)) && row.termsDays != null ? Number(row.termsDays) : null, invoicedAt: row.invoicedAt || "" };
   t.poStatus = orderPoStatus_(t);
-  t.termsDueDate = net30DueDate_({ ...t, placedAt: row.placedAt, shippedAt: row.shippedAt, deliveredAt: row.deliveredAt, completedAt: row.completedAt }, terms || TERMS_DEFAULT);
+  t.termsDueDate = net30DueDate_({ ...t, placedAt: row.placedAt, shippedAt: row.shippedAt, deliveredAt: row.deliveredAt, completedAt: row.completedAt }, terms || TERMS_DEFAULT, null, tz);
   return t;
 }
 const noNet30Yet_ = (e) => /no such column: (\w+\.)?(net30|poNumber|poAcceptedAt|poAcceptedBy|poTypedAt|termsDays|invoicedAt|allowNet30)\b|no column named (net30|poNumber|poAcceptedAt|poTypedAt|termsDays|invoicedAt|allowNet30)/i.test(String(e && e.message));
@@ -19632,7 +19632,7 @@ export async function getQuickBooksData(db, { dateFrom, dateTo } = {}) {
     });
     const discountCents = p8Sum_(money, m => m.discountCents);
     const giftCardCents = p8Sum_(items.filter(i => p8IsGift_(i) && !i.cancelDate), i => i.lineTotalCents);
-    const t = net30 ? orderTermsFields_(o, terms) : { net30: false, poNumber: "", termsDueDate: "" };
+    const t = net30 ? orderTermsFields_(o, terms, tz) : { net30: false, poNumber: "", termsDueDate: "" };
     return { orderId: o.orderId, date: businessDay_(o.saleAt, tz), customer: p8OrderCustomer_(o, custNames), shop: orgNames.get(o.orgId) || o.orgId,
       orgId: o.orgId, lines: outLines, discountCents, shippingCents: a.shippingCents, rushCents: a.rushNetCents, taxCents: a.taxCents, giftCardCents,
       totalCents: p8Sum_(outLines, l => l.amountCents) - discountCents + a.shippingCents + a.rushNetCents + a.taxCents + giftCardCents,

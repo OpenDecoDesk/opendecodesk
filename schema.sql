@@ -38,7 +38,10 @@ CREATE TABLE IF NOT EXISTS orgs (
   -- The shop's default reorder-QR TRANSFER (migrations/0047); reorderQrGraphicId above is the old way.
   reorderQrTransferId  INTEGER REFERENCES transfers(id),
   -- Rush fee (migrations/0082): '' = the global rule; {"offer":false} or {"offer":true, …its own rule}.
-  rushFeeJson          TEXT NOT NULL DEFAULT ''
+  rushFeeJson          TEXT NOT NULL DEFAULT '',
+  -- Fundraiser (migrations/0110): '' = none; {"mode":"percent","percentBps",…} or {"mode":"perPiece","cents",…},
+  -- with "label" and "showOnShop". Inside the listed price; changes affect new orders only.
+  fundraiserJson       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS products (
@@ -303,7 +306,7 @@ CREATE TABLE IF NOT EXISTS orders (
   externalOrderId     TEXT,                       -- migrations/0087: the store's own order number
   payOnDelivery       INTEGER NOT NULL DEFAULT 0 CHECK (payOnDelivery IN (0, 1)),  -- migrations/0105: steps go on before it's paid
   customerId          INTEGER REFERENCES customers(id),  -- migrations/0108: the customer it belongs to; NULL = none
-  trackingCheckedAt   TEXT                        -- migrations/0110: the delivery check's last tracking lookup (least recent first)
+  trackingCheckedAt   TEXT                        -- migrations/0111: the delivery check's last tracking lookup (least recent first)
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -354,7 +357,9 @@ CREATE TABLE IF NOT EXISTS order_items (
   -- migrations/0060: filled from the shop's finished stock (no blank / design / making steps).
   fromStock           INTEGER NOT NULL DEFAULT 0 CHECK (fromStock IN (0, 1)),
   -- migrations/0080: the combination (ready_to_ship.variant) a line filled from stock came from.
-  stockVariant        TEXT NOT NULL DEFAULT ''
+  stockVariant        TEXT NOT NULL DEFAULT '',
+  -- migrations/0110: what this line raises for its shop's fundraiser, worked out when it was priced; 0 = none.
+  fundraiserCents     INTEGER NOT NULL DEFAULT 0 CHECK (fundraiserCents >= 0)
 );
 
 CREATE TABLE IF NOT EXISTS design_verifications (
@@ -883,7 +888,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_running_per_piece
   ON production_runs(itemId, pieceNo) WHERE status = 'running' AND pieceNo IS NOT NULL;
 -- migrations/0104: the finished runs by when they finished (the pricing analysis' last 12 months).
 CREATE INDEX IF NOT EXISTS idx_runs_done_finished ON production_runs(finishedAt) WHERE status = 'done';
--- migrations/0111: runs by when they started (the Run times report's range and its run log's pages).
+-- migrations/0112: runs by when they started (the Run times report's range and its run log's pages).
 CREATE INDEX IF NOT EXISTS idx_runs_started ON production_runs(startedAt);
 
 -- migrations/0032: a design's hoops (on its own / with a typed-in name), a product's designs in
@@ -1074,7 +1079,7 @@ CREATE INDEX IF NOT EXISTS idx_blank_colors          ON blank_colors(blankId);
 CREATE INDEX IF NOT EXISTS idx_inventory_type  ON inventory(productType, size);
 CREATE INDEX IF NOT EXISTS idx_blanks_type     ON blanks(productType);
 CREATE INDEX IF NOT EXISTS idx_prod_blank_link ON product_blank_links(orgId, productId);
-CREATE INDEX IF NOT EXISTS idx_prod_blank_link_blank ON product_blank_links(blankId, blankColor, blankSize);   -- migrations/0111: which products use a blank
+CREATE INDEX IF NOT EXISTS idx_prod_blank_link_blank ON product_blank_links(blankId, blankColor, blankSize);   -- migrations/0112: which products use a blank
 CREATE INDEX IF NOT EXISTS idx_rts_org         ON ready_to_ship(orgId, productId);
 CREATE INDEX IF NOT EXISTS idx_items_from_stock ON order_items (orgId, productId, size, stockVariant) WHERE fromStock = 1;
 
@@ -1178,7 +1183,7 @@ CREATE INDEX IF NOT EXISTS idx_movements_blank    ON inventory_movements(blankId
 CREATE INDEX IF NOT EXISTS idx_movements_blank_color ON inventory_movements(blankId, color, size, occurredAt);
 CREATE INDEX IF NOT EXISTS idx_movements_occurred ON inventory_movements(occurredAt);
 CREATE INDEX IF NOT EXISTS idx_movements_order    ON inventory_movements(orderId);
--- migrations/0111: purchases still in force by when they were recorded (has restock on order arrived?).
+-- migrations/0112: purchases still in force by when they were recorded (has restock on order arrived?).
 CREATE INDEX IF NOT EXISTS idx_movements_purchase_created ON inventory_movements(createdAt) WHERE kind = 'purchase' AND voidedAt IS NULL;
 
 -- Months already filed: changes that would alter them are refused (migrations/0010).
@@ -1243,11 +1248,13 @@ CREATE TABLE IF NOT EXISTS expenses (
   accountId       INTEGER REFERENCES accounts(id),                                   -- paid from (0014)
   paidPersonally  INTEGER NOT NULL DEFAULT 0 CHECK (paidPersonally IN (0, 1)),       -- owner's own money (0014)
   refundOfId      INTEGER REFERENCES expenses(id) ON DELETE SET NULL,                -- the purchase this refunds (0017)
-  recurringId     INTEGER REFERENCES recurring_expenses(id)                          -- recorded from this rule (0085)
+  recurringId     INTEGER REFERENCES recurring_expenses(id),                         -- recorded from this rule (0085)
+  fundraiserOrgId TEXT REFERENCES orgs(orgId)                                        -- a payout to this shop's fundraiser (0110)
 );
 CREATE INDEX IF NOT EXISTS idx_expenses_date     ON expenses(deletedAt, expenseDate);
 CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(categoryId);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_recurring ON expenses(recurringId, expenseDate) WHERE recurringId IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_expenses_fundraiser ON expenses(fundraiserOrgId) WHERE fundraiserOrgId IS NOT NULL;  -- 0110
 
 -- Recurring expenses (migrations/0085): recorded automatically on each date they come due (frequency from startDate,
 -- the start's day of the month as the anchor; endDate NULL = no end; nextIndex = the occurrence that's next).
@@ -1291,6 +1298,9 @@ INSERT OR IGNORE INTO expense_categories (name, deductionType, scheduleCLine, de
 -- Sales tax paid to the state (migrations/0090): Home's "Money in and out" shows it as sales tax going out.
 INSERT OR IGNORE INTO expense_categories (name, deductionType, scheduleCLine, deductiblePct, createdAt, updatedAt, systemKey) VALUES
   ('Sales tax paid to the state', 'none', '', 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'sales_tax_paid');
+-- Fundraiser payouts (migrations/0110): money a shop's sales raised, paid to the group it supports.
+INSERT OR IGNORE INTO expense_categories (name, deductionType, scheduleCLine, deductiblePct, createdAt, updatedAt, systemKey) VALUES
+  ('Fundraiser payouts', 'deductible', '27a', 100, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'fundraiser_payout');
 -- Capital purchases (migrations/0092): Depreciation categories are always capital; small equipment is deducted now but
 -- still kept out of Home's operating profit.
 UPDATE expense_categories SET capital = 1 WHERE deductionType = 'depreciation';

@@ -116,4 +116,4 @@ const shape = (plan) => JSON.stringify(plan.lines.map(l => [l.orderId, l.qty, l.
 
   console.log(`\n${fail ? "FAIL" : "PASS"} — ${pass} passed, ${fail} failed`);
   if (fail) process.exit(1);
-})().catch(e => { console.error(e); console.log("test331 crashed: false"); process.exit(1); });
+})().catch(e => { console.error(e); console.log("test337 crashed: false"); process.exit(1); });

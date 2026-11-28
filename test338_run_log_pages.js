@@ -5,7 +5,7 @@ const { JSDOM, ResourceLoader } = require("jsdom");
 
 // The Run times report on a long history (2026-11, review round 2). production_runs gets a row for every hooping, and
 // the report read the range four times with no index on startedAt and sent every run in it as its run log, drawn as one
-// table. Now (migrations/0111) the range is read on idx_runs_started; the run log is the newest 500 runs, with Load older
+// table. Now (migrations/0112) the range is read on idx_runs_started; the run log is the newest 500 runs, with Load older
 // fetching the next 500 after the last one shown ({startedAt, id}, as the audit log pages); and the per-design totals and
 // the "Other" notes are worked out by the database over the WHOLE range — the same figures as adding up every run.
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
@@ -116,8 +116,8 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const plans = reportQueries.map(e => d1.q("EXPLAIN QUERY PLAN " + e.sql, ...e.args).map(r => String(r.detail)).filter(t => /^(SEARCH|SCAN) (pr|production_runs)\b/.test(t)));
   ok(`all ${reportQueries.length} of the report's queries (log, totals, aborted, notes, untimed) search the start-time index`, reportQueries.length === 5 &&
     plans.every(p => p.length === 1 && /USING (COVERING )?INDEX idx_runs_started \(startedAt>\? AND startedAt<\?\)/.test(p[0])) || (console.log("   ", plans), false));
-  const schema = read("schema.sql"), mig = read("migrations/0111_growth_indexes.sql");
-  ok("migration 0111 and schema.sql both create it", [schema, mig].every(s => /CREATE INDEX IF NOT EXISTS idx_runs_started ON production_runs\(startedAt\);/.test(s)));
+  const schema = read("schema.sql"), mig = read("migrations/0112_growth_indexes.sql");
+  ok("migration 0112 and schema.sql both create it", [schema, mig].every(s => /CREATE INDEX IF NOT EXISTS idx_runs_started ON production_runs\(startedAt\);/.test(s)));
 
   console.log("\n=== The screen: Load older ===");
   const call = async (body) => {
@@ -158,4 +158,4 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 
   console.log(`\n${fail ? "FAIL" : "PASS"} — ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
-})().catch(e => { console.error(e); console.log("test332 crashed: false"); process.exit(1); });
+})().catch(e => { console.error(e); console.log("test338 crashed: false"); process.exit(1); });

@@ -4,7 +4,7 @@ const { createD1 } = require("./testlib/d1-shim.js");
 // Has restock on order arrived? (2026-11, review round 2.) The Blanks and Blanks to Order screens ask, for the restock
 // ordered in the last 45 days, whether a purchase of that blank / color / size was recorded after the order
 // (db.js restockOnOrder_): purchases still in force recorded since then. inventory_movements gets a row for every made
-// line, and nothing indexed createdAt, so that read went through the whole table every time. migrations/0111 adds a
+// line, and nothing indexed createdAt, so that read went through the whole table every time. migrations/0112 adds a
 // partial index of the purchases still in force by createdAt; the question asked, and so the answer, is unchanged.
 // This checks the database's own plan (EXPLAIN QUERY PLAN) for the read as db.js writes it, and the answer.
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
@@ -50,8 +50,8 @@ const SQL = "SELECT blankId, color, size, MAX(createdAt) AS last FROM inventory_
   console.log("\n=== The code and the files ===");
   ok("db.js still asks it the way it's checked here", dbJs.includes(`"${SQL}"`));
   const line = /CREATE INDEX IF NOT EXISTS idx_movements_purchase_created ON inventory_movements\(createdAt\) WHERE kind = 'purchase' AND voidedAt IS NULL;/;
-  ok("migration 0111 and schema.sql both create it", line.test(read("migrations/0111_growth_indexes.sql")) && line.test(read("schema.sql")));
+  ok("migration 0112 and schema.sql both create it", line.test(read("migrations/0112_growth_indexes.sql")) && line.test(read("schema.sql")));
 
   console.log(`\n${fail ? "FAIL" : "PASS"} — ${pass} passed, ${fail} failed`);
   if (fail) process.exit(1);
-})().catch(e => { console.error(e); console.log("test333 crashed: false"); process.exit(1); });
+})().catch(e => { console.error(e); console.log("test339 crashed: false"); process.exit(1); });

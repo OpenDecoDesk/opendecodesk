@@ -136,6 +136,22 @@ quote has no shipping address, so it counts as in your home state.
   a delivery the customer chooses on the invoice can still change its tax (shipped out of state).
 - Quotes aren't sales: they are not in the reports. The order is, from the month it was made.
 
+## Fundraisers
+
+A shop's fundraiser ([shops-and-domains.md](shops-and-domains.md#fundraising)) **doesn't change
+the tax**. It is inside the price: the customer pays the same, the sale is the same amount, and the
+tax on it is worked out exactly as without a fundraiser. What the group gets is part of your sale,
+not a separate charge.
+
+- A **percent** fundraiser is taken of the line's price **without** its tax: with prices that include
+  tax, the tax is taken out of the price first; with tax added on top, the tax isn't counted.
+- A **per piece** fundraiser is never more than the line before tax.
+- **Paying the group** is recorded as an expense, in the built-in category "Fundraiser payouts"
+  ([operations.md](operations.md#fundraising-the-report-and-payouts)), set up as a fully deductible
+  "other expenses" category. It doesn't change the sales tax report. Whether that is right for you,
+  or whether the group's share changes what you owe in your state, is a question for your
+  accountant: the app only records it.
+
 ## The reports
 
 **Reports → Sales Tax Report**, for any range of months:

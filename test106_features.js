@@ -406,6 +406,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
       "getAccountRegister", "setRecordReceipt", "previewReceiptAccountChange", "setReceiptAccount",                       // Account viewer, Change account…
       "getReconciliation", "importStatement", "autoMatchStatement", "matchStatementLine", "unmatchStatementLine", "ignoreStatementLine", "createFromStatementLine", "reconcileMonth", "unreconcileMonth", "listCashoutPayments", // Reconcile
       "listClosedPeriods", "closePeriod", "reopenPeriod", "getAccountantExport",                              // Periods & Export
+      "recordFundraiserPayout",                                                                               // Fundraising → Record payout… (an expense)
     ],
     shipping: [
       "updateShipFromAddress",                         // Global settings → Ship-from address
@@ -433,8 +434,9 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     "listCustomers", "getCustomer", "saveCustomer", "setCustomerArchived", "mergeCustomers", "setOrderCustomer",
     // Reports that aren't bookkeeping
     "getAuditLog", "getRevenueReport", "getDashboard", "getSalesTaxReport", "getInventoryReport",
+    "getFundraisingReport", "listFundraiserPayouts",   // Fundraising: what sales raised works without Bookkeeping
     // Shops, products, catalog, settings
-    "listOrgsAdmin", "createOrg", "setupOrgDomain", "getOrgDomainStatus", "updateOrg", "listProducts", "createProduct", "updateProduct", "importProducts", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "getCatalogIssues", "publish",
+    "listOrgsAdmin", "createOrg", "setupOrgDomain", "getOrgDomainStatus", "updateOrg", "setOrgFundraiser", "listProducts", "createProduct", "updateProduct", "importProducts", "setProductVisible", "setProductOrder", "createProductVersion", "copyProductVersionSettings", "separateProductVersion", "copyProductsFromOrg", "getCatalogIssues", "publish",
     "getGlobalSettings", "updateGlobalSettings", "saveGlobalSettingsAll", "getSetupStatus", "getCloudflareSetup", "connectCloudflare", "getBusinessProfile", "updateBusinessProfile", "getEmailSettings", "updateEmailSettings", "previewCustomerEmail", "samplePdf", "sendSampleEmail", "getLocaleSettings", "updateLocaleSettings", "getFeatures", "updateFeatures", "getShipFromAddress", "getSalesTaxSettings", "updateSalesTaxSettings",
     "listLocations", "saveLocation", "deleteLocation", "listProductCategories", "saveProductCategory", "deleteProductCategory", "listProductGraphicImages", "setProductGraphicImage", "deleteProductGraphicImage",
     "listGraphics", "saveGraphic", "setProductGraphicColorBlocked", "deleteGraphic", "getTierPrices", "setTierPrices",

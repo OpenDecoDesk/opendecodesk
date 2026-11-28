@@ -20,7 +20,7 @@
  * Bounded: at most `limit` outside requests per run (Cloudflare caps subrequests per
  * invocation) — each tracking lookup is one, and each "your order has shipped" email a pickup sends
  * is another. `requests` in the result says how many it used. Each step takes the shipments looked up
- * longest ago first and stamps every lookup (orders.trackingCheckedAt, migrations/0110), so with more
+ * longest ago first and stamps every lookup (orders.trackingCheckedAt, migrations/0111), so with more
  * waiting than one run can look up, each gets its turn on a later run; the pickup step gets at most half
  * of the run's lookups, so deliveries are always looked up too. Shipments TRACKING_CHECK_DAYS old
  * are no longer looked up: the roll-up lists them for a person (db.js getUnconfirmedShipments). Anything

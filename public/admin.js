@@ -183,6 +183,14 @@ const ADMIN_ACTIONS_ = {
     document.getElementById("revTo").value = this.dataset.year + "-12-31";
     document.getElementById("revFilters").dispatchEvent(new Event("submit"));
   },
+  fundraisingShowRange_(){
+    document.getElementById("frFrom").value = this.dataset.from;
+    document.getElementById("frTo").value = this.dataset.to;
+    document.getElementById("frFilters").dispatchEvent(new Event("submit"));
+  },
+  fundraisingExportCsv_(){ fundraisingExportCsv_(); },
+  fundraisingPayout_(){ showFundraiserPayoutModal_(this.dataset.org); },
+  fundraisingOpenOrder_(){ openOrderFromDashboard_(this.dataset.org, this.dataset.order, this.dataset.placed); },
   expViewReceipt_(){ expViewReceipt_(this.dataset.key); },
   voidBlankMovement_(){ voidBlankMovement_(this.dataset.mid); },
   restoreBlankMovement_(){ restoreBlankMovement_(this.dataset.mid); },
@@ -746,6 +754,7 @@ async function adminRoute() {
   if (raw === "audit")     { renderAuditLog(app); return; }
   if (raw === "revenue")   { renderRevenueReport(app); return; }
   if (raw === "salestax")  { renderSalesTaxReport(app); return; }
+  if (raw === "fundraising") { renderFundraisingReport(app); return; }
   if (raw === "cogs")      { renderInventoryReport(app); return; }
   if (raw === "blankorder") { renderBlanksToOrder(app); return; }
   if (raw === "books")     { renderBooks(app); return; }
@@ -2180,7 +2189,7 @@ const ADMIN_NAV_GROUPS = [
   ]},
   { label: "Inventory", items: [ ["inventory", "Blanks"], ["blankorder", "Blanks to order"], ["transfers", "Transfers"] ]},
   { label: "Finance", items: [ ["expenses", "Expenses"], ["money", "Accounts & money"], ["reconcile", "Reconcile"], ["accountviewer", "Account viewer"], ["shoprate", "Shop rate"] ]},
-  { label: "Reports", items: [ ["audit", "Audit log"], ["revenue", "Revenue report"], ["salestax", "Sales tax report"], ["cogs", "Inventory & COGS"], ["runreport", "Run times"], ["books", "Periods & export"] ]},
+  { label: "Reports", items: [ ["audit", "Audit log"], ["revenue", "Revenue report"], ["salestax", "Sales tax report"], ["fundraising", "Fundraising"], ["cogs", "Inventory & COGS"], ["runreport", "Run times"], ["books", "Periods & export"] ]},
   { label: "Settings", items: [
     ["settings", "Global settings"], ["vendors", "Vendor integrations"], ["comms", "Communications"], ["orphans", "Orphaned images"],
     ["users", "Users"], ["security", "Security (2FA)"], ["password", "Change password"],
@@ -2584,8 +2593,11 @@ function adminCanOpenPage_(hash){
   const page = String(hash || "").replace(/^#\/?/, "").split("/")[0];
   if (page === "customers") return adminCanCustomers_();
   if (page === "quotes") return adminCanQuotes_();   // the same, for Quotes (migrations/0109)
+  if (page === "fundraising") return adminCanFundraising_();   // and for Fundraising (migrations/0110)
   return adminItemOn_(adminPageItem_(hash));
 }
+// May this user open Reports → Fundraising (reports.fundraising, read)?
+function adminCanFundraising_(){ return adminCan_("reports.fundraising", "read"); }
 // May this user open Customers, pick a customer on a sale and follow an order's customer link (customers.records, read)?
 function adminCanCustomers_(){ return adminCan_("customers.records", "read"); }
 // May this user open Quotes and follow an order's "From quote" link (quotes.estimates, read)?
@@ -5980,7 +5992,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         </td>` : ""}
         <td data-date-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${adminDate_(o.placedAt)} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" data-admin-action="editOrderDate" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Edit date">✎</button></td>
         <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" data-admin-action="editOrderDueDate" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
-        <td>${orderCustomerNameHtml_(o)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}${orderEstimatePill_(o)}</td>
+        <td>${orderCustomerNameHtml_(o)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}${orderEstimatePill_(o)}${orderFundraiserPill_(o, org.orgId)}</td>
         <td>${escapeHtml(o.orderId)}</td>
         <td>${escapeHtml(it.name)}</td>
         <td>${itemHasSize_(it) ? escapeHtml(it.size) : "OSFA"}</td>
@@ -6091,7 +6103,7 @@ function orderCardHtml_(o, org, verif, showShop){
     <div class="oc-head">
       ${!showShop && active.length ? `<input type="checkbox" class="order-select" ${ids} data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" data-admin-change="updateBulkBar" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
       <div class="oc-who">
-        <div class="oc-name">${orderCustomerNameHtml_(o)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}${orderEstimatePill_(o)}</div>
+        <div class="oc-name">${orderCustomerNameHtml_(o)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}${orderEstimatePill_(o)}${orderFundraiserPill_(o, org.orgId)}</div>
         <div class="oc-dim">${escapeHtml(o.orderId)} · ${adminDate_(o.placedAt)} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" data-admin-action="editOrderDate" title="Edit date" aria-label="Edit order date">✎</button></div>
         <div class="oc-dim">Due: ${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "—"} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" data-admin-action="editOrderDueDate" title="Set due date" aria-label="Set due date">✎</button></div>
         ${showShop ? `<div class="oc-dim">${escapeHtml(org.name || org.orgId)}</div>` : ""}
@@ -6683,6 +6695,7 @@ async function showPaymentsModal(orgId, orderId) {
           ${o.taxMode === "exclusive" && !o.taxExempt ? `<tr><td style="padding:3px 0;color:#666;">Sales tax (${Number(o.taxRate || 0)}%) — added to the prices</td><td style="padding:3px 0;text-align:right;">$${Number(o.salesTax || 0).toFixed(2)}</td></tr>` : ""}
           <tr style="font-weight:600;border-top:1px solid #e5e7eb;"><td style="padding:4px 0;">Amount due</td><td style="padding:4px 0;text-align:right;">$${effectiveTotal.toFixed(2)}</td></tr>
           ${o.taxMode === "exclusive" && !o.taxExempt ? "" : `<tr><td style="padding:2px 0;color:#666;font-size:12px;">${o.taxExempt ? "Tax-exempt order" : "Includes sales tax (" + Number(o.taxRate || 0) + "%)"}</td><td style="padding:2px 0;text-align:right;color:#666;font-size:12px;">${o.taxExempt ? "—" : "$" + Number(o.salesTax || 0).toFixed(2)}</td></tr>`}
+          ${orderFundraiserText_(o, orgId) ? `<tr class="pm-fundraiser"><td colspan="2" style="padding:2px 0;color:#854d0e;font-size:12px;" title="Inside the price: the customer pays the same">${escapeHtml(orderFundraiserText_(o, orgId))} (inside the price)</td></tr>` : ""}
           ${amountReceived > 0 ? `<tr><td style="padding:3px 0;color:#166534;">Received</td><td style="padding:3px 0;text-align:right;color:#166534;">$${amountReceived.toFixed(2)}</td></tr>` : ""}
           ${refundedAmount > 0 ? `<tr><td style="padding:3px 0;color:#b03a2e;">Refunded</td><td style="padding:3px 0;text-align:right;color:#b03a2e;">−$${refundedAmount.toFixed(2)}</td></tr>
           <tr><td style="padding:3px 0;color:#666;">Net kept</td><td style="padding:3px 0;text-align:right;">$${Number(o.netReceived || 0).toFixed(2)}</td></tr>` : ""}
@@ -7342,6 +7355,27 @@ function orderEstimatePill_(o){
   return adminCanOpen_("quotes")
     ? ` <a href="#/quotes/${id}" class="order-estimate-link" title="Open the quote this order was made from" style="${style}text-decoration:none;">From quote ${escapeHtml(num)}</a>`
     : ` <span class="order-estimate-link" style="${style}">From quote ${escapeHtml(num)}</span>`;
+}
+// "Raises $4.00 for Example Boosters" on an order whose lines raise money for the shop's fundraiser (migrations/0110).
+// Each line keeps what it raises, worked out when it was priced, so a fundraiser changed since doesn't change it. The
+// server adds the lines up (order.fundraiserRaised, dollars: cancelled lines left out, a refunded share taken off — the
+// figure the Fundraising report counts once the order is paid), so the page never adds money itself. The group's
+// name is the shop's fundraiser now (the lines keep only the amount); "" for an order that raises nothing, or from a
+// server older than fundraisers.
+function orderFundraiserText_(o, orgId){
+  const raised = Number(o && o.fundraiserRaised) || 0;
+  if (!(raised > 0)) return "";
+  const id = orgId || (o && o.orgId);
+  const org = (window._adminOrgRegistry || []).find(x => x.orgId === id);
+  const f = fundraiserView_(org && org.fundraiser);
+  // The full shop registry is filled only by the catalog pages; the session's shop list (listOrgs) has the label too.
+  const listed = (adminOrgs || []).find(x => x.orgId === id);
+  const label = (f && f.label) || (listed && listed.fundraiserLabel) || "";
+  return "Raises " + adminMoney_(raised) + " for " + (label || "the shop's fundraiser");
+}
+function orderFundraiserPill_(o, orgId){
+  const t = orderFundraiserText_(o, orgId);
+  return t ? ` <span class="fundraiser-pill" title="Inside the order's price: what it raises for the shop's fundraiser (Reports → Fundraising)">${escapeHtml(t)}</span>` : "";
 }
 // An order's customer record: its id, or null when the order isn't linked to one (or the server is older than the link).
 function orderCustomerId_(o){
@@ -12056,6 +12090,107 @@ async function loadOrgRushDefault_(){
   }catch(e){ el.textContent = ""; }
 }
 
+// ---- A shop's fundraiser (migrations/0110): a percent of each item's price, or an amount per piece, for a group ----
+// It is inside the listed price: the customer pays the same, and the amount is the shop's to give back. db.js
+// (parseFundraiser_) sends it as { mode: "percent", percent } or { mode: "perPiece", amount } with label and
+// showOnShop, in dollars and percent; null = none. Saved with its own action (setOrgFundraiser) by the form's Save.
+// The same shape however it arrives: null for none or anything that isn't one. Audit rows may hold what was stored
+// (percentBps / cents) rather than what db.js hands out, so both are read.
+function fundraiserView_(f){
+  if (typeof f === "string") { try { f = f ? JSON.parse(f) : null; } catch (_) { f = null; } }
+  if (!f || typeof f !== "object") return null;
+  const label = String(f.label || "").trim(), showOnShop = f.showOnShop === true;
+  if (f.mode === "percent") {
+    const percent = f.percent != null ? Number(f.percent) : f.percentBps != null ? Number(f.percentBps) / 100 : NaN;
+    return Number.isFinite(percent) && percent > 0 ? { mode: "percent", percent: Number(percent.toFixed(2)), label, showOnShop } : null;
+  }
+  if (f.mode === "perPiece") {
+    const amount = f.amount != null ? Number(f.amount) : f.cents != null ? Number(f.cents) / 100 : NaN;
+    return Number.isFinite(amount) && amount > 0 ? { mode: "perPiece", amount: Number(amount.toFixed(2)), label, showOnShop } : null;
+  }
+  return null;
+}
+// What the shop's page says about it: "10% of every purchase supports Example Boosters" / "$2.00 of every item …"
+// (the catalog writes the shop's own line the same way).
+function fundraiserText_(f){
+  const v = fundraiserView_(f);
+  if (!v) return "";
+  return (v.mode === "percent" ? v.percent + "% of every purchase" : adminMoney_(v.amount) + " of every item") + " supports " + (v.label || "the group");
+}
+function setOrgFundraiser_(stored){
+  const box = document.getElementById("orgFormFundraiser");
+  if (!box) return;
+  const f = fundraiserView_(stored);
+  // What's on file, to tell whether Save has anything to send (an older server that sends no fundraiser reads as none,
+  // and a form left at None then sends nothing).
+  window._orgFrInitial = JSON.stringify(f);
+  const amount = !f ? "" : f.mode === "percent" ? String(f.percent) : Number(f.amount).toFixed(2);
+  box.innerHTML = `
+    <label>This shop
+      <select id="orgFrMode" style="max-width:360px;">
+        <option value=""${!f ? " selected" : ""}>Has no fundraiser</option>
+        <option value="percent"${f && f.mode === "percent" ? " selected" : ""}>Gives a percent of each item's price</option>
+        <option value="perPiece"${f && f.mode === "perPiece" ? " selected" : ""}>Gives a set amount per piece</option>
+      </select>
+    </label>
+    <div id="orgFrFields">
+      <label><span id="orgFrAmountLabel"></span>
+        <input type="number" id="orgFrAmount" min="0.01" step="0.01" value="${escapeHtml(amount)}" style="max-width:160px;">
+      </label>
+      <label>Supports
+        <input type="text" id="orgFrLabel" maxlength="80" value="${escapeHtml(f ? f.label : "")}" placeholder="e.g. Example Boosters">
+      </label>
+      <label class="checkbox-row"><input type="checkbox" id="orgFrShow" ${f && f.showOnShop ? "checked" : ""}> Show on the shop — a line under its name</label>
+      <div class="admin-note" id="orgFrPreview"></div>
+    </div>`;
+  const sel = document.getElementById("orgFrMode");
+  const show = () => {
+    const mode = sel.value;
+    document.getElementById("orgFrFields").style.display = mode ? "" : "none";
+    document.getElementById("orgFrAmountLabel").textContent = mode === "perPiece" ? "Amount per piece ($0.01–$1,000)" : "Percent of each item's price (0.01–50)";
+    document.getElementById("orgFrAmount").max = mode === "perPiece" ? "1000" : "50";
+    const r = readOrgFundraiser_();
+    const shown = r && r.fundraiser ? fundraiserText_(r.fundraiser) : "";
+    document.getElementById("orgFrPreview").textContent = !shown ? ""
+      : (r.fundraiser.showOnShop ? "The shop shows: “" + shown + ".”" : "Not shown on the shop: " + shown + ".");
+  };
+  sel.onchange = show;
+  box.addEventListener("input", show);
+  box.addEventListener("change", show);
+  show();
+}
+// What the form says: { fundraiser } (null = none), { error } when it can't be saved, undefined when the form has no
+// fundraiser box. The server checks the same (normalizeFundraiser_).
+function readOrgFundraiser_(){
+  const sel = document.getElementById("orgFrMode");
+  if (!sel) return undefined;
+  if (!sel.value) return { fundraiser: null };
+  const raw = document.getElementById("orgFrAmount").value.trim(), n = Number(raw);
+  const label = document.getElementById("orgFrLabel").value.trim();
+  const showOnShop = document.getElementById("orgFrShow").checked;
+  if (sel.value === "percent") {
+    if (raw === "" || !Number.isFinite(n) || n < 0.01 || n > 50) return { error: "The fundraiser's percent must be from 0.01 to 50." };
+    if (!label) return { error: "Say who the fundraiser supports (e.g. Example Boosters)." };
+    return { fundraiser: { mode: "percent", percent: Number(n.toFixed(2)), label: label.slice(0, 80), showOnShop } };
+  }
+  if (raw === "" || !Number.isFinite(n) || n < 0.01 || n > 1000) return { error: "The fundraiser's amount per piece must be from $0.01 to $1,000." };
+  if (!label) return { error: "Say who the fundraiser supports (e.g. Example Boosters)." };
+  return { fundraiser: { mode: "perPiece", amount: Number(n.toFixed(2)), label: label.slice(0, 80), showOnShop } };
+}
+// Sends the fundraiser when it differs from what's on file. "" when saved (or nothing to send), else the problem.
+async function saveOrgFundraiser_(orgId, fr){
+  if (!fr || fr.error || JSON.stringify(fundraiserView_(fr.fundraiser)) === window._orgFrInitial) return "";
+  try {
+    const { ok, data } = await adminSave_({ action: "setOrgFundraiser", org: orgId, fundraiser: fr.fundraiser });
+    if (!ok) return data.message || "the save failed.";
+    const saved = data.fundraiser !== undefined ? data.fundraiser : fr.fundraiser;
+    window._orgFrInitial = JSON.stringify(fundraiserView_(saved));
+    const reg = (window._adminOrgRegistry || []).find(o => o.orgId === orgId);
+    if (reg) reg.fundraiser = saved;
+    return "";
+  } catch (e) { return "the server couldn't be reached."; }
+}
+
 function applyCloneOrg(){
   const orgId = document.getElementById("orgFormCloneFrom").value;
   if(!orgId) return;
@@ -12068,6 +12203,8 @@ function applyCloneOrg(){
   document.getElementById("orgFormReady").checked = !!src.ready;
   setOrgDeliveryList_(src.deliveryOptions || [{ type: "pickup" }].concat(src.shippingEnabled ? [{ type: "shipping" }] : []));
   setOrgRush_(src.rushFee);
+  // The fundraiser isn't copied: it names the group the other shop gives back to, and a new shop raising money for
+  // someone else's group by accident is worse than setting it up again.
 
   const pay = (src.enabledPayments && typeof src.enabledPayments === "object" && !Array.isArray(src.enabledPayments))
     ? src.enabledPayments : {};
@@ -12267,6 +12404,10 @@ function renderOrgForm(app, org){
           ? `<div class="admin-error" style="display:block;">This shop's exemption certificate expired on ${escapeHtml(org.taxExemptExpires)}. Get a current one before its next order.</div>` : ""}
         <div class="admin-note">Keep a copy of the certificate on file. Changing this affects new orders only.</div>
 
+        <h3 style="margin:18px 0 6px; font-size:14px; font-family:'IBM Plex Mono',monospace; text-transform:uppercase; letter-spacing:.06em; font-weight:600;">Fundraiser</h3>
+        <div class="admin-note" style="margin-bottom:6px;">Part of each sale goes back to the group this shop raises money for (Reports → Fundraising adds it up). Inside your prices: customers pay the same. Changes apply to new orders.</div>
+        <div id="orgFormFundraiser"></div>
+
         <h3 style="margin:18px 0 6px; font-size:14px; font-family:'IBM Plex Mono',monospace; text-transform:uppercase; letter-spacing:.06em; font-weight:600;">Payment methods</h3>
         <div class="admin-note" style="margin-bottom:10px;">These can only restrict — not expand — what's enabled globally. A method disabled globally won't appear here even if checked.</div>
         <label class="checkbox-row"><input type="checkbox" id="orgFormPayCard" ${payChecked("card")}> Credit / Debit Card</label>
@@ -12312,6 +12453,7 @@ function renderOrgForm(app, org){
   `;
   setOrgDeliveryList_(org && org.deliveryOptions);
   setOrgRush_(org && org.rushFee);
+  setOrgFundraiser_(org ? org.fundraiser : null);
   loadOrgRushDefault_();
   window._prodFormDirty = false;
   { const panel = app.querySelector(".admin-panel"); if (panel) { const dirty = () => { window._prodFormDirty = true; }; panel.addEventListener("input", dirty); panel.addEventListener("change", dirty); } }
@@ -12472,6 +12614,10 @@ async function submitOrgForm(isEdit){
   if(!body.name){ errEl.textContent = "The shop needs a name: it's what customers see at the top of its page."; return; }
   { const why = orgDeliveryProblem_(body.deliveryOptions); if(why){ errEl.textContent = why; return; } }
   if(body.rushFee && body.rushFee.error){ errEl.textContent = body.rushFee.error; return; }
+  // The fundraiser isn't part of updateOrg / createOrg: it is saved by setOrgFundraiser once the shop is (it needs
+  // the shop to exist), and checked here first so a mistake in it stops the whole Save.
+  const fundraiser = readOrgFundraiser_();
+  if(fundraiser && fundraiser.error){ errEl.textContent = fundraiser.error; return; }
   { const why = webAddressProblem_(body.subdomain, isEdit ? body.orgId : null); if(why){ errEl.textContent = why; return; } }
   if(body.accent && !isValidAccent(body.accent)){
     errEl.textContent = "Accent must be a valid CSS color (e.g. #1E7A4C, navy, rgb(30,122,76)).";
@@ -12491,6 +12637,11 @@ async function submitOrgForm(isEdit){
       errEl.textContent = signedOut ? "Nothing was saved. " + data.message : (data.message || "Something went wrong.");
       return;
     }
+    // The shop is saved; now its fundraiser, when it changed. Edit stays on the form when that fails (the rest is
+    // saved, so a second Save sends only the fundraiser); a new shop goes on to Shop setup and says so.
+    const frProblem = await saveOrgFundraiser_(body.orgId, fundraiser);
+    if(frProblem && isEdit){ errEl.textContent = "The shop's settings were saved, but not its fundraiser: " + frProblem; return; }
+    if(frProblem) showToast("Shop created, but its fundraiser wasn't saved (" + frProblem + ") — set it again under the shop's Edit.", true);
     window._prodFormDirty = false;   // saved: leaving no longer asks
     if(!isEdit){
       const domainMsg = orgDomainText_(data.domain, body.subdomain) + (data.domain && data.domain.error ? " Retry from the shop's Edit page." : "");
@@ -15420,6 +15571,203 @@ async function renderRevenueReport(app) {
   loadReport();
 }
 
+// ---- Fundraising report (migrations/0110) ---------------------------------------
+// What each shop's fundraiser raised over a range, what was paid out to the group and what is still owed, with the
+// orders below (db.js getFundraisingReport). Raised counts paid orders only — not voided, test or cancelled lines; a
+// refund takes its share back — on the same sale date as the Revenue report. Each line's amount was worked out when
+// it was priced, so changing a fundraiser never rewrites what earlier orders raised. A payout is an expense in the
+// built-in "Fundraiser payouts" category tied to the shop (Bookkeeping), so it is in Expenses and the books as well.
+// The last report drawn, for Export CSV and Record payout… (they use what is on the screen, not a new request).
+let _fundraising = null, _fundraisingSeq = 0;
+async function renderFundraisingReport(app){
+  adminSetHash("fundraising");
+  document.title = adminTitle_("Fundraising");
+  _fundraising = null;
+  const y = adminYear_();
+  const inp = "font-size:13px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;background:var(--surface,#fff);color:var(--ink,#111);";
+  const lbl = "font-size:12px;font-weight:600;display:block;margin-bottom:3px;";
+  const quick = "padding:6px 10px;font-size:12px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:var(--surface,#fff);";
+  const q = (n) => [y + "-" + ["01", "04", "07", "10"][n] + "-01", y + "-" + ["03-31", "06-30", "09-30", "12-31"][n]];
+  const shops = (adminOrgs || []).slice().sort((a, b) => String(a.name || a.orgId).localeCompare(String(b.name || b.orgId)));
+  app.innerHTML = `
+    ${adminPageHead_("Fundraising")}
+    <div class="admin-panel" style="--org-accent:var(--accent);max-width:980px;margin:8px auto 60px;">
+      <form id="frFilters" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:var(--surface-alt,#f6f6f6);padding:14px 16px;border-radius:8px;margin-bottom:14px;">
+        <div><label style="${lbl}" for="frFrom">From</label><input type="date" id="frFrom" value="${y}-01-01" style="${inp}"></div>
+        <div><label style="${lbl}" for="frTo">To</label><input type="date" id="frTo" value="${reportToDay_()}" style="${inp}"></div>
+        <div><label style="${lbl}" for="frOrg">Shop</label><select id="frOrg" style="${inp}max-width:240px;">
+          <option value="">All shops</option>${shops.map(o => `<option value="${escapeHtml(o.orgId)}">${escapeHtml(o.name || o.orgId)}</option>`).join("")}</select></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-self:flex-end;">
+          <button type="submit" class="admin-pass-submit" style="padding:6px 18px;font-size:13px;">Generate</button>
+          ${[0, 1, 2, 3].map(n => `<button type="button" data-from="${q(n)[0]}" data-to="${q(n)[1]}" data-admin-action="fundraisingShowRange_" style="${quick}">Q${n + 1} ${y}</button>`).join("")}
+          ${[y, y - 1].map(yy => `<button type="button" data-from="${yy}-01-01" data-to="${yy}-12-31" data-admin-action="fundraisingShowRange_" style="${quick}">${yy}</button>`).join("")}
+        </div>
+      </form>
+      <div class="admin-note" style="margin-bottom:14px;">A fundraiser is inside the shop's prices: customers pay the same, and the amount is yours to give back. Set it on the shop's Edit page. Raised counts paid orders only; a cancelled item raises nothing, and a refund takes its share back.</div>
+      <div id="frResults"></div>
+    </div>`;
+  document.getElementById("frFilters").addEventListener("submit", (e) => { e.preventDefault(); frLoad_(); });
+  document.getElementById("frOrg").addEventListener("change", () => frLoad_());
+  await frLoad_();
+}
+
+async function frLoad_(){
+  const el = document.getElementById("frResults");
+  if (!el) return;
+  const dateFrom = document.getElementById("frFrom").value, dateTo = document.getElementById("frTo").value;
+  const org = document.getElementById("frOrg").value;
+  if (!dateFrom || !dateTo) { el.innerHTML = `<div class="admin-error" style="display:block;">Choose both dates.</div>`; return; }
+  if (dateFrom > dateTo) { el.innerHTML = `<div class="admin-error" style="display:block;">The From date is after the To date.</div>`; return; }
+  el.innerHTML = `<div style="color:#888;font-size:14px;padding:20px 0;">Loading…</div>`;
+  // A newer Generate (another range or shop picked meanwhile) wins over an answer still on its way.
+  const seq = ++_fundraisingSeq;
+  const ask = Object.assign({ dateFrom, dateTo }, org ? { org } : {});
+  let d, payouts = null;
+  try {
+    // The payouts list is a nicety under the report: a server that can't send it still shows the report.
+    [d, payouts] = await Promise.all([adminApi_(Object.assign({ action: "getFundraisingReport" }, ask)),
+      adminApi_(Object.assign({ action: "listFundraiserPayouts" }, ask)).then(r => (r && r.payouts) || [], () => null)]);
+  } catch (e) {
+    if (seq !== _fundraisingSeq) return;
+    el.innerHTML = `<div class="admin-error" style="display:block;">${escapeHtml(e.message || "Couldn't load the report.")}</div>`;
+    return;
+  }
+  if (seq !== _fundraisingSeq || !document.getElementById("frResults")) return;
+  _fundraising = Object.assign({}, d, { dateFrom, dateTo, org, payouts });
+  el.innerHTML = frReportHtml_(_fundraising);
+}
+
+// The shop's name for a row: the report's own, else the admin's list of shops, else its id.
+function frShopName_(r, orgId){
+  const s = (r.shops || []).find(x => x.orgId === orgId) || (adminOrgs || []).find(x => x.orgId === orgId);
+  return (s && s.name) || orgId || "";
+}
+// Record payout… only for a role that may add expenses, with Bookkeeping on (the server refuses it otherwise).
+function frCanPay_(){ return adminFeatureOn_("bookkeeping") && adminCan_("finance.expenses", "edit"); }
+
+function frReportHtml_(r){
+  const fmt = adminMoney_, dash = (n) => Number(n) ? fmt(n) : "—";
+  const th = "padding:9px 12px;text-align:right;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;white-space:nowrap;border-bottom:2px solid #ccc;";
+  const thL = th.replace("text-align:right", "text-align:left");
+  const td = "padding:9px 12px;text-align:right;border-bottom:1px solid #ddd;color:#111;background:#fff;";
+  const tdL = td.replace("text-align:right", "text-align:left");
+  const ft = "padding:9px 12px;text-align:right;background:#f0f0f0;color:#111;font-weight:700;border-top:2px solid #aaa;";
+  const shops = r.shops || [], orders = r.orders || [], t = r.totals || {};
+  const pay = frCanPay_();
+  const asOf = r.owedAsOf || r.dateTo;
+  const modeText = (s) => s.mode === "percent" ? "a percent of each sale" : s.mode === "perPiece" ? "an amount per piece" : "no fundraiser now";
+  const shopRows = shops.map(s => `<tr>
+      <td style="${tdL}"><strong>${escapeHtml(s.name || s.orgId)}</strong>${s.label ? `<br><span style="font-size:12px;color:#555;">Supports ${escapeHtml(s.label)} · ${escapeHtml(modeText(s))}</span>` : `<br><span style="font-size:12px;color:#888;">${escapeHtml(modeText(s))}</span>`}</td>
+      <td style="${td}">${Number(s.orders) || "—"}</td>
+      <td style="${td}">${Number(s.pieces) || "—"}</td>
+      <td style="${td}">${dash(s.sales)}</td>
+      <td style="${td}font-weight:600;">${dash(s.raised)}</td>
+      <td style="${td}">${dash(s.paidOut)}</td>
+      <td style="${td}font-weight:600;color:${Number(s.owed) > 0.005 ? "#b45309" : Number(s.owed) < -0.005 ? "#b03a2e" : "#111"};">${Number(s.owed) ? fmt(s.owed) : "—"}</td>
+      ${pay ? `<td style="${td}"><button type="button" class="admin-btn" data-org="${escapeHtml(s.orgId)}" data-need="finance.expenses:edit" data-admin-action="fundraisingPayout_" style="padding:3px 10px;font-size:12px;white-space:nowrap;">Record payout…</button></td>` : ""}
+    </tr>`).join("");
+  const orderRows = orders.map(o => `<tr>
+      <td style="${tdL}white-space:nowrap;">${escapeHtml(adminDate_(o.placedAt))}</td>
+      <td style="${tdL}">${adminCanOpen_("orders") ? `<button type="button" data-perm-keep data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" data-placed="${escapeHtml(o.placedAt || "")}" data-admin-action="fundraisingOpenOrder_" title="Open this order in its shop's orders" style="background:none;border:none;padding:0;cursor:pointer;color:#1d4ed8;font:inherit;text-decoration:underline;">${escapeHtml(o.orderId)}</button>` : escapeHtml(o.orderId)}</td>
+      <td style="${tdL}">${escapeHtml(frShopName_(r, o.orgId))}</td>
+      <td style="${tdL}">${escapeHtml(o.customerName || "")}</td>
+      <td style="${td}">${Number(o.pieces) || 0}</td>
+      <td style="${td}">${fmt(o.sales)}</td>
+      <td style="${td}font-weight:600;">${fmt(o.raised)}</td>
+    </tr>`).join("");
+  const payouts = r.payouts;
+  const acctName = (p) => p.accountName || ((_accountsCache && _accountsCache.accounts || []).find(a => String(a.id) === String(p.accountId)) || {}).name || "";
+  const payoutRows = (payouts || []).map(p => `<tr>
+      <td style="${tdL}white-space:nowrap;">${escapeHtml(adminDate_(p.date))}</td>
+      <td style="${tdL}">${escapeHtml(frShopName_(r, p.orgId))}</td>
+      <td style="${td}">${fmt(p.amount)}</td>
+      <td style="${tdL}">${escapeHtml(acctName(p))}</td>
+      <td style="${tdL}color:#555;">${escapeHtml(p.note || p.description || "")}</td>
+    </tr>`).join("");
+  return `
+    <div style="font-size:13px;color:#555;margin-bottom:10px;">${escapeHtml(adminDate_(r.dateFrom))} – ${escapeHtml(adminDate_(r.dateTo))}${r.saleDate ? " · " + escapeHtml(saleDateNote_(r.saleDate)) : ""}. Still owed is everything raised less everything paid out up to ${escapeHtml(adminDate_(asOf))}, not only in this range.</div>
+    <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;margin-bottom:22px;"><table class="stack-mobile" id="frShops" style="width:100%;border-collapse:collapse;font-size:14px;">
+      <thead><tr><th style="${thL}">Shop</th><th style="${th}">Orders</th><th style="${th}">Pieces</th><th style="${th}" title="What these orders' items sold for, before tax">Sales</th><th style="${th}">Raised</th><th style="${th}" title="Payouts dated in this range">Paid out</th><th style="${th}" title="Raised less paid out, up to the To date">Still owed</th>${pay ? `<th style="${th}"></th>` : ""}</tr></thead>
+      <tbody>${shopRows || `<tr><td colspan="${pay ? 8 : 7}" style="${tdL}color:#888;">No shop has a fundraiser, and none raised or paid out anything in this range. Set one up on a shop's Edit page (Manage catalog → the shop → Edit).</td></tr>`}</tbody>
+      ${shops.length ? `<tfoot><tr><td style="${ft}text-align:left;">Total</td><td style="${ft}">${Number(t.orders) || 0}</td><td style="${ft}">${Number(t.pieces) || 0}</td><td style="${ft}">${fmt(t.sales)}</td><td style="${ft}">${fmt(t.raised)}</td><td style="${ft}">${fmt(t.paidOut)}</td><td style="${ft}">${fmt(t.owed)}</td>${pay ? `<td style="${ft}"></td>` : ""}</tr></tfoot>` : ""}
+    </table></div>
+    ${!pay && shops.some(s => Number(s.owed) > 0.005) ? `<div class="admin-note" style="margin:-12px 0 18px;">${adminFeatureOn_("bookkeeping") ? "Recording a payout needs Edit on Expenses (Users → Roles and permissions)." : "To record a payout to the group, turn on Bookkeeping (Global settings → Features): a payout is an expense, paid from one of your accounts."}</div>` : ""}
+
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+      <h3 style="margin:0;font-size:15px;">Orders (${orders.length})</h3>
+      ${orders.length ? `<button type="button" class="admin-btn" data-perm-keep data-admin-action="fundraisingExportCsv_" style="padding:4px 12px;font-size:12px;">Export CSV</button>` : ""}
+    </div>
+    <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;margin-bottom:22px;"><table class="stack-mobile" id="frOrders" style="width:100%;border-collapse:collapse;font-size:14px;">
+      <thead><tr><th style="${thL}">Date</th><th style="${thL}">Order #</th><th style="${thL}">Shop</th><th style="${thL}">Customer</th><th style="${th}">Pieces</th><th style="${th}">Sales</th><th style="${th}">Raised</th></tr></thead>
+      <tbody>${orderRows || `<tr><td colspan="7" style="${tdL}color:#888;">No paid order raised anything in this range.</td></tr>`}</tbody>
+    </table></div>
+
+    ${payouts ? `<h3 style="margin:0 0 8px;font-size:15px;">Payouts to the group (${payouts.length})</h3>
+    <div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table class="stack-mobile" id="frPayouts" style="width:100%;border-collapse:collapse;font-size:14px;">
+      <thead><tr><th style="${thL}">Date</th><th style="${thL}">Shop</th><th style="${th}">Amount</th><th style="${thL}">Paid from</th><th style="${thL}">Note</th></tr></thead>
+      <tbody>${payoutRows || `<tr><td colspan="5" style="${tdL}color:#888;">No payouts in this range.</td></tr>`}</tbody>
+    </table></div>
+    <div style="font-size:12px;color:#777;margin-top:6px;">Each payout is an expense in the Fundraiser payouts category${adminCanOpen_("expenses") ? ` — change or void one under <a href="#expenses">Finance → Expenses</a>` : ""}.</div>` : ""}`;
+}
+
+// The per-order rows on the screen, as a CSV (the same rows, nothing asked of the server again).
+function fundraisingExportCsv_(){
+  const r = _fundraising;
+  if (!r || !(r.orders || []).length) { showToast("Generate the report first — there are no orders to export.", true); return; }
+  const label = (orgId) => ((r.shops || []).find(s => s.orgId === orgId) || {}).label || "";
+  const rows = r.orders.map(o => ({ date: adminDay_(o.placedAt), orderId: o.orderId, shop: frShopName_(r, o.orgId), supports: label(o.orgId),
+    customer: o.customerName || "", pieces: Number(o.pieces) || 0, sales: Number(Number(o.sales || 0).toFixed(2)), raised: Number(Number(o.raised || 0).toFixed(2)) }));
+  downloadCsv_(`fundraising-${r.org ? r.org + "-" : ""}${r.dateFrom}-to-${r.dateTo}.csv`, rows,
+    [["date", "Date"], ["orderId", "Order #"], ["shop", "Shop"], ["supports", "Supports"], ["customer", "Customer"], ["pieces", "Pieces"], ["sales", "Sales"], ["raised", "Raised"]]);
+}
+
+// Record payout…: money paid to a shop's group, as an expense in the built-in Fundraiser payouts category tied to the
+// shop (recordFundraiserPayout), paid from one of the accounts, on a date — a closed month refuses it like any
+// expense. The amount starts at what is still owed.
+async function showFundraiserPayoutModal_(orgId){
+  const r = _fundraising, shop = r && (r.shops || []).find(s => s.orgId === orgId);
+  if (!shop) { showToast("Generate the report again, then record the payout.", true); return; }
+  if (!frCanPay_()) { showToast("Your role can't record expenses, or Bookkeeping is off.", true); return; }
+  let accounts = [];
+  try { accounts = ((await loadAccounts_()).accounts || []).filter(a => a.active); }
+  catch (e) { showToast(e.message || "Couldn't load your accounts.", true); return; }
+  if (!accounts.length) { showToast("Add an account first (Finance → Accounts & money): a payout is paid from one.", true); return; }
+  let last = ""; try { last = localStorage.getItem("oddExpPaidFrom") || ""; } catch (_) {}
+  const pick = accounts.some(a => String(a.id) === last) ? last : (accounts.length === 1 ? String(accounts[0].id) : "");
+  const owed = Number(shop.owed) > 0.005 ? Number(shop.owed).toFixed(2) : "";
+  const inp = "font-size:14px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;";
+  const lbl = "display:block;font-size:12px;font-weight:600;margin-bottom:3px;";
+  const { ov, close } = inventoryModal_(`Record payout — ${escapeHtml(shop.name || orgId)}`, `
+    <div style="font-size:13px;color:#555;margin-bottom:12px;">Money you paid ${shop.label ? `to <strong>${escapeHtml(shop.label)}</strong>` : "to the group"} from this shop's fundraiser. It is recorded as an expense in Fundraiser payouts${owed ? `; still owed up to ${escapeHtml(adminDate_(r.owedAsOf || r.dateTo))}: <strong>${adminMoney_(owed)}</strong>` : ""}.</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+      <div><label style="${lbl}" for="frpAmount">Amount ($)</label><input id="frpAmount" type="number" min="0.01" step="0.01" value="${owed}" style="${inp}width:130px;"></div>
+      <div><label style="${lbl}" for="frpDate">Date paid</label><input id="frpDate" type="date" value="${localToday_()}" style="${inp}"></div>
+      <div style="flex:1;min-width:160px;"><label style="${lbl}" for="frpAccount">Paid from</label><select id="frpAccount" style="${inp}width:100%;">${accountOptions_(accounts, pick, { blank: !pick })}</select></div>
+    </div>
+    <label style="${lbl}" for="frpNote">Note (optional)</label>
+    <input id="frpNote" type="text" maxlength="200" placeholder="e.g. Check 1042, spring season" style="${inp}width:100%;">
+    <div id="frpErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;"><button type="button" class="admin-btn admin-btn-secondary" id="frpCancel">Cancel</button><button type="button" class="admin-btn" id="frpSave" data-need="finance.expenses:edit">Save payout</button></div>`, 500, { guard: true });
+  ov.querySelector("#frpCancel").onclick = close;
+  ov.querySelector("#frpSave").onclick = async () => {
+    const err = ov.querySelector("#frpErr"), btn = ov.querySelector("#frpSave");
+    const amount = Number(ov.querySelector("#frpAmount").value), date = ov.querySelector("#frpDate").value;
+    const accountId = ov.querySelector("#frpAccount").value, note = ov.querySelector("#frpNote").value.trim();
+    if (!(amount > 0)) { err.textContent = "Enter the amount paid."; return; }
+    if (!date) { err.textContent = "Enter the date it was paid."; return; }
+    if (!accountId) { err.textContent = "Choose the account it was paid from."; return; }
+    err.textContent = ""; btn.disabled = true; btn.textContent = "Saving…";
+    try {
+      const { ok, signedOut, data } = await adminSave_({ action: "recordFundraiserPayout", org: orgId, amount: Number(amount.toFixed(2)), date, accountId: Number(accountId), note });
+      if (!ok) { err.textContent = (signedOut ? "Nothing was saved. " : "") + (data.message || "The payout wasn't saved."); btn.disabled = false; btn.textContent = "Save payout"; return; }
+    } catch (e) { err.textContent = "Could not reach the server."; btn.disabled = false; btn.textContent = "Save payout"; return; }
+    try { localStorage.setItem("oddExpPaidFrom", accountId); } catch (_) {}
+    close();
+    showToast(`Payout of ${adminMoney_(amount)} recorded${shop.label ? " for " + shop.label : ""}.`);
+    await frLoad_();
+  };
+}
+
 // ---- Audit Log ---------------------------------------------------------------
 const AUDIT_ACTION_LABELS = {
   "order.marked_paid":        "Marked paid",
@@ -15441,6 +15789,8 @@ const AUDIT_ACTION_LABELS = {
   "settings.sales_tax_set":   "Sales tax rate set",
   "settings.accounting_set":  "Bookkeeping sale date set",
   "org.tax_exemption_set":    "Tax exemption set",
+  "org.fundraiser_set":       "Fundraiser set",
+  "fundraiser.payout_recorded": "Fundraiser payout recorded",
   "report.accountant_export": "Accountant export",
   "payments.stripe_fees_backfilled": "Stripe fees backfilled",
   "order.discount_set":       "Discount set",
@@ -15560,6 +15910,10 @@ function auditDetailSummary(action, detail) {
       case "inventory.movement_restored": return escapeHtml(detail.blankName || "") + (detail.size ? " · " + escapeHtml(detail.size) : "") + (detail.qtyDelta != null ? " · " + (Number(detail.qtyDelta) > 0 ? "+" : "") + Number(detail.qtyDelta) : "") + (detail.reason ? " · " + escapeHtml(detail.reason) : "");
       case "inventory.received":
       case "inventory.written_off": return escapeHtml(detail.blankName || detail.name || "") + (detail.vendor ? " · " + escapeHtml(detail.vendor) : "") + (detail.qty != null ? " · " + Number(detail.qty) : "");
+      // A shop's fundraiser (migrations/0110): what it was → what it is ("none" when there wasn't one).
+      case "org.fundraiser_set":  return escapeHtml((fundraiserText_(detail.from) || "none") + " → " + (fundraiserText_(detail.to) || "none"));
+      case "fundraiser.payout_recorded": return adminMoney_(detail.amount || 0) + (detail.label ? " to " + escapeHtml(detail.label) : "") +
+        (detail.date ? " · " + escapeHtml(adminDate_(detail.date)) : "") + (detail.note ? " — " + escapeHtml(detail.note) : "");
       case "report.accountant_export": return escapeHtml((detail.dateFrom || "") + " → " + (detail.dateTo || ""));
       case "payments.stripe_fees_backfilled": return Number(detail.updated || 0) + " fee(s)" + (detail.redated && detail.redated.length ? " · " + detail.redated.length + " date(s)" : "");
       // Anything else: a short, ESCAPED preview — detail can hold typed text.

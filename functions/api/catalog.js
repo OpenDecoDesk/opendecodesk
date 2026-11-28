@@ -161,6 +161,28 @@ function clientQtyBreaks_(list){
     .sort((a, b) => a.minQty - b.minQty).slice(0, 6);
 }
 
+// The shop's fundraiser (migrations/0110) as the shop page shows it: one sentence, and only when the shop ticked
+// "Show on the shop". db.js validated it when it was saved (normalizeFundraiser_); the raw setup — mode, amount, the
+// tick box — never leaves the server, and anything malformed (or an entry cached before 0110, with no fundraiser at
+// all) reads as "nothing to show" rather than a broken sentence. null = say nothing.
+function fundraiserShopText_(f){
+  if(!f || typeof f !== "object" || f.showOnShop !== true) return null;
+  const label = String(f.label || "").trim().slice(0, 80);
+  if(!label) return null;
+  if(f.mode === "perPiece"){
+    const amount = Number(f.amount);
+    if(!Number.isFinite(amount) || amount <= 0) return null;
+    return "$" + amount.toFixed(2) + " of every item supports " + label;
+  }
+  if(f.mode === "percent"){
+    const pct = Number(f.percent);
+    if(!Number.isFinite(pct) || pct <= 0) return null;
+    // 10 → "10%", 2.5 → "2.5%": at most the two decimals the setting allows, no trailing zeros.
+    return String(Math.round(pct * 100) / 100) + "% of every purchase supports " + label;
+  }
+  return null;
+}
+
 // Maps a stored product (productId/pricingMode/flatPrice/sizePricing) to the
 // shape storefront.js's rendering expects (id, and sizePricing OR flatPrice —
 // no pricingMode field).
@@ -352,6 +374,7 @@ export async function onRequestGet(context){
   }
 
   const enabledPayments = computeEnabledPayments(org, catalogData.globalSettings, !!env.STRIPE_SECRET_KEY);
+  const fundraiserText = fundraiserShopText_(org.fundraiser);
 
   // The shop's stock block — finished stock, the digital products' files and the blanks' free stock — kept up to 30
   // seconds per shop (readShopStock_ above; a draft preview reads it fresh). Each part that can't be read is left out.
@@ -447,6 +470,9 @@ export async function onRequestGet(context){
       salesTaxMode: ((catalogData.globalSettings || {}).salesTax || {}).taxMode === "exclusive" ? "exclusive" : "inclusive",
       // The rush fee this shop offers (migrations/0082): its own rule, else the global one; null = no rush.
       rush: org.rushOffer || null,
+      // The shop's fundraiser (migrations/0110), only as the sentence under its heading and only when it's to be shown;
+      // left out otherwise. It's inside the prices, so nothing in the cart depends on it.
+      ...(fundraiserText ? { fundraiser: { text: fundraiserText } } : {}),
       // Public Turnstile site key (not secret) — only when server-side
       // verification is actually on, so the widget never renders for nothing.
       turnstileSiteKey: (env.TURNSTILE_SECRET_KEY && env.TURNSTILE_SITE_KEY) ? env.TURNSTILE_SITE_KEY : null

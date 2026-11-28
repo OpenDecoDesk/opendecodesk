@@ -447,6 +447,9 @@
   .rush-pill{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;background:#fee2e2;color:#991b1b;white-space:nowrap;}
   .rush-pill-pending{background:#fef3c7;color:#92400e;}
   .rush-pill-late{background:#991b1b;color:#fff;}
+  /* Orders: what an order raises for its shop's fundraiser (migrations/0110). Wraps, unlike the rush flag: it carries
+     the group's name, which can be long. */
+  .fundraiser-pill{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;background:#fef9c3;color:#854d0e;}
   /* Admin buttons shared by every screen: a quieter secondary and a danger (delete / void / remove) style. */
   .admin-btn.admin-btn-secondary{background:#fff;color:var(--ink,#222);border:1px solid #ccc;}
   /* One look for every destructive button (Delete / Void / Remove / Revoke / Disconnect): red text on white, and a

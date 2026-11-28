@@ -104,6 +104,7 @@ import {
   insertAuditLog, getAuditLog,
   getRevenueData, getDashboard, homeOrderStage, getAccountingSettings, setAccountingSettings, getSaleDateBasis, getOrderCostsNotYetSold, getOrderCostsNotYetSoldAt,
   getSalesTaxSettings, setSalesTaxSettings, setOrgTaxExemption, getSalesTaxReport,
+  normalizeFundraiser_, setOrgFundraiser, getFundraisingReport, recordFundraiserPayout, listFundraiserPayouts,
   getSalesTaxRefunds, PAYMENT_METHODS, methodFromPaymentMethod, getCardPaymentsMissingFees, setPaymentFee, getSalesTaxReturn, getTaxedResalePurchases, getStripeLinkedPayments, setPaymentDate, countStripePaymentsToCheck, markStripeChecked, stripeRefsTaken,
   getDigestState, getDigestRun, getOrdersForDigest, getUnsentOwnerNotices, getFailedAdminLogins,
   ACCOUNT_TYPES, OTHER_INCOME_TYPES, listAccounts, listAccountNames, saveAccount, getAccount, getMoneyDefaults, setMoneyDefaults,
@@ -570,6 +571,8 @@ const NO_MONTH_ACTIONS = new Set([
   "saveDesignVersion", "updateDesignVersionColors", "setDesignVersionStitches", "fillDesignStitchCounts", "deleteDesign", "saveGraphic", "deleteGraphic",
   "saveProductCategory", "deleteProductCategory", "saveLocation", "deleteLocation", "updateBrandRules", "addBrandApproval", "applyRulePrices",
   "revokeBrandApproval", "setBoxPresets",
+  // A shop's fundraiser (migrations/0110) applies to orders placed after it is set: each line keeps what it raised.
+  "setOrgFundraiser",
   // Production
   "saveMachine", "setMachineHoop", "setMachineNeedle", "recordMachineDiscovery", "setMachineStitchCount", "deleteMachine", "saveMaintenanceTask",
   "deleteMaintenanceTask", "recordMaintenance", "saveHoop", "deleteHoop", "saveThread", "importThreadChart", "saveSpoolSize", "saveThreadInventory",
@@ -626,7 +629,7 @@ const dropFields_ = (v, drop) => Array.isArray(v) ? v.map(x => dropFields_(x, dr
 // catch-up costs, stock made at a cost, a receipt's account, supplier orders' totals, statement entries and
 // reconciliations, deposit mapping and Stripe fees, and the blank costs behind a product's confirmed prices. Their
 // rows stay; their detail goes to a role without costs.view (auditCostsFor_). Counts, write-offs, links and names stay.
-const MONEY_AUDIT_ACTIONS_ = new RegExp("^(settings\\.pricing|settings\\.shop_rate|payment\\.|expense\\.|recurring_expense\\.|" +
+const MONEY_AUDIT_ACTIONS_ = new RegExp("^(settings\\.pricing|settings\\.shop_rate|payment\\.|expense\\.|recurring_expense\\.|fundraiser\\.payout_recorded$|" +
   "inventory\\.(received|order_received|receipt_account_changed|vendor_prices_changed|average_cost_recomputed|catch_up|movement_voided|movement_restored|made_for_stock)$|" +
   "transfer\\.(received|sheet_edited|catch_up|movement_voided|movement_restored|receipt_account_changed)$|" +
   "supplier_order\\.(placed|failed)$|statement\\.(created_entry|reconciled)$|payments\\.(deposit_mapped|stripe_fees_backfilled)$|product\\.prices_confirmed$)");
@@ -663,6 +666,8 @@ const FEATURE_ACTIONS = {
     "listExpenseCategories", "saveExpenseCategory", "deleteExpenseCategory", "getShopRate", "saveShopRate",
     "listExpenses", "saveExpense", "deleteExpense", "getExpenseReport", "previewExpenseImport", "importExpenses",
     "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",
+    // A payout to a shop's fundraiser is an expense; the Fundraising report itself works without Bookkeeping.
+    "recordFundraiserPayout",
   ],
   // (Reading the ship-from address isn't behind the switch: Global settings shows it as soon as
   // Shipping is ticked, before it's saved on.)
@@ -1011,6 +1016,9 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (["addPayment", "recordRefund", "setPaymentDate", "markPaidManual", "setReadyToShipQty", "countBlankStock", "countTransferStock"].includes(a) && b.at) { const t = actionTime(b); if (t && t.at) months.push(t.at.slice(0, 7)); }
     if (a === "setPaymentDate" && b.paymentId) months.push(await paymentMonth(env.DB, b.paymentId));
     if (a === "saveExpense" && b.expense && /^\d{4}-\d{2}-\d{2}$/.test(String(b.expense.date || ""))) months.push(String(b.expense.date).slice(0, 7));
+    // A fundraiser payout is an expense dated when it was paid (migrations/0110).
+    // The handler trims the date before saving it, so the month is read from the trimmed date too.
+    if (a === "recordFundraiserPayout" && /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || "").trim())) months.push(String(b.date).trim().slice(0, 7));
     if (["saveExpense", "deleteExpense"].includes(a) && (b.expenseId || (b.expense && b.expense.id))) months.push(await expenseMonth(env.DB, b.expenseId || b.expense.id));
     if (["saveMoneyEntry", "deleteMoneyEntry"].includes(a) && ["income", "owner", "transfer"].includes(b.kind)) {
       if (b.entry && /^\d{4}-\d{2}-\d{2}$/.test(String(b.entry.date || ""))) months.push(String(b.entry.date).slice(0, 7));
@@ -1199,7 +1207,9 @@ async function handleOrdersPost_(context, listBefore = null) {
   if (body.action === "listOrgs") {
     const denied = await requireAdmin(env, host, body.key, request, "Not available here.", ACTION_PERM_[body.action]);
     if (denied) return denied;
-    return listAnswer_("orgs", "orgs", (orgs) => orgs.map((o) => ({ orgId: o.orgId, name: o.name, subdomain: o.subdomain || "" })));
+    return listAnswer_("orgs", "orgs", (orgs) => orgs.map((o) => ({ orgId: o.orgId, name: o.name, subdomain: o.subdomain || "",
+      // Who the shop's fundraiser supports, for the Orders page's "Raises $x for …" (no amounts: those are on each order).
+      fundraiserLabel: (o.fundraiser && o.fundraiser.label) || "" })));
   }
 
   // ---- getOrders -------------------------------------------------------------
@@ -2328,6 +2338,121 @@ async function handleOrdersPost_(context, listBefore = null) {
     totals.netTaxDue = Math.round((totals.taxCollected - totals.taxRefunded + totals.useTax) * 100) / 100;
     return jsonResponse({ status: "ok", rows, refunds, totals, taxReturn, dateFrom, dateTo,
       ratePercent: salesTax.rateBps / 100, jurisdiction: salesTax.jurisdiction, taxMode: salesTax.taxMode });
+  }
+
+  // ---- Fundraising (migrations/0110) — a shop's fundraiser, the report, payouts to the group ----
+  // A fundraiser is inside the shop's prices: customers pay the same, and each order line keeps what it raised when it
+  // was priced (order_items.fundraiserCents), so changing the setting changes new orders only.
+  // A database without 0110: the writers would fail on the missing columns. Say so plainly instead of a 500.
+  const fundraisingNotReady_ = () => jsonResponse({ status: "error", message: "Fundraising isn't ready yet: the database is still being updated. Try again in a minute." }, 503);
+  const fundraisingReady_ = async (run) => {
+    try { return await run(); }
+    catch (e) {
+      if (!/no such column: (\w+\.)?(fundraiserJson|fundraiserCents|fundraiserOrgId)/i.test(String(e && e.message))) throw e;
+      return fundraisingNotReady_();
+    }
+  };
+  const fundraisingYmd_ = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) && !isNaN(Date.parse(v + "T00:00:00Z")) &&
+    new Date(v + "T00:00:00Z").toISOString().slice(0, 10) === v;
+  // The shop a request names (`org`): { org } (null when it names none and needn't), or { error } — the reply.
+  const fundraisingOrg_ = async (raw, required) => {
+    if (raw === undefined || raw === null || raw === "") return required ? { error: jsonResponse({ status: "error", message: "Choose a shop." }, 400) } : { org: null };
+    if (typeof raw !== "string" || raw.length > 100) return { error: jsonResponse({ status: "error", message: "That shop isn't valid." }, 400) };
+    const org = await getOrgById(env.DB, raw);
+    return org ? { org } : { error: jsonResponse({ status: "error", message: "Unknown shop" }, 404) };
+  };
+
+  // ---- getFundraisingReport — per shop and per order: sales, raised, paid out, still owed ----
+  // Sales money, gated like the Revenue report (its function at Read, no costs.view): what a shop sold and raised is
+  // what its customers paid, not what anything cost.
+  if (body.action === "getFundraisingReport") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const dateFrom = String(body.dateFrom || "").trim(), dateTo = String(body.dateTo || "").trim();
+    if (!fundraisingYmd_(dateFrom) || !fundraisingYmd_(dateTo)) return jsonResponse({ status: "error", message: "Invalid date range — expected YYYY-MM-DD" }, 400);
+    if (dateFrom > dateTo) return jsonResponse({ status: "error", message: "The start date is after the end date." }, 400);
+    const { org, error } = await fundraisingOrg_(body.org, false);
+    if (error) return error;
+    return fundraisingReady_(async () => {
+      const saleDate = await getSaleDateBasis(env.DB);   // orders sold in the range, dated as the Revenue report dates them
+      const rep = await getFundraisingReport(env.DB, { dateFrom, dateTo, orgId: org ? org.orgId : undefined, basis: saleDate });
+      if (rep && rep.error) return jsonResponse({ status: "error", message: rep.error }, 400);
+      // Owed is raised less paid out over ALL time up to dateTo, not just the range: a payout in March settles what
+      // February raised. The answer says as of when.
+      return jsonResponse({ status: "ok", dateFrom, dateTo, orgId: org ? org.orgId : null, saleDate, shops: rep.shops, orders: rep.orders, totals: rep.totals, owedAsOf: dateTo });
+    });
+  }
+
+  // ---- listFundraiserPayouts — what was paid out to shops' groups (optionally one shop, a date range) ----
+  if (body.action === "listFundraiserPayouts") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const dateFrom = String(body.dateFrom || "").trim(), dateTo = String(body.dateTo || "").trim();
+    if ((dateFrom && !fundraisingYmd_(dateFrom)) || (dateTo && !fundraisingYmd_(dateTo))) return jsonResponse({ status: "error", message: "Invalid date range — expected YYYY-MM-DD" }, 400);
+    const { org, error } = await fundraisingOrg_(body.org, false);
+    if (error) return error;
+    return fundraisingReady_(async () => {
+      const got = await listFundraiserPayouts(env.DB, { orgId: org ? org.orgId : undefined, dateFrom: dateFrom || undefined, dateTo: dateTo || undefined });
+      return jsonResponse({ status: "ok", payouts: Array.isArray(got) ? got : (got && got.payouts) || [] });
+    });
+  }
+
+  // ---- setOrgFundraiser — a shop's fundraiser, or none (fundraiser: null) ----
+  // Applies to orders placed from now on. The storefront's "… supports …" line comes from the cached catalog, so the
+  // catalog moves to a new version, as other shop changes that show at once do.
+  if (body.action === "setOrgFundraiser") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const { org, error } = await fundraisingOrg_(body.org, true);
+    if (error) return error;
+    // Left out is refused rather than read as "none": a form that forgot the field must not clear a shop's fundraiser.
+    if (body.fundraiser === undefined) return jsonResponse({ status: "error", message: "Say what the fundraiser is, or choose none." }, 400);
+    let fundraiser = null;
+    if (body.fundraiser !== null) {
+      if (typeof body.fundraiser !== "object" || Array.isArray(body.fundraiser)) return jsonResponse({ status: "error", message: "That fundraiser isn't valid." }, 400);
+      const n = normalizeFundraiser_(body.fundraiser);
+      if (!n || n.error) return jsonResponse({ status: "error", message: (n && n.error) || "That fundraiser isn't valid." }, 400);
+      fundraiser = n.fundraiser || null;
+    }
+    return fundraisingReady_(async () => {
+      const r = await setOrgFundraiser(env.DB, org.orgId, fundraiser);
+      if (r && r.error) return r.notReady ? fundraisingNotReady_() : jsonResponse({ status: "error", message: r.error }, 400);
+      const from = r && r.before !== undefined ? r.before : (org.fundraiser || null);
+      if (JSON.stringify(from) !== JSON.stringify(fundraiser)) {
+        audit({ orgId: org.orgId, orderId: null, action: "org.fundraiser_set", detail: { from, to: fundraiser } });
+        try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
+      }
+      return jsonResponse({ status: "ok", fundraiser });
+    });
+  }
+
+  // ---- recordFundraiserPayout — money paid to a shop's group, as an expense in "Fundraiser payouts" ----
+  // An expense like any other (Expenses, Account viewer, Reconcile, the accountant's export), so it needs Expenses at
+  // Edit, the Bookkeeping feature (FEATURE_ACTIONS) and an open month for its date (periodGuard).
+  if (body.action === "recordFundraiserPayout") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const bad = (message) => jsonResponse({ status: "error", message }, 400);
+    const { org, error } = await fundraisingOrg_(body.org, true);
+    if (error) return error;
+    const amount = Number(body.amount);
+    if (body.amount === "" || body.amount === null || typeof body.amount === "boolean" || !Number.isFinite(amount) || amount <= 0 || amount > 1000000) return bad("Amount must be a positive number");
+    const date = String(body.date || "").trim();
+    if (!fundraisingYmd_(date)) return bad("Date must be YYYY-MM-DD");
+    if (date > new Date().toISOString().slice(0, 10)) return bad("The date can't be in the future");
+    if (date < "2020-01-01") return bad("That date is too far back");
+    const acct = body.accountId ? await getAccount(env.DB, body.accountId) : null;
+    if (!acct || !acct.active) return bad("Choose which account paid it");
+    const note = String(body.note == null ? "" : body.note).trim().slice(0, 200);
+    { const locked = await periodGuard(body); if (locked) return locked; }
+    return fundraisingReady_(async () => {
+      const r = await recordFundraiserPayout(env.DB, { orgId: org.orgId, amount, date, accountId: acct.id, note, actor: adminActor(request) });
+      if (r && r.notReady) return fundraisingNotReady_();
+      if (!r || r.error) return bad((r && r.error) || "The payout couldn't be recorded.");
+      audit({ orgId: org.orgId, orderId: null, action: "fundraiser.payout_recorded", detail: { expenseId: r.id, amount, date, accountId: acct.id, note,
+        label: (org.fundraiser && org.fundraiser.label) || org.name || org.orgId } });
+      return jsonResponse({ status: "ok", id: r.id });
+    });
   }
 
   // ---- markPaidManual — admin marks an order paid + emails customer ----------

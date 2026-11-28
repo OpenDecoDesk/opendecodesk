@@ -296,6 +296,13 @@ The page also needs the **Quotes** feature (Global settings → Features), on un
 off, the page is hidden for everyone and a quote link a customer already has answers "Quotes aren't
 available." Turning it back on brings every quote back as it was.
 
+**Fundraising** is a permission of its own under Reports, "Fundraising report". Manager and Admin
+have it in full and Back office can read the report; Production can't open it. Recording a payout to
+the group is an expense, so it needs the edit level of Expenses too (Manager and Admin) and the
+Bookkeeping feature; setting up a shop's fundraiser needs the edit level of the shop's settings. As
+with Customers, a role you made yourself, or a built-in one you have changed, starts without it
+([Fundraising](#fundraising-the-report-and-payouts) below).
+
 - **Adding someone:** name, email, role. You are shown a temporary password once; give it to
   them. They must choose their own the first time they sign in.
 - **Someone leaves:** disable them. They are signed out at once and can't sign in. Users are
@@ -450,4 +457,44 @@ The result is the **overhead per hour**, your pay and profit per hour, and the *
 rate** keeps the figures and your changes, and price analysis then uses them (see Pricing in
 [shops-and-domains.md](shops-and-domains.md#pricing-what-an-item-costs-and-leaves)). The page works the
 numbers out again as you type; nothing is used until it's saved. Part of Bookkeeping.
+
+## Fundraising: the report and payouts
+
+A shop can raise money for its group: a percent of each item's price, or an amount per piece, inside
+the prices (set up in the shop's settings, see
+[shops-and-domains.md](shops-and-domains.md#fundraising)). Each order line keeps what it raised,
+worked out when it was priced.
+
+**Reports → Fundraising** shows, for a range of dates (with presets, as on the Revenue report) and one
+shop or all of them:
+
+- **Per shop:** the orders, pieces and sales, what they **raised**, what was **paid out** to the group,
+  and what is still **owed** — with totals across the shops. A shop is listed when it has a
+  fundraiser now, or raised or paid out something in the range.
+- **Per order**, below it: each order with its date, customer, pieces, sales and what it raised.
+  **Export CSV** downloads these rows.
+
+What counts:
+
+- **Only paid orders raise money.** An order still owing raises nothing until it is paid in full; test
+  and voided orders never do.
+- A **cancelled line** raises nothing, and a **refunded** one raises less in proportion to the share of
+  the line refunded (never below nothing).
+- Orders are dated as the Revenue report dates them — when they ship or are delivered, or when they were
+  placed, as Global settings → Bookkeeping says.
+- **Paid out** is the payouts dated in the range. **Owed** is everything raised up to the end of the
+  range less everything paid out up to then — not only the range's — so it is what you owe the group as
+  of that date.
+
+**Record payout…** on a shop's row records money you gave the group: the amount (it starts at what is
+owed), the date, the account it was paid from and a note. It is an expense in the built-in category
+**Fundraiser payouts**, tied to the shop, so it shows wherever expenses do — Expenses, the Account
+viewer, Reconcile and the accountant's export — and the report lists each shop's payouts. Like any
+expense it can't be dated in a closed month, and it is in the audit log. Deleting it in Expenses takes
+it off the report. Recording a payout needs the Bookkeeping feature and the edit level of Expenses; the
+report itself works without Bookkeeping ([Users and roles](#users-and-roles)).
+
+The built-in category (named "Fundraiser payouts (built in)" if you already had a category called
+"Fundraiser payouts") can be renamed but not deleted. Nothing is paid to the group automatically: the report tells
+you what is owed, and you pay it the way you always have.
 

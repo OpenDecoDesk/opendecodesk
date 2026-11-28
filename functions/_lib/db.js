@@ -14969,6 +14969,7 @@ export const SYSTEM_ISSUE_LABELS = {
   digest_failed: "Daily roll-ups that did not complete (the scheduled run tries again the next hour, up to 3 times a day)",
   recurring_expense_skipped: "Recurring expenses that couldn't be recorded (fix the rule on Expenses — it's recorded once fixed)",
   cleanup_failed: "Daily clean-ups that did not complete (old log entries stay until one does)",
+  card_fees_failed: "Card fees couldn't be read from Stripe (card payments keep a $0 fee until they can; check the Stripe key)",
   migrations_pending: "Database updates this version needs that haven't been applied (until they are, some pages can show $0 or empty lists; see Global settings → Setup status)",
   api_error: "Requests that failed with an unexpected error (the page showed \"Something went wrong\")",
 };

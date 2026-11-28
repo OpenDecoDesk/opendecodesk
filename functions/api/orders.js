@@ -2198,7 +2198,8 @@ async function handleOrdersPost_(context, listBefore = null) {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
     const state = await getDigestState(env.DB);
-    // Run delivery check first so newly-delivered notices are included below.
+    // Run delivery check first so newly-delivered and picked-up notices are included below (pickups are 'picked_up'
+    // notices, so they're shown, and later emailed, once — not also from this run's list).
     const deliveries = await checkShippedDeliveries(env).catch(() => ({ inTransit: [], delivered: [], pickedUp: [], awaitingPickup: [] }));
     const [{ orders, more }, notices, orgs, security, issues, awaitingBlanks] = await Promise.all([
       getOrdersForDigest(env.DB, state), getUnsentOwnerNotices(env.DB), getAllOrgs(env.DB), getFailedAdminLogins(env.DB),
@@ -2218,7 +2219,6 @@ async function handleOrdersPost_(context, listBefore = null) {
           persName: it.persName || "", cancelled: !!it.cancelDate })) })),
       notices: notices.map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
       inTransit: (deliveries.inTransit || []).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
-      pickedUp: (deliveries.pickedUp || []).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
       awaitingPickup: (deliveries.awaitingPickup || []).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
       // Machine maintenance that's due (migrations/0071) — the roll-up lists it.
       maintenanceDue: (await getFeatures(env.DB).catch(() => ({ production: true }))).production

@@ -171,12 +171,15 @@ async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
   // to check, the oldest 20 and how many in all; never a reason to send on their own.
   const unconfirmed = await getUnconfirmedShipments(env.DB).catch((e) => { console.error("getUnconfirmedShipments failed:", e); return { count: 0, orders: [] }; });
   const inTransit = deliveries.inTransit || [];
-  // Picked up by the carrier (marked shipped this run) is news; a label still waiting for a scan is
-  // listed in the email for the record but never a reason to send one on its own.
-  const pickedUp = deliveries.pickedUp || [], awaitingPickup = deliveries.awaitingPickup || [];
+  // Picked up by the carrier is news: each pickup is a queued owner notice (kind 'picked_up', deliveryCheck.js), so
+  // it is in `notices` above, including one from a run whose email failed or a day email wasn't set up, and it is
+  // marked sent with the others. A label still waiting for a scan is listed in the email for the record but never
+  // a reason to send one on its own.
+  const awaitingPickup = deliveries.awaitingPickup || [];
+  const pickedUpCount = notices.filter(x => x.kind === "picked_up").length;
   // In transit alone isn't news: otherwise the email would go out every day while any package
   // was on its way, with nothing new in it. It's still listed whenever something else sends one.
-  if (!orders.length && !notices.length && !securityAlert && !deliveries.delivered.length && !pickedUp.length && !issues.length && !blanksOverdue.length && !priceReminder && !belowTarget.length) {
+  if (!orders.length && !notices.length && !securityAlert && !deliveries.delivered.length && !issues.length && !blanksOverdue.length && !priceReminder && !belowTarget.length) {
     // Nothing to report; move the marker past any test/voided orders.
     await setDigestState(env.DB, { ...cursor, sentAt: state ? state.sentAt || "" : "" });
     await alerts.commit().catch(() => {});   // nothing new below target — remember the recoveries
@@ -193,7 +196,7 @@ async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
     return jsonResponse({ status: "ok", sent: false, heartbeat, orders: 0, notices: 0, delivered: deliveries.delivered.length, inTransit: 0 });
   }
   const orgNames = Object.fromEntries((await getAllOrgs(env.DB)).map(o => [o.orgId, o.name]));
-  const sent = await sendDailyDigestEmail(env, { orders, more, notices, orgNames, security, inTransit, pickedUp, awaitingPickup, issues, awaitingBlanks, priceReminder, belowTarget, maintenanceDue, rushToSet, recurringRecorded, unconfirmed });
+  const sent = await sendDailyDigestEmail(env, { orders, more, notices, orgNames, security, inTransit, awaitingPickup, issues, awaitingBlanks, priceReminder, belowTarget, maintenanceDue, rushToSet, recurringRecorded, unconfirmed });
   if (!sent) return jsonResponse({ status: "error", message: "Email could not be sent — will retry next run" }, 502);
   await onSent();
   if (priceReminder) await setBlankPriceReminderSent(env.DB).catch((e) => console.error("setBlankPriceReminderSent failed:", e));
@@ -202,7 +205,7 @@ async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
   await markOwnerNoticesSent(env.DB, notices.map(x => x.id));
   if (security) await clearFailedAdminLogins(env.DB, security);   // only what this email reported
   if (issues.length) await clearSystemIssues(env.DB, issues);
-  return jsonResponse({ status: "ok", sent: true, orders: orders.length, more, notices: notices.length, delivered: deliveries.delivered.length, inTransit: inTransit.length, pickedUp: pickedUp.length });
+  return jsonResponse({ status: "ok", sent: true, orders: orders.length, more, notices: notices.length, delivered: deliveries.delivered.length, inTransit: inTransit.length, pickedUp: pickedUpCount });
 }
 
 export async function onRequestGet() {

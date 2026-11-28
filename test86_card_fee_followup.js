@@ -61,5 +61,6 @@ const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
   console.log("it only retries when the first read gave 0:", /inserted && feeCents === 0/.test(hook));
   // (The daily housekeeping, an hour before the roll-up on its own tick — test84 runs it; the desktop program has no Stripe.)
   const hk = w.slice(w.indexOf("async function runHousekeeping_("), w.indexOf("export async function handleScheduled("));
-  console.log("the scheduled housekeeping fills missing fees, an hour before the roll-up:", /fillMissingCardFees\(env\)/.test(hk) && /jobHour: housekeepingHour\(env\)/.test(w) && /const housekeeping = await runHousekeeping_\(env\);/.test(w));
+  console.log("the scheduled housekeeping fills missing fees, an hour before the roll-up:", /fillMissingCardFees\(env\)/.test(hk) && /jobHour: housekeepingHour\(env\)/.test(w) && /const housekeeping = await runHousekeeping_\(env, \{ firstTry: attempt\.attempts === 1 \}\);/.test(w));
+  // (Stripe refusing — a revoked or restricted key — is told apart from "no fee yet": test349.)
 })().catch((e) => { console.log("test86 crashed:", false); console.error(e); process.exit(1); });

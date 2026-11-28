@@ -89,6 +89,9 @@ const iso = (daysAgo, h = 12) => { const d = new Date(Date.now() - daysAgo * 864
     console.log("the customer got one shipped email with the USPS tracking link:", shipMail.length === 1 && shipMail[0].to === "ann@example.com" &&
       shipMail[0].htmlBody.includes("https://tools.usps.com/go/TrackConfirmAction?tLabels=9400111") && r.pickedUp[0].customerEmailed === true);
     console.log("audited as done by the check:", d1.q("SELECT actor FROM audit_log WHERE action='order.shipped_auto' AND orderId='A1'")[0].actor === "delivery-check");
+    const puNotice = d1.q("SELECT kind, urgent, summary FROM owner_notices WHERE orderId='A1' AND kind='picked_up'");
+    console.log("queued as a 'picked up' owner notice for the roll-up (not urgent: the customer was emailed):",
+      puNotice.length === 1 && puNotice[0].urgent === 0 && /USPS 9400111 picked up/.test(puNotice[0].summary));
     lookups = [];
     r = await L.checkShippedDeliveries(env(d1));
     console.log("next run: no second email; it's now watched for delivery instead:",
@@ -186,9 +189,11 @@ const iso = (daysAgo, h = 12) => { const d = new Date(Date.now() - daysAgo * 864
 
     console.log("\n=== The roll-up ===");
     mail.length = 0;
-    const pu = [{ orderId: "A1", orgId: "prime", customerName: "Ann", carrier: "USPS", tracking: "9400111", shippedAtLabel: "Oct 1", customerEmailed: true }];
+    // Pickups reach the roll-up as queued 'picked_up' notices (deliveryCheck.js), not a list of their own.
+    const pu = [{ id: 1, kind: "picked_up", orderId: "A1", orgId: "prime", summary: "Ann — USPS 9400111 picked up Oct 1", detail: "Marked shipped; the customer was emailed their tracking.",
+      imageUrls: [], urgent: false, createdAt: iso(0) }];
     const aw = [{ orderId: "A9", orgId: "prime", customerName: "Zed", carrier: "USPS", tracking: "9400123", labelAtLabel: "Sep 30" }];
-    let sent = await L.sendDailyDigestEmail(env(d1), { pickedUp: pu, awaitingPickup: aw, orgNames: { prime: "Example League" } });
+    let sent = await L.sendDailyDigestEmail(env(d1), { notices: pu, awaitingPickup: aw, orgNames: { prime: "Example League" } });
     console.log("lists 'Picked up by the carrier' and 'Label created, not shipped yet', and says so in the subject:",
       sent === true && /Picked up by the carrier — 1/.test(mail[0].htmlBody) && /Label created, not shipped yet — 1/.test(mail[0].htmlBody) && /1 picked up by carrier/.test(mail[0].subject));
     mail.length = 0;

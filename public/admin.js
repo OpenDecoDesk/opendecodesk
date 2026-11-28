@@ -20709,12 +20709,15 @@ async function renderCommunications(app, opts){
   const th = "padding:7px 10px;text-align:left;background:#f0f0f0;color:#333;font-size:12px;font-weight:700;border-bottom:2px solid #ccc;";
   const td = "padding:8px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#111;background:#fff;";
   const sub = "color:#666;font-size:12px;";
-  const KIND = { payment: "Payment", refund: "Refund", dispute: "Dispute", design: "Design response", delivered: "Delivered" };
+  const KIND = { payment: "Payment", refund: "Refund", dispute: "Dispute", design: "Design response", delivered: "Delivered", picked_up: "Picked up" };
   const urgent = d.notices.filter(x => x.urgent);
   const delivered = d.notices.filter(x => !x.urgent && x.kind === "delivered");
-  const activity = d.notices.filter(x => !x.urgent && x.kind !== "delivered");
+  // Carrier pickups are queued notices (migrations/0113) until a roll-up reports them; one whose customer couldn't
+  // be emailed is under Needs attention.
+  const pickedUp = d.notices.filter(x => !x.urgent && x.kind === "picked_up");
+  const activity = d.notices.filter(x => !x.urgent && x.kind !== "delivered" && x.kind !== "picked_up");
   const inTransit = d.inTransit || [];
-  const pickedUp = d.pickedUp || [], awaitingPickup = d.awaitingPickup || [];
+  const awaitingPickup = d.awaitingPickup || [];
   const awaitingBlanks = d.awaitingBlanks || [];
   const total = d.orders.reduce((s, o) => s + Math.round(Number(o.total) * 100), 0) / 100;
   const since = d.firstRun ? "No roll-up has been sent yet — the first one covers the last 24 hours."
@@ -20762,16 +20765,16 @@ async function renderCommunications(app, opts){
         </tr>`).join("")}</tbody></table></div>`
     : `<div style="color:#888;">Nothing is waiting on a delivery (shipped orders need a tracking number to be checked).</div>`;
 
-  // Labels the carrier hasn't scanned yet, and any the check just found scanned (marked shipped now).
+  // Labels the carrier hasn't scanned yet.
   const shipRows = (rows, statusCell) => `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
       <thead><tr><th style="${th}">Order</th><th style="${th}">Shop</th><th style="${th}">Customer</th><th style="${th}">Carrier / tracking</th><th style="${th}">Status</th></tr></thead>
       <tbody>${rows.map(x => `<tr>
         <td style="${td}white-space:nowrap;">${escapeHtml(x.orderId)}</td><td style="${td}">${escapeHtml(x.orgName)}</td><td style="${td}">${escapeHtml(x.customerName)}</td>
         <td style="${td}font-family:monospace;font-size:12px;">${escapeHtml(x.carrier)} ${escapeHtml(x.tracking)}</td>
         <td style="${td}">${statusCell(x)}</td></tr>`).join("")}</tbody></table></div>`;
-  const pickedUpHtml = pickedUp.length ? `<h2 style="font-size:17px;margin:22px 0 8px;">📮 Just picked up by the carrier — ${pickedUp.length}</h2>
-    <div style="font-size:13px;color:#555;margin:0 0 8px;">This check found a carrier scan, so these are now marked shipped (dated by the first scan) and each customer was emailed their tracking.</div>
-    ${shipRows(pickedUp, x => `Shipped ${escapeHtml(x.shippedAtLabel || "")}${x.customerEmailed === false ? `<br><span style="color:#b45309;font-size:12px;">customer email not sent</span>` : ""}`)}` : "";
+  const pickedUpHtml = pickedUp.length ? `<h2 style="font-size:17px;margin:22px 0 8px;">📮 Picked up by the carrier — ${pickedUp.length}</h2>
+    <div style="font-size:13px;color:#555;margin:0 0 8px;">The tracking check found a carrier scan, so these are now marked shipped (dated by the first scan) and each customer was emailed their tracking.</div>
+    ${noticeTable(pickedUp)}` : "";
   const awaitingHtml = `<h2 style="font-size:17px;margin:22px 0 8px;">🏷 Label created — not shipped yet${awaitingPickup.length ? ` — ${awaitingPickup.length}` : ""}</h2>
     <div style="font-size:13px;color:#555;margin:0 0 8px;">These have a label, but the carrier hasn't scanned them yet. Each is marked shipped automatically (and the customer emailed) once tracking shows a scan — or mark it shipped yourself on the orders screen.</div>
     ${awaitingPickup.length ? shipRows(awaitingPickup, x => `${escapeHtml(x.status || "Awaiting scan")}${x.labelAtLabel ? `<br><span style="${sub}">label ${escapeHtml(x.labelAtLabel)}</span>` : ""}`)

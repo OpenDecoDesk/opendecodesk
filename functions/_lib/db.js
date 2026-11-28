@@ -7547,18 +7547,50 @@ export async function setDesignStitchCount(db, table, id, value) {
 // Issues (migrations/0046): each design and each of its machines carries `issues` — the total count
 // of every kind noted on its runs — and `runsWithIssues`; `issueTotals` is the same across the whole
 // range; each log row has its own `issues` / `issueNote`; `otherNotes` lists the free-text details.
-export async function getRunReportByDesign(db, { from, to } = {}) {
+// A range can hold tens of thousands of runs (one per hooping), so the totals are added up by the database — one row
+// per design / machine / issues noted (the same answer as adding up every run) — and the log is paged: the newest
+// RUN_LOG_PAGE runs, `detailMore` saying older ones are in range too. `before` ({startedAt, id} of the last run shown,
+// the audit log's keyset) asks for the page after it, and then only `{ detail, detailMore }` comes back.
+// All of them read the range on idx_runs_started (migrations/0109); the "+status" keeps the planner off the status index,
+// which holds nearly every run.
+const RUN_LOG_PAGE = 500;
+export async function getRunReportByDesign(db, { from, to, before = null } = {}) {
   const lo = from ? String(from) : "0000";
   const hi = to ? String(to) + "T23:59:59.999Z" : "9999";
+  const dur = (a, b) => Math.max(0, Date.parse(b) - Date.parse(a));
+  const issuesOf = (r) => cleanRunIssues(tryParse_(r.issuesJson, {}), "").issues;
+  const after = before && typeof before === "object" && before.startedAt && Number.isFinite(Number(before.id));
+  const { results: detailRows } = await db.prepare(
+    `SELECT pr.id AS runId, pr.designName, pr.machineName, pr.orgId, org.name AS orgName, pr.orderId,
+            pr.startedAt, pr.finishedAt, pr.status, pr.abortReasonLabel, pr.abortNote, pr.stepLabel, pr.issuesJson, pr.issueNote,
+            pr.stitchCount, pr.stitchesCounted
+     FROM production_runs pr LEFT JOIN orgs org ON org.orgId = pr.orgId
+     WHERE pr.startedAt >= ? AND pr.startedAt <= ? AND COALESCE(pr.timed, 1) = 1${after ? " AND (pr.startedAt < ? OR (pr.startedAt = ? AND pr.id < ?))" : ""}
+     ORDER BY pr.startedAt DESC, pr.id DESC LIMIT ?`
+  ).bind(lo, hi, ...(after ? [String(before.startedAt), String(before.startedAt), Number(before.id)] : []), RUN_LOG_PAGE + 1).all();
+  const detail = detailRows.slice(0, RUN_LOG_PAGE).map(r => ({
+    runId: Number(r.runId), designName: r.designName || "(no design)", machineName: r.machineName || "(unassigned)",
+    orgName: r.orgName || r.orgId, orderId: r.orderId, startedAt: r.startedAt, finishedAt: r.finishedAt || "",
+    status: r.status, durationMs: r.finishedAt ? dur(r.startedAt, r.finishedAt) : null,
+    abortReasonLabel: r.abortReasonLabel || "", abortNote: r.abortNote || "", stepLabel: r.stepLabel || "",
+    issues: r.status === "done" ? issuesOf(r) : {}, issueNote: r.status === "done" ? (r.issueNote || "") : "",
+    stitchCount: r.stitchCount == null ? null : Number(r.stitchCount), stitchesCounted: r.stitchesCounted == null ? null : Number(r.stitchesCounted),
+  }));
+  const detailMore = detailRows.length > RUN_LOG_PAGE;
+  if (after) return { detail, detailMore };
+  // Each group's runs, time (ms, as dur() works it out) and stitches; groups in the order of their first run, so each
+  // design and machine is met in the same order as when every run was read one by one.
+  const msSql = "MAX(0, CAST(ROUND((julianday(finishedAt) - julianday(startedAt)) * 86400000) AS INTEGER))";
   const { results: done } = await db.prepare(
-    `SELECT designId, designName, orgId, machineName, startedAt, finishedAt, issuesJson, stitchCount
-     FROM production_runs WHERE status='done' AND finishedAt IS NOT NULL AND startedAt >= ? AND startedAt <= ?
-       AND COALESCE(timed, 1) = 1`
+    `SELECT designId, designName, machineName, issuesJson, COUNT(*) AS runs, SUM(${msSql}) AS totalMs,
+            SUM(stitchCount) AS stitches, COUNT(stitchCount) AS stitchRuns, SUM(CASE WHEN stitchCount IS NOT NULL THEN ${msSql} ELSE 0 END) AS stitchMs
+     FROM production_runs WHERE +status='done' AND finishedAt IS NOT NULL AND startedAt >= ? AND startedAt <= ?
+       AND COALESCE(timed, 1) = 1
+     GROUP BY designId, designName, machineName, issuesJson ORDER BY MIN(id)`
   ).bind(lo, hi).all();
   const { results: aborted } = await db.prepare(
-    "SELECT designId, designName FROM production_runs WHERE status='aborted' AND startedAt >= ? AND startedAt <= ?"
+    "SELECT designId, designName, COUNT(*) AS runs FROM production_runs WHERE +status='aborted' AND startedAt >= ? AND startedAt <= ? GROUP BY designId, designName ORDER BY MIN(id)"
   ).bind(lo, hi).all();
-  const dur = (a, b) => Math.max(0, Date.parse(b) - Date.parse(a));
   const byDesign = new Map();
   const keyOf = (r) => (r.designId == null ? "none" : String(r.designId));
   const ensure = (r) => {
@@ -7567,30 +7599,29 @@ export async function getRunReportByDesign(db, { from, to } = {}) {
       designName: r.designName || "(no design)", runs: 0, totalMs: 0, abortedCount: 0, issues: {}, runsWithIssues: 0, _byMachine: new Map(), ...stitchAcc_() });
     return byDesign.get(k);
   };
-  const issuesOf = (r) => cleanRunIssues(tryParse_(r.issuesJson, {}), "").issues;
-  const addIssues = (into, issues) => { for (const k of Object.keys(issues)) into[k] = (into[k] || 0) + issues[k]; };
+  const addIssues = (into, issues, times) => { for (const k of Object.keys(issues)) into[k] = (into[k] || 0) + issues[k] * times; };
   const issueTotals = {};
-  let runsWithIssues = 0;
+  let runsWithIssues = 0, doneRuns = 0;
   // Stitches (migrations/0071): over the timed runs whose design's stitch count is known — total, per run, per minute.
   const stitchAcc_ = () => ({ stitches: 0, stitchRuns: 0, stitchMs: 0 });
-  const addStitches_ = (into, n, ms) => { if (n == null) return; into.stitches += Number(n) || 0; into.stitchRuns++; into.stitchMs += ms; };
+  const addStitches_ = (into, r) => { into.stitches += Number(r.stitches) || 0; into.stitchRuns += Number(r.stitchRuns) || 0; into.stitchMs += Number(r.stitchMs) || 0; };
   const stitchOut_ = (a) => ({ stitches: a.stitches, avgStitches: a.stitchRuns ? Math.round(a.stitches / a.stitchRuns) : 0,
     stitchesPerMin: a.stitchMs > 0 ? Math.round(a.stitches / (a.stitchMs / 60000)) : 0 });
   const allStitches = stitchAcc_();
   for (const r of done) {
-    const g = ensure(r); const ms = dur(r.startedAt, r.finishedAt);
-    g.runs++; g.totalMs += ms;
+    const g = ensure(r); const n = Number(r.runs) || 0, ms = Number(r.totalMs) || 0;
+    doneRuns += n; g.runs += n; g.totalMs += ms;
     const mk = r.machineName || "(unassigned)";
     const mm = g._byMachine.get(mk) || { machineName: mk, runs: 0, totalMs: 0, issues: {}, runsWithIssues: 0, ...stitchAcc_() };
-    mm.runs++; mm.totalMs += ms; g._byMachine.set(mk, mm);
-    addStitches_(g, r.stitchCount, ms); addStitches_(mm, r.stitchCount, ms); addStitches_(allStitches, r.stitchCount, ms);
+    mm.runs += n; mm.totalMs += ms; g._byMachine.set(mk, mm);
+    addStitches_(g, r); addStitches_(mm, r); addStitches_(allStitches, r);
     const issues = issuesOf(r);
     if (Object.keys(issues).length) {
-      addIssues(g.issues, issues); addIssues(mm.issues, issues); addIssues(issueTotals, issues);
-      g.runsWithIssues++; mm.runsWithIssues++; runsWithIssues++;
+      addIssues(g.issues, issues, n); addIssues(mm.issues, issues, n); addIssues(issueTotals, issues, n);
+      g.runsWithIssues += n; mm.runsWithIssues += n; runsWithIssues += n;
     }
   }
-  for (const r of aborted) ensure(r).abortedCount++;
+  for (const r of aborted) ensure(r).abortedCount += Number(r.runs) || 0;
   const designs = [...byDesign.values()].map(g => ({
     designId: g.designId, designName: g.designName, runs: g.runs, totalMs: g.totalMs,
     avgMs: g.runs ? Math.round(g.totalMs / g.runs) : 0, abortedCount: g.abortedCount,
@@ -7600,31 +7631,23 @@ export async function getRunReportByDesign(db, { from, to } = {}) {
       ...stitchOut_(m), runsNoStitches: m.runs - m.stitchRuns }))
       .sort((a, b) => b.runs - a.runs),
   })).sort((a, b) => b.runs - a.runs);
-  const { results: detailRows } = await db.prepare(
-    `SELECT pr.id AS runId, pr.designName, pr.machineName, pr.orgId, org.name AS orgName, pr.orderId,
-            pr.startedAt, pr.finishedAt, pr.status, pr.abortReasonLabel, pr.abortNote, pr.stepLabel, pr.issuesJson, pr.issueNote,
-            pr.stitchCount, pr.stitchesCounted
+  // The free-text "other" details over the whole range (not just the log's page), newest first — the list at the
+  // bottom of the report. Only finished, timed runs carry one, as in the log.
+  const { results: noteRows } = await db.prepare(
+    `SELECT pr.id AS runId, pr.designName, pr.machineName, pr.orgId, org.name AS orgName, pr.orderId, pr.startedAt, pr.stepLabel, pr.issuesJson, pr.issueNote
      FROM production_runs pr LEFT JOIN orgs org ON org.orgId = pr.orgId
-     WHERE pr.startedAt >= ? AND pr.startedAt <= ? AND COALESCE(pr.timed, 1) = 1 ORDER BY pr.startedAt DESC, pr.id DESC`
+     WHERE +pr.status = 'done' AND pr.issueNote <> '' AND pr.startedAt >= ? AND pr.startedAt <= ? AND COALESCE(pr.timed, 1) = 1
+     ORDER BY pr.startedAt DESC, pr.id DESC`
   ).bind(lo, hi).all();
-  const detail = detailRows.map(r => ({
-    runId: Number(r.runId), designName: r.designName || "(no design)", machineName: r.machineName || "(unassigned)",
-    orgName: r.orgName || r.orgId, orderId: r.orderId, startedAt: r.startedAt, finishedAt: r.finishedAt || "",
-    status: r.status, durationMs: r.finishedAt ? dur(r.startedAt, r.finishedAt) : null,
-    abortReasonLabel: r.abortReasonLabel || "", abortNote: r.abortNote || "", stepLabel: r.stepLabel || "",
-    issues: r.status === "done" ? issuesOf(r) : {}, issueNote: r.status === "done" ? (r.issueNote || "") : "",
-    stitchCount: r.stitchCount == null ? null : Number(r.stitchCount), stitchesCounted: r.stitchesCounted == null ? null : Number(r.stitchesCounted),
-  }));
-  // The free-text "other" details, newest first — the list at the bottom of the report.
-  const otherNotes = detail.filter(x => x.issueNote).map(x => ({ runId: x.runId, startedAt: x.startedAt, designName: x.designName, machineName: x.machineName,
-    orgName: x.orgName, orderId: x.orderId, stepLabel: x.stepLabel, count: x.issues.other || 1, note: x.issueNote }));
+  const otherNotes = noteRows.map(r => ({ runId: Number(r.runId), startedAt: r.startedAt, designName: r.designName || "(no design)", machineName: r.machineName || "(unassigned)",
+    orgName: r.orgName || r.orgId, orderId: r.orderId, stepLabel: r.stepLabel || "", count: issuesOf(r).other || 1, note: r.issueNote }));
   // Untimed hoopings ("Mark done (no timing)") aren't in the timings, but their stitches still ran.
   const untimed = await db.prepare(
     `SELECT COUNT(*) AS n, COALESCE(SUM(stitchCount), 0) AS stitches FROM production_runs
-     WHERE status='done' AND COALESCE(timed, 1) = 0 AND startedAt >= ? AND startedAt <= ?`).bind(lo, hi).first();
-  const stitchSummary = Object.assign(stitchOut_(allStitches), { runsNoStitches: done.length - allStitches.stitchRuns,
+     WHERE +status='done' AND COALESCE(timed, 1) = 0 AND startedAt >= ? AND startedAt <= ?`).bind(lo, hi).first();
+  const stitchSummary = Object.assign(stitchOut_(allStitches), { runsNoStitches: doneRuns - allStitches.stitchRuns,
     untimedRuns: Number(untimed && untimed.n) || 0, untimedStitches: Number(untimed && untimed.stitches) || 0 });
-  return { designs, detail, issueKinds: RUN_ISSUE_KINDS, issueTotals, runsWithIssues, doneRuns: done.length, otherNotes, stitchSummary };
+  return { designs, detail, detailMore, issueKinds: RUN_ISSUE_KINDS, issueTotals, runsWithIssues, doneRuns, otherNotes, stitchSummary };
 }
 
 // ---- Catch-up: use blanks for orders that were made before stock was tracked ----
@@ -7652,11 +7675,23 @@ export async function planBlankCatchUp(db) {
        AND (i.cogsCents IS NULL OR i.cogsSource = 'estimate') AND NOT ${fs("i")}
      ORDER BY useDate, i.id`).all();
   if (!cands.length) return { lines: [], totalUnits: 0, totalCents: 0, replacedEstimateCents: 0, shortLines: 0 };
-  const { results: mv } = await db.prepare(
-    "SELECT id, blankId, color, size, qtyDelta, unitCostCents, kind, occurredAt FROM inventory_movements WHERE voidedAt IS NULL ORDER BY occurredAt, id").all();
-  const { results: cur } = await db.prepare("SELECT blankId, color, size, purchasePriceCents FROM blank_sizes").all();
+  // Only the history that can move these lines' costs: the movements of their blank / color / size (on
+  // idx_movements_blank_color), up to the latest line's date — a later one comes after every line in the replay.
+  // And only those blanks' sizes and names. Each key's replay sorts its own events, so no ORDER BY is needed.
+  const keys = JSON.stringify([...new Map(cands.map(c => [c.blankId + "|" + (c.blankColor || "") + "|" + (c.blankSize || ""),
+    [Number(c.blankId), c.blankColor || "", c.blankSize || ""]])).values()]);
+  const ids = JSON.stringify([...new Set(cands.map(c => Number(c.blankId)))]);
+  const lastUse = cands.reduce((a, c) => (String(c.useDate) > a ? String(c.useDate) : a), "");
+  const [{ results: mv }, { results: cur }, { results: names }] = await Promise.all([
+    db.prepare(
+      `SELECT m.id, m.blankId, m.color, m.size, m.qtyDelta, m.unitCostCents, m.kind, m.occurredAt
+       FROM (SELECT DISTINCT json_extract(value, '$[0]') AS b, json_extract(value, '$[1]') AS c, json_extract(value, '$[2]') AS s FROM json_each(?)) k
+       JOIN inventory_movements m ON m.blankId = k.b AND m.color = k.c AND m.size = k.s
+       WHERE m.voidedAt IS NULL AND m.occurredAt <= ?`).bind(keys, lastUse).all(),
+    db.prepare("SELECT blankId, color, size, purchasePriceCents FROM blank_sizes WHERE blankId IN (SELECT value FROM json_each(?))").bind(ids).all(),
+    db.prepare("SELECT id, name FROM blanks WHERE id IN (SELECT value FROM json_each(?))").bind(ids).all(),
+  ]);
   const curAvg = new Map(cur.map(r => [r.blankId + "|" + (r.color || "") + "|" + r.size, Number(r.purchasePriceCents) || 0]));
-  const { results: names } = await db.prepare("SELECT id, name FROM blanks").all();
   const blankNames = new Map(names.map(r => [Number(r.id), r.name]));
 
   const byKey = new Map();
@@ -14308,13 +14343,17 @@ async function stockLink_(db, orgId, productId, pricingMode, size, color = "") {
   return null;
 }
 
+// The shop's pieces set aside (finishedSetAside_), for a caller that reads the shop's stock and a product's Stock window
+// in one request: read once, then handed to both (getReadyToShipByOrg's and getFinishedStock's `held`).
+export async function getFinishedSetAside(db, orgId) { return finishedSetAside_(db, orgId); }
+
 // What the storefront badge shows: AVAILABLE pieces (on hand less set aside), per product + size + combination
-// (variant '' for a product with no choices).
-export async function getReadyToShipByOrg(db, orgId) {
+// (variant '' for a product with no choices). `held`: the shop's set-aside pieces when the caller already has them.
+export async function getReadyToShipByOrg(db, orgId, { held: given } = {}) {
   const { results } = await db.prepare(
     "SELECT productId, size, variant, quantity FROM ready_to_ship WHERE orgId=? ORDER BY productId, size"
   ).bind(orgId).all();
-  const held = await finishedSetAside_(db, orgId);
+  const held = given || await finishedSetAside_(db, orgId);
   return results.map(r => ({ productId: r.productId, size: r.size, variant: r.variant || "",
     quantity: Math.max(0, (Number(r.quantity) || 0) - ((held[heldKey_(orgId, r.productId, r.size, r.variant)] || {}).n || 0)) }));
 }
@@ -14353,29 +14392,43 @@ export async function getBlankReadyByOrg(db, orgId) {
 // orders) / available / average cost / value, and what Make for stock would use — the linked blank and how many of it
 // are free. A product with choices also gets what can be picked (`options`) and the blank behind each color + size
 // (`links`), for making a new combination.
-export async function getFinishedStock(db, orgId, productId) {
+// The product's blank links are read in one query and looked up in memory (stockLink_'s rule: a flat product's link
+// is under "OSFA", else ''), and only those blanks' reservations are read — so the queries don't grow with the
+// product's colors × sizes. `held`: the shop's set-aside pieces when the caller already has them (getFinishedSetAside).
+export async function getFinishedStock(db, orgId, productId, { held: given } = {}) {
   const p = await stockProduct_(db, orgId, productId);
   if (!p) return null;
   const configurable = !!Number(p.configurable), flat = p.pricingMode === "flat";
-  const { results: rows } = await db.prepare("SELECT size, variant, variantLabel, quantity, avgCostCents FROM ready_to_ship WHERE orgId=? AND productId=? ORDER BY variantLabel, size").bind(orgId, productId).all();
-  const held = await finishedSetAside_(db, orgId), reserved = await getBlankReservations(db);
+  const [{ results: rows }, { results: linkRows }] = await Promise.all([
+    db.prepare("SELECT size, variant, variantLabel, quantity, avgCostCents FROM ready_to_ship WHERE orgId=? AND productId=? ORDER BY variantLabel, size").bind(orgId, productId).all(),
+    db.prepare(
+      `SELECT l.productColor, l.productSize, l.blankId, l.blankColor, l.blankSize, b.name AS blankName, COALESCE(bs.quantity, 0) AS quantity, COALESCE(bs.purchasePriceCents, 0) AS avg
+       FROM product_blank_links l LEFT JOIN blanks b ON b.id = l.blankId
+       LEFT JOIN blank_sizes bs ON bs.blankId = l.blankId AND bs.color = l.blankColor AND bs.size = l.blankSize
+       WHERE l.orgId = ? AND l.productId = ?`).bind(orgId, productId).all(),
+  ]);
+  const linkKey = (color, size) => String(color || "") + "\u0001" + String(size || "");
+  const linkAt = new Map(linkRows.filter(l => l.blankId != null).map(l => [linkKey(l.productColor, l.productSize), l]));
+  const held = given || await finishedSetAside_(db, orgId);
+  const reserved = await getBlankReservations(db, { blankIds: [...linkAt.values()].map(l => Number(l.blankId)) });
   const sizes = flat ? [""] : Object.keys(tryParse_(p.sizePricingCents, {}) || {});
   for (const r of rows) if (!sizes.includes(r.size)) sizes.push(r.size);
-  const blankOf = async (size, color) => {
-    const link = await stockLink_(db, orgId, productId, p.pricingMode, size, color);
+  const blankOf = (size, color) => {
+    let link = null;
+    for (const sz of flat ? ["OSFA", ""] : [size]) if ((link = linkAt.get(linkKey(color, sz)) || null)) break;
     return link ? { blankId: Number(link.blankId), name: link.blankName || "", color: link.blankColor || "", size: link.blankSize || "", avgCost: fromCents(link.avg),
       free: Math.max(0, Number(link.quantity) - (reserved[[link.blankId, link.blankColor || "", link.blankSize || ""].join("|")] || 0)) } : null;
   };
-  const sizeRow = async (size, variant, label, color) => {
+  const sizeRow = (size, variant, label, color) => {
     const r = rows.find(x => x.size === size && (x.variant || "") === variant) || { quantity: 0, avgCostCents: 0 };
     const h = held[heldKey_(orgId, productId, size, variant)] || { n: 0, orderIds: [] };
     const onHand = Number(r.quantity) || 0, avg = Number(r.avgCostCents) || 0;
     return { size, variant, label, onHand, setAside: h.n, setAsideOrders: h.orderIds, available: Math.max(0, onHand - h.n), avgCost: fromCents(avg),
-      value: fromCents(Math.max(0, onHand) * avg), blank: await blankOf(size, color) };
+      value: fromCents(Math.max(0, onHand) * avg), blank: blankOf(size, color) };
   };
   const out = { productId, name: p.name || productId, flat, configurable, noBlankNeeded: !!Number(p.noBlankNeeded), sizes: [] };
   if (!configurable) {
-    for (const size of sizes) out.sizes.push(await sizeRow(size, "", "", ""));
+    for (const size of sizes) out.sizes.push(sizeRow(size, "", "", ""));
     return out;
   }
   // Every combination stock has been recorded for, with each of its sizes that has a row.
@@ -14384,7 +14437,7 @@ export async function getFinishedStock(db, orgId, productId) {
     const v = r.variant || "";
     let c = combos.find(x => x.variant === v);
     if (!c) { let color = ""; try { color = String(JSON.parse(v)[0] || ""); } catch (e) { /* '' or not ours */ } combos.push(c = { variant: v, label: r.variantLabel || "", color, sizes: [] }); }
-    c.sizes.push(await sizeRow(r.size, v, c.label, c.color));
+    c.sizes.push(sizeRow(r.size, v, c.label, c.color));
   }
   out.combinations = combos;
   // What can be picked, the way the shop page offers it.
@@ -14397,7 +14450,7 @@ export async function getFinishedStock(db, orgId, productId) {
       graphics: (loc.graphicIds || []).map(Number).map(id => byId.get(id)).filter(g => g && g.visible)
         .map(g => ({ id: Number(g.id), name: g.name, inkColors: g.inkColors || [], allowedGarmentColors: g.allowedGarmentColors || [] })) })) };
   out.links = {};
-  for (const color of colors) { out.links[color] = {}; for (const size of sizes) out.links[color][size] = await blankOf(size, color); }
+  for (const color of colors) { out.links[color] = {}; for (const size of sizes) out.links[color][size] = blankOf(size, color); }
   return out;
 }
 

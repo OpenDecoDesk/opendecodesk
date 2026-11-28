@@ -13,7 +13,7 @@ const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'
 const L = new Function(strip(read("functions/_lib/hostConfig.js")) + "\n" + strip(read("functions/_lib/http.js")) + "\n" + strip(read("functions/_lib/db.js")) + "\n" +
   strip(read("functions/_lib/catalogCache.js")) + "\n" + strip(read("functions/api/catalog.js")) + `\nreturn { createProduct, createTransfer, createGraphic, setTierPrices,
   publishShop, bumpCatalogVersion, getPublicCatalogData, getPublicCatalogMeta, getPublicCatalogShop, getCatalogData, getCatalogShop,
-  invalidateCatalogVersionCache, _resetCatalogCacheState, _catalogShopsInMemory, classifyHost, catalogGet: onRequestGet };`)();
+  invalidateCatalogVersionCache, _resetCatalogCacheState, _catalogShopsInMemory, classifyHost, catalogGet: onRequestGet, _resetShopStock };`)();
 let pass = 0, fail = 0;
 const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
 
@@ -26,7 +26,7 @@ function freshCacheApi() {
     async match(key) { cacheApi.matches++; const hit = store.get(typeof key === "string" ? key : key.url); return hit ? hit.clone() : undefined; },
     async put(key, response) { store.set(typeof key === "string" ? key : key.url, response); },
   } };
-  L._resetCatalogCacheState();
+  L._resetCatalogCacheState(); L._resetShopStock();
   return store;
 }
 

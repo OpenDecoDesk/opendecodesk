@@ -23439,11 +23439,45 @@ async function renderRunReport(app){
   const thL = th.replace("text-align:right", "text-align:left");
   const cell = "padding:8px 12px;text-align:right;border-bottom:1px solid #ddd;color:#111;background:#fff;";
   const cellL = cell.replace("text-align:right", "text-align:left");
+  // One run log row. The log comes 500 runs at a time, newest first; Load older adds the next ones under it.
+  const logRow = (x, kinds) => `<tr>
+            <td style="${cellL}">${escapeHtml(x.startedAt ? adminDateTime_(x.startedAt) : "")}</td>
+            <td style="${cellL}">${escapeHtml(x.designName)}</td>
+            <td style="${cellL}">${escapeHtml(x.machineName)}</td>
+            <td style="${cellL}">${escapeHtml(x.orgName)} · ${escapeHtml(x.orderId)}</td>
+            <td style="${cell}">${x.status === "done" ? dur(x.durationMs) : "—"}</td>
+            <td style="${cell}" class="rr-stitches">${x.status === "aborted" ? (x.stitchesCounted ? Number(x.stitchesCounted).toLocaleString() : "—") : x.stitchCount != null ? Number(x.stitchCount).toLocaleString() : `<span style="color:#bbb;">—</span>`}</td>
+            <td style="${cellL}">${x.status === "aborted" ? "Aborted" + (x.abortReasonLabel ? " — " + escapeHtml(x.abortReasonLabel) : "") + (x.abortNote ? " (" + escapeHtml(x.abortNote) + ")" : "") : (x.status === "done" ? "Done" : "Running")}</td>
+            <td style="${cellL}">${escapeHtml(runIssuesText_(x.issues, kinds)) || `<span style="color:#bbb;">—</span>`}</td>
+          </tr>`;
+  // Under the log: how many runs are shown and, when older ones are in the range too, a button for the next page.
+  function logFooter(shown, more, range, kinds){
+    const foot = document.getElementById("rrRunLogFooter");
+    if (!foot) return;
+    const n = shown.length;
+    foot.innerHTML = more
+      ? `Showing the newest ${n} runs <button type="button" class="admin-btn" id="rrLoadOlder" style="padding:2px 10px;font-size:12px;margin-left:4px;">Load older</button>`
+      : `${n} run${n === 1 ? "" : "s"}`;
+    const btn = document.getElementById("rrLoadOlder");
+    if (!btn) return;
+    btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = "Loading…";
+      const last = shown[shown.length - 1];
+      try {
+        const r = await runOrderApi_({ action: "getRunReportByDesign", ...range, before: { startedAt: last.startedAt, id: last.runId } });
+        const page = (r.report && r.report.detail) || [];
+        const body = document.querySelector("#rrRunLog tbody");
+        if (body) body.insertAdjacentHTML("beforeend", page.map(x => logRow(x, kinds)).join(""));
+        logFooter(shown.concat(page), !!(r.report && r.report.detailMore) && page.length > 0, range, kinds);
+      } catch (e) { foot.innerHTML = `<span style="color:#b03a2e;">${escapeHtml(e.message)}</span>`; }
+    };
+  }
   async function load(){
     const el = document.getElementById("rrResults");
     el.innerHTML = `<div style="color:#888;font-size:14px;padding:20px 0;">Loading…</div>`;
     try {
-      const r = await runOrderApi_({ action: "getRunReportByDesign", from: document.getElementById("rrFrom").value, to: document.getElementById("rrTo").value });
+      const range = { from: document.getElementById("rrFrom").value, to: document.getElementById("rrTo").value };
+      const r = await runOrderApi_({ action: "getRunReportByDesign", ...range });
       const rep = r.report || { designs: [], detail: [] };
       if (!rep.designs.length && !rep.detail.length) { el.innerHTML = `<div style="color:#888;padding:20px 0;">No runs in this range.</div>`; return; }
       // Issues noted when each run was finished (migrations/0046): a column per kind, per design and per machine.
@@ -23469,19 +23503,11 @@ async function renderRunReport(app){
           </tbody>
         </table></div>`).join("");
       const detail = `<h3 style="margin:24px 0 8px;font-size:15px;">Run log</h3>
-        <table style="width:100%;border-collapse:collapse;">
+        <table id="rrRunLog" style="width:100%;border-collapse:collapse;">
           <thead><tr><th style="${thL}">Started</th><th style="${thL}">Design</th><th style="${thL}">Machine</th><th style="${thL}">Order</th><th style="${th}">Duration</th><th style="${th}">Stitches</th><th style="${thL}">Status</th><th style="${thL}">Issues</th></tr></thead>
-          <tbody>${rep.detail.map(x => `<tr>
-            <td style="${cellL}">${escapeHtml(x.startedAt ? adminDateTime_(x.startedAt) : "")}</td>
-            <td style="${cellL}">${escapeHtml(x.designName)}</td>
-            <td style="${cellL}">${escapeHtml(x.machineName)}</td>
-            <td style="${cellL}">${escapeHtml(x.orgName)} · ${escapeHtml(x.orderId)}</td>
-            <td style="${cell}">${x.status === "done" ? dur(x.durationMs) : "—"}</td>
-            <td style="${cell}" class="rr-stitches">${x.status === "aborted" ? (x.stitchesCounted ? Number(x.stitchesCounted).toLocaleString() : "—") : x.stitchCount != null ? Number(x.stitchCount).toLocaleString() : `<span style="color:#bbb;">—</span>`}</td>
-            <td style="${cellL}">${x.status === "aborted" ? "Aborted" + (x.abortReasonLabel ? " — " + escapeHtml(x.abortReasonLabel) : "") + (x.abortNote ? " (" + escapeHtml(x.abortNote) + ")" : "") : (x.status === "done" ? "Done" : "Running")}</td>
-            <td style="${cellL}">${escapeHtml(runIssuesText_(x.issues, kinds)) || `<span style="color:#bbb;">—</span>`}</td>
-          </tr>`).join("")}</tbody>
-        </table>`;
+          <tbody>${rep.detail.map(x => logRow(x, kinds)).join("")}</tbody>
+        </table>
+        <div id="rrRunLogFooter" style="font-size:13px;color:#666;margin:8px 0 0;"></div>`;
       // The free-text details typed for "Other", newest first.
       const notes = rep.otherNotes || [];
       const other = `<h3 style="margin:24px 0 8px;font-size:15px;">Other issue details</h3>` + (notes.length ? `
@@ -23496,6 +23522,7 @@ async function renderRunReport(app){
           </tr>`).join("")}</tbody>
         </table></div>` : `<div id="rrOtherNotes" style="color:#888;font-size:13px;">No “Other” details were entered in this range.</div>`);
       el.innerHTML = designBlocks + detail + other;
+      logFooter(rep.detail, !!rep.detailMore, range, kinds);
     } catch (e) { el.innerHTML = `<div style="color:#b03a2e;">${escapeHtml(e.message)}</div>`; }
   }
   document.getElementById("rrFilters").onsubmit = (e) => { e.preventDefault(); load(); };

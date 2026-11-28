@@ -109,4 +109,5 @@ export const MIGRATIONS = [
   "0105_pay_on_delivery.sql",
   "0106_orphan_scan_transfer_item_index.sql",
   "0107_receive_request_keys.sql",
+  "0109_growth_indexes.sql",
 ];

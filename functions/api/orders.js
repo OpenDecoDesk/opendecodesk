@@ -95,7 +95,7 @@ import {
   getLatestVerificationsByOrg,
   updateOrderShipping,
   addOrderPayment, getOrderPaymentById, setOrderDiscount,
-  getReadyToShipByOrg, upsertReadyToShipQty, addBlankSizes, getFinishedStock, makeForStock, setFinishedCount, getFinishedGoodsMovements,
+  getReadyToShipByOrg, getFinishedSetAside, upsertReadyToShipQty, addBlankSizes, getFinishedStock, makeForStock, setFinishedCount, getFinishedGoodsMovements,
   voidFinishedGoodsMovement, getFinishedGoodsValuation, getFinishedGoodsValuations, WRITEOFF_REASONS,
   updateOrderPlacedAt, setOrderDueDate,
   insertAuditLog, getAuditLog,
@@ -6151,8 +6151,10 @@ async function handleOrdersPost_(context, listBefore = null) {
       return jsonResponse({ status: "ok", checked: todo.length, filled, unreadable, more: todo.length >= 40 && filled > 0 });
     }
 
+    // The Run times report. `before` ({startedAt, id} of the last run shown): the run log's next page only (Load older).
     if (body.action === "getRunReportByDesign") {
-      return jsonResponse({ status: "ok", report: await getRunReportByDesign(env.DB, { from: body.from, to: body.to }) });
+      const before = body.before && typeof body.before === "object" ? { startedAt: String(body.before.startedAt || ""), id: Number(body.before.id) } : null;
+      return jsonResponse({ status: "ok", report: await getRunReportByDesign(env.DB, { from: body.from, to: body.to, before }) });
     }
 
     if (body.action === "importThreadChart") {
@@ -6529,11 +6531,13 @@ async function handleOrdersPost_(context, listBefore = null) {
     }
 
     // Finished stock (migrations/0060). getReadyToShip: the shop's AVAILABLE counts (what its site shows),
-    // and with a productId that product's full picture for the Stock window (getFinishedStock).
+    // and with a productId that product's full picture for the Stock window (getFinishedStock). The pieces set aside
+    // are read once for both.
     if (body.action === "getReadyToShip") {
       if (!body.org) return jsonResponse({ status: "error", message: "org required" }, 400);
-      const stock = await getReadyToShipByOrg(env.DB, body.org);
-      const finished = body.productId ? await getFinishedStock(env.DB, body.org, String(body.productId)) : undefined;
+      const held = await getFinishedSetAside(env.DB, body.org);
+      const stock = await getReadyToShipByOrg(env.DB, body.org, { held });
+      const finished = body.productId ? await getFinishedStock(env.DB, body.org, String(body.productId), { held }) : undefined;
       return jsonResponse({ status: "ok", stock, finished: stripCosts_(finished, "inventory.blanks", "stock") });
     }
 

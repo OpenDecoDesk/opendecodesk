@@ -27,7 +27,7 @@ jobs:
   # keys and talks to no outside service. A desktop release runs this file, so it waits for this job too.
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5 (pinned to a commit, like the backup workflow)
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -38,8 +38,9 @@ jobs:
       - run: npm run e2e
         env:
           CI: "1"            # a stray test.only fails the run
-          E2E_WORKERS: "2"   # the runner has 4 cores, and each worker also drives the one local server
-      # The HTML report and the traces and screenshots of the failed tests, under the run's Artifacts.
+          E2E_WORKERS: "1"   # one file at a time: with two, the runner's one local server fell behind and a different test timed out each run
+          E2E_STATE_DIR: ${{ runner.temp }}/e2e-state   # the local install, and the server's log kept below
+      # The HTML report, the traces and screenshots of the failed tests, and the local server's log, under the run's Artifacts.
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: failure()
         with:
@@ -47,5 +48,6 @@ jobs:
           path: |
             e2e/.report
             e2e/.results
+            ${{ runner.temp }}/e2e-state/wrangler-dev.log
           include-hidden-files: true
           if-no-files-found: ignore

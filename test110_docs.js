@@ -218,13 +218,13 @@ ok("the test workflow runs the scan in strict mode", /scan-private\.sh --strict/
   const twJob = (name) => (tw.match(new RegExp("\\n  " + name + ":\\n((?:    .*\\n|\\s*\\n)+)")) || [])[1] || "";
   const unit = twJob("test"), e2e = twJob("e2e");
   ok("the test job has a 20-minute limit", /^    timeout-minutes: 20\b/m.test(unit));
-  ok("an e2e job with a 30-minute limit installs Chromium with its system libraries and runs `npm run e2e` with 2 workers and CI set",
-    /^    timeout-minutes: 30\b/m.test(e2e) && /^      - run: npm ci\b/m.test(e2e) && /^      - run: npx playwright install --with-deps chromium\b/m.test(e2e) &&
-    /^      - run: npm run e2e\n        env:\n(?:          .*\n)*?          E2E_WORKERS: "2"/m.test(e2e) && /^          CI: "1"/m.test(e2e) &&
+  ok("an e2e job with a 45-minute limit installs Chromium with its system libraries and runs `npm run e2e` one file at a time with CI set",
+    /^    timeout-minutes: 45\b/m.test(e2e) && /^      - run: npm ci\b/m.test(e2e) && /^      - run: npx playwright install --with-deps chromium\b/m.test(e2e) &&
+    /^      - run: npm run e2e\n        env:\n(?:          .*\n)*?          E2E_WORKERS: "1"/m.test(e2e) && /^          CI: "1"/m.test(e2e) &&
     e2e.indexOf("npm ci") < e2e.indexOf("playwright install") && e2e.indexOf("playwright install") < e2e.indexOf("npm run e2e"));
   ok("…on the same Node as the test job", (unit.match(/node-version: (\S+)/) || [])[1] === "22" && (e2e.match(/node-version: (\S+)/) || [])[1] === "22");
   ok("…and when it fails it keeps the report and the traces as an artifact", /- uses: actions\/upload-artifact@[0-9a-f]{40} # v\d+\n        if: failure\(\)\n/.test(e2e) &&
-    /e2e\/\.report\n/.test(e2e) && /e2e\/\.results\n/.test(e2e) && /include-hidden-files: true/.test(e2e));
+    /e2e\/\.report\n/.test(e2e) && /e2e\/\.results\n/.test(e2e) && /e2e-state\/wrangler-dev\.log\n/.test(e2e) && /include-hidden-files: true/.test(e2e));
   ok("every action the workflows use is pinned to a full commit", [tw, desk, read(".github/workflows/d1-backup.yml")]
     .every(w => [...w.matchAll(/uses: (\S+)/g)].every(m => /^\.\//.test(m[1]) || /@[0-9a-f]{40}$/.test(m[1]))) && /actions\/upload-artifact@/.test(e2e));
 }

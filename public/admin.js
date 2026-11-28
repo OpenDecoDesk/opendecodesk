@@ -16675,7 +16675,8 @@ async function showTransferCatchUp_(onDone, filter){
   const td = "padding:5px 8px;border-bottom:1px solid #e5e5e5;font-size:12px;vertical-align:top;";
   const shops = [...new Set(d.lines.map(l => l.orgId))];
   const shopName = (s) => (d.lines.find(l => l.orgId === s) || {}).orgName || s;
-  const ticked = (l, u) => !l.locked && l.voidedUse == null && l.source === "order" && (!u.added || (filter && Number(filter.transferId) === Number(u.transferId)));
+  // A line that already used some of its transfers (usedBefore) starts unticked too: the rest may have been left off on purpose.
+  const ticked = (l, u) => !l.locked && l.voidedUse == null && !l.usedBefore && l.source === "order" && (!u.added || (filter && Number(filter.transferId) === Number(u.transferId)));
   const transfers = [...new Map(d.lines.flatMap(l => l.uses).map(u => [Number(u.transferId), u.name])).entries()];
   const row = (l) => `<tr>
       <td style="${td}"><input type="checkbox" data-tcu="${l.itemId}" data-shop="${escapeHtml(l.orgId)}" title="Tick or untick this line's transfers" ${l.locked ? "disabled" : ""}></td>
@@ -16684,7 +16685,7 @@ async function showTransferCatchUp_(onDone, filter){
       <td style="${td}">${escapeHtml(l.name)}${l.size ? " (" + escapeHtml(l.size) + ")" : ""} × ${l.qty}</td>
       <td style="${td}">${l.uses.map((u, i) => `<label style="display:block;cursor:pointer;white-space:nowrap;"><input type="checkbox" data-tcu-use="${l.itemId}:${i}" data-line="${l.itemId}" data-shop="${escapeHtml(l.orgId)}" data-tid="${Number(u.transferId)}" ${l.locked ? "disabled" : ticked(l, u) ? "checked" : ""}> ${escapeHtml(u.name)} × ${u.qty} @ ${fmt(u.unitCost)}${u.added ? ` <span style="color:#78350f;">(added from the product)</span>` : ""}${u.shortBy > 0 ? ` <span style="color:#b03a2e;">short ${u.shortBy}</span>` : ""}</label>`).join("")}</td>
       <td style="${td}text-align:right;" data-tcu-cost="${l.itemId}"></td>
-      <td style="${td}">${l.voidedUse != null ? `<span style="color:#78350f;">Its use was voided${l.voidedUse ? " (" + escapeHtml(l.voidedUse) + ")" : ""} — tick it once its transfer is here.</span> ` : ""}${l.source === "product" ? `<span style="color:#78350f;">From the product today — the order didn't save its transfers.</span> ` : ""}${l.uses.some(u => u.added) ? `<span style="color:#78350f;">The order saved its transfers before the product printed the ones marked added.</span> ` : ""}<span style="color:#b03a2e;">${l.locked ? "Month closed. " : ""}${escapeHtml([...new Set(l.uses.map(u => u.note).filter(Boolean))].join(" "))}</span></td>
+      <td style="${td}">${l.voidedUse != null ? `<span style="color:#78350f;">Its use was voided${l.voidedUse ? " (" + escapeHtml(l.voidedUse) + ")" : ""} — tick it once its transfer is here.</span> ` : l.usedBefore ? `<span style="color:#78350f;">Its other transfers are already used — tick these if they were used too.</span> ` : ""}${l.source === "product" ? `<span style="color:#78350f;">From the product today — the order didn't save its transfers.</span> ` : ""}${l.uses.some(u => u.added) ? `<span style="color:#78350f;">The order saved its transfers before the product printed the ones marked added.</span> ` : ""}<span style="color:#b03a2e;">${l.locked ? "Month closed. " : ""}${escapeHtml([...new Set(l.uses.map(u => u.note).filter(Boolean))].join(" "))}</span></td>
     </tr>`;
   body.innerHTML = `
     <div style="font-size:13px;color:#333;margin-bottom:10px;">These order lines are made (or shipped/delivered) but never took their transfers out of stock. Applying takes each ticked transfer out dated the day the order was made, at the transfer's average cost <em>on that day</em>, and adds it to the line's cost of goods sold.

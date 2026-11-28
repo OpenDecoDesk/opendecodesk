@@ -6559,7 +6559,9 @@ async function handleOrdersPost_(context, listBefore = null) {
         detail: { movementId, reason, transferName: mv.transferName, occurredAt: mv.occurredAt, unitCost: mv.unitCost, vendor: mv.vendor, vendorRef: mv.vendorRef,
           before: { transferId: mv.transferId, qtyDelta: mv.qtyDelta, kind: mv.kind, orderId: mv.orderId || null, itemId: mv.itemId } } });
       if (auditErr) return auditErr;
-      const row = await voidTransferMovement(env.DB, movementId, reason);
+      let row;   // refused (userFacing) when the transfer's stock changed while this was being worked out
+      try { row = await voidTransferMovement(env.DB, movementId, reason); }
+      catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 409); throw e; }
       if (!row) return jsonResponse({ status: "error", message: "That entry was just changed — reload the history and try again." }, 409);
       return jsonResponse({ status: "ok", recosted: row.recosted || 0 });
     }
@@ -6578,7 +6580,9 @@ async function handleOrdersPost_(context, listBefore = null) {
         detail: { movementId, transferId: mv.transferId, transferName: mv.transferName, qtyDelta: mv.qtyDelta, unitCost: mv.unitCost, kind: mv.kind,
           vendor: mv.vendor, vendorRef: mv.vendorRef, occurredAt: mv.occurredAt, wasVoidedAt: mv.voidedAt, wasVoidReason: mv.voidReason } });
       if (auditErr) return auditErr;
-      const restored = await restoreTransferMovement(env.DB, movementId);
+      let restored;
+      try { restored = await restoreTransferMovement(env.DB, movementId); }
+      catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 409); throw e; }
       if (!restored) return jsonResponse({ status: "error", message: "That entry was just changed — reload the history and try again." }, 409);
       return jsonResponse({ status: "ok", movements: await getTransferMovements(env.DB, mv.transferId), transfers: await listTransfers(env.DB, body.org || null) });
     }

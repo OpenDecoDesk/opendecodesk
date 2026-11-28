@@ -159,6 +159,45 @@ test("a transfer sheet is received into stock and counted", async ({ page }) => 
   await expect(row).toContainText(TRANSFER + " 8 $2.50");
 });
 
+// Saving an edited sheet is refused when the transfer's stock changed while the server was working it out (a line
+// finished on Run Order at that moment): nothing is saved, the window says so and stays open, and saving again works.
+// The race itself can't be timed from a browser, so the first save's answer is the server's refusal, served here
+// (test347 makes the real one); the second goes to the server.
+test("an edited sheet refused because stock changed says so, and saving again saves it", async ({ page, api }) => {
+  const name = uniq("Example Club Sleeve Transfer");
+  const transferId = (await api("saveTransfer", { transfer: { name } })).id;
+  await api("receiveTransferSheet", { rows: [{ transferId, count: 10, pctOfSheet: 100 }], total: 25, receivedAt: new Date().toLocaleDateString("en-CA"),
+    vendor: "", vendorRef: "", paidPersonally: true });
+  await openAdmin(page, "transfers");
+  const row = page.getByRole("row", { name: new RegExp("^" + name) });
+  await expect(row).toContainText(name + " 10 $2.50");
+  await row.getByRole("button", { name: "History" }).click();
+  await page.getByRole("dialog", { name: "History — " + name }).getByRole("button", { name: "Open sheet" }).click();
+  const ed = page.getByRole("dialog", { name: "Edit transfer sheet" });
+  await ed.locator(".trRow .trCount").first().fill("8");   // 8 on the sheet, not 10: $3.125 each
+  await ed.getByRole("button", { name: "Preview changes" }).click();
+  await expect(ed.getByRole("button", { name: "Save changes" })).toBeVisible();
+
+  let refused = 0;
+  await page.route("**/api/orders", async (route) => {
+    const body = route.request().postDataJSON() || {};
+    if (body.action === "editTransferSheet" && !body.preview && !refused++) {
+      return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ status: "error", message: "Stock changed while you were editing; try again." }) });
+    }
+    return route.continue();
+  });
+  await ed.getByRole("button", { name: "Save changes" }).click();
+  await expect(ed).toContainText("Stock changed while you were editing; try again.");
+  await expect(ed.getByRole("button", { name: "Save changes" })).toBeEnabled();
+  expect((await api("getTransferMovements", { transferId })).movements.filter(m => m.kind === "purchase" && !m.voidedAt).map(m => m.qtyDelta)).toEqual([10]);
+
+  await ed.getByRole("button", { name: "Save changes" }).click();
+  await expect(toast(page)).toContainText("Sheet saved.");
+  await expect(ed).toBeHidden();
+  await page.unroute("**/api/orders");
+  await expect(row).toContainText(name + " 8 $3.13");
+});
+
 test("a product's finished stock (ready to ship) takes a count", async ({ page, api }) => {
   const shop = await makeShop(api, { prefix: "invstock", products: [{ name: "Sample Stock Tee", price: 22 }] });
   await openAdmin(page, "catalog/orgs/" + shop.orgId + "/products");

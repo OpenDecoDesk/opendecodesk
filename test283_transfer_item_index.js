@@ -14,20 +14,32 @@ const INDEX = "idx_transfer_movements_itemId";
 
 // The lookups, each with the piece of db.js it stands for (so a change there is noticed here).
 const LOOKUPS = [
-  { what: "the line's live uses, counted when a line is finished or a movement restored (consumeLineTransfersOnce_, the void / restore guard)",
-    inDb: [`SELECT COUNT(*) n FROM transfer_movements WHERE itemId=? AND kind='consume' AND voidedAt IS NULL`, `(SELECT COUNT(*) FROM transfer_movements WHERE itemId = ? AND kind = 'consume' AND voidedAt IS NULL)`],
-    sql: `SELECT COUNT(*) n FROM transfer_movements WHERE itemId=? AND kind='consume' AND voidedAt IS NULL`, binds: [1] },
+  { what: "the line's live uses, counted when the catch-up writes them (applyTransferCatchUp's guard)",
+    inDb: [`(SELECT COUNT(*) FROM transfer_movements WHERE itemId = ? AND kind = 'consume' AND voidedAt IS NULL)`],
+    sql: `SELECT COUNT(*) n FROM transfer_movements WHERE itemId = ? AND kind = 'consume' AND voidedAt IS NULL`, binds: [1] },
+  { what: "the line's live uses of one transfer, counted when its last piece is made (makeItemPieces_ — by the line, not the transfer)",
+    inDb: [`(SELECT COUNT(*) FROM transfer_movements WHERE itemId = ? AND transferId = ? AND kind = 'consume' AND voidedAt IS NULL)`],
+    sql: `SELECT COUNT(*) n FROM transfer_movements WHERE itemId = ? AND transferId = ? AND kind = 'consume' AND voidedAt IS NULL`, binds: [1, 2], byTransfer: true },
   { what: "the Transfers queue: which of these lines already used their transfers (transfersInHand_)",
     inDb: ["SELECT DISTINCT itemId FROM transfer_movements WHERE kind='consume' AND voidedAt IS NULL AND itemId IN ("],
     sql: `SELECT DISTINCT itemId FROM transfer_movements WHERE kind='consume' AND voidedAt IS NULL AND itemId IN (?,?,?)`, binds: [1, 2, 3] },
   { what: "refreshing an order's lines from the catalog: has each line used stock (refreshOrderLinesFromCatalog)",
     inDb: ["EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL) AS usedStock"],
     sql: `SELECT i.id, EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL) AS usedStock FROM order_items i WHERE i.orderId = ?`, binds: ["O1"] },
-  { what: "the catch-up plan: made lines with no live use, and the reason a use was voided (planTransferCatchUp)",
+  { what: "the catch-up plan: made lines with no live use, a voided use or a saved transfer not used yet, the reason a use was voided and the uses it has (planTransferCatchUp)",
     inDb: ["(SELECT m.voidReason FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS voidedUse",
-      "AND NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL)"],
-    sql: `SELECT i.id, (SELECT m.voidReason FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS voidedUse
-          FROM order_items i WHERE i.orderId = ? AND NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL)`, binds: ["O1"] },
+      "(SELECT json_group_array(m.transferId) FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL) AS usedJson",
+      "AND (NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL)",
+      "OR EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NOT NULL)",
+      "AND NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.transferId = CAST(json_extract(l.value, '$.transferId') AS INTEGER)"],
+    sql: `SELECT i.id, (SELECT m.voidReason FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS voidedUse,
+            (SELECT json_group_array(m.transferId) FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL) AS usedJson
+          FROM order_items i WHERE i.orderId = ? AND (NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NULL)
+            OR EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.kind = 'consume' AND m.voidedAt IS NOT NULL)
+            OR CASE WHEN json_valid(i.configJson) THEN EXISTS (SELECT 1 FROM json_each(i.configJson, '$.locations') l
+              WHERE json_extract(l.value, '$.kind') = 'transfer' AND CAST(json_extract(l.value, '$.transferId') AS INTEGER) > 0
+                AND NOT EXISTS (SELECT 1 FROM transfer_movements m WHERE m.itemId = i.id AND m.transferId = CAST(json_extract(l.value, '$.transferId') AS INTEGER)
+                  AND m.kind = 'consume' AND m.voidedAt IS NULL)) ELSE 0 END)`, binds: ["O1"], byTransfer: true },
 ];
 
 (async () => {
@@ -50,7 +62,7 @@ const LOOKUPS = [
     // Without it — the database as it was — the same lookups walk the table (or build a throwaway index each time).
     d1._raw.exec(`DROP INDEX ${INDEX}`);
     const before = LOOKUPS.map(q => stepsOn(d1, q.sql, q.binds));
-    ok("without the index none of them could: each read the whole table, or built its own index every time", before.every(steps => steps.length > 0 && steps.every(t => !t.includes(INDEX) && (/^SCAN/.test(t) || /AUTOMATIC/.test(t)))));
+    ok("without the index none of them could: each read the whole table (or every movement of the transfer), or built its own index every time", before.every((steps, i) => steps.length > 0 && steps.every(t => !t.includes(INDEX) && (/^SCAN/.test(t) || /AUTOMATIC/.test(t) || (LOOKUPS[i].byTransfer && /USING INDEX idx_transfer_movements_item \(transferId=\?\)/.test(t))))));
   }
 
   console.log("=== The code and the files ===");

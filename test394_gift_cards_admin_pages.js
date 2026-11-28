@@ -48,9 +48,10 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   const d1 = await createD1();
   d1._raw.exec(read("testlib/schema-pre-0006.sql"));
   for (const f of fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort()) d1.execFile(read("migrations/" + f));
+  let stripeKey394 = "";   // card payments set up (an invented key) for the Global settings → Gift cards part
   const call = async (body) => {
     const waits = [];
-    const res = await api({ env: { DB: d1 }, waitUntil: (p) => waits.push(Promise.resolve(p).catch(() => {})),
+    const res = await api({ env: { DB: d1, ...(stripeKey394 ? { STRIPE_SECRET_KEY: stripeKey394 } : {}) }, waitUntil: (p) => waits.push(Promise.resolve(p).catch(() => {})),
       request: { url: "https://admin.example.com/api/orders", json: async () => Object.assign({ key: "x" }, body), headers: { get: () => null } } });
     await Promise.all(waits);
     return { status: res.status, body: JSON.parse(await res.text()) };
@@ -811,6 +812,12 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   const saveSettings = async () => { reset(); await w.submitGlobalSettings(); await idle(); return of("saveGlobalSettingsAll"); };
   const errNow = () => id("globalSettingsError") ? id("globalSettingsError").textContent : "";
   await drawSettings();
+  ok("no Stripe key (card payments not set up): the sell-on-the-shop tick is unticked and greyed out, with the note why",
+    !!id("gGiftSell") && id("gGiftSell").disabled && !id("gGiftSell").checked && /Card payments must be set up and switched on to sell gift cards on a shop/.test(text(panel())));
+  stripeKey394 = "sk_test_x";
+  await drawSettings();
+  ok("with a Stripe key and Card on: the tick can be used, with “Only shops that take card payments show gift cards.”",
+    !id("gGiftSell").disabled && /Only shops that take card payments show gift cards\./.test(text(panel())));
   ok("the page reads the Discount codes rule and the gift card settings", of("getDiscountRules").length === 1 && of("getGiftCardSettings").length === 1);
   ok("Payment methods has “Gift cards (a card's balance can pay part or all of an order — a payment, not a discount)”, ticked by default",
     !!id("gPayGiftCard") && id("gPayGiftCard").checked && text(id("gPayGiftCard").closest("label")) === "Gift cards (a card's balance can pay part or all of an order — a payment, not a discount)");
@@ -833,7 +840,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
       saves.length === 1 && saves[0].settings.payments.giftCard === false && same(saves[0].settings.discountRules, { multiple: true }) &&
       same(saves[0].settings.giftCards, { sellOnline: true, amounts: [1000, 2550, 4000], minCents: 250, maxCents: 100000 }) && of("updateDiscountRules").length === 0 && of("updateGiftCardSettings").length === 0);
     ok("…saved: the rule, the gift card settings and the payment method", errNow() === "" && (await must({ action: "getDiscountRules" })).discountRules.multiple === true &&
-      same((await must({ action: "getGiftCardSettings" })).giftCards, { sellOnline: true, amounts: [1000, 2550, 4000], minCents: 250, maxCents: 100000 }) &&
+      same((await must({ action: "getGiftCardSettings" })).giftCards, { sellOnline: true, amounts: [1000, 2550, 4000], minCents: 250, maxCents: 100000, cardReady: true }) &&
       (await must({ action: "getGlobalSettings" })).globalSettings.enabledPayments.giftCard === false); }
   await drawSettings();
   ok("drawn again: the rule on, sold online, “10, 25.50, 40”, 2.50 to 1000, the payment unticked",

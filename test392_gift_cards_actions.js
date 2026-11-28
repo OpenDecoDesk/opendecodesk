@@ -550,7 +550,7 @@ console.error = (...a) => { logged.push(a.map(String).join(" ")); };
   console.log("\n=== Global settings: Gift cards ===");
   {
     let r = await admin({ action: "getGiftCardSettings" });
-    ok("before anything is saved: not sold online, $25 / $50 / $100, custom $5–$500", r.status === 200 && same(r.body.giftCards, { sellOnline: false, amounts: [2500, 5000, 10000], minCents: 500, maxCents: 50000 }));
+    ok("before anything is saved: not sold online, $25 / $50 / $100, custom $5–$500 (no Stripe key: card not ready)", r.status === 200 && same(r.body.giftCards, { sellOnline: false, amounts: [2500, 5000, 10000], minCents: 500, maxCents: 50000, cardReady: false }));
     const good = { sellOnline: true, amounts: [2000, 4000], minCents: 1000, maxCents: 20000 };
     for (const [b, msg] of [
       [{ ...good, sellOnline: "yes" }, "Say whether gift cards are sold online."],
@@ -572,6 +572,12 @@ console.error = (...a) => { logged.push(a.map(String).join(" ")); };
     r = await admin({ action: "getGiftCardSettings" });
     ok("refused, each with its sentence (sell online not yes/no; 1–6 amounts of $1–$10,000; the smallest and largest $1–$10,000, in order), and nothing saved",
       r.body.giftCards.sellOnline === false);
+    r = await admin({ action: "updateGiftCardSettings", ...good });
+    ok("sold online with no Stripe key: 400 “Set up card payments before selling gift cards on a shop.”, nothing saved",
+      r.status === 400 && r.body.message === "Set up card payments before selling gift cards on a shop." && (await admin({ action: "getGiftCardSettings" })).body.giftCards.sellOnline === false);
+    const envWas = ENV;
+    ENV = { ...ENV, STRIPE_SECRET_KEY: "sk_test_x" };   // card payments set up (Global Card on to start)
+    ok("…with a Stripe key: cardReady", (await admin({ action: "getGiftCardSettings" })).body.giftCards.cardReady === true);
     const v0 = q1("SELECT value FROM global_settings WHERE key = 'catalogVersion'");
     const log0 = auditCount();
     r = await admin({ action: "updateGiftCardSettings", sellOnline: true, amounts: ["2000", 4000, 2000, 100, 1000000], minCents: "100", maxCents: 1000000 });
@@ -583,6 +589,7 @@ console.error = (...a) => { logged.push(a.map(String).join(" ")); };
     ok("audited settings.gift_cards_set from the defaults to the new ones", auditCount() === log0 + 1 && au.d.from.sellOnline === false && same(au.d.to.amounts, [2000, 4000, 100, 1000000]));
     const v1 = q1("SELECT value FROM global_settings WHERE key = 'catalogVersion'");
     ok("the shops' catalog moves to a new version (the Gift cards button shows without a Publish)", !!v1 && (!v0 || v1.value !== v0.value));
+    ENV = envWas;
   }
 
   console.log("\n=== Global settings: Discount codes (one code or several) ===");

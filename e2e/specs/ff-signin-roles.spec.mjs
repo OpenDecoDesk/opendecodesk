@@ -221,8 +221,12 @@ test("Blanks at Edit only: Receive order opens and offers what it was paid from"
     await expect(dlg).toBeVisible();
     const paidFrom = dlg.locator("#roPaidFrom");
     await expect(paidFrom).toBeVisible();
-    // Every active account by name, then personal funds — not "(accounts unavailable)".
-    await expect(paidFrom.locator("option").filter({ hasNotText: /^Choose…$/ })).toHaveText([...active, "Personal funds (owner paid)"]);
+    // Every active account by name, then personal funds — not "(accounts unavailable)". Other specs running at the
+    // same time may add accounts meanwhile, so the list is checked for these names, not for exactly these.
+    const offered = paidFrom.locator("option").filter({ hasNotText: /^Choose…$/ });
+    await expect(offered.last()).toHaveText("Personal funds (owner paid)");
+    const names = await offered.allTextContents();
+    for (const name of active) expect(names).toContain(name);
     await expect(paidFrom).not.toContainText("accounts unavailable");
     // One can be chosen, and the form's own blank is on offer.
     await paidFrom.selectOption({ label: active[0] });

@@ -1577,7 +1577,8 @@ async function hasNet30Column_(db) {
   catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; return false; }
 }
 // SQL for net30Cleared(): Net 30 with a PO that staff accepted (migrations/0121). Keep the two forms the same rule.
-const NET30_CLEARED_SQL_ = (a = "o") => `(${a}.net30 = 1 AND ${a}.poNumber <> '' AND ${a}.poAcceptedAt IS NOT NULL)`;
+// A PO of only spaces is no PO, in both (net30Cleared trims).
+const NET30_CLEARED_SQL_ = (a = "o") => `(${a}.net30 = 1 AND TRIM(${a}.poNumber) <> '' AND ${a}.poAcceptedAt IS NOT NULL)`;
 // SQL for "the work on this order (alias, default o) may go ahead": paid, paid for everything but a rush fee
 // (migrations/0082), set to pay on delivery (migrations/0105), or Net 30 with an accepted PO (migrations/0121) — the
 // queues' version of workCleared().
@@ -3572,6 +3573,13 @@ export function net30DueDate_(o, terms, completedAt, tz = _shopTimeZone_ || DEFA
   const own = Number(o.termsDays);
   return addDaysYmd_(day, termsDaysOk_(own) ? own : t.defaultDays);
 }
+// The business's time zone for due dates and the report's days: Region's saved zone, else the one last resolved
+// (resolveTimeZone: the TIMEZONE variable), else UTC — read now, not left to whatever a request before resolved.
+async function termsZone_(db) {
+  let saved = "";
+  try { saved = (await getLocaleSettings(db)).timeZone; } catch (e) { /* the next source */ }
+  return saved || _shopTimeZone_ || DEFAULT_TIME_ZONE;
+}
 // The terms columns of an order row, as the readers give them (one place, so parseOrder_ and the report agree).
 function orderTermsFields_(row, terms) {
   const t = { net30: !!Number(row.net30), poNumber: row.poNumber || "", poAcceptedAt: row.poAcceptedAt || "",
@@ -3624,7 +3632,7 @@ export async function setOrderTerms(db, orderId, { net30, termsDays, poNumber, a
     }
   }
   if (accept && !typedByCustomer) {
-    if (!next.poNumber) return { error: "There's no PO number to accept yet." };
+    if (!String(next.poNumber || "").trim()) return { error: "There's no PO number to accept yet." };
     if (!next.poAcceptedAt) Object.assign(next, { poAcceptedAt: now, poAcceptedBy: String(by || "").slice(0, 200) });
   }
   await db.prepare("UPDATE orders SET net30 = ?, termsDays = ?, poNumber = ?, poAcceptedAt = ?, poAcceptedBy = ?, poTypedAt = ? WHERE orderId = ?")
@@ -3657,7 +3665,7 @@ export async function acceptOrderPo(db, orderId, by = "", now = new Date().toISO
   if (!String(row.poNumber || "").trim()) return { error: "There's no PO number to accept yet." };
   const before = termsAuditFields_(row);
   if (row.poAcceptedAt) return { ok: true, already: true, before, after: before, cleared: true, wasCleared: true };
-  await db.prepare("UPDATE orders SET poAcceptedAt = ?, poAcceptedBy = ? WHERE orderId = ? AND poAcceptedAt IS NULL AND poNumber <> ''")
+  await db.prepare("UPDATE orders SET poAcceptedAt = ?, poAcceptedBy = ? WHERE orderId = ? AND poAcceptedAt IS NULL AND TRIM(poNumber) <> ''")
     .bind(now, String(by || "").slice(0, 200), row.orderId).run();
   const after = { ...before, poAcceptedAt: now, poAcceptedBy: String(by || "").slice(0, 200) };
   return { ok: true, before, after, cleared: true, wasCleared: false };
@@ -3677,13 +3685,13 @@ export const UNPAID_PO_GROUPS = [
   { key: "1-30", label: "1–30 days late" }, { key: "31-60", label: "31–60 days late" }, { key: "61-90", label: "61–90 days late" }, { key: "90+", label: "Over 90 days late" },
 ];
 export async function getUnpaidPoReport(db, { asOf, orgId = null, customerId = null, tz } = {}) {
-  const zone = tz || _shopTimeZone_ || DEFAULT_TIME_ZONE;
+  const zone = tz || await termsZone_(db);
   const day = ymdOk_(asOf) ? String(asOf) : dateInTimeZone(new Date(), zone);
   const terms = await getTerms(db);
   const empty = { asOf: day, startsAt: terms.startsAt, defaultDays: terms.defaultDays, groups: UNPAID_PO_GROUPS.map(g => ({ ...g, count: 0, owedCents: 0 })),
     rows: [], customers: [], totals: { count: 0, owedCents: 0, lateCents: 0, toCheck: 0 } };
   if (!(await hasNet30Column_(db))) return empty;
-  const where = ["o.net30 = 1", "o.voidedAt IS NULL", "o.isTest = 0", "o.placedAt <= ?"], binds = [dayEnd_(day)];
+  const where = ["o.net30 = 1", "o.voidedAt IS NULL", "o.isTest = 0", "o.placedAt <= ?"], binds = [localDayEndInstant(day, zone) || dayEnd_(day)];   // the business's day end
   if (orgId) { where.push("o.orgId = ?"); binds.push(String(orgId)); }
   const cid = customerId_(customerId);
   if (customerId != null && customerId !== "") { where.push("o.customerId = ?"); binds.push(cid || 0); }
@@ -11749,6 +11757,7 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
     discountCodeListByOrder_(db, sub, binds),  // the discount codes it used, if any (0115, several since 0120)
   ]);
   for (const r of orderRows) r.orderDesignsMissing = missing[r.orderId] || 0;
+  const zone = orderRows.some(r => Number(r.net30)) ? await termsZone_(db) : null;   // Net 30 due dates' calendar
 
   const itemsByOrder = byId_();
   for (const it of itemRows) {
@@ -11783,7 +11792,7 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
     o.discountCode = o.discountCodes.join(", ");
     o.brandReview = reviews.get(r.orderId) || [];
     o.catalogDrift = r.manufacturedAt || r.completedAt || r.voidedAt ? [] : drift.get(r.orderId) || [];
-    if (o.net30) o.termsDueDate = net30DueDate_(o, terms);   // with the saved terms (migrations/0121)
+    if (o.net30) o.termsDueDate = net30DueDate_(o, terms, null, zone);   // with the saved terms (migrations/0121), on the business's calendar
     return o;
   });
 }
@@ -11809,7 +11818,7 @@ export async function getOrderById(db, orderId) {
   order.invoice = invoices[orderId] || null;
   order.discountCodes = discountCodes[orderId] || [];   // the discount codes it used (migrations/0115, several since 0120)
   order.discountCode = order.discountCodes.join(", ");   // …joined for older callers, "" = none
-  if (order.net30) order.termsDueDate = net30DueDate_(order, terms);   // with the saved terms (migrations/0121)
+  if (order.net30) order.termsDueDate = net30DueDate_(order, terms, null, await termsZone_(db));   // with the saved terms (migrations/0121), on the business's calendar
   // The customer's own garments counted in (migrations/0121): each such line's live check-in rows.
   if (order.ownGarments.lines) {
     const byItem = await garmentCheckinsByItem_(db, orderId);
@@ -11964,6 +11973,8 @@ export async function listCustomers(db, { q = "", includeArchived = false, limit
     return {
       customers: results.map(r => ({ id: Number(r.id), name: r.name || "", company: r.company || "", email: r.email || "", phone: r.phone || "",
         taxExempt: !!r.taxExempt, taxExemptExpires: r.taxExemptExpires || "", archived: !!r.archivedAt,
+        // Net 30 (migrations/0121), read as parseCustomer_ does: the list's "Net N" tag.
+        allowNet30: !!Number(r.allowNet30), termsDays: r.termsDays == null || !(Number(r.termsDays) >= 1) ? null : Number(r.termsDays),
         orderCount: Number(r.orderCount) || 0, lastOrderAt: r.lastOrderAt || "" })),
       total: Number(totalRow && totalRow.n) || 0,
     };
@@ -18175,7 +18186,7 @@ export async function getDashboard(db, { today, fresh = false, now = Date.now(),
   // Kept money without the categories won't do once the pies are shown; kept with them does for anything.
   if (want.money) take("money", !want.cats || !!(kept.money && kept.money.cats), () => getDashboardMoney(db, { yearFrom, monthFrom, to: today, byCategory: want.cats }));
   if (want.inOut) take("inOut", true, async () => ({ inOut: await getMoneyInOutByMonth(db, { yearFrom, to: today }) }));
-  if (want.unpaidPos) take("unpaidPos", true, async () => ({ unpaidPos: (await getUnpaidPoReport(db, { asOf: today })).totals }));
+  if (want.unpaidPos) take("unpaidPos", true, async () => ({ unpaidPos: (await getUnpaidPoReport(db, { asOf: today, tz: await termsZone_(db) })).totals }));
   await Promise.all(work);
   if (work.length) {
     await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('dashboardCache', ?)")

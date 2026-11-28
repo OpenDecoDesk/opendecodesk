@@ -5122,7 +5122,7 @@ function net30Tag_(o){
   const due = o.termsDueDate || "";
   const late = !!(due && Number(o.balanceDue) > 0 && localToday_() > due);
   const bits = [net30PoText_(o.poNumber), due ? (late ? "was due " : "due ") + adminDate_(due, { month: "short", day: "numeric" }) : Number(o.balanceDue) > 0 ? "due date to come" : ""].filter(Boolean);
-  return `<span class="n30-tag${late ? " n30-tag-late" : ""}" title="Net ${Number(o.termsDays) || 30}${o.poAcceptedBy ? " · PO accepted by " + escapeHtml(o.poAcceptedBy) : ""}">${escapeHtml(bits.join(" · "))}</span>`;
+  return `<span class="n30-tag${late ? " n30-tag-late" : ""}" title="Net ${Number(o.termsDays) || Number(net30Rule_(o.orgId).defaultDays) || 30}${o.poAcceptedBy ? " · PO accepted by " + escapeHtml(o.poAcceptedBy) : ""}">${escapeHtml(bits.join(" · "))}</span>`;
 }
 // The order's Net 30… window: put it on Net 30 (or take it off), its days, its PO, Accept PO, and when it falls due.
 async function showOrderTerms_(orgId, orderId){
@@ -9868,7 +9868,16 @@ function showLocalSaleModal(products, blanks, opts = {}){
     // Net 30 (migrations/0121): its PO and days show while it is the payment picked.
     const net30Wrap = overlay.querySelector("#lsNet30Wrap");
     if(net30Wrap){
-      const showNet30 = () => { net30Wrap.style.display = overlay.querySelector("#lsPayment").value === "Net 30" ? "" : "none"; };
+      // Hidden, its boxes are switched off too, so a Days to pay out of range can't stop Record sale (a hidden box's
+      // min/max would, with nothing shown); only the boxes this switched off are switched back on.
+      const showNet30 = () => {
+        const on = overlay.querySelector("#lsPayment").value === "Net 30";
+        net30Wrap.style.display = on ? "" : "none";
+        net30Wrap.querySelectorAll("input").forEach(i => {
+          if(!on && !i.disabled){ i.disabled = true; i.dataset.n30Off = "1"; }
+          else if(on && i.dataset.n30Off){ i.disabled = false; delete i.dataset.n30Off; }
+        });
+      };
       overlay.querySelector("#lsPayment").addEventListener("change", showNet30);
       showNet30();
     }

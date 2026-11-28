@@ -584,6 +584,8 @@ const harness = (d1) => {
     p.type("pat@example.com"); p.leave(); await pause(40); p.choose("Net 30");
     p.type("lee@example.com"); p.leave(); await pause(40);
     ok("…Net 30 chosen and then taken out: the select is back to \"How will you pay?\" and the PO box is gone", p.$("custPaymentMethod").value === "" && !p.$("custPoNumber") && !p.offered());
+    ok("…and the hint no longer promises an invoice: \"Choose how you'll pay — you'll see how to pay after you place the order.\"",
+      p.$("paymentHint").textContent === "Choose how you'll pay — you'll see how to pay after you place the order." && !/invoice/.test(p.$("paymentHint").textContent));
   }
   {
     const answers = { "pat@example.com": { status: "ok", ok: true, termsDays: 45 } };

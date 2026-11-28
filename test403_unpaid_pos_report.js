@@ -40,7 +40,7 @@ const glue = () => new Function("const Date = globalThis.__FixedDate403;\n" +
   "const sendOrderReceivedEmail = async () => false, sendPaymentConfirmedEmail = async () => false, sendCancellationEmail = async () => false, sendDesignVerificationEmail = async () => false, sendShippingPaymentEmail = async () => false, sendShippedEmail = async () => false, sendInvoiceEmail = async () => false;\n" +
   "const ensureOrgDomain = async () => ({}), getOrgDomainStatus = async () => ({ configured: false });\n" +
   dbSrc + "\n" + apiSrc +
-  "\nreturn { post: onRequestPost, getUnpaidPoReport, UNPAID_PO_GROUPS, getDashboard, HOME_BLOCKS, cleanUserPrefs, setTerms, getTerms, getOrderById, getOpenOrderStages, toCents, resolveTimeZone };")();
+  "\nreturn { post: onRequestPost, getUnpaidPoReport, UNPAID_PO_GROUPS, getDashboard, HOME_BLOCKS, cleanUserPrefs, setTerms, getTerms, getOrderById, getOpenOrderStages, toCents, resolveTimeZone, getOpenOrders };")();
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const migrations = fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_/.test(f) && f >= "0006").sort();
 const fresh = async (upTo) => {
@@ -105,6 +105,22 @@ process.on("exit", () => { if (!finished) { console.log("the test ran to its end
     const r = await callOn(L, d1)({ action: "getDashboard", today: "2026-12-16", blocks: ["unpaidpos"] });
     ok("Home's Unpaid POs block, asked before anything else, also counts that order 1 day late",
       r.status === 200 && r.body.unpaidPos && r.body.unpaidPos.count === 1 && r.body.unpaidPos.lateCents === 4200);
+  }
+  // The same order read straight from db.js in a fresh copy that never resolved a zone (a fresh worker): the order
+  // readers' due date and Home's figures still use the business's Region zone, not UTC.
+  {
+    const L = glue(), d1 = await fresh();
+    setTermsRow(d1, { defaultDays: 30, startsAt: "invoice" });
+    seed(d1, { id: "TZ-3", placedAt: "2026-11-10T18:00:00.000Z", po: "PO-1001", accepted: true, invoicedAt: "2026-11-16T03:00:00.000Z", items: [["tee", 4200]] });
+    const one = await L.getOrderById(d1, "TZ-3");
+    ok("getOrderById, with no zone resolved yet: the order's due date is on the business's calendar (Dec 15, Chicago)", !!one && one.termsDueDate === "2026-12-15");
+    const open = (await L.getOpenOrders(d1)).find(o => o.orderId === "TZ-3");
+    ok("…and the order lists (loadOrders_) say the same", !!open && open.termsDueDate === "2026-12-15");
+    const dsh = await L.getDashboard(d1, { today: "2026-12-16", blocks: ["unpaidpos"], fresh: true });
+    ok("getDashboard's Unpaid POs part, with no zone resolved yet, counts it 1 day late (the business's zone passed to the report)",
+      !!dsh.unpaidPos && dsh.unpaidPos.count === 1 && dsh.unpaidPos.lateCents === 4200);
+    const rep0 = await L.getUnpaidPoReport(d1, { asOf: "2026-12-16" });
+    ok("…and the report asked with no zone (the roll-up's way) does too", rep0.rows.length === 1 && rep0.rows[0].dueDate === "2026-12-15" && rep0.rows[0].daysLate === 1);
   }
 
   const L = glue();
@@ -300,6 +316,14 @@ process.on("exit", () => { if (!finished) { console.log("the test ran to its end
     ok("a date-only stamp (noon UTC) is its own day in any zone", row(await rep({ tz: "Pacific/Kiritimati" }), "Z-2").dueDate === "2026-12-14" &&
       row(await rep({ tz: "Pacific/Pago_Pago" }), "Z-2").dueDate === "2026-12-14");
     d1._raw.exec("DELETE FROM order_items WHERE orderId = 'Z-2'; DELETE FROM orders WHERE orderId = 'Z-2'");
+    // Placed on or before the as-of day means by the end of that day where the business is.
+    seed(d1, { id: "Z-3", cust: 1, placedAt: "2026-11-30T03:00:00.000Z", po: "PO-7003", accepted: true, items: [["tee", 100]] });
+    ok("an order placed at 9 pm in Chicago on Nov 29 is on the report as of Nov 29 there", !!row(await rep({ asOf: "2026-11-29", tz: CT }), "Z-3"));
+    ok("…but not as of Nov 28, and not as of Nov 29 on UTC's calendar (it's Nov 30 there)", !row(await rep({ asOf: "2026-11-28", tz: CT }), "Z-3") &&
+      !row(await rep({ asOf: "2026-11-29", tz: "UTC" }), "Z-3") && !!row(await rep({ asOf: "2026-11-30", tz: "UTC" }), "Z-3"));
+    seed(d1, { id: "Z-4", cust: 1, placedAt: "2026-11-30T06:30:00.000Z", po: "PO-7004", accepted: true, items: [["tee", 100]] });
+    ok("…and one placed half past midnight on Nov 30 in Chicago isn't on it as of Nov 29", !row(await rep({ asOf: "2026-11-29", tz: CT }), "Z-4") && !!row(await rep({ asOf: "2026-11-30", tz: CT }), "Z-4"));
+    d1._raw.exec("DELETE FROM order_items WHERE orderId IN ('Z-3', 'Z-4'); DELETE FROM orders WHERE orderId IN ('Z-3', 'Z-4')");
     ok("no as-of day: today on the business's calendar", (await L.getUnpaidPoReport(d1, { tz: CT })).asOf === "2026-12-15" &&
       (await L.getUnpaidPoReport(d1, { tz: "Pacific/Kiritimati" })).asOf === "2026-12-16");
     ok("an as-of day that isn't a date is today too", (await L.getUnpaidPoReport(d1, { asOf: "12/01/2026", tz: CT })).asOf === "2026-12-15");

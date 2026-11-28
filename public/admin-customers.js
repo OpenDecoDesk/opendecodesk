@@ -54,6 +54,9 @@
     const body = root.querySelector("#custBody"), count = root.querySelector("#custCount"), pager = root.querySelector("#custPager");
     let asked = 0, timer = null;
 
+    // The Net 30 terms' default days (Global settings → Net 30 terms), sent with the list: the "Net N" of a customer
+    // allowed Net 30 with no days of their own.
+    let defaultDays = 30;
     function draw(customers, total) {
       if (!customers.length) {
         count.textContent = "";
@@ -66,7 +69,7 @@
       body.innerHTML = `<div class="admin-table-wrap"><table class="stack-mobile cust-table">
         <thead><tr><th>Name</th><th>Company</th><th>Email</th><th>Phone</th><th class="cust-num">Orders</th><th>Last order</th></tr></thead>
         <tbody>${customers.map(c => `<tr class="cust-row${c.archived ? " cust-row-archived" : ""}" data-cust-id="${escapeHtml(c.id)}">
-          <td class="stack-title"><a class="cust-link" href="#customers/${encodeURIComponent(c.id)}">${escapeHtml(custLabel(c))}</a>${c.taxExempt ? (c.taxExemptExpires && c.taxExemptExpires < localToday_() ? ` <span class="cust-tag cust-tag-warn">Exemption expired</span>` : ` <span class="cust-tag cust-tag-exempt">Exempt</span>`) : ""}${c.allowNet30 ? ` <span class="cust-tag cust-tag-net30">Net ${Number(c.termsDays) > 0 ? Number(c.termsDays) : 30}</span>` : ""}${c.archived ? ` <span class="cust-tag">Archived</span>` : ""}</td>
+          <td class="stack-title"><a class="cust-link" href="#customers/${encodeURIComponent(c.id)}">${escapeHtml(custLabel(c))}</a>${c.taxExempt ? (c.taxExemptExpires && c.taxExemptExpires < localToday_() ? ` <span class="cust-tag cust-tag-warn">Exemption expired</span>` : ` <span class="cust-tag cust-tag-exempt">Exempt</span>`) : ""}${c.allowNet30 ? ` <span class="cust-tag cust-tag-net30">Net ${Number(c.termsDays) > 0 ? Number(c.termsDays) : defaultDays}</span>` : ""}${c.archived ? ` <span class="cust-tag">Archived</span>` : ""}</td>
           <td>${escapeHtml(c.company || "")}</td>
           <td>${escapeHtml(c.email || "")}</td>
           <td>${escapeHtml(c.phone || "")}</td>
@@ -84,6 +87,7 @@
         const d = await adminApi_({ action: "listCustomers", q: listView.q, includeArchived: listView.includeArchived, limit: PAGE_SIZE, offset: listView.offset });
         if (mine !== asked || !stillOn(hash, root)) return;
         const customers = d.customers || [], total = Number(d.total) || 0;
+        defaultDays = Number.isInteger(Number(d.defaultDays)) && Number(d.defaultDays) >= 1 ? Number(d.defaultDays) : 30;
         // The page being asked for is gone (the last customer on it was archived or merged): back to the first.
         if (!customers.length && listView.offset > 0) { listView.offset = 0; return load(); }
         draw(customers, total);
@@ -203,6 +207,7 @@
     // Net 30 terms (migrations/0121): shown once the server sends them with the customer (an older one leaves them out,
     // and is then never sent them).
     const termsKnown = c.allowNet30 !== undefined && c.allowNet30 !== null;
+    const defaultDays = Number.isInteger(Number(d.defaultDays)) && Number(d.defaultDays) >= 1 ? Number(d.defaultDays) : 30;   // Global settings → Net 30 terms
     const shopName = (orgId) => { const o = (adminOrgs || []).find(x => x.orgId === orgId); return (o && o.name) || orgId || ""; };
     const field = (label, fid, value, attrs) => `<label class="cust-field"><span>${label}</span><input id="${fid}" value="${escapeHtml(value == null ? "" : value)}" ${attrs || 'type="text"'}></label>`;
 
@@ -215,7 +220,7 @@
             <div class="cust-sub">${c.name && c.company ? escapeHtml(c.company) + " · " : ""}Customer since ${escapeHtml(adminDate_(c.createdAt))}
               ${c.archived ? ` <span class="cust-tag">Archived</span>` : ""}
               ${c.taxExempt ? ` <span class="cust-tag ${expired ? "cust-tag-warn" : "cust-tag-exempt"}">${expired ? "Exemption expired" : "Tax exempt"}</span>` : ""}
-              ${termsKnown && c.allowNet30 ? ` <span class="cust-tag cust-tag-net30">Net ${Number(c.termsDays) > 0 ? Number(c.termsDays) : 30}</span>` : ""}</div>
+              ${termsKnown && c.allowNet30 ? ` <span class="cust-tag cust-tag-net30">Net ${Number(c.termsDays) > 0 ? Number(c.termsDays) : defaultDays}</span>` : ""}</div>
           </div>
           <div class="cust-actions">
             ${c.archived ? "" : `<button type="button" class="admin-btn" id="custNewSale" data-need="orders.details:edit">New sale for this customer</button>`}
@@ -337,8 +342,9 @@
       let terms = {};
       if (termsKnown) {
         if (canFull) {
-          const raw = val("custTermsDays"), days = raw === "" ? null : Number(raw);
-          if (days !== null && !(Number.isInteger(days) && days >= 1 && days <= 365)) { err.textContent = "Terms: a whole number of days from 1 to 365, or blank for the default."; root.querySelector("#custTermsDays").focus(); return; }
+          const box = root.querySelector("#custTermsDays"), raw = val("custTermsDays"), days = raw === "" ? null : Number(raw);
+          // A number box gives "" for what isn't a number (badInput): refused, not saved as the default.
+          if ((box.validity && box.validity.badInput) || (days !== null && !(Number.isInteger(days) && days >= 1 && days <= 365))) { err.textContent = "Terms: a whole number of days from 1 to 365, or blank for the default."; root.querySelector("#custTermsDays").focus(); return; }
           terms = { allowNet30: root.querySelector("#custNet30").checked, termsDays: days };
         } else terms = { allowNet30: !!c.allowNet30, termsDays: c.termsDays == null ? null : Number(c.termsDays) };
       }

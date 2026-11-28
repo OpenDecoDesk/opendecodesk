@@ -4103,6 +4103,30 @@ export function methodFromPaymentMethod(paymentMethod) {
 // opts: { method, reference, feeCents, kind: 'payment'|'refund'|'dispute',
 // receivedAt }. Refunds and lost disputes are NEGATIVE amounts.
 // Returns the new row id, or 0 when it was already recorded.
+// What counts as received when the balance is worked out: the payments, less the money given back for lines that
+// came off the order. Refunds and lost disputes count against it only up to the refund credit of the cancelled
+// lines (each cancelled line's refundCents, at most its total with its tax when tax is added on top), so a goodwill
+// refund, or a refund on a line still on the order, never puts a balance back; money returned for a cancelled line
+// does, once an item is added in its place. A card refund counts once its webhook row is in. One rule for every
+// place that compares money in with what's owed (paidRefreshSql_, refreshPaidStatus, getOrderCheckoutState, the
+// customer's per-order balance, parseOrder_'s balanceDue via balanceReceivedCents_ below). `oid` spells the
+// order's id, `tm` its tax mode (as paidRefreshSql_). The raw payments (paymentsSql_) are still what
+// addOrderPayment's expectReceivedCents compares.
+const paymentsSql_ = (oid) => `COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = ${oid} AND kind = 'payment' AND voidedAt IS NULL), 0)`;
+const balanceReceivedSql_ = (oid, tm) => `(${paymentsSql_(oid)} - MAX(0, MIN(
+    COALESCE((SELECT -SUM(amountCents) FROM order_payments WHERE orderId = ${oid} AND kind IN ('refund', 'dispute') AND voidedAt IS NULL), 0),
+    COALESCE((SELECT SUM(MIN(refundCents, lineTotalCents + (CASE WHEN ${tm} = 'exclusive' THEN COALESCE(taxCents, 0) ELSE 0 END)))
+      FROM order_items WHERE orderId = ${oid} AND cancelDate IS NOT NULL AND refundCents > 0), 0))))`;
+// The JS twin of balanceReceivedSql_, from an order's parsed payments and lines (parseOrder_). In cents.
+function balanceReceivedCents_(payments, items, taxMode) {
+  const live = (payments || []).filter(p => !p.voidedAt);
+  const paid = live.filter(p => (p.kind || "payment") === "payment").reduce((s, p) => s + toCents(p.amount), 0);
+  const refunded = -live.filter(p => p.kind === "refund" || p.kind === "dispute").reduce((s, p) => s + toCents(p.amount), 0);
+  const credit = (items || []).filter(it => it.cancelDate && toCents(it.refundAmount || 0) > 0).reduce((s, it) =>
+    s + Math.min(toCents(it.refundAmount), toCents(it.lineTotal) + (taxMode_(taxMode) === "exclusive" ? toCents(it.tax || 0) : 0)), 0);
+  return paid - Math.max(0, Math.min(refunded, credit));
+}
+
 // The order's paid flag worked out from the ledger in ONE statement — the same rule as
 // refreshPaidStatus below, orderAmounts' "owed" (items + shipping + rush fee − discount, plus the sales tax
 // when it's added on top, migrations/0052; test124 checks the two agree) — so it can ride in the same batch
@@ -4118,7 +4142,8 @@ const paidRefreshSql_ = (tm) => {
   // What's owed for the work itself — everything but the rush fee (paidForWork) — and in all.
   const workOwed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN COALESCE(shippingCostCents, 0) ELSE 0 END) - COALESCE(discountCents, 0) + ${taxAdded})`;
   const owed = `MAX(0, ${items} + (CASE WHEN ${items} > 0 THEN COALESCE(shippingCostCents, 0) ELSE 0 END) + ${rush} - COALESCE(discountCents, 0) + ${taxAdded})`;
-  const received = "COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = orders.orderId AND kind = 'payment' AND voidedAt IS NULL), 0)";
+  // Less the refunds for cancelled lines (see above); the tax mode is the order's, spelled so the lines' subquery reads it.
+  const received = balanceReceivedSql_("orders.orderId", legacy ? tm : "orders." + tm);
   return `UPDATE orders SET
     paidAt = CASE WHEN ${owed} = 0 THEN paidAt
                   WHEN ${received} >= ${owed} THEN (CASE WHEN paid = 1 THEN paidAt ELSE COALESCE((SELECT MAX(receivedAt) FROM order_payments WHERE orderId = orders.orderId AND kind = 'payment' AND voidedAt IS NULL), ?) END)
@@ -4153,13 +4178,21 @@ export async function addOrderPayment(db, orderId, amount, note, externalRef = "
   // opts.expectReceivedCents (settleOrderBalance): insert only while the order's payments still add up to what the
   // caller saw when it worked out the balance — two "Mark as paid"s, or one racing a card payment, can't both book it.
   const expect = Number.isFinite(opts.expectReceivedCents);
+  // opts.withinKept (a refund recorded by hand): insert only while the order still holds at least the refund — its
+  // live rows of every kind (Net kept) add up to that much — in the same statement, so two refunds saved at once
+  // can't both take the same money. Refused, it inserts nothing and returns 0, as a repeat does; the caller tells
+  // them apart by the request key.
+  const withinKept = !!opts.withinKept && toCents(amount) < 0;
+  const conds = [], condBinds = [];
+  if (expect) { conds.push("(SELECT COALESCE(SUM(amountCents), 0) FROM order_payments WHERE orderId = ? AND kind = 'payment' AND voidedAt IS NULL) = ?"); condBinds.push(orderId, Math.round(opts.expectReceivedCents)); }
+  if (withinKept) { conds.push("(SELECT COALESCE(SUM(amountCents), 0) FROM order_payments WHERE orderId = ? AND voidedAt IS NULL) >= ?"); condBinds.push(orderId, -toCents(amount)); }
   const insert = db.prepare(
     `INSERT OR IGNORE INTO order_payments (orderId, amountCents, note, receivedAt, externalRef, method, reference, feeCents, kind, accountId${requestKey ? ", requestKey" : ""})
      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${requestKey ? ", ?" : ""}` +
-    (expect ? " WHERE (SELECT COALESCE(SUM(amountCents), 0) FROM order_payments WHERE orderId = ? AND kind = 'payment' AND voidedAt IS NULL) = ?" : "")
+    (conds.length ? " WHERE " + conds.join(" AND ") : "")
   ).bind(orderId, toCents(amount), note || "", receivedAt, externalRef || "", method,
     String(opts.reference || "").slice(0, 100), Math.max(0, Math.round(Number(opts.feeCents) || 0)), kind, accountId,
-    ...(requestKey ? [requestKey] : []), ...(expect ? [orderId, Math.round(opts.expectReceivedCents)] : []));
+    ...(requestKey ? [requestKey] : []), ...condBinds);
   const stmts = [insert];
   // How much of a refund was shipping (migrations/0035): set on the row just inserted, and only then.
   if (opts.shippingCents > 0) stmts.push(db.prepare("UPDATE order_payments SET shippingCents=? WHERE id = last_insert_rowid() AND changes() > 0").bind(Math.round(opts.shippingCents)));
@@ -4236,10 +4269,10 @@ export async function setOrderDiscount(db, orderId, amount, note) {
 }
 
 // Recomputes the cached orders.paid / paidAt from the payments ledger.
-// Only kind='payment' rows count toward "paid": a later refund or lost
-// dispute is money going back out, recorded separately (parseOrder_'s
-// refundedAmount / netReceived) — it doesn't turn a settled order into one
-// with a balance due.
+// kind='payment' rows count toward "paid", less only the money given back for
+// cancelled lines (balanceReceivedSql_): any other refund or lost dispute is
+// money going back out, recorded separately (parseOrder_'s refundedAmount /
+// netReceived) — it doesn't turn a settled order into one with a balance due.
 // Paid = money received covers the effective total (active items, plus
 // shipping when any item is active, minus discount). An order that owes $0
 // keeps whatever the admin set, since there's nothing for the ledger to show.
@@ -4248,17 +4281,18 @@ export async function setOrderDiscount(db, orderId, amount, note) {
 export async function refreshPaidStatus(db, orderId) {
   const row = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
     SELECT o.paid, o.paidAt, o.paidForWork, ${tm === LEGACY_TAX_MODE_ ? 0 : 1} AS hasPaidForWork, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
-      COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL), 0) AS receivedCents,
+      ${balanceReceivedSql_("o.orderId", tm)} AS receivedCents, ${paymentsSql_("o.orderId")} AS paymentsCents,
       (SELECT MAX(receivedAt) FROM order_payments WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL) AS lastPaymentAt
     FROM orders o WHERE o.orderId = ?`)).bind(orderId).first());
   if (!row) return null;
   const hasWork = row.hasPaidForWork !== 0;   // 0 only on a database from before migrations/0082
   const amounts = orderAmountsOfRow_(row);
   const owed = amounts.owedCents, workOwed = amounts.workOwedCents;
-  const received = Number(row.receivedCents) || 0;
+  // receivedCents: what counts against the balance; paymentsCents: the payments alone (expectReceivedCents compares those).
+  const received = Number(row.receivedCents) || 0, paymentsCents = Number(row.paymentsCents) || 0;
   if (owed === 0) {
     if (hasWork && Number(row.paidForWork) !== Number(row.paid)) await db.prepare("UPDATE orders SET paidForWork = paid WHERE orderId = ?").bind(orderId).run();
-    return { paid: !!row.paid, paidForWork: !!row.paid, owedCents: 0, receivedCents: received };
+    return { paid: !!row.paid, paidForWork: !!row.paid, owedCents: 0, receivedCents: received, paymentsCents };
   }
   const paid = received >= owed ? 1 : 0;
   // Paid for everything but the rush fee (migrations/0082): production doesn't wait for an unpaid rush fee.
@@ -4268,7 +4302,7 @@ export async function refreshPaidStatus(db, orderId) {
     if (hasWork) await db.prepare("UPDATE orders SET paid = ?, paidAt = ?, paidForWork = ? WHERE orderId = ?").bind(paid, paidAt, paidForWork, orderId).run();
     else await db.prepare("UPDATE orders SET paid = ?, paidAt = ? WHERE orderId = ?").bind(paid, paidAt, orderId).run();
   }
-  return { paid: !!paid, paidForWork: !!paidForWork, owedCents: owed, receivedCents: received };
+  return { paid: !!paid, paidForWork: !!paidForWork, owedCents: owed, receivedCents: received, paymentsCents };
 }
 
 // "Mark as paid": records a ledger payment for whatever is still owed (so the
@@ -4294,7 +4328,7 @@ export async function settleOrderBalanceOnce(db, orderId, note, at = null, reque
     const o = await db.prepare("SELECT paymentMethod FROM orders WHERE orderId=?").bind(orderId).first();
     const id = await addOrderPayment(db, orderId, fromCents(balance), note || "Marked paid", "",
       { method: methodFromPaymentMethod(o && o.paymentMethod), ...(at ? { receivedAt: at } : {}),
-        expectReceivedCents: state.receivedCents, ...(requestKey ? { requestKey } : {}) });
+        expectReceivedCents: state.paymentsCents, ...(requestKey ? { requestKey } : {}) });
     return id ? { recorded: fromCents(balance), tookRow: true } : { recorded: 0, tookRow: false };
   }
   if (state.owedCents === 0) {
@@ -11071,12 +11105,12 @@ export async function getCustomer(db, id) {
   if (!row) return null;
   const { results } = await db.prepare(
     `SELECT o.orderId, o.orgId, o.placedAt, o.voidedAt, o.isTest, o.completedAt, ${ORDER_AMOUNT_COLS_},
-            COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL), 0) AS receivedCents
+            ${paymentsSql_("o.orderId")} AS receivedCents, ${balanceReceivedSql_("o.orderId", "o.taxMode")} AS balanceReceivedCents
        FROM orders o WHERE o.customerId = ? ORDER BY o.placedAt DESC, o.orderId DESC`).bind(row.id).all();
   let orderCount = 0, spentCents = 0, dueCents = 0;
   const orders = [];
   for (const r of results) {
-    const owed = orderAmountsOfRow_(r).owedCents, received = Number(r.receivedCents) || 0, due = Math.max(0, owed - received);
+    const owed = orderAmountsOfRow_(r).owedCents, received = Number(r.receivedCents) || 0, due = Math.max(0, owed - (Number(r.balanceReceivedCents) || 0));
     if (!r.isTest && !r.voidedAt) { orderCount++; spentCents += owed; dueCents += due; }
     if (orders.length < CUSTOMER_ORDERS_MAX_) orders.push({ orderId: r.orderId, orgId: r.orgId, placedAt: r.placedAt, total: fromCents(owed),
       paidAmount: fromCents(received), balanceDue: fromCents(due), voided: !!r.voidedAt, isTest: !!r.isTest, completed: !!r.completedAt });
@@ -12281,9 +12315,14 @@ export async function cancelLineItemWithReason(db, itemId, reason, at = null) {
   return { lateCancel, changed: true };
 }
 
+// A cancelled line's refund counts against what was received (balanceReceivedSql_), so the paid flag is brought up
+// to date in the same batch.
 export async function setLineItemRefund(db, itemId, refundAmount, at = null) {
-  await db.prepare("UPDATE order_items SET refundDate=?, refundCents=? WHERE id=?")
-    .bind(at || new Date().toISOString(), Math.max(0, toCents(refundAmount)), itemId).run();
+  const item = await db.prepare("SELECT orderId FROM order_items WHERE id=?").bind(itemId).first();
+  const set = db.prepare("UPDATE order_items SET refundDate=?, refundCents=? WHERE id=?")
+    .bind(at || new Date().toISOString(), Math.max(0, toCents(refundAmount)), itemId);
+  if (!item) { await set.run(); return; }
+  await db.batch([set, await paidRefreshStmt_(db, item.orderId)]);
 }
 
 export async function getOrderItemById(db, itemId) {
@@ -12446,15 +12485,14 @@ export async function getOrderForShipping(db, orderId) {
 // What /api/checkout needs before charging: the real total, whether it's
 // already paid, and the org the order actually belongs to.
 // What a card checkout should charge: the BALANCE still due — active items + shipping −
-// discount − payments already received (orderAmounts, as refreshPaidStatus) — not orders.totalCents,
+// discount − payments already received, less refunds for cancelled lines (balanceReceivedSql_, as refreshPaidStatus) — not orders.totalCents,
 // which ignores discounts and anything already paid by Venmo/Zelle/check. Also returns whether
 // the order is voided, and the customer's name/email from the order row (checkout.js uses these
 // rather than trusting the request body).
 export async function getOrderCheckoutState(db, orderId) {
   const row = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
     SELECT o.paid, o.orgId, o.voidedAt, o.customerName, o.contact, o.shippingMethod, o.rushFeePending, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
-      COALESCE((SELECT SUM(amountCents) FROM order_payments
-                WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL), 0) AS receivedCents
+      ${balanceReceivedSql_("o.orderId", tm)} AS receivedCents
     FROM orders o WHERE o.orderId = ?`)).bind(orderId).first());
   if (!row) return null;
   const amounts = orderAmountsOfRow_(row);
@@ -15173,7 +15211,8 @@ function parseOrder_(row, items, payments, labels) {
   const shippingPaidAmount = fromCents(row.shippingPaidCents);
   const activeItemsTotal = fromCents(activeItemsCents);
   const effectiveTotal = fromCents(effectiveCents);
-  const balanceDue = fromCents(Math.max(0, effectiveCents - receivedCents));
+  // Received less the refunds for cancelled lines (balanceReceivedCents_, the twin of the SQL the paid flag uses).
+  const balanceDue = fromCents(Math.max(0, effectiveCents - balanceReceivedCents_(payments, items, taxMode)));
   return {
     orderId: row.orderId,
     orgId: row.orgId,

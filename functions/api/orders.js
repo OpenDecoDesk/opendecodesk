@@ -846,9 +846,12 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (!o || typeof o !== "object") return o;
     const { processorFees, ...rest } = o;
     if (Array.isArray(o.items)) rest.items = o.items.map(({ cogs, cogsSource, ...it }) => it);
-    if (Array.isArray(o.payments)) rest.payments = o.payments.map(({ fee, ...p }) => p);
+    if (Array.isArray(o.payments)) rest.payments = paymentsFor_(o.payments);
     return rest;
   });
+  // An order's payments as a payment action sends them back (add, refund, void, a date or account change): the same
+  // rule as orderCostsFor_ — without costs.view, no processor fee on any of them.
+  const paymentsFor_ = (payments) => !Array.isArray(payments) || seesPricing_() ? payments : payments.map(({ fee, ...p }) => p);
   // Blanks for any screen (the Blanks list, Run Order, the blanks step): without costs.view or Edit on Blanks, no average
   // cost, vendor price or MAP — Read on Blanks is stock and details only (owner's decision, 2026-11-23), the same rule as
   // stripCosts_ below. Whoever receives, counts or prices blanks (Edit) still sees them.
@@ -974,20 +977,26 @@ async function handleOrdersPost_(context, listBefore = null) {
   // Record refund would put it (the line's Record refund, and a line taken off in Edit items — review #15), so the
   // balance, Net kept, the revenue and sales-tax reports and Reconcile all see it. Keyed by the line, so the same
   // line's refund can't go into the books twice (a double click, a retry). `kept` is what the order still holds,
-  // in dollars. Null when recorded (or already was); otherwise the reply refusing it.
+  // in dollars. Null when recorded (or already was); otherwise the reply refusing it. The ceiling is checked again
+  // in the insert itself (addOrderPayment's withinKept), so a refund saved at the same moment can't take the same
+  // money: that one is refused with refundTaken_, and the audit entry is written only for a refund that went in.
   const recordLineRefund_ = async (order, itemId, itemName, amount, method, at, kept) => {
     const requestKey = "lineRefund:" + itemId;
     if (await alreadyRecorded(requestKey)) return null;
     if (Math.round(amount * 100) > Math.round(kept * 100)) {
       return jsonResponse({ status: "error", message: `Refund can't exceed the $${Math.max(0, kept).toFixed(2)} kept on this order` }, 400);
     }
-    const auditErr = await auditStrict({ orgId: order.orgId, orderId: order.orderId, action: "payment.refunded",
+    const note = ("Refund — " + (itemName || "cancelled item")).slice(0, 500);
+    const inserted = await addOrderPayment(env.DB, order.orderId, -amount, note, "",
+      { method, kind: "refund", receivedAt: at || undefined, requestKey, withinKept: true });
+    if (!inserted) return await alreadyRecorded(requestKey) ? null : refundTaken_();
+    audit({ orgId: order.orgId, orderId: order.orderId, action: "payment.refunded",
       detail: { amount, method, reference: "", note: "Refund — " + itemName, shipping: 0, itemId } });
-    if (auditErr) return auditErr;
-    await addOrderPayment(env.DB, order.orderId, -amount, ("Refund — " + (itemName || "cancelled item")).slice(0, 500), "",
-      { method, kind: "refund", receivedAt: at || undefined, requestKey });
     return null;
   };
+  // A refund the order no longer holds the money for, because another refund was recorded first (two admins, or two
+  // tabs, saving at once).
+  const refundTaken_ = () => jsonResponse({ status: "error", message: "Another refund was recorded first; reload the order to see it." }, 409);
   // When something happened, as the admin chose it (2026-10): `b.at` — an ISO date-time from the browser's
   // date-and-time box (or a bare YYYY-MM-DD = that day). Not given → null (the action uses now); {error} = refused.
   const actionTime = (b, field = "at") => {
@@ -1914,7 +1923,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (auditErr) return auditErr;
       await setPaymentAccount(env.DB, p.id, acct.id);
       const updated = await getOrderById(env.DB, p.orderId);
-      return jsonResponse({ status: "ok", payments: updated ? updated.payments : [] });
+      return jsonResponse({ status: "ok", payments: updated ? paymentsFor_(updated.payments) : [] });
     }
   }
 
@@ -2555,7 +2564,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       return jsonResponse({ status: "ok", orderId, duplicate: true,
         amountReceived: same.amountReceived, balanceDue: same.balanceDue,
         discountAmount: same.discountAmount, discountNote: same.discountNote,
-        effectiveTotal: same.effectiveTotal, salesTax: same.salesTax, payments: same.payments, ...paidState_(same) });
+        effectiveTotal: same.effectiveTotal, salesTax: same.salesTax, payments: paymentsFor_(same.payments), ...paidState_(same) });
     }
 
     // Optionally apply a discount for the remaining balance
@@ -2584,7 +2593,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     return jsonResponse({ status: "ok", orderId,
       amountReceived: updated.amountReceived, balanceDue: updated.balanceDue,
       discountAmount: updated.discountAmount, discountNote: updated.discountNote,
-      effectiveTotal: updated.effectiveTotal, salesTax: updated.salesTax, payments: updated.payments, ...paidState_(updated) });
+      effectiveTotal: updated.effectiveTotal, salesTax: updated.salesTax, payments: paymentsFor_(updated.payments), ...paidState_(updated) });
   }
 
   // ---- recordRefund — money returned outside Stripe (Venmo, check, cash…) ----
@@ -2626,18 +2635,20 @@ async function handleOrdersPost_(context, listBefore = null) {
     // Recorded once per Save (requestKeyOf): the same request again — a double click, a retry — changes nothing,
     // and isn't audited a second time.
     const requestKey = requestKeyOf(body, "refund");
-    if (await alreadyRecorded(requestKey)) {
+    const duplicate_ = async () => {
       const same = await getOrderById(env.DB, orderId);
-      return jsonResponse({ status: "ok", orderId, duplicate: true, payments: same.payments, amountReceived: same.amountReceived,
+      return jsonResponse({ status: "ok", orderId, duplicate: true, payments: paymentsFor_(same.payments), amountReceived: same.amountReceived,
         refundedAmount: same.refundedAmount, netReceived: same.netReceived, balanceDue: same.balanceDue, ...paidState_(same) });
-    }
-    const auditErr = await auditStrict({ orgId: order.orgId, orderId, action: "payment.refunded",
-      detail: { amount, method, reference, note, shipping } });
-    if (auditErr) return auditErr;
-    await addOrderPayment(env.DB, orderId, -amount, note, "", { method, reference, kind: "refund", receivedAt: when ? when.receivedAt : undefined, accountId,
-      shippingCents: Math.round(shipping * 100), ...(requestKey ? { requestKey } : {}) });
+    };
+    if (await alreadyRecorded(requestKey)) return await duplicate_();
+    // Only while the order still holds the refund, checked in the insert itself (withinKept): of two refunds saved at
+    // once, the second finds the money gone and is refused. The audit entry is written once the refund is in.
+    const inserted = await addOrderPayment(env.DB, orderId, -amount, note, "", { method, reference, kind: "refund", receivedAt: when ? when.receivedAt : undefined, accountId,
+      shippingCents: Math.round(shipping * 100), withinKept: true, ...(requestKey ? { requestKey } : {}) });
+    if (!inserted) return await alreadyRecorded(requestKey) ? await duplicate_() : refundTaken_();
+    audit({ orgId: order.orgId, orderId, action: "payment.refunded", detail: { amount, method, reference, note, shipping } });
     const updated = await getOrderById(env.DB, orderId);
-    return jsonResponse({ status: "ok", orderId, payments: updated.payments, amountReceived: updated.amountReceived,
+    return jsonResponse({ status: "ok", orderId, payments: paymentsFor_(updated.payments), amountReceived: updated.amountReceived,
       refundedAmount: updated.refundedAmount, netReceived: updated.netReceived, balanceDue: updated.balanceDue, ...paidState_(updated) });
   }
 
@@ -2658,7 +2669,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     try { await setRefundShipping(env.DB, paymentId, Number(body.shippingAmount) || 0); }
     catch (e) { return jsonResponse({ status: "error", message: e.message }, 400); }
     const updated = await getOrderById(env.DB, before.orderId);
-    return jsonResponse({ status: "ok", orderId: before.orderId, payments: updated.payments, amountReceived: updated.amountReceived,
+    return jsonResponse({ status: "ok", orderId: before.orderId, payments: paymentsFor_(updated.payments), amountReceived: updated.amountReceived,
       refundedAmount: updated.refundedAmount, netReceived: updated.netReceived, balanceDue: updated.balanceDue, ...paidState_(updated) });
   }
 
@@ -2778,7 +2789,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (auditErr) return auditErr;
     await setPaymentDate(env.DB, paymentId, when.receivedAt);
     const updated = await getOrderById(env.DB, payment.orderId);
-    return jsonResponse({ status: "ok", payments: updated ? updated.payments : [],
+    return jsonResponse({ status: "ok", payments: updated ? paymentsFor_(updated.payments) : [],
       amountReceived: updated ? updated.amountReceived : null, balanceDue: updated ? updated.balanceDue : null });
   }
 
@@ -2813,7 +2824,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     return jsonResponse({ status: "ok",
       amountReceived: updated ? updated.amountReceived : null,
       balanceDue: updated ? updated.balanceDue : null,
-      payments: updated ? updated.payments : [], ...paidState_(updated) });
+      payments: updated ? paymentsFor_(updated.payments) : [], ...paidState_(updated) });
   }
 
   // ---- setPayOnDelivery — the order is paid when it's delivered (migrations/0105) ----------------
@@ -4179,7 +4190,7 @@ async function handleOrdersPost_(context, listBefore = null) {
         if (ledgerRefund(removal)) {
           const line = (order.items || []).find(i => Number(i.sheetRow) === itemId);
           const refused = await recordLineRefund_(order, itemId, line ? line.name : "", refund, removal.refundMethod, null, keptForRefunds);
-          if (refused) throw new Error("The refund for " + ((line && line.name) || "a line") + " wasn't recorded");
+          if (refused) throw Object.assign(new Error("The refund for " + ((line && line.name) || "a line") + " wasn't recorded"), { reply: refused });
           keptForRefunds -= refund;
         }
         if (refund > 0) await setLineItemRefund(env.DB, itemId, refund);
@@ -4192,6 +4203,8 @@ async function handleOrdersPost_(context, listBefore = null) {
         audit({ orgId, orderId, action: "order.edited", detail: { removals: removals.length, updates: updates.length, additions: additions.length,
           incomplete: true, error: String((e && e.message) || e).slice(0, 200) } });
       }
+      // A refund refused because another one took the money first (recordLineRefund_): its own answer, not a crash.
+      if (e && e.reply) return e.reply;
       throw e;
     }
 

@@ -321,6 +321,14 @@ Orders area: Admin and Manager in full, Back office edit, Production none. The *
 one of its own under Reports: Admin and Manager in full, Back office can read it, Production can't open
 it ([Net 30 terms and POs](#net-30-terms-and-pos) below).
 
+**Sales by…**, **Profit per job** and **QuickBooks export** are permissions of their own under Reports.
+Sales by… and Profit per job: Admin and Manager, nobody else; Profit per job, and the Profit box on an
+order, also need "Money, costs and margins (everywhere)". QuickBooks export: Admin and Manager in full, Back office can
+download, Production can't open it. The **Gift card liability** report goes with the Gift cards
+permission. As with Customers, a role you made yourself, or a built-in one you have changed, starts
+without them ([Sales and profit reports](#sales-and-profit-reports), [QuickBooks
+export](#quickbooks-export) below).
+
 - **Adding someone:** name, email, role. You are shown a temporary password once; give it to
   them. They must choose their own the first time they sign in.
 - **Someone leaves:** disable them. They are signed out at once and can't sign in. Users are
@@ -516,6 +524,147 @@ The built-in category (named "Fundraiser payouts (built in)" if you already had 
 "Fundraiser payouts") can be renamed but not deleted. Nothing is paid to the group automatically: the report tells
 you what is owed, and you pay it the way you always have.
 
+## Sales and profit reports
+
+Two reports under **Reports** look at the same orders in the same way:
+
+- **Which orders.** Not test orders, not voided ones, and not an order that is only a gift card. An order
+  is dated by its **sale date**, as the Revenue report dates it — when it shipped or was delivered (or
+  completed), or when it was placed, as Global settings → Bookkeeping says; the page says which.
+- **Business days.** The dates are your days, in the business time zone (Global settings → Region): "to
+  Jan 31" runs to midnight at the end of Jan 31 where you are, not in UTC. Months are your months too.
+- **Gift cards are never sales.** A gift card line is left out of both: selling a card is a liability
+  (see [Gift card liability](#gift-card-liability)); the sale counts when the card pays for an order.
+- Cancelled lines are left out.
+
+### Sales by customer, product, shop and decoration
+
+The **Sales by…** report (in the Reports menu) groups the goods sold in a range of dates (this month to date to start, with
+quarter and year presets), for one shop or all, by **Customer**, **Product**, **Shop** or
+**Decoration**. Each row: the orders, pieces, **gross** (the lines before any discount), **discount**
+(the order's discount — codes and a discount typed by staff alike — shared across its lines by their
+amount), **refunds** (line refunds), **net** (gross less discount less refunds) and its share of the
+total net, largest first.
+
+- **Customer:** the customer record; an order without one is grouped by its email, as "No customer
+  record: <email>".
+- **Product:** the product; a custom line is grouped by its own name.
+- **Decoration:** the line's decoration type. A line decorated two ways (embroidered and printed) counts
+  its pieces under each and splits its money evenly between them; a line with none is "No decoration".
+
+Shipping, rush and sales tax aren't sales of goods: they are shown as totals under the table, not in the
+rows. **Export CSV** downloads the rows.
+
+### Profit per job
+
+**Reports → Profit per job** shows, for each order in the range, what it brought in, what it cost and
+what it left, lowest margin first to start (or highest profit, most revenue, newest). The strip at the top
+totals them and says how many use estimates; a row opens to show its costs part by part, and **Export
+CSV** has each part as a column. The order window shows the same figures in a **Profit** box under its
+money table.
+
+**Revenue** is the goods after discounts and refunds, plus the shipping charged (after any free-shipping
+code or shipping refund) and the rush fee. Sales tax is never revenue, and a gift card line is left out.
+
+**Costs:**
+
+- **Blanks** — the blanks and finished stock used for the order's lines, at what they cost. A line that
+  hasn't been made yet (and needs a blank — not a customer's own garment) is **estimated** from the
+  blank's purchase price for the pieces still to make.
+- **Transfers** — the transfers used; for a line not yet made, the product's transfer cost for the pieces
+  still to make (an estimate).
+- **Decoration** — each line's decoration cost from Global settings → Decoration types, **at today's
+  settings** (embroidery has none here).
+- **Supplies** — the product's supplies cost per piece, or the default from the pricing settings when the
+  product has none.
+- **Outside digitizing** — the digitizing jobs recorded for the order.
+- **Card fees** — the processor's fees on the order's payments.
+- **Postage** — the shipping labels bought for it.
+- **Labor isn't counted yet.** Production time will be added in a later version.
+
+**Margin** is profit as a percent of revenue (none when there is no revenue). An order using an estimate
+is marked **est.** and its notes say which part.
+
+**Who can.** Both reports are permissions of their own under Reports, "Sales by customer, product, shop and
+decoration" and "Profit per job": Admin and Manager, nobody else to start. Profit also needs **Money, costs
+and margins (everywhere)**: without it there is no Profit per job report and no Profit box on an
+order, and the server never sends the figures ([Users and roles](#users-and-roles)).
+
+## Gift card liability
+
+**Reports → Gift card liability** is the gift cards' money month by month, for a range of dates (this
+year to start), in your business time zone. For each month:
+
+- **Opening** — what was on cards at the start of the month.
+- **Sold** — cards bought (online, as an order).
+- **Given** — cards staff issued, not paid for.
+- **Spent** — what cards paid for orders.
+- **Put back** — refunds and voided gift card payments that went back onto cards.
+- **Adjusted** — Adjust… on a card, up or down.
+- **Voided** — balances taken off by Void….
+- **Closing** — opening plus the month's changes.
+
+Every month in the range is listed, even an empty one, with totals below, and **On cards right now**
+(every active card's balance today). The closing figure as of today is that same amount. **Export CSV**
+downloads the months. It needs the Gift cards feature and the Gift cards permission.
+
+## QuickBooks export
+
+The **QuickBooks export** page turns a range of dates into files QuickBooks imports, in either form:
+
+- **QuickBooks Online** — CSV files: the sales as sales receipts or invoices (QuickBooks Online's own
+  import columns, one row per line, with **Shipping**, **Rush**, **Discount** and **Gift card** as lines of
+  their own), and payments, expenses and deposits as bank files (Date, Description, Amount) — **one file
+  per bank account**.
+- **QuickBooks Desktop** — one IIF file with every part ticked in it.
+
+Pick the dates (this month, last month, this quarter or last year to start), the form, and the parts. The
+page shows what each part holds (how many, and the total) before **Download**. The form you pick last is
+remembered.
+
+**What each part holds** (dates are your business days):
+
+- **Sales** — the same orders as the sales report, dated by their sale date, **with** gift-card-only
+  orders: each line, shipping, rush, the discount, sales tax, and any gift card sold, which goes to the
+  **gift card liability** account, never to sales. A Net 30 order is always an invoice, with its due
+  date and PO.
+- **Payments** — every payment and refund by the day it was received (refunds negative). A gift card
+  payment moves money off the gift card liability account; it isn't money in a bank. Card (Stripe)
+  fees go to the card fees account with the payment, since a Stripe payout is already net of them. A
+  payment recorded straight into a bank account (a check) goes to that account, not to Undeposited
+  Funds.
+- **Expenses** — by expense date, from the account they were paid from to the expense account their
+  category maps to. A vendor refund is the reverse. Shipping labels go in here too, to the postage
+  account, from the account each label was paid from.
+- **Deposits** — Stripe payouts and cashouts into your accounts: money moved from Undeposited Funds to
+  the bank account. A Venmo or cash cash-out carries its fees to the card fees account.
+
+**Account mapping**, on the same page, says which QuickBooks account each kind of money goes to. It starts
+with QuickBooks' usual names — Sales, Shipping Income, Discounts Given, Sales Tax Payable, Gift Cards
+Outstanding, Undeposited Funds, Merchant Fees, Postage and Delivery, Accounts Receivable (rush goes to
+Sales) — and each of your accounts and expense categories under its own name. Type the names exactly as
+they are in your QuickBooks chart of accounts. Also: **Sales go in as** sales receipts (paid at once) or
+invoices, and **Customer name** — the customer, or the shop (one customer per shop in QuickBooks). A name
+is 1 to 100 characters, without tabs or line breaks. Saved in the `quickbooks` setting.
+
+**Importing.** **Make a backup of your company file first.**
+
+- **QuickBooks Online:** the sales file through Settings ▸ Import data (Invoices); each bank file
+  through Banking ▸ Upload, picking the matching bank account.
+- **QuickBooks Desktop:** File ▸ Utilities ▸ Import ▸ IIF Files. A sale is a cash sale into Undeposited
+  Funds, or an invoice into Accounts Receivable; an expense is a check, or a credit card charge for a
+  credit card account; a deposit moves Undeposited Funds to the bank. **Every transaction in the file
+  balances to the cent**: the page refuses to make a file where one doesn't, rather than hand QuickBooks
+  something it would import wrong.
+
+Check the mapping before the first import: a name that doesn't match an account in your QuickBooks
+won't land where you expect. The importing steps have not been tried against a
+real QuickBooks company file. Each download is in the audit log (`report.quickbooks_export`), and so is
+a change to the mapping (`settings.quickbooks`).
+
+**Who can.** "QuickBooks export" is a permission of its own under Reports: Admin and Manager in full
+(they can change the mapping), Back office can download, Production can't open it. It needs the
+Bookkeeping feature ([Users and roles](#users-and-roles)).
 
 ## Discount codes
 
@@ -651,7 +800,8 @@ the balance to nothing and the card stops working. Both need full access and are
 gift card line is left out of Revenue, Sales tax, Fundraising, cost and pricing reports and the Home
 page's money. The sale is revenue when the card pays for an order. A gift card payment is not money in
 a bank account, so it is never on the deposits list or in an account's balance. The page's top strip shows
-what is **outstanding** (all active balances), and what was sold and spent this month.
+what is **outstanding** (all active balances), and what was sold and spent this month; the
+[Gift card liability](#gift-card-liability) report has it month by month.
 
 **Who can.** The **Gift cards** permission: Admin and Manager have it in full, Back office can look and
 issue or resend, Production has no access ([Users and roles](#users-and-roles)). Taking a card as payment

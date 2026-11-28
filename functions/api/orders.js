@@ -161,6 +161,12 @@ import {
   refundToGiftCard, adjustGiftCard, voidGiftCard, giftCardTotals, orderForReorder_,
 } from "../_lib/db.js";
 import { sendGiftCardEmail } from "../_lib/email.js";
+// Phase 8: sales by customer / product / shop / decoration, profit per job, gift card liability, QuickBooks export.
+import {
+  getSalesReport, getOrderProfit, getProfitReport, getGiftCardLiability,
+  getQuickBooksSettings, setQuickBooksSettings, getQuickBooksData,
+} from "../_lib/db.js";
+import { buildQuickBooksExport, qbSummary } from "../_lib/quickbooks.js";
 // Payments, refunds and money integrity (kept apart from the long list above).
 import { DECORATION_TYPES, DECORATION_KEYS, DEFAULT_DECORATION_PRICING, normalizeDecorationTypes, normalizeDecorationPricing, priceDecoration } from "../_lib/db.js";
 import { expireCheckoutSession, createCheckoutSession, CHECKOUT_LINK_SECONDS, listCacheVersions_, readCachedList_, refreshCachedLists_, peekCachedList_, blankListDelta_ } from "../_lib/db.js";
@@ -849,6 +855,8 @@ const NO_MONTH_ACTIONS = new Set([
   // Net 30 with a PO (migrations/0121): no money moves either — the order stays owed until payments arrive, which are
   // dated as any payment is. Terms, days, the PO and accepting it only decide when the steps may go on and when it's due.
   "setOrderTerms", "acceptOrderPo", "updateTermsSettings",
+  // QuickBooks export (phase 8): the account names a file is written with. No money moves and no month's numbers change.
+  "updateQuickBooksSettings",
   // Customer-supplied garments: counting the customer's own garments in touches no stock and no cost.
   "checkInGarments", "undoGarmentCheckin",
   // Customer records (migrations/0108): who an order belongs to and who is tax-exempt from now on. An order's own
@@ -982,6 +990,8 @@ const FEATURE_ACTIONS = {
     "listRecurringExpenses", "saveRecurringExpense", "stopRecurringExpense", "deleteRecurringExpense",
     // A payout to a shop's fundraiser is an expense; the Fundraising report itself works without Bookkeeping.
     "recordFundraiserPayout",
+    // QuickBooks export (phase 8): the books, so Bookkeeping's. The account mapping lives on its page.
+    "getQuickBooksSettings", "updateQuickBooksSettings", "getQuickBooksExport",
   ],
   // (Reading the ship-from address isn't behind the switch: Global settings shows it as soon as
   // Shipping is ticked, before it's saved on.)
@@ -1013,6 +1023,8 @@ const FEATURE_ACTIONS = {
   giftCards: [
     "listGiftCards", "getGiftCard", "revealGiftCardCode", "issueGiftCard", "adjustGiftCard", "voidGiftCard", "resendGiftCard", "giftCardTotals",
     "redeemGiftCard", "refundToGiftCard",
+    // The Gift card liability report (phase 8): what is held on cards, month by month.
+    "getGiftCardLiability",
   ],
   // Email campaigns (migrations/0117). The checkout's and Local sale's box check the same switch themselves.
   emailCampaigns: [
@@ -2833,6 +2845,157 @@ async function handleOrdersPost_(context, listBefore = null) {
     let net30On = false;
     try { net30On = ((await getGlobalSettings(env.DB)) || {}).enabledPayments?.net30 === true; } catch (_) { net30On = false; }
     return jsonResponse({ status: "ok", ...got.value, asOf: got.value.asOf || asOf, orgId: org ? org.orgId : null, customerId: customerId || null, net30On });
+  }
+
+  // ---- Phase 8 reports: Sales by…, Profit per job, an order's profit, Gift card liability, QuickBooks export ----
+  // db.js takes the days as YYYY-MM-DD and makes them business days itself (businessRange_: the first moment of dateFrom
+  // to the last of dateTo on the business's clock). Money comes back in cents. Costs and profit are never answered to a
+  // caller without costs.view.
+  const P8_SALES_BY_ = ["customer", "product", "shop", "decoration"];
+  const P8_PROFIT_SORTS_ = ["margin", "profit", "revenue", "date"];
+  const P8_QB_FORMATS_ = ["online", "desktop"];
+  const P8_QB_PARTS_ = ["sales", "payments", "expenses", "deposits"];
+  // { dateFrom, dateTo } from the request, or { error } — the reply. At most three years: from 2024-01-01 the last day
+  // allowed is 2026-12-31.
+  const p8Range_ = (b) => {
+    const dateFrom = String(b.dateFrom || "").trim(), dateTo = String(b.dateTo || "").trim();
+    if (!fundraisingYmd_(dateFrom) || !fundraisingYmd_(dateTo)) return { error: jsonResponse({ status: "error", message: "Invalid date range — expected YYYY-MM-DD" }, 400) };
+    if (dateFrom > dateTo) return { error: jsonResponse({ status: "error", message: "The start date is after the end date." }, 400) };
+    const limit = (Number(dateFrom.slice(0, 4)) + 3) + dateFrom.slice(4);   // three years on (a 29 Feb start: 1 Mar is still before it)
+    if (dateTo >= limit) return { error: jsonResponse({ status: "error", message: "Pick at most three years." }, 400) };
+    return { dateFrom, dateTo };
+  };
+  // A db.js call of phase 8: { value } or { reply } (a userFacing throw or an { error } answer is a 400).
+  const p8Call_ = async (run) => {
+    let value;
+    try { value = await run(); }
+    catch (e) {
+      if (e && e.userFacing) return { reply: jsonResponse({ status: "error", message: e.message }, 400) };
+      throw e;
+    }
+    if (value && value.error) return { reply: jsonResponse({ status: "error", message: value.error }, value.status || 400) };
+    return { value };
+  };
+  const p8NoCosts_ = () => jsonResponse({ status: "error", code: "forbidden", message: "You can't see costs." }, 403);
+
+  // ---- getSalesReport — sales by customer, product, shop or decoration type (reports.sales Read; no costs) ----
+  if (body.action === "getSalesReport") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const range = p8Range_(body);
+    if (range.error) return range.error;
+    const by = body.by == null || body.by === "" ? "customer" : String(body.by);
+    if (!P8_SALES_BY_.includes(by)) return jsonResponse({ status: "error", message: "Group by customer, product, shop or decoration." }, 400);
+    const { org, error } = await fundraisingOrg_(body.orgId != null && body.orgId !== "" ? body.orgId : body.org, false);
+    if (error) return error;
+    const got = await p8Call_(() => getSalesReport(env.DB, { dateFrom: range.dateFrom, dateTo: range.dateTo, by, ...(org ? { orgId: org.orgId } : {}) }));
+    if (got.reply) return got.reply;
+    return jsonResponse({ status: "ok", ...got.value, orgId: org ? org.orgId : null });
+  }
+
+  // ---- getProfitReport — every order's revenue, costs and profit, lowest margin first (reports.profit Read + costs.view) ----
+  if (body.action === "getProfitReport") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    if (!seesPricing_()) return p8NoCosts_();
+    const range = p8Range_(body);
+    if (range.error) return range.error;
+    const sort = body.sort == null || body.sort === "" ? "margin" : String(body.sort);
+    if (!P8_PROFIT_SORTS_.includes(sort)) return jsonResponse({ status: "error", message: "Sort by margin, profit, revenue or date." }, 400);
+    const { org, error } = await fundraisingOrg_(body.orgId != null && body.orgId !== "" ? body.orgId : body.org, false);
+    if (error) return error;
+    const got = await p8Call_(() => getProfitReport(env.DB, { dateFrom: range.dateFrom, dateTo: range.dateTo, sort, ...(org ? { orgId: org.orgId } : {}) }));
+    if (got.reply) return got.reply;
+    return jsonResponse({ status: "ok", ...got.value, sort, orgId: org ? org.orgId : null });
+  }
+
+  // ---- getOrderProfit — one order's revenue, cost parts and profit (the order window's Profit box) ----
+  // costs.view Read (its ACTION_PERM) AND the order itself at Read (orders.details).
+  if (body.action === "getOrderProfit") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    if (!seesPricing_()) return p8NoCosts_();
+    if (!can_("orders.details", "read")) return jsonResponse({ status: "error", code: "forbidden", message: "Your role can't open orders. Ask an admin." }, 403);
+    const orderId = String(body.orderId || "").trim();
+    if (!ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
+    const got = await p8Call_(() => getOrderProfit(env.DB, orderId));
+    if (got.reply) return got.reply;
+    const profit = got.value;
+    if (!profit || (body.org && profit.orgId && profit.orgId !== body.org)) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    return jsonResponse({ status: "ok", profit });
+  }
+
+  // ---- getGiftCardLiability — sold, spent and outstanding on gift cards, month by month (giftcards.cards Read) ----
+  if (body.action === "getGiftCardLiability") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const range = p8Range_(body);
+    if (range.error) return range.error;
+    const got = await p8Call_(() => getGiftCardLiability(env.DB, { dateFrom: range.dateFrom, dateTo: range.dateTo }));
+    if (got.reply) return got.reply;
+    return jsonResponse({ status: "ok", dateFrom: range.dateFrom, dateTo: range.dateTo, ...got.value });
+  }
+
+  // ---- QuickBooks export (reports.quickbooks; Bookkeeping feature) — the account mapping and the files ----
+  // Settings live in global_settings under `quickbooks` (db.js getQuickBooksSettings: defaults filled in). The files are
+  // built by functions/_lib/quickbooks.js from db.js getQuickBooksData: QuickBooks Online CSVs (one per part, the bank
+  // parts one per bank account) or one QuickBooks Desktop .iif.
+  if (body.action === "getQuickBooksSettings") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    // The app's own bank accounts and expense categories come with it, so the mapping page needs no Finance permission
+    // (Back office reads this page without listAccounts / listExpenseCategories).
+    const [qb, accRows, catRows] = await Promise.all([getQuickBooksSettings(env.DB),
+      env.DB.prepare("SELECT id, name, type, active FROM accounts ORDER BY id").all().then(r => r.results || []).catch(() => []),
+      env.DB.prepare("SELECT id, name FROM expense_categories ORDER BY name").all().then(r => r.results || []).catch(() => [])]);
+    const accounts = accRows.map(a => ({ id: Number(a.id), name: a.name || "", type: a.type || "", active: a.active == null ? true : !!Number(a.active) }));
+    const categories = catRows.map(c => ({ id: Number(c.id), name: c.name || "" }));
+    return jsonResponse({ status: "ok", quickbooks: qb, settings: qb, accounts, categories });
+  }
+  if (body.action === "updateQuickBooksSettings") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const isObj_ = (x) => x && typeof x === "object" && !Array.isArray(x);
+    const raw = isObj_(body.quickbooks) ? body.quickbooks : isObj_(body.settings) ? body.settings : body;
+    const { action: _a, key: _k, settings: _s, quickbooks: _q, ...v } = raw;
+    // db.js setQuickBooksSettings checks the input itself (buildQuickBooksSettings: names trimmed, 1–100 characters, no
+    // tabs or line breaks, unknown accounts and categories dropped) and refuses with a userFacing error.
+    const before = await getQuickBooksSettings(env.DB);
+    const saved = await p8Call_(() => setQuickBooksSettings(env.DB, v));
+    if (saved.reply) return saved.reply;
+    const after = saved.value && typeof saved.value === "object" && saved.value.accounts ? saved.value : await getQuickBooksSettings(env.DB);
+    audit({ orgId: null, orderId: null, action: "settings.quickbooks", detail: { from: before, to: after } });
+    return jsonResponse({ status: "ok", quickbooks: after, settings: after });
+  }
+  if (body.action === "getQuickBooksExport") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const range = p8Range_(body);
+    if (range.error) return range.error;
+    let format = body.format == null || body.format === "" ? "" : String(body.format);
+    if (format && !P8_QB_FORMATS_.includes(format)) return jsonResponse({ status: "error", message: "Choose QuickBooks Online or QuickBooks Desktop." }, 400);
+    let parts = body.parts == null ? P8_QB_PARTS_.slice() : body.parts;
+    if (!Array.isArray(parts) || !parts.length || parts.some(p => !P8_QB_PARTS_.includes(p))) return jsonResponse({ status: "error", message: "Pick what to export: sales, payments, expenses or deposits." }, 400);
+    parts = P8_QB_PARTS_.filter(p => parts.includes(p));   // in the usual order, each once
+    if (typeof buildQuickBooksExport !== "function") return jsonResponse({ status: "error", message: "The QuickBooks export isn't available right now." }, 503);
+    const got = await p8Call_(() => getQuickBooksData(env.DB, { dateFrom: range.dateFrom, dateTo: range.dateTo }));
+    if (got.reply) return got.reply;
+    // The builders name the files by the range (quickbooks.js qbFilename_), so the range goes in with the rows.
+    const data = { ...got.value, dateFrom: range.dateFrom, dateTo: range.dateTo };
+    if (!format) format = (data.settings && P8_QB_FORMATS_.includes(data.settings.format)) ? data.settings.format : "online";
+    // The page's summary strip (summaryOnly): counts and totals only — no files, and nothing in the audit log.
+    if (body.summaryOnly === true) {
+      return jsonResponse({ status: "ok", dateFrom: range.dateFrom, dateTo: range.dateTo, format, parts, summary: qbSummary(data) });
+    }
+    let built;
+    try { built = buildQuickBooksExport(data, format, parts); }
+    catch (e) {
+      // quickbooks.js refuses a Desktop file whose transactions don't each add up to zero, rather than hand it out.
+      console.error("QuickBooks export failed:", e);
+      return jsonResponse({ status: "error", message: String((e && e.message) || "The QuickBooks file couldn't be made.").slice(0, 300) }, 409);
+    }
+    audit({ orgId: null, orderId: null, action: "report.quickbooks_export", detail: { format, parts, dateFrom: range.dateFrom, dateTo: range.dateTo } });
+    return jsonResponse({ status: "ok", dateFrom: range.dateFrom, dateTo: range.dateTo, format, parts, files: built.files, summary: built.summary });
   }
 
   // ---- setOrgFundraiser — a shop's fundraiser, or none (fundraiser: null) ----

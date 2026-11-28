@@ -888,3 +888,43 @@
   .og-slip-sign span{flex:1; border-top:1px solid #000; padding-top:3pt; font-size:10pt;}
 }
 .cust-tag-net30{background:#e0e7ff; color:#3730a3;}
+
+/* ---- Reports → Sales by…, Profit per job and Gift card liability (phase 8, public/admin-salesreports.js), and the
+   order window's Profit box (admin.js pmProfitHtml_) ---- */
+.sr-bar .cust-field input, .sr-bar .cust-field select{min-width:140px;}
+.sr-presets{display:flex; flex-wrap:wrap; gap:6px; margin:0 0 12px;}
+.sr-preset, .sr-by-btn{font:inherit; font-size:12px; padding:5px 10px; border:1px solid #ccc; border-radius:4px; background:var(--surface,#fff); color:var(--ink,#1a1a1a); cursor:pointer;}
+.sr-preset.on, .sr-by-btn.on{border-color:var(--accent,#1d4ed8); background:var(--accent-soft,#eef2ff); font-weight:600;}
+.sr-by{display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:0 0 10px;}
+.sr-by-l{font-size:12px; font-weight:600; margin-right:4px;}
+.sr-table tfoot td{border-top:2px solid var(--card-line,#ccc); font-weight:700;}
+.sr-share-h{min-width:120px;}
+.sr-share-c{white-space:nowrap;}
+.sr-share{display:inline-block; width:70px; height:6px; border-radius:3px; background:#eee; vertical-align:middle; margin-right:6px; overflow:hidden;}
+.sr-share-bar{display:block; height:100%; background:var(--accent,#1d4ed8);}
+.sr-share-n{font-size:12px; font-variant-numeric:tabular-nums;}
+.sr-below{display:flex; flex-wrap:wrap; gap:8px 24px; margin:10px 0; font-size:13px;}
+.sr-below > div{display:flex; gap:8px;}
+.sr-below span{color:var(--ink-soft,#666);}
+.sr-est{display:inline-block; font-size:10px; font-weight:700; padding:0 5px; border-radius:8px; background:#fef3c7; color:#92400e; vertical-align:middle;}
+.sr-negn{color:#b03a2e;}
+.sr-prow.sr-neg td:first-child{box-shadow:inset 3px 0 0 #b03a2e;}
+.sr-toggle{background:none; border:none; cursor:pointer; font-size:14px; padding:0 4px; color:var(--ink-soft,#666);}
+.sr-parts-row td{background:var(--surface-alt,#f8f8f6);}
+.sr-parts{display:flex; flex-wrap:wrap; gap:6px 20px; font-size:12px;}
+.sr-parts > div{display:flex; gap:6px;}
+.sr-parts span{color:var(--ink-soft,#666);}
+.sr-empty{padding:16px 0;}
+.pm-profit{border-top:1px solid #e5e7eb; padding-top:10px; margin:-4px 0 14px; font-size:13px;}
+.pm-profit-h{font-size:12px; font-weight:600; color:#666; margin-bottom:4px;}
+.pm-profit-t{width:100%; border-collapse:collapse;}
+.pm-profit-t td{padding:2px 0;}
+.pm-profit-n{text-align:right; font-variant-numeric:tabular-nums;}
+.pm-profit-cost td{color:#666; font-size:12px;}
+.pm-profit-sum td{font-weight:700; border-top:1px solid #e5e7eb; padding-top:4px;}
+.pm-profit-t .pm-profit-neg, .pm-profit-t .pm-profit-neg td{color:#b03a2e;}
+.pm-profit-note{font-size:12px; color:#666; margin-top:4px;}
+@media (max-width:600px){
+  .sr-share{width:48px;}
+  .sr-bar .cust-field{flex:1 1 140px;}
+}

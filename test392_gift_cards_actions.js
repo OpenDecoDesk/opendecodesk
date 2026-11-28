@@ -87,8 +87,8 @@ console.error = (...a) => { logged.push(a.map(String).join(" ")); };
     ok("reading the gift card settings: Global settings, the Gift cards page, or the order's payment form",
       same(perm("getGiftCardSettings"), [["settings.global", "read"], ["giftcards.cards", "read"], ["orders.payments", "edit"]]));
     const feat = [...ordersJs.match(/giftCards: \[([\s\S]*?)\],/)[1].matchAll(/"(\w+)"/g)].map(m => m[1]);
-    ok("the Gift cards switch covers the ten admin card actions, and not the settings or Reorder",
-      same(feat.slice().sort(), ["adjustGiftCard", "getGiftCard", "giftCardTotals", "issueGiftCard", "listGiftCards", "redeemGiftCard", "refundToGiftCard", "resendGiftCard", "revealGiftCardCode", "voidGiftCard"]));
+    ok("the Gift cards switch covers the ten admin card actions and the liability report (phase 8), and not the settings or Reorder",
+      same(feat.slice().sort(), ["adjustGiftCard", "getGiftCard", "getGiftCardLiability", "giftCardTotals", "issueGiftCard", "listGiftCards", "redeemGiftCard", "refundToGiftCard", "resendGiftCard", "revealGiftCardCode", "voidGiftCard"]));
     const noMonth = [...ordersJs.match(/const NO_MONTH_ACTIONS = new Set\(\[([\s\S]*?)\]\);/)[1].matchAll(/"(\w+)"/g)].map(m => m[1]);
     ok("issuing, adjusting, voiding, resending, showing and the settings change no month's numbers",
       ["issueGiftCard", "adjustGiftCard", "voidGiftCard", "resendGiftCard", "revealGiftCardCode", "updateDiscountRules", "updateGiftCardSettings", "getDiscountRules", "getGiftCardSettings", "getOrderForReorder"].every(a => noMonth.includes(a)));

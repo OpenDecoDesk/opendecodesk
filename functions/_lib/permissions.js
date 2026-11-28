@@ -79,6 +79,9 @@ export const PERMISSION_AREAS = [
     { hash: "runreport", label: "Run times", fns: [["reports.runtimes", "Run times"]] },
     { hash: "fundraising", label: "Fundraising", fns: [["reports.fundraising", "Fundraising report"]] },
     { hash: "unpaidpos", label: "Unpaid POs", fns: [["reports.receivables", "Unpaid POs report"]] },
+    { hash: "salesby", label: "Sales by…", fns: [["reports.sales", "Sales by customer, product, shop and decoration"]] },
+    { hash: "profit", label: "Profit per job", fns: [["reports.profit", "Profit per job"]] },
+    { hash: "quickbooks", label: "QuickBooks export", fns: [["reports.quickbooks", "QuickBooks export"]] },
     { hash: "books", label: "Periods and export", fns: [["reports.books", "Closed periods and accountant's export"]] },
     { hash: "taxpacket", label: "Tax packet", fns: [["reports.taxpacket", "Printable tax packet for the accountant"]] } ] },
   { key: "settings", label: "Settings", items: [
@@ -112,7 +115,8 @@ const homeHidesCosts_ = (p) => !p.costsApart && ((p.menus || {})[MENU_OF_ITEM.ho
 // fails until it is placed).
 const BY_FN = {
   "home.counts": { read: ["getDashboard"] },
-  "costs.view": { read: ["analyzePricing", "getPricingSettings"] },
+  // An order's profit (phase 8): its costs, so costs.view; orders.js also asks for orders.details Read.
+  "costs.view": { read: ["analyzePricing", "getPricingSettings", "getOrderProfit"] },
   "orders.details": {
     read: ["getOrders", "getOrdersByIds", "getOrdersAllShops", "getOpenOrders", "getOrderItemFiles", "getOrderItemDesigns", "listDesignVerifications"],
     edit: ["updateCustomerInfo", "editOrder", "updateOrderDate", "setOrderDates", "setOrderDueDate", "bulkSetDueDate", "refreshOrderFromCatalog",
@@ -164,7 +168,7 @@ const BY_FN = {
   // audited (it is the card: anyone who has it can spend it). Adjusting a balance and voiding a card take money
   // off a customer's card: Full. Spending a card on an order and refunding to one are orders.payments' (above).
   "giftcards.cards": {
-    read: ["listGiftCards", "getGiftCard", "giftCardTotals"],
+    read: ["listGiftCards", "getGiftCard", "giftCardTotals", "getGiftCardLiability"],
     edit: ["issueGiftCard", "revealGiftCardCode", "resendGiftCard"],
     full: ["adjustGiftCard", "voidGiftCard"] },
   // Email campaigns (migrations/0117): read sees them and who they'd go to; edit writes them and sends tests; full
@@ -256,6 +260,12 @@ const BY_FN = {
   // Unpaid POs (migrations/0121): every Net 30 order still owed, by how late it is. What customers owe, not what anything
   // cost, so no costs.view. Accepting a PO from it is orders.terms' (setOrderTerms, acceptOrderPo).
   "reports.receivables": { read: ["getUnpaidPoReport"] },
+  // Phase 8. Sales by customer / product / shop / decoration: what was sold, no costs. Profit per job shows costs, so
+  // orders.js also asks for costs.view. The QuickBooks export is the books (Back office reads it); its account
+  // mapping is Edit's.
+  "reports.sales": { read: ["getSalesReport"] },
+  "reports.profit": { read: ["getProfitReport"] },
+  "reports.quickbooks": { read: ["getQuickBooksSettings", "getQuickBooksExport"], edit: ["updateQuickBooksSettings"] },
   "reports.books": { read: ["listClosedPeriods", "getAccountantExport"], edit: ["closePeriod"], full: ["reopenPeriod"] },
   // The packet is drawn from the other reports, so it needs to read them too (renderTaxPacket says which are missing).
   "reports.taxpacket": { read: ["getTaxPacketExtras"] },
@@ -358,7 +368,7 @@ const STAFF_FNS = only_({
   "production.machines": "edit", "production.maintenance": "edit", "production.maintenanceLog": "edit", "production.machinefiles": "edit",
   "production.hoops": "edit", "production.threads": "edit", "production.abortreasons": "edit",
   "inventory.blanks": "edit", "inventory.blankorder": "edit", "inventory.transfers": "edit",
-  "reports.runtimes": "read", "reports.fundraising": "read", "reports.receivables": "read", "settings.comms": "read",
+  "reports.runtimes": "read", "reports.fundraising": "read", "reports.receivables": "read", "reports.quickbooks": "read", "settings.comms": "read",
 });
 const PRODUCTION_FNS = only_({
   "home.counts": "read",

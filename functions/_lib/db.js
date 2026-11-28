@@ -19134,3 +19134,561 @@ export async function orderForReorder_(db, orderId) {
 function tryParse_(str, fallback) {
   try { return JSON.parse(str); } catch { return fallback; }
 }
+
+// ---- Sales by…, profit per job, gift card liability and the QuickBooks export (phase 8) ------------------------------
+// These reports work in BUSINESS days (like giftCardTotals / getUnpaidPoReport): a range runs from the start of
+// dateFrom to the end of dateTo where the business is (termsZone_), and months are the business's months. Sales and
+// profit use the same orders — sold in the range on the install's sale date (getSaleDateBasis), not test, not void, not
+// nothing-but-gift-cards — and the same per-line money (p8LineMoney_), so their totals tie to the Revenue report's net
+// sales (getRevenueData) for the same orders, less line refunds. A gift card sold online is never a sale here: its
+// line is left out (in QuickBooks it goes to the liability account). Money in cents.
+
+// { fromIso, toIso, tz } for two business days "YYYY-MM-DD" (inclusive).
+export async function businessRange_(db, fromYmd, toYmd) {
+  const tz = await termsZone_(db);
+  const from = String(fromYmd || "").slice(0, 10), to = String(toYmd || "").slice(0, 10);
+  const prevEnd = ymdOk_(from) ? localDayEndInstant(addDaysYmd_(from, -1), tz) : null;
+  const fromIso = prevEnd ? new Date(Date.parse(prevEnd) + 1).toISOString() : dayStart_(from);
+  const toIso = (ymdOk_(to) && localDayEndInstant(to, tz)) || dayEnd_(to);
+  return { fromIso, toIso, tz };
+}
+// "YYYY-MM" (the business's month) / "YYYY-MM-DD" (its day) of an ISO time.
+export function businessMonth_(iso, tz) { return iso ? dateInTimeZone(iso, tz).slice(0, 7) : ""; }
+const businessDay_ = (iso, tz) => (iso ? dateInTimeZone(iso, tz) : "");
+// A date range the reports accept: both days YYYY-MM-DD, from ≤ to. An { error } or null.
+const p8RangeError_ = (dateFrom, dateTo) => !ymdOk_(dateFrom) || !ymdOk_(dateTo) ? "Choose the dates as YYYY-MM-DD."
+  : dateFrom > dateTo ? "The start date is after the end date." : null;
+const p8Pct_ = (part, whole) => (whole ? Math.round(part * 1000 / whole) / 10 : null);
+const p8Sum_ = (list, f) => list.reduce((s, x) => s + (Number(f(x)) || 0), 0);
+// Runs `sql` (whose LAST parameter is a JSON list read with json_each) over `ids` in chunks, so a long list never makes
+// one huge statement; the rows of every chunk together.
+const P8_CHUNK_ = 400;
+async function p8AllIn_(db, sql, ids, ...binds) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += P8_CHUNK_) {
+    const { results } = await db.prepare(sql).bind(...binds, JSON.stringify(ids.slice(i, i + P8_CHUNK_))).all();
+    for (const r of results || []) out.push(r);
+  }
+  return out;
+}
+// The same, for a table a database may not have yet (an empty list then).
+async function p8AllInOpt_(db, sql, ids, ...binds) {
+  try { return await p8AllIn_(db, sql, ids, ...binds); }
+  catch (e) { if (/no such (table|column)/i.test(String(e && e.message))) return []; throw e; }
+}
+const P8_KEY_SEP_ = "\u0001";
+const p8ProductKey_ = (orgId, productId) => String(orgId) + P8_KEY_SEP_ + String(productId);
+const p8IsGift_ = (i) => i.productId === GIFT_CARD_PRODUCT_ID;
+const p8Live_ = (i) => !i.cancelDate && !p8IsGift_(i);
+const p8HasProduct_ = (i) => !!i.productId && i.productId !== "__custom__" && !p8IsGift_(i);
+
+// The orders sold in [fromIso, toIso] on `basis`: not test, not void, and (unless giftOnly) not gift-card-only. Every
+// order column plus saleAt and giftOnly.
+async function p8Orders_(db, { fromIso, toIso, basis, orgId = null, giftOnly = false }) {
+  const sale = saleDateSql_(basis, "o");
+  const { results } = await db.prepare(`SELECT o.*, ${sale} AS saleAt, ${GIFT_ONLY_ORDER_SQL_} AS giftOnly FROM orders o
+    WHERE ${sale} >= ? AND ${sale} <= ? AND o.isTest = 0 AND o.voidedAt IS NULL${giftOnly ? "" : ` AND NOT ${GIFT_ONLY_ORDER_SQL_}`}${orgId ? " AND o.orgId = ?" : ""}
+    ORDER BY ${sale}, o.orderId`).bind(fromIso, toIso, ...(orgId ? [String(orgId)] : [])).all();
+  return results || [];
+}
+// Every line of the orders (cancelled and gift card lines too), grouped by orderId.
+async function p8ItemsBy_(db, orderIds) {
+  const rows = await p8AllIn_(db, "SELECT * FROM order_items WHERE orderId IN (SELECT value FROM json_each(?)) ORDER BY orderId, id", orderIds);
+  const by = new Map();
+  for (const r of rows) (by.get(r.orderId) || by.set(r.orderId, []).get(r.orderId)).push(r);
+  return by;
+}
+// The products the lines name: key (p8ProductKey_) → the row, plus `dec` (what productDecoration_ reads).
+async function p8Products_(db, items) {
+  const keys = [...new Set(items.filter(p8HasProduct_).map(i => p8ProductKey_(i.orgId, i.productId)))];
+  const map = new Map();
+  if (!keys.length) return map;
+  const rows = await p8AllIn_(db, `SELECT p.*, (SELECT COUNT(*) FROM product_designs pd WHERE pd.orgId = p.orgId AND pd.productId = p.productId) AS designCount
+    FROM products p WHERE (p.orgId || char(1) || p.productId) IN (SELECT value FROM json_each(?))`, keys).catch((e) => {
+    if (!/no such (table|column)/i.test(String(e && e.message))) throw e;
+    return p8AllIn_(db, "SELECT p.* FROM products p WHERE (p.orgId || char(1) || p.productId) IN (SELECT value FROM json_each(?))", keys);
+  });
+  for (const r of rows) {
+    r.dec = { decorationType: r.decorationType || "", designId: r.designId == null ? null : r.designId, designCount: Number(r.designCount) || 0,
+      fixedTransfers: tryParse_(r.fixedTransfersJson, []) || [], digital: !!Number(r.digital), noDesignNeeded: !!Number(r.noDesignNeeded) };
+    map.set(p8ProductKey_(r.orgId, r.productId), r);
+  }
+  return map;
+}
+async function p8OrgNames_(db) {
+  const { results } = await db.prepare("SELECT orgId, name FROM orgs").all();
+  return new Map((results || []).map(r => [r.orgId, r.name || r.orgId]));
+}
+// customerId → the customer's name (company, then email, when it has none). A database before 0108: none.
+async function p8CustomerNames_(db, ids) {
+  const list = [...new Set(ids.map(customerId_).filter(Boolean))];
+  const rows = list.length ? await p8AllInOpt_(db, "SELECT id, name, company, email FROM customers WHERE id IN (SELECT value FROM json_each(?))", list) : [];
+  return new Map(rows.map(r => [Number(r.id), r.name || r.company || r.email || ("Customer " + r.id)]));
+}
+// The name an order goes by: its customer record's, else the name typed on it, else its contact.
+const p8OrderCustomer_ = (o, names) => names.get(customerId_(o.customerId)) || o.customerName || o.contact || "";
+
+// The goods money of an order's live, non-gift-card lines, line by line, sales tax left out:
+//   grossCents    the line before the discount (its total less the tax inside it when prices include tax)
+//   discountCents its share of the order's discount (codes and manual alike, less the discount's tax share when prices
+//                 include tax), shared by gross with whole cents — the shares add up to the discount exactly
+//   refundCents   the line's own refund (order_items.refundCents), without its tax, at most what is left of the line
+//   netCents      gross − discount − refund
+// Σ(gross − discount) is exactly orderAmounts' netSalesCents for the same lines (the Revenue report's net sales).
+function p8LineMoney_(o, lines) {
+  const incl = taxMode_(o.taxMode) !== "exclusive";
+  const gross = lines.map(l => Math.max(0, (Number(l.lineTotalCents) || 0) - (incl ? Number(l.taxCents) || 0 : 0)));
+  const G = gross.reduce((s, g) => s + g, 0);
+  const D = Math.max(0, Math.min(G, (Number(o.discountCents) || 0) - (incl ? Number(o.discountTaxCents) || 0 : 0)));
+  let cum = 0, prev = 0;
+  return lines.map((l, i) => {
+    cum += gross[i];
+    const upTo = G > 0 ? Math.round(D * cum / G) : 0, disc = upTo - prev;
+    prev = upTo;
+    const total = Number(l.lineTotalCents) || 0, rf = Math.max(0, Number(l.refundCents) || 0);
+    const refund = Math.max(0, Math.min(gross[i] - disc, total > 0 ? Math.round(gross[i] * Math.min(rf, total) / total) : 0));
+    return { grossCents: gross[i], discountCents: disc, refundCents: refund, netCents: gross[i] - disc - refund };
+  });
+}
+// orderAmounts for the order's live non-gift-card lines (shipping, rush and tax as the Revenue report has them).
+function p8Amounts_(o, lines) {
+  return orderAmountsOfRow_({ ...o, itemsCents: p8Sum_(lines, l => l.lineTotalCents), itemsTaxCents: p8Sum_(lines, l => l.taxCents) });
+}
+
+// ---- Sales by customer / product / shop / decoration ----
+export const SALES_REPORT_BY = ["customer", "product", "shop", "decoration"];
+const P8_DECORATION_LABEL_ = Object.fromEntries(DECORATION_TYPES.map(t => [t.key, t.label]));
+export async function getSalesReport(db, { dateFrom, dateTo, by = "customer", orgId = null } = {}) {
+  const bad = p8RangeError_(dateFrom, dateTo);
+  if (bad) return { error: bad };
+  const group = SALES_REPORT_BY.includes(by) ? by : "customer";
+  const basis = await getSaleDateBasis(db);
+  const range = await businessRange_(db, dateFrom, dateTo);
+  const orders = await p8Orders_(db, { ...range, basis, orgId });
+  const itemsBy = await p8ItemsBy_(db, orders.map(o => o.orderId));
+  const allItems = [...itemsBy.values()].flat();
+  const [orgNames, custNames, products] = await Promise.all([p8OrgNames_(db),
+    group === "customer" ? p8CustomerNames_(db, orders.map(o => o.customerId)) : new Map(),
+    group === "product" || group === "decoration" ? p8Products_(db, allItems) : new Map()]);
+  const rows = new Map();
+  const row = (key, label, extra) => rows.get(key) || rows.set(key, { key, label, ...(extra || {}), orders: new Set(), qty: 0, grossCents: 0, discountCents: 0, refundCents: 0, netCents: 0 }).get(key);
+  const totals = { orders: orders.length, qty: 0, grossCents: 0, discountCents: 0, refundCents: 0, netCents: 0, shippingCents: 0, rushCents: 0, taxCents: 0 };
+  for (const o of orders) {
+    const lines = (itemsBy.get(o.orderId) || []).filter(p8Live_);
+    const money = p8LineMoney_(o, lines), a = p8Amounts_(o, lines);
+    totals.shippingCents += a.shippingCents; totals.rushCents += a.rushNetCents; totals.taxCents += a.taxCents;
+    lines.forEach((l, i) => {
+      const m = money[i], qty = Math.max(0, Number(l.qty) || 0);
+      totals.qty += qty; totals.grossCents += m.grossCents; totals.discountCents += m.discountCents; totals.refundCents += m.refundCents; totals.netCents += m.netCents;
+      let targets;
+      if (group === "customer") {
+        const cid = customerId_(o.customerId);
+        if (cid) targets = [row("c:" + cid, custNames.get(cid) || o.customerName || ("Customer " + cid), { customerId: cid })];
+        else { const who = String(o.contact || o.customerName || "").trim(); targets = [row("e:" + who.toLowerCase(), "No customer record: " + (who || "unknown"))]; }
+      } else if (group === "shop") targets = [row("s:" + o.orgId, orgNames.get(o.orgId) || o.orgId, { orgId: o.orgId })];
+      else if (group === "product") {
+        const p = p8HasProduct_(l) ? products.get(p8ProductKey_(l.orgId, l.productId)) : null;
+        targets = [p ? row("p:" + p8ProductKey_(l.orgId, l.productId), p.name || l.name || l.productId, { orgId: l.orgId, productId: l.productId, shop: orgNames.get(l.orgId) || l.orgId })
+          : row("n:" + String(l.name || "").trim().toLowerCase(), String(l.name || "").trim() || "Custom line")];
+      } else {
+        const p = p8HasProduct_(l) ? products.get(p8ProductKey_(l.orgId, l.productId)) : null;
+        const types = lineDecorations_(l, p ? p.dec : null);
+        targets = types.length ? types.map(t => row("d:" + t, P8_DECORATION_LABEL_[t] || t, { decoration: t })) : [row("d:none", "No decoration", { decoration: "" })];
+      }
+      // Two decoration types: the qty counts under each, the money is split evenly (spare cents to the first).
+      const n = targets.length;
+      const split = (c) => { const each = Math.trunc(c / n); return targets.map((_, k) => each + (k === 0 ? c - each * n : 0)); };
+      const g = split(m.grossCents), d = split(m.discountCents), r = split(m.refundCents);
+      targets.forEach((t, k) => {
+        t.orders.add(o.orderId); t.qty += qty; t.grossCents += g[k]; t.discountCents += d[k]; t.refundCents += r[k]; t.netCents += g[k] - d[k] - r[k];
+      });
+    });
+  }
+  const list = [...rows.values()];
+  // Two products with the same name in different shops: the shop goes on the label.
+  if (group === "product") {
+    const seen = new Map();
+    for (const r of list) seen.set(r.label, (seen.get(r.label) || 0) + 1);
+    for (const r of list) if (r.shop && seen.get(r.label) > 1) r.label = r.label + " (" + r.shop + ")";
+  }
+  const out = list.map(r => ({ ...r, orders: r.orders.size, sharePct: totals.netCents ? Math.round(r.netCents * 1000 / totals.netCents) / 10 : 0 }))
+    .sort((a, b) => b.netCents - a.netCents || String(a.label).localeCompare(String(b.label)));
+  return { dateFrom, dateTo, basis, by: group, rows: out, totals };
+}
+
+// ---- Profit per job ----
+// What an order made: revenue (net goods + shipping charged + the rush fee, never sales tax or gift cards sold) less
+// what it cost (blanks, transfers, decoration, supplies, outside digitizing, card fees, postage; labor arrives later).
+// Worked out for many orders at once (a few queries per P8_CHUNK_ orders): orderId → the profit object.
+const P8_COST_KEYS_ = ["blanksCents", "transfersCents", "decorationCents", "suppliesCents", "digitizingCents", "cardFeesCents", "postageCents", "laborCents"];
+async function p8Profits_(db, orders, itemsBy) {
+  const ids = orders.map(o => o.orderId), out = new Map();
+  if (!ids.length) return out;
+  if (!itemsBy) itemsBy = await p8ItemsBy_(db, ids);
+  const allItems = [...itemsBy.values()].flat();
+  const live = allItems.filter(p8Live_);
+  const unmade = live.filter(i => (Number(i.manufacturedQty) || 0) < Math.max(1, Number(i.qty) || 1));
+  const unmadeKeys = [...new Set(unmade.filter(p8HasProduct_).map(i => p8ProductKey_(i.orgId, i.productId)))];
+  const sumBy = (rows, key = "orderId") => new Map(rows.map(r => [r[key], Number(r.c) || 0]));
+  const inIds = "IN (SELECT value FROM json_each(?))";
+  const [products, pricing, decPricing, blankRows, fgRows, trRows, digRows, payRows, labelRows, linkRows, rtsRows, transferRows] = await Promise.all([
+    p8Products_(db, live), getPricingSettings(db), getDecorationPricing(db),
+    p8AllIn_(db, `SELECT orderId, COALESCE(SUM(-qtyDelta * unitCostCents), 0) AS c FROM inventory_movements
+      WHERE orderId ${inIds} AND kind = 'consume' AND voidedAt IS NULL AND COALESCE(reason, '') <> 'finished' GROUP BY orderId`, ids)
+      .catch((e) => { if (!/no such column: reason/i.test(String(e && e.message))) throw e;
+        return p8AllIn_(db, `SELECT orderId, COALESCE(SUM(-qtyDelta * unitCostCents), 0) AS c FROM inventory_movements WHERE orderId ${inIds} AND kind = 'consume' AND voidedAt IS NULL GROUP BY orderId`, ids); }),
+    p8AllInOpt_(db, `SELECT orderId, COALESCE(SUM(-qtyDelta * unitCostCents), 0) AS c FROM finished_goods_movements
+      WHERE orderId ${inIds} AND kind IN ('sell', 'return') AND voidedAt IS NULL GROUP BY orderId`, ids),
+    p8AllInOpt_(db, `SELECT orderId, itemId, COALESCE(SUM(-qtyDelta * unitCostCents), 0) AS c, COUNT(*) AS n FROM transfer_movements
+      WHERE orderId ${inIds} AND kind = 'consume' AND voidedAt IS NULL AND COALESCE(reason, '') <> 'finished' GROUP BY orderId, itemId`, ids),
+    p8AllInOpt_(db, `SELECT orderId, COALESCE(SUM(costCents), 0) AS c FROM digitizing_jobs WHERE orderId ${inIds} AND deletedAt IS NULL GROUP BY orderId`, ids),
+    p8AllIn_(db, `SELECT orderId, COALESCE(SUM(feeCents), 0) AS fees,
+        COALESCE(SUM(CASE WHEN kind IN ('refund', 'dispute') THEN -amountCents ELSE 0 END), 0) AS refunds,
+        COALESCE(SUM(CASE WHEN kind IN ('refund', 'dispute') THEN COALESCE(shippingCents, 0) ELSE 0 END), 0) AS shipRefunds
+      FROM order_payments WHERE orderId ${inIds} AND voidedAt IS NULL GROUP BY orderId`, ids),
+    p8AllIn_(db, `SELECT orderId, COALESCE(SUM(amountCents), 0) AS c FROM shipping_labels WHERE orderId ${inIds} AND voidedAt IS NULL GROUP BY orderId`, ids),
+    unmadeKeys.length ? p8AllInOpt_(db, `SELECT l.orgId, l.productId, l.productColor, l.productSize, bs.purchasePriceCents, bs.vendorPriceCents
+      FROM product_blank_links l LEFT JOIN blank_sizes bs ON bs.blankId = l.blankId AND bs.color = l.blankColor AND bs.size = l.blankSize
+      WHERE (l.orgId || char(1) || l.productId) ${inIds}`, unmadeKeys) : [],
+    unmadeKeys.length ? p8AllInOpt_(db, `SELECT orgId, productId, size, variant, avgCostCents FROM ready_to_ship WHERE (orgId || char(1) || productId) ${inIds}`, unmadeKeys) : [],
+    db.prepare("SELECT id, purchasePriceCents FROM transfers").all().then(r => r.results || []).catch(() => []),
+  ]);
+  const blanksBy = sumBy(blankRows), fgBy = sumBy(fgRows), digBy = sumBy(digRows), labelsBy = sumBy(labelRows);
+  const payBy = new Map(payRows.map(r => [r.orderId, r]));
+  const trBy = new Map(), trItems = new Set();
+  for (const r of trRows) { trBy.set(r.orderId, (trBy.get(r.orderId) || 0) + (Number(r.c) || 0)); if (r.itemId != null) trItems.add(Number(r.itemId)); }
+  const linkBy = new Map(linkRows.map(l => [[l.orgId, l.productId, l.productColor || "", l.productSize || ""].join(P8_KEY_SEP_), l]));
+  const rtsBy = new Map(rtsRows.map(r => [[r.orgId, r.productId, r.size || "", r.variant || ""].join(P8_KEY_SEP_), Number(r.avgCostCents) || 0]));
+  const transferCost = new Map(transferRows.map(t => [Number(t.id), Math.max(0, Number(t.purchasePriceCents) || 0)]));
+  const defaultSupplies = Math.max(0, Number(pricing.suppliesCents) || 0);
+  for (const o of orders) {
+    const items = itemsBy.get(o.orderId) || [], lines = items.filter(p8Live_);
+    const money = p8LineMoney_(o, lines), a = p8Amounts_(o, lines), pay = payBy.get(o.orderId) || {};
+    const notes = new Set();
+    let estimated = false;
+    // Revenue. Refunds not tied to a line (beyond its shipping part and the lines' own refunds, cancelled lines' too)
+    // come off the goods, without the tax inside them.
+    let goods = p8Sum_(money, m => m.netCents);
+    const lineRefunds = p8Sum_(items.filter(i => !p8IsGift_(i)), i => Math.min(Math.max(0, Number(i.refundCents) || 0), Number(i.lineTotalCents) || 0));
+    const shipRefunds = Math.max(0, Number(pay.shipRefunds) || 0);
+    const otherRefund = Math.max(0, (Number(pay.refunds) || 0) - shipRefunds - lineRefunds);
+    if (otherRefund > 0 && goods > 0) {
+      const withTax = goods + Math.max(0, a.taxCents - a.rushTaxCents);   // what the customer paid for the goods, tax and all
+      const off = Math.min(goods, withTax > 0 ? Math.round(otherRefund * goods / withTax) : otherRefund);
+      goods -= off;
+      if (off > 0) notes.add("Refunds not tied to a line are taken off the goods");
+    }
+    const revenue = { goodsCents: goods, shippingCents: Math.max(0, a.shippingCents - shipRefunds), rushCents: a.rushNetCents };
+    // Costs.
+    const c = Object.fromEntries(P8_COST_KEYS_.map(k => [k, 0]));
+    c.blanksCents = (blanksBy.get(o.orderId) || 0) + (fgBy.get(o.orderId) || 0);
+    c.transfersCents = trBy.get(o.orderId) || 0;
+    let decorated = false, blankEst = false, blankMissing = false, transferEst = false;
+    for (const l of lines) {
+      const qty = Math.max(1, Number(l.qty) || 1), made = Math.max(0, Math.min(qty, Number(l.manufacturedQty) || 0));
+      const p = p8HasProduct_(l) ? products.get(p8ProductKey_(l.orgId, l.productId)) : null;
+      const digital = !!(p && Number(p.digital)), noBlank = !!(p && Number(p.noBlankNeeded)) || digital || !!Number(l.customerOwned);
+      const cfg = tryParse_(l.configJson, null);
+      // Lines made before stock was tracked carry an estimated blank cost instead of movements.
+      if (l.cogsSource === "estimate" && Number(l.cogsCents) > 0) { c.blanksCents += Number(l.cogsCents); blankEst = true; }
+      // Blanks for the pieces not made yet.
+      if (made < qty && !noBlank && p8HasProduct_(l)) {
+        const left = qty - made;
+        if (Number(l.fromStock)) {
+          const unit = rtsBy.get([l.orgId, l.productId, stockSize_(p && p.pricingMode, l.size), String(l.stockVariant || "")].join(P8_KEY_SEP_)) || 0;
+          if (unit > 0) { c.blanksCents += unit * left; blankEst = true; } else blankMissing = true;
+        } else {
+          const color = cfg && cfg.garmentColor ? String(cfg.garmentColor) : "";
+          const link = linkBy.get([l.orgId, l.productId, color, l.size || ""].join(P8_KEY_SEP_)) || linkBy.get([l.orgId, l.productId, "", l.size || ""].join(P8_KEY_SEP_));
+          const unit = link ? (Number(link.purchasePriceCents) > 0 ? Number(link.purchasePriceCents) : Number(link.vendorPriceCents) || 0) : 0;
+          if (unit > 0) { c.blanksCents += unit * left; blankEst = true; } else blankMissing = true;
+        }
+      } else if (made < qty && !noBlank && !p8HasProduct_(l)) blankMissing = true;
+      // Transfers for a line not finished yet (they are used with its last piece): its transfers' average cost, else
+      // the product's own transfer cost, for every piece.
+      if (made < qty && !Number(l.fromStock) && !trItems.has(Number(l.id))) {
+        const tids = lineTransferIds_(l);
+        const unit = tids.length ? tids.reduce((s, t) => s + (transferCost.get(Number(t)) || 0), 0) : Math.max(0, Number(p && p.transferCostCents) || 0);
+        if (unit > 0) { c.transfersCents += unit * qty; transferEst = true; }
+      }
+      // Decoration (today's settings): each config location's type, else the product's own, per piece.
+      const locs = cfg && Array.isArray(cfg.locations) ? cfg.locations.filter(x => x && x.location) : [];
+      let dec = 0;
+      if (locs.length) for (const loc of locs) dec += decorationCostCents(locationDecoration_(loc), { colors: loc.colors, locations: 1 }, decPricing);
+      else for (const t of lineDecorations_(l, p ? p.dec : null)) dec += decorationCostCents(t, { colors: 1, locations: 1 }, decPricing);
+      if (dec > 0) { c.decorationCents += dec * qty; decorated = true; }
+      // Supplies: the product's own cost per piece, else the Pricing default (as the pricing analysis picks it).
+      if (p && !digital) c.suppliesCents += (p.suppliesCostCents != null ? Math.max(0, Number(p.suppliesCostCents) || 0) : defaultSupplies) * qty;
+    }
+    c.digitizingCents = digBy.get(o.orderId) || 0;
+    c.cardFeesCents = Math.max(0, Number(pay.fees) || 0);
+    c.postageCents = labelsBy.get(o.orderId) || 0;
+    if (blankEst) { estimated = true; notes.add("Blank cost estimated for lines not yet made"); }
+    if (transferEst) { estimated = true; notes.add("Transfer cost estimated for lines not yet made"); }
+    if (blankMissing) notes.add("Some lines have no blank cost to go on");
+    if (decorated) notes.add("Decoration cost uses today's settings");
+    const revenueCents = revenue.goodsCents + revenue.shippingCents + revenue.rushCents;
+    const costCents = P8_COST_KEYS_.reduce((s, k) => s + c[k], 0), profitCents = revenueCents - costCents;
+    out.set(o.orderId, { orderId: o.orderId, revenueCents, revenue, costs: c, costCents, profitCents,
+      marginPct: revenueCents ? Math.round(profitCents * 1000 / revenueCents) / 10 : null, estimated, notes: [...notes] });
+  }
+  return out;
+}
+// One order's profit (the order window), whatever its date; null when there is no such order.
+export async function getOrderProfit(db, orderId, opts = {}) {
+  const o = await db.prepare("SELECT * FROM orders WHERE orderId = ?").bind(String(orderId == null ? "" : orderId)).first();
+  if (!o) return null;
+  return (await p8Profits_(db, [o])).get(o.orderId) || null;
+}
+export const PROFIT_REPORT_SORTS = ["margin", "profit", "revenue", "date"];
+// Every order the sales report counts, with its profit. sort: "margin" (lowest first, no revenue last), "profit"
+// (highest first), "revenue" (most first), "date" (newest first).
+export async function getProfitReport(db, { dateFrom, dateTo, orgId = null, sort = "margin" } = {}) {
+  const bad = p8RangeError_(dateFrom, dateTo);
+  if (bad) return { error: bad };
+  const basis = await getSaleDateBasis(db);
+  const range = await businessRange_(db, dateFrom, dateTo);
+  const orders = await p8Orders_(db, { ...range, basis, orgId });
+  const itemsBy = await p8ItemsBy_(db, orders.map(o => o.orderId));
+  const [profits, orgNames, custNames] = await Promise.all([p8Profits_(db, orders, itemsBy), p8OrgNames_(db), p8CustomerNames_(db, orders.map(o => o.customerId))]);
+  const rows = orders.map(o => {
+    const p = profits.get(o.orderId);
+    return { orderId: o.orderId, orgId: o.orgId, orgName: orgNames.get(o.orgId) || o.orgId, customerName: p8OrderCustomer_(o, custNames),
+      saleDate: businessDay_(o.saleAt, range.tz), revenueCents: p.revenueCents, costCents: p.costCents, profitCents: p.profitCents,
+      marginPct: p.marginPct, estimated: p.estimated, costs: p.costs, revenue: p.revenue, notes: p.notes };
+  });
+  const s = PROFIT_REPORT_SORTS.includes(sort) ? sort : "margin";
+  const byDate = (a, b) => String(b.saleDate).localeCompare(String(a.saleDate)) || String(b.orderId).localeCompare(String(a.orderId));
+  rows.sort(s === "profit" ? (a, b) => b.profitCents - a.profitCents || byDate(a, b)
+    : s === "revenue" ? (a, b) => b.revenueCents - a.revenueCents || byDate(a, b)
+    : s === "date" ? byDate
+    : (a, b) => (a.marginPct == null) - (b.marginPct == null) || (a.marginPct == null ? 0 : a.marginPct - b.marginPct) || byDate(a, b));
+  const revenueCents = p8Sum_(rows, r => r.revenueCents), costCents = p8Sum_(rows, r => r.costCents);
+  return { dateFrom, dateTo, basis, sort: s, rows, totals: { orders: rows.length, revenueCents, costCents, profitCents: revenueCents - costCents,
+    marginPct: p8Pct_(revenueCents - costCents, revenueCents), estimatedCount: rows.filter(r => r.estimated).length } };
+}
+
+// ---- Gift card liability ----
+// Month by month (business months) from the gift card ledger: opening (everything on cards before the month), sold
+// (cards sold on an order), issued (given by staff), redeemed (spent), refunded (put back on cards), adjusted (by hand,
+// signed), voided, closing. Every month in the range appears. outstandingNowCents = what active cards hold now — the
+// last closing when the range ends today.
+export async function getGiftCardLiability(db, { dateFrom, dateTo } = {}) {
+  const bad = p8RangeError_(dateFrom, dateTo);
+  if (bad) return { error: bad };
+  const { fromIso, toIso, tz } = await businessRange_(db, dateFrom, dateTo);
+  const keys = ["soldCents", "issuedCents", "redeemedCents", "refundedCents", "adjustedCents", "voidedCents"];
+  const months = [];
+  for (let m = dateFrom.slice(0, 7); m <= dateTo.slice(0, 7); ) {
+    months.push({ month: m, openingCents: 0, ...Object.fromEntries(keys.map(k => [k, 0])), closingCents: 0, _delta: 0 });
+    const [y, mo] = m.split("-").map(Number);
+    m = mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, "0")}`;
+  }
+  let opening = 0, rows = [], held = 0;
+  try {
+    const [o, r, h] = await Promise.all([
+      db.prepare("SELECT COALESCE(SUM(deltaCents), 0) AS n FROM gift_card_ledger WHERE at < ?").bind(fromIso).first(),
+      db.prepare(`SELECT l.at, l.kind, l.deltaCents, CASE WHEN COALESCE(g.sourceOrderId, '') <> '' THEN 1 ELSE 0 END AS sold
+        FROM gift_card_ledger l LEFT JOIN gift_cards g ON g.id = l.cardId WHERE l.at >= ? AND l.at <= ? ORDER BY l.at, l.id`).bind(fromIso, toIso).all(),
+      db.prepare("SELECT COALESCE(SUM(balanceCents), 0) AS n FROM gift_cards WHERE status = 'active'").first(),
+    ]);
+    opening = Number(o && o.n) || 0; rows = r.results || []; held = Number(h && h.n) || 0;
+  } catch (e) { if (!noGiftCardsYet_(e)) throw e; }
+  const byMonth = new Map(months.map(m => [m.month, m]));
+  for (const r of rows) {
+    const mk = businessMonth_(r.at, tz);
+    const m = byMonth.get(mk) || (mk < months[0].month ? months[0] : months[months.length - 1]);
+    const d = Number(r.deltaCents) || 0;
+    m._delta += d;
+    if (r.kind === "issue") { if (Number(r.sold)) m.soldCents += d; else m.issuedCents += d; }
+    else if (r.kind === "redeem") m.redeemedCents -= d;
+    else if (r.kind === "refund") m.refundedCents += d;
+    else if (r.kind === "adjust") m.adjustedCents += d;
+    else if (r.kind === "void") m.voidedCents -= d;
+  }
+  let run = opening;
+  for (const m of months) { m.openingCents = run; run += m._delta; m.closingCents = run; delete m._delta; }
+  const totals = { openingCents: opening, ...Object.fromEntries(keys.map(k => [k, p8Sum_(months, m => m[k])])), closingCents: run };
+  return { dateFrom, dateTo, months, totals, outstandingNowCents: held };
+}
+
+// ---- QuickBooks (global_settings "quickbooks") ----
+// { format: "online" | "desktop", accounts: {…QB_ACCOUNT_KEYS: QuickBooks account names}, bankAccounts: {"<accountId>":
+// name}, expenseAccounts: {"<categoryId>": name}, salesAs: "receipts" | "invoices", customerName: "customer" | "shop" }.
+// Read: every app account and expense category has a name (its own name unless one was saved).
+export const QB_ACCOUNT_KEYS = ["sales", "shippingIncome", "rushIncome", "discounts", "salesTaxPayable", "giftCardLiability", "undepositedFunds", "cardFees", "postage", "ar"];
+export const QB_ACCOUNT_DEFAULTS = Object.freeze({ sales: "Sales", shippingIncome: "Shipping Income", rushIncome: "Sales", discounts: "Discounts Given",
+  salesTaxPayable: "Sales Tax Payable", giftCardLiability: "Gift Cards Outstanding", undepositedFunds: "Undeposited Funds", cardFees: "Merchant Fees",
+  postage: "Postage and Delivery", ar: "Accounts Receivable" });
+const QB_ACCOUNT_LABELS_ = { sales: "Sales", shippingIncome: "Shipping income", rushIncome: "Rush income", discounts: "Discounts", salesTaxPayable: "Sales tax payable",
+  giftCardLiability: "Gift card liability", undepositedFunds: "Undeposited funds", cardFees: "Card fees", postage: "Postage", ar: "Accounts receivable" };
+const qbNameOk_ = (v) => typeof v === "string" && v.trim().length >= 1 && v.trim().length <= 100 && !/[\t\r\n]/.test(v);
+async function qbAppAccounts_(db) {
+  const [a, c] = await Promise.all([
+    db.prepare("SELECT id, name, type FROM accounts ORDER BY id").all().then(r => r.results || []).catch(() => []),
+    db.prepare("SELECT id, name FROM expense_categories ORDER BY name").all().then(r => r.results || []).catch(() => []),
+  ]);
+  return { accounts: a.map(x => ({ id: Number(x.id), name: x.name || "", type: x.type || "" })), categories: c.map(x => ({ id: Number(x.id), name: x.name || "" })) };
+}
+// QuickBooks can't take a tab or line break in a name: spaces instead, at most 100 characters.
+const qbFallbackName_ = (s) => String(s || "").replace(/[\t\r\n]+/g, " ").trim().slice(0, 100);
+function qbSettingsFrom_(raw, app) {
+  const o = raw && typeof raw === "object" ? raw : {};
+  const acc = o.accounts && typeof o.accounts === "object" ? o.accounts : {};
+  const bank = o.bankAccounts && typeof o.bankAccounts === "object" ? o.bankAccounts : {};
+  const exp = o.expenseAccounts && typeof o.expenseAccounts === "object" ? o.expenseAccounts : {};
+  return {
+    format: o.format === "desktop" ? "desktop" : "online",
+    accounts: Object.fromEntries(QB_ACCOUNT_KEYS.map(k => [k, qbNameOk_(acc[k]) ? acc[k].trim() : QB_ACCOUNT_DEFAULTS[k]])),
+    bankAccounts: Object.fromEntries(app.accounts.map(a => [String(a.id), qbNameOk_(bank[a.id]) ? bank[a.id].trim() : qbFallbackName_(a.name) || ("Account " + a.id)])),
+    expenseAccounts: Object.fromEntries(app.categories.map(c => [String(c.id), qbNameOk_(exp[c.id]) ? exp[c.id].trim() : qbFallbackName_(c.name) || ("Category " + c.id)])),
+    salesAs: o.salesAs === "invoices" ? "invoices" : "receipts",
+    customerName: o.customerName === "shop" ? "shop" : "customer",
+  };
+}
+export async function getQuickBooksSettings(db) {
+  return qbSettingsFrom_(await getSettingJson_(db, "quickbooks", null), await qbAppAccounts_(db));
+}
+// The build step (writeSettingBuilds): whatever is passed replaces what is saved, the rest is kept. A name is trimmed;
+// an empty one goes back to the default; over 100 characters, or with a tab or line break, is refused. Ids of accounts /
+// categories that don't exist are dropped. What is stored for a bank account / category is only a name that differs
+// from the app's own (so renaming it in the app carries over).
+export async function buildQuickBooksSettings(db, v) {
+  const p = v && typeof v === "object" ? v : {};
+  const app = await qbAppAccounts_(db);
+  const raw = (await getSettingJson_(db, "quickbooks", null)) || {};
+  const cur = qbSettingsFrom_(raw, app);
+  const name = (x, label) => {
+    const s = String(x == null ? "" : x);
+    if (/[\t\r\n]/.test(s)) throw pricingError_(`${label}: QuickBooks names can't have tabs or line breaks.`);
+    const t = s.trim();
+    if (t.length > 100) throw pricingError_(`${label}: a QuickBooks name can be at most 100 characters.`);
+    return t;
+  };
+  const next = { ...cur, accounts: { ...cur.accounts } };
+  if (p.format !== undefined) { if (p.format !== "online" && p.format !== "desktop") throw pricingError_("Pick QuickBooks Online or QuickBooks Desktop."); next.format = p.format; }
+  if (p.salesAs !== undefined) { if (p.salesAs !== "receipts" && p.salesAs !== "invoices") throw pricingError_("Sales go in as sales receipts or invoices."); next.salesAs = p.salesAs; }
+  if (p.customerName !== undefined) { if (p.customerName !== "customer" && p.customerName !== "shop") throw pricingError_("Name the customer by the customer or by the shop."); next.customerName = p.customerName; }
+  if (p.accounts !== undefined) {
+    if (!p.accounts || typeof p.accounts !== "object") throw pricingError_("Send the QuickBooks account names as a list.");
+    for (const k of QB_ACCOUNT_KEYS) if (p.accounts[k] !== undefined) next.accounts[k] = name(p.accounts[k], QB_ACCOUNT_LABELS_[k]) || QB_ACCOUNT_DEFAULTS[k];
+  }
+  const own = (list, given, saved, label) => {
+    const out = {};
+    for (const x of list) {
+      const id = String(x.id), dflt = qbFallbackName_(x.name) || (label + " " + x.id);
+      let n = saved && qbNameOk_(saved[id]) ? saved[id].trim() : "";
+      if (given && given[id] !== undefined) n = name(given[id], x.name || label);
+      if (n && n !== dflt) out[id] = n;
+    }
+    return out;
+  };
+  for (const [k, list, label] of [["bankAccounts", app.accounts, "Account"], ["expenseAccounts", app.categories, "Category"]]) {
+    if (p[k] !== undefined && (!p[k] || typeof p[k] !== "object")) throw pricingError_("Send the QuickBooks account names as a list.");
+  }
+  const stored = { format: next.format, accounts: next.accounts, salesAs: next.salesAs, customerName: next.customerName,
+    bankAccounts: own(app.accounts, p.bankAccounts, raw.bankAccounts, "Account"),
+    expenseAccounts: own(app.categories, p.expenseAccounts, raw.expenseAccounts, "Category") };
+  return { value: qbSettingsFrom_(stored, app), stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('quickbooks', ?)").bind(JSON.stringify(stored))] };
+}
+export async function setQuickBooksSettings(db, v) {
+  const b = await buildQuickBooksSettings(db, v);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
+}
+
+// The plain rows quickbooks.js builds its files from, for the business days dateFrom..dateTo (money in cents):
+//   sales     the sales report's orders PLUS gift-card-only ones, by sale date: lines (goods, sales tax left out),
+//             discountCents (tax left out), shippingCents, rushCents (tax left out), taxCents (all sales tax on the
+//             order, goods and rush), giftCardCents (gift cards sold — the liability, not sales), totalCents (= Σ line
+//             amounts − discount + shipping + rush + tax + gift cards: what the customer owes), net30 / dueDate /
+//             poNumber. customer = the customer's name, shop = the shop's (settings.customerName says which to use).
+//   payments  live payment / refund / dispute rows (orders not void or test) by receivedAt; refunds negative;
+//             giftCard = paid from (or refunded to) a gift card — a card's balance spent, not money received.
+//   expenses  live expenses by expenseDate (negative = a vendor refund).
+//   postage   live shipping labels by purchasedAt (they are no expense rows of their own): { id, date, accountId,
+//             amountCents, orderId, memo }.
+//   deposits  money moved into an account from a holding account: Stripe payouts (Stripe balance → the payout account;
+//             a negative payout the other way, amount negative), Venmo / cash cash-outs (account_transfers, with the
+//             payments each covers from payment_cashouts; feeCents = the fees on those payments' covered parts). A
+//             Stripe payout is already net of Stripe's fees and links no payments (its fees are on the card payments'
+//             feeCents). Checks and other payments recorded straight into a bank account have no deposit row.
+//   accounts, categories, settings (getQuickBooksSettings).
+export async function getQuickBooksData(db, { dateFrom, dateTo } = {}) {
+  const bad = p8RangeError_(dateFrom, dateTo);
+  if (bad) return { error: bad };
+  const basis = await getSaleDateBasis(db);
+  const range = await businessRange_(db, dateFrom, dateTo), tz = range.tz;
+  const orders = await p8Orders_(db, { ...range, basis, giftOnly: true });
+  const itemsBy = await p8ItemsBy_(db, orders.map(o => o.orderId));
+  const [orgNames, custNames, settings, app, terms, net30] = await Promise.all([p8OrgNames_(db), p8CustomerNames_(db, orders.map(o => o.customerId)),
+    getQuickBooksSettings(db), qbAppAccounts_(db), getTerms(db), hasNet30Column_(db)]);
+  const sales = orders.map(o => {
+    const items = itemsBy.get(o.orderId) || [], lines = items.filter(p8Live_);
+    const money = p8LineMoney_(o, lines), a = p8Amounts_(o, lines);
+    const outLines = lines.map((l, i) => {
+      const qty = Math.max(1, Number(l.qty) || 1), amount = money[i].grossCents;
+      return { name: [l.name || "Item", l.size].filter(Boolean).join(" ").slice(0, 200), qty, rateCents: Math.round(amount / qty), amountCents: amount, taxable: !!Number(l.taxable) };
+    });
+    const discountCents = p8Sum_(money, m => m.discountCents);
+    const giftCardCents = p8Sum_(items.filter(i => p8IsGift_(i) && !i.cancelDate), i => i.lineTotalCents);
+    const t = net30 ? orderTermsFields_(o, terms) : { net30: false, poNumber: "", termsDueDate: "" };
+    return { orderId: o.orderId, date: businessDay_(o.saleAt, tz), customer: p8OrderCustomer_(o, custNames), shop: orgNames.get(o.orgId) || o.orgId,
+      orgId: o.orgId, lines: outLines, discountCents, shippingCents: a.shippingCents, rushCents: a.rushNetCents, taxCents: a.taxCents, giftCardCents,
+      totalCents: p8Sum_(outLines, l => l.amountCents) - discountCents + a.shippingCents + a.rushNetCents + a.taxCents + giftCardCents,
+      net30: !!t.net30, dueDate: t.net30 ? t.termsDueDate || "" : "", poNumber: t.poNumber || "" };
+  });
+  // net30: the order was on terms, so QuickBooks invoiced it (a payment on an order sold before the range still clears
+  // Accounts Receivable).
+  const paySql = (gc) => `SELECT p.id, p.orderId, p.receivedAt, p.method, p.accountId, p.amountCents, p.feeCents, p.kind, p.reference, ${gc ? "p.giftCardId" : "NULL AS giftCardId"},
+      o.orgId, o.customerId, o.customerName, o.contact, ${net30 ? "o.net30" : "0"} AS net30
+    FROM order_payments p JOIN orders o ON o.orderId = p.orderId
+    WHERE p.receivedAt >= ? AND p.receivedAt <= ? AND p.voidedAt IS NULL AND o.isTest = 0 AND o.voidedAt IS NULL ORDER BY p.receivedAt, p.id`;
+  let payRows;
+  try { ({ results: payRows } = await db.prepare(paySql(true)).bind(range.fromIso, range.toIso).all()); }
+  catch (e) { if (!noGiftCardsYet_(e)) throw e; ({ results: payRows } = await db.prepare(paySql(false)).bind(range.fromIso, range.toIso).all()); }
+  const payCust = await p8CustomerNames_(db, (payRows || []).map(p => p.customerId));
+  const payments = (payRows || []).map(p => ({ id: Number(p.id), orderId: p.orderId, date: businessDay_(p.receivedAt, tz), method: p.method || "other",
+    accountId: p.accountId == null ? null : Number(p.accountId), amountCents: Number(p.amountCents) || 0, feeCents: Number(p.feeCents) || 0, kind: p.kind || "payment",
+    giftCard: p.giftCardId != null, reference: p.reference || "", customer: p8OrderCustomer_(p, payCust), shop: orgNames.get(p.orgId) || p.orgId,
+    net30: !!Number(p.net30) }));
+  // Postage: live shipping labels bought in the range (orders not test or void), from the account each was paid from.
+  const { results: labelRows } = await db.prepare(`SELECT l.id, l.orderId, l.purchasedAt, l.accountId, l.amountCents, l.carrier, l.service, l.trackingNumber
+    FROM shipping_labels l JOIN orders o ON o.orderId = l.orderId
+    WHERE l.voidedAt IS NULL AND l.purchasedAt >= ? AND l.purchasedAt <= ? AND o.isTest = 0 AND o.voidedAt IS NULL ORDER BY l.purchasedAt, l.id`)
+    .bind(range.fromIso, range.toIso).all().catch((e) => { if (/no such (table|column)/i.test(String(e && e.message))) return { results: [] }; throw e; });
+  const postage = (labelRows || []).map(l => ({ id: Number(l.id), date: businessDay_(l.purchasedAt, tz), accountId: l.accountId == null ? null : Number(l.accountId),
+    amountCents: Number(l.amountCents) || 0, orderId: l.orderId, memo: [l.carrier, l.service, l.trackingNumber].filter(Boolean).join(" ") }));
+  const { results: expRows } = await db.prepare(`SELECT e.id, e.expenseDate, e.description, e.vendor, e.categoryId, c.name AS categoryName, e.accountId, e.amountCents, e.paidPersonally
+    FROM expenses e LEFT JOIN expense_categories c ON c.id = e.categoryId
+    WHERE e.deletedAt IS NULL AND e.expenseDate >= ? AND e.expenseDate <= ? ORDER BY e.expenseDate, e.id`).bind(dateFrom, dateTo).all();
+  const expenses = (expRows || []).map(e => ({ id: Number(e.id), date: e.expenseDate, payee: e.vendor || e.description || "", categoryId: Number(e.categoryId),
+    categoryName: e.categoryName || "", accountId: e.accountId == null ? null : Number(e.accountId), amountCents: Number(e.amountCents) || 0,
+    memo: e.description || "", paidPersonally: !!Number(e.paidPersonally) }));
+  // Deposits.
+  const typeOf = new Map(app.accounts.map(a => [a.id, a.type]));
+  const holding = (t) => t === "stripe" || t === "venmo" || t === "cash";
+  let transfers = [];
+  try {
+    ({ results: transfers } = await db.prepare(`SELECT id, transferDate, fromAccountId, toAccountId, amountCents, note, externalRef FROM account_transfers
+      WHERE deletedAt IS NULL AND transferDate >= ? AND transferDate <= ? ORDER BY transferDate, id`).bind(dateFrom, dateTo).all());
+  } catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
+  const allocs = transfers.length ? await p8AllInOpt_(db, `SELECT c.transferId, c.paymentId, c.amountCents, p.amountCents AS payCents, p.feeCents
+    FROM payment_cashouts c JOIN order_payments p ON p.id = c.paymentId WHERE c.transferId IN (SELECT value FROM json_each(?)) ORDER BY c.id`, transfers.map(t => Number(t.id))) : [];
+  const allocBy = new Map();
+  for (const c of allocs) (allocBy.get(Number(c.transferId)) || allocBy.set(Number(c.transferId), []).get(Number(c.transferId))).push(c);
+  const deposits = [];
+  for (const t of transfers || []) {
+    const from = typeOf.get(Number(t.fromAccountId)), to = typeOf.get(Number(t.toAccountId)), links = allocBy.get(Number(t.id)) || [];
+    let kind = null, accountId = Number(t.toAccountId), amount = Number(t.amountCents) || 0;
+    if (from === "stripe" && !holding(to)) kind = "stripe_payout";
+    else if (to === "stripe" && t.externalRef && !holding(from)) { kind = "stripe_payout"; accountId = Number(t.fromAccountId); amount = -amount; }
+    else if (links.length || (holding(from) && !holding(to))) kind = "cashout";
+    if (!kind) continue;
+    const feeCents = links.reduce((s, c) => { const alloc = Number(c.amountCents) || 0;
+      return s + alloc - cashoutNetCents_({ amountCents: Number(c.payCents) || 0, feeCents: Number(c.feeCents) || 0 }, alloc); }, 0);
+    deposits.push({ id: Number(t.id), date: t.transferDate, accountId, fromAccountId: kind === "stripe_payout" && amount < 0 ? Number(t.toAccountId) : Number(t.fromAccountId),
+      amountCents: amount, feeCents, paymentIds: links.map(c => Number(c.paymentId)), kind, note: t.note || "", reference: t.externalRef || "" });
+  }
+  return { dateFrom, dateTo, basis, sales, payments, expenses, postage, deposits, accounts: app.accounts, categories: app.categories, settings };
+}

@@ -71,8 +71,9 @@ test.describe("signing in and out", () => {
     await menu(page).getByRole("button", { name: "Sign out", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
     await expect(menu(page)).toHaveCount(0);
-    // The cookie the browser had is refused now, wherever it is replayed from.
-    expect(await sessionWorks(signedIn)).toBe(false);
+    // The cookie the browser had is refused now, wherever it is replayed from. The page sends the sign-out without
+    // waiting for it, so the server may take a moment longer than the sign-in box to catch up.
+    await expect.poll(() => sessionWorks(signedIn), { timeout: 10_000 }).toBe(false);
   });
 
   test("two-step sign-in: a wrong code is refused, the authenticator's code signs in", async ({ page }) => {

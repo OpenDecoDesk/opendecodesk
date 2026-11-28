@@ -184,7 +184,10 @@ test("Back office: the payment window lists the accounts by name, and the accoun
   await expect(pm).toContainText(/Amount due\s*\$15\.00/);
   const picker = pm.locator("#pmAccount");
   await expect(picker).toBeVisible();
-  await expect(picker.locator("option")).toHaveText(active);
+  // Every active account (other specs running alongside may have added more since the list above was read).
+  await expect(picker.locator("option").first()).toBeAttached();
+  const offered = await picker.locator("option").allTextContents();
+  for (const name of active) expect(offered).toContain(name);
   // Choosing a method still moves the picker to the account that method usually goes to (by the account's type).
   const cash = full.accounts.find(a => a.active && a.type === "cash");
   if (cash) {

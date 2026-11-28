@@ -296,8 +296,8 @@ const ordersJs = read("functions/api/orders.js");
   {
     let r = await call({ action: "getCustomer", id: patId }, staff);
     ok("answers { status, customer, orders, totals, marketing } (marketing: migrations/0117)", r.status === 200 && keys(r.body) === "customer,marketing,orders,status,totals" && r.body.status === "ok" && r.body.marketing.optedOut === false);
-    ok("the customer is id, name, company, email, phone, address, notes, the three exemption fields, archived, createdAt and updatedAt",
-      keys(r.body.customer) === "address,archived,company,createdAt,email,id,name,notes,phone,taxExempt,taxExemptCertificate,taxExemptExpires,updatedAt" &&
+    ok("the customer is id, name, company, email, phone, address, notes, the three exemption fields, Net 30 (allowNet30, termsDays), archived, createdAt and updatedAt",
+      keys(r.body.customer) === "address,allowNet30,archived,company,createdAt,email,id,name,notes,phone,taxExempt,taxExemptCertificate,taxExemptExpires,termsDays,updatedAt" &&
       r.body.customer.id === patId && r.body.customer.name === "Pat Example" && r.body.customer.email === "pat@example.com" && r.body.customer.address === null &&
       r.body.customer.taxExempt === false && r.body.customer.archived === false);
     ok("each order is orderId, orgId, placedAt, total, paidAmount, balanceDue, voided, isTest and completed",

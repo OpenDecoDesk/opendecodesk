@@ -33,7 +33,7 @@ async function freshDb(before) {
   d1._raw.exec(`INSERT INTO orgs (orgId, subdomain, name, createdAt, updatedAt) VALUES ('club','club','Example Club','t','t'), ('boost','boost','Example Boosters','t','t');`);
   return d1;
 }
-const CARD_KEYS = "blank,blankReceived,customerName,dueDate,embroideryDone,garmentColor,hasEmbroidery,itemId,itemName,itemSize,locations,orderId,orgId,orgName,placedAt,qty,started,type";
+const CARD_KEYS = "blank,blankReceived,customerName,customerOwned,dueDate,embroideryDone,garmentColor,hasEmbroidery,itemId,itemName,itemSize,locations,orderId,orgId,orgName,placedAt,qty,started,type";   // customerOwned: phase 7, the line is on the customer's own garment
 const loc = (decoration, label, extra = {}) => ({ location: label.toLowerCase(), label, kind: decoration === "embroidery" ? "embroidery" : "transfer", decoration,
   graphicName: "Crest " + label, ink: "Red", ...extra });
 

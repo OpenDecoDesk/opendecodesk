@@ -229,7 +229,8 @@ CREATE TABLE IF NOT EXISTS customers (
   updatedAt            TEXT NOT NULL,
   archivedAt           TEXT,
   mergedIntoId         INTEGER REFERENCES customers(id)
-);
+  -- migrations/0121 (written as its ALTERs leave it): may pick Net 30 at checkout, and their days (NULL = the default)
+  , allowNet30 INTEGER NOT NULL DEFAULT 0 CHECK (allowNet30 IN (0, 1)), termsDays INTEGER CHECK (termsDays IS NULL OR termsDays BETWEEN 1 AND 365));
 -- One customer per email, leaving out the ones merged away.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_email ON customers(email) WHERE email <> '' AND mergedIntoId IS NULL;
 
@@ -311,7 +312,17 @@ CREATE TABLE IF NOT EXISTS orders (
   trackingCheckedAt   TEXT                        -- migrations/0111: the delivery check's last tracking lookup (least recent first)
   , reorderOf           TEXT NOT NULL DEFAULT ''   -- migrations/0120: the order a Local sale was copied from ('' = none)
   , shippingDiscountCents INTEGER NOT NULL DEFAULT 0 CHECK (shippingDiscountCents >= 0)  -- migrations/0120: what free-shipping codes took off shipping
+  -- Net 30 terms (migrations/0121): cleared for work once a PO is accepted (db.js net30Cleared); the due date is
+  -- worked out when read (net30DueDate_), never stored. invoicedAt = the FIRST invoice send.
+  , net30               INTEGER NOT NULL DEFAULT 0 CHECK (net30 IN (0, 1))
+  , poNumber            TEXT NOT NULL DEFAULT ''
+  , poAcceptedAt        TEXT
+  , poAcceptedBy        TEXT NOT NULL DEFAULT ''
+  , poTypedAt           TEXT                      -- when the customer typed the PO (waits for Accept PO)
+  , termsDays           INTEGER CHECK (termsDays IS NULL OR termsDays BETWEEN 1 AND 365)  -- NULL = the default days
+  , invoicedAt          TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_orders_net30 ON orders(net30) WHERE net30 = 1;
 
 CREATE TABLE IF NOT EXISTS order_items (
   id                      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -367,6 +378,9 @@ CREATE TABLE IF NOT EXISTS order_items (
   -- migrations/0118: Start / Mark made of a screen print, vinyl, DTG or sublimation line (like transfersAppliedAt).
   decStartedAt        TEXT,
   decMadeAt           TEXT
+  -- migrations/0121: the customer's own garment (no blank, no blank cost; production waits for ownReceivedAt).
+  , customerOwned       INTEGER NOT NULL DEFAULT 0 CHECK (customerOwned IN (0, 1))
+  , ownReceivedAt       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS design_verifications (
@@ -456,7 +470,8 @@ CREATE TABLE IF NOT EXISTS estimate_items (
   customPrice    INTEGER NOT NULL DEFAULT 0 CHECK (customPrice IN (0,1)),
   taxable        INTEGER NOT NULL DEFAULT 1 CHECK (taxable IN (0,1)),
   lineTotalCents INTEGER NOT NULL DEFAULT 0
-);
+  -- migrations/0121 (written as its ALTER leaves it): the line is on the customer's own garment
+  , customerOwned INTEGER NOT NULL DEFAULT 0 CHECK (customerOwned IN (0, 1)));
 CREATE INDEX IF NOT EXISTS idx_estimate_items_estimate ON estimate_items(estimateId, position);
 
 -- Discount codes (migrations/0115): a code a customer types at checkout, a percent (percentBps) or an amount
@@ -541,6 +556,23 @@ CREATE TABLE IF NOT EXISTS gift_card_ledger (
   by          TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_gift_card_ledger_card ON gift_card_ledger(cardId, id);
+
+-- Customer-supplied garments checked in (migrations/0121): one row per size counted for a customer-owned line. A
+-- re-count voids the line's earlier rows (voidedAt) and writes new ones; db.js checkInGarments.
+CREATE TABLE IF NOT EXISTS garment_checkins (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  orderId      TEXT NOT NULL,
+  itemId       INTEGER NOT NULL,
+  size         TEXT NOT NULL DEFAULT '',
+  expectedQty  INTEGER NOT NULL DEFAULT 0 CHECK (expectedQty >= 0),
+  receivedQty  INTEGER NOT NULL DEFAULT 0 CHECK (receivedQty >= 0),
+  condition    TEXT NOT NULL DEFAULT 'good' CHECK (condition IN ('good', 'damaged', 'other')),
+  note         TEXT NOT NULL DEFAULT '',
+  at           TEXT NOT NULL,
+  by           TEXT NOT NULL DEFAULT '',
+  voidedAt     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_garment_checkins_item ON garment_checkins(itemId);
 
 -- Email campaigns (migrations/0117): addresses that asked for no marketing email, the campaigns, and who each
 -- one went to. See the migration for the rules.

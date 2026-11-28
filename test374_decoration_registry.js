@@ -355,8 +355,8 @@ const CHECK = /CHECK constraint failed/;
 
   say("=== The shipped migration list ===");
   const names = migrationFiles.map(f => f);
-  ok("migrationList.js lists 0118_decoration_types.sql and 0119_quote_notices.sql, in that order, then 0120 (phase 6) last",
-    MIGRATIONS.slice(-3).join(",") === "0118_decoration_types.sql,0119_quote_notices.sql,0120_gift_cards_multi_codes.sql");
+  ok("migrationList.js lists 0118_decoration_types.sql and 0119_quote_notices.sql, in that order, then 0120 (phase 6) and 0121 (phase 7) last",
+    MIGRATIONS.slice(-4).join(",") === "0118_decoration_types.sql,0119_quote_notices.sql,0120_gift_cards_multi_codes.sql,0121_terms_and_own_garments.sql");
   ok("each of them exists in migrations/", names.includes("0118_decoration_types.sql") && names.includes("0119_quote_notices.sql"));
   ok("the list and the migrations folder are the same files in the same order", same(MIGRATIONS.filter(f => f >= "0006"), names));
   ok("no name is listed twice", new Set(MIGRATIONS).size === MIGRATIONS.length);

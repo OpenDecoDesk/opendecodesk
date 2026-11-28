@@ -15,7 +15,7 @@ import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { getDigestState, setDigestState, setDigestRun, getOrdersForDigest, getAllOrgs, getUnsentOwnerNotices, markOwnerNoticesSent,
   getFailedAdminLogins, clearFailedAdminLogins, getSystemIssues, clearSystemIssues, getOrdersAwaitingBlanks, localToday,
   getBlankPriceReminder, setBlankPriceReminderSent, getNewPricingAlerts, listMaintenanceTasks, getFeatures, getRushFeesToSet,
-  recordDueRecurringExpenses, getRecurringExpensesRecorded, recordSystemIssue, insertAuditLog, getUnconfirmedShipments } from "../_lib/db.js";
+  recordDueRecurringExpenses, getRecurringExpensesRecorded, recordSystemIssue, insertAuditLog, getUnconfirmedShipments, getUnpaidPoReport } from "../_lib/db.js";
 import { sendDailyDigestEmail, sendDigestHeartbeatEmail, emailCanSend } from "../_lib/email.js";
 import { checkShippedDeliveries, checkBlankShipments } from "../_lib/deliveryCheck.js";
 import { checkSupplierShipments } from "../_lib/supplierOrders.js";
@@ -170,6 +170,10 @@ async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
   // Shipments the tracking check has stopped looking up (90 days on, still not delivered): listed for a person
   // to check, the oldest 20 and how many in all; never a reason to send on their own.
   const unconfirmed = await getUnconfirmedShipments(env.DB).catch((e) => { console.error("getUnconfirmedShipments failed:", e); return { count: 0, orders: [] }; });
+  // Net 30 orders still owed (migrations/0121): POs the customer typed that staff haven't accepted, and POs past
+  // their due date — those due since the last roll-up marked newly late. Listed, never a reason to send on their own;
+  // the quiet-morning email counts them among what's being watched.
+  const unpaidPos = await unpaidPosForDigest_(env, today, state && state.sentAt ? state.sentAt : "");
   const inTransit = deliveries.inTransit || [];
   // Picked up by the carrier is news: each pickup is a queued owner notice (kind 'picked_up', deliveryCheck.js), so
   // it is in `notices` above, including one from a run whose email failed or a day email wasn't set up, and it is
@@ -189,14 +193,14 @@ async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
     // email problem by send_ and turns up in the next roll-up.
     let heartbeat = "";
     if (trigger === "scheduled") {
-      const ok = await sendDigestHeartbeatEmail(env, { lastSentAt: state ? state.sentAt || "" : "", inTransit, awaitingPickup, awaitingBlanks, maintenanceDue, rushToSet, recurringRecorded, unconfirmed });
+      const ok = await sendDigestHeartbeatEmail(env, { lastSentAt: state ? state.sentAt || "" : "", inTransit, awaitingPickup, awaitingBlanks, maintenanceDue, rushToSet, recurringRecorded, unconfirmed, unpaidPos });
       heartbeat = ok ? "sent" : "failed";
       if (ok) await onSent();
     }
     return jsonResponse({ status: "ok", sent: false, heartbeat, orders: 0, notices: 0, delivered: deliveries.delivered.length, inTransit: 0 });
   }
   const orgNames = Object.fromEntries((await getAllOrgs(env.DB)).map(o => [o.orgId, o.name]));
-  const sent = await sendDailyDigestEmail(env, { orders, more, notices, orgNames, security, inTransit, awaitingPickup, issues, awaitingBlanks, priceReminder, belowTarget, maintenanceDue, rushToSet, recurringRecorded, unconfirmed });
+  const sent = await sendDailyDigestEmail(env, { orders, more, notices, orgNames, security, inTransit, awaitingPickup, issues, awaitingBlanks, priceReminder, belowTarget, maintenanceDue, rushToSet, recurringRecorded, unconfirmed, unpaidPos });
   if (!sent) return jsonResponse({ status: "error", message: "Email could not be sent — will retry next run" }, 502);
   await onSent();
   if (priceReminder) await setBlankPriceReminderSent(env.DB).catch((e) => console.error("setBlankPriceReminderSent failed:", e));
@@ -206,6 +210,30 @@ async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
   if (security) await clearFailedAdminLogins(env.DB, security);   // only what this email reported
   if (issues.length) await clearSystemIssues(env.DB, issues);
   return jsonResponse({ status: "ok", sent: true, orders: orders.length, more, notices: notices.length, delivered: deliveries.delivered.length, inTransit: inTransit.length, pickedUp: pickedUpCount });
+}
+
+// The roll-up's part of the Unpaid POs report (db.js getUnpaidPoReport) as of the business's today: the POs to check,
+// the late ones (most days late first; `newlyLate` when the due date is on or after the day of the last roll-up, so
+// it became late since), and the totals. Null when there are none, or the report can't be read (the roll-up goes
+// without it).
+async function unpaidPosForDigest_(env, today, lastSentAt) {
+  try {
+    if (typeof getUnpaidPoReport !== "function") return null;
+    const rep = await getUnpaidPoReport(env.DB, { asOf: today });
+    const rows = (rep && rep.rows) || [];
+    if (!rows.length) return null;
+    let lastDay = "";
+    if (lastSentAt) { try { lastDay = await localToday(env, new Date(lastSentAt)); } catch (e) { lastDay = String(lastSentAt).slice(0, 10); } }
+    const toCheck = rows.filter(r => r.poStatus === "PO to check");
+    const late = rows.filter(r => Number(r.daysLate) > 0 && r.dueDate && r.dueDate < today)
+      .map(r => ({ ...r, newlyLate: !!lastDay && r.dueDate >= lastDay }))
+      .sort((a, b) => Number(b.daysLate) - Number(a.daysLate) || String(a.orderId).localeCompare(String(b.orderId)));
+    const t = rep.totals || {};
+    return { toCheck, late, totals: { count: Number(t.count) || rows.length, owedCents: Number(t.owedCents) || 0, lateCents: Number(t.lateCents) || 0, toCheck: Number(t.toCheck) || toCheck.length } };
+  } catch (e) {
+    console.error("getUnpaidPoReport failed — sending the roll-up without unpaid POs:", e);
+    return null;
+  }
 }
 
 export async function onRequestGet() {

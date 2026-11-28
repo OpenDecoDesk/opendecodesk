@@ -615,7 +615,9 @@ test("every field of a customer is edited and saved: details, address, notes and
   expect(sent).toHaveLength(1);
   expect(sent[0]).toEqual({ action: "saveCustomer", id, name: "Pat " + t, company: "Example Club " + t, email: "Pat." + t + "@Example.test", phone: "555-0103",
     address: { line1: "1 Example Street", line2: "Suite 2", city: "Sampleville", state: "ZZ", zip: "00000" },
-    notes: "Prefers pickup.\nSecond line <b>plain</b>.", taxExempt: true, taxExemptCertificate: "EX-" + t, taxExemptExpires: "2099-12-31", ...(sent[0].key !== undefined ? { key: sent[0].key } : {}) });
+    notes: "Prefers pickup.\nSecond line <b>plain</b>.", taxExempt: true, taxExemptCertificate: "EX-" + t, taxExemptExpires: "2099-12-31",
+    allowNet30: false, termsDays: null,   // the Net 30 terms box (phase 7), sent as it was
+    ...(sent[0].key !== undefined ? { key: sent[0].key } : {}) });
 
   const saved = { name: "Pat " + t, company: "Example Club " + t, email: "pat." + t + "@example.test", phone: "555-0103",
     notes: "Prefers pickup.\nSecond line <b>plain</b>.", taxExempt: true, taxExemptCertificate: "EX-" + t, taxExemptExpires: "2099-12-31" };

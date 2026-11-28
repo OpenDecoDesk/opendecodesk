@@ -123,6 +123,15 @@ function computeEnabledPayments(org, globalSettings, stripeConfigured){
   if(globalCheck && orgCheck) methods.push("Check");
   return methods;
 }
+// Net 30 (migrations/0121) is never in that list: it is offered only to a customer whose record allows it, which the
+// checkout learns by asking orders.js checkNet30 with the email typed. `net30Offered` says only whether asking can say
+// yes here: Global settings → Payment methods ticks Net 30 (off until ticked, like pay on delivery) and this shop hasn't
+// switched it off for itself.
+function net30OfferedAtCheckout_(org, globalSettings){
+  const g = (globalSettings && globalSettings.enabledPayments) || {};
+  const o = (org && org.enabledPayments) || {};
+  return g.net30 === true && o.net30 !== false;
+}
 
 // Normalizes a stored image URL that is missing its scheme. If R2_PUBLIC_BASE
 // is set without "https://", uploads are stored as
@@ -529,6 +538,8 @@ export async function onRequestGet(context){
       // An empty array means no payment method is shown at checkout —
       // the order still goes through, just without a payment selection.
       enabledPayments,
+      // Whether the checkout should ask checkNet30 about the email typed (net30OfferedAtCheckout_ above).
+      net30Offered: net30OfferedAtCheckout_(org, catalogData.globalSettings),
       orderDeadline: org.orderDeadline || null,
       ...orderClosing_(org.orderDeadline, catalogData.locale, env),
       closedMessage: org.closedMessage || null,

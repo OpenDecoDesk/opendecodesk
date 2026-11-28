@@ -699,12 +699,12 @@ async function giftBuySubmit_(){
 // with carrier rates for an address — and pay the balance. Everything comes from /api/invoice; a
 // delivery choice is saved there (the fee is the server's) and the page is redrawn from its answer.
 const _inv = { token: "", data: null, pick: "", rates: [], ratesZip: "", rateIdx: -1, manual: false, addr: {}, busy: "", err: "", paidNote: false,
-  codeText: "", codeMsg: "", giftText: "", giftMsg: "", giftOk: "" };
+  codeText: "", codeMsg: "", giftText: "", giftMsg: "", giftOk: "", poText: "", poMsg: "", poOk: "" };
 const invMoney_ = (n) => "$" + Number(n || 0).toFixed(2);
 async function renderInvoice(app, token, justPaid){
   document.title = "Invoice";
   Object.assign(_inv, { token, data: null, pick: "", rates: [], ratesZip: "", rateIdx: -1, manual: false, addr: {}, busy: "", err: "", paidNote: !!justPaid,
-    codeText: "", codeMsg: "", giftText: "", giftMsg: "", giftOk: "" });
+    codeText: "", codeMsg: "", giftText: "", giftMsg: "", giftOk: "", poText: "", poMsg: "", poOk: "" });
   app.innerHTML = `<div class="inv" role="status">Loading your invoice…</div>`;
   let res, data;
   try { res = await fetch("/api/invoice?token=" + encodeURIComponent(token)); data = await res.json(); }
@@ -820,6 +820,10 @@ function invDraw_(){
     deliveryHtml = `<h2>Delivery</h2><div>${escapeHtml(cur.label)}${ad ? `<div class="inv-detail">${escapeHtml([ad.name, ad.line1, ad.line2, `${ad.city}, ${ad.state} ${ad.zip}`].filter(Boolean).join(" · "))}</div>` : ""}</div>`;
   }
 
+  // Net 30 terms (migrations/0121): the PO and when payment is due, and — while the order has no PO — a box for it. The
+  // PO the customer types is checked by the shop (Accept PO) before the order counts as cleared; until then it says so.
+  const termsHtml = invTermsHtml_(v);
+
   // Paying.
   let payHtml;
   if (v.paid) {
@@ -877,11 +881,59 @@ function invDraw_(){
       </tbody></table>
       ${taxNote}
       ${deliveryHtml}
+      ${termsHtml}
       <h2>${v.paid ? "Payment" : "Pay"}</h2>
       ${payHtml}
     </div>`;
   invWire_();
   restoreFocus();
+}
+// "Dec 31, 2026" from "2026-12-31" (a calendar day: no time zone can move it).
+function invShortDay_(day){
+  const d = new Date(String(day || "") + "T12:00:00Z");
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(day || "")) && !isNaN(d) ? d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : "";
+}
+// The Net 30 block: "Net 30 — PO 1001 — due Dec 31, 2026", or "PO needed" with the box to add it. Nothing for an order
+// without terms; once it's paid in full only the PO is worth repeating.
+function invTermsHtml_(v){
+  const t = v.terms;
+  if (!t || !t.net30) return "";
+  const label = "Net " + (Number(t.termsDays) > 0 ? Number(t.termsDays) : 30);
+  const due = invShortDay_(t.dueDate);
+  const whenDue = due ? "due " + escapeHtml(due) : (t.dueText ? escapeHtml(t.dueText) : "");
+  // "PO 1001", but not "PO PO-1001" for a number that already says it.
+  const po = (n) => (/^P\.?O\b/i.test(String(n)) ? "" : "PO ") + escapeHtml(n);
+  if (v.paid) return t.poNumber ? `<div class="inv-note inv-terms">${escapeHtml(label)} — ${po(t.poNumber)}</div>` : "";
+  const thanks = _inv.poOk ? `<div class="inv-detail" role="status">${escapeHtml(_inv.poOk)}</div>` : "";
+  if (t.poNumber) {
+    return `<h2>Terms</h2><div class="inv-note inv-terms">${escapeHtml(label)} — ${po(t.poNumber)}${whenDue ? " — " + whenDue : ""}${
+      t.poStatus === "PO to check" && !_inv.poOk ? `<div class="inv-detail">We'll confirm your PO number.</div>` : ""}</div>${thanks}`;
+  }
+  const box = t.canSetPo ? `<div class="inv-addon"><label for="invPo">Your PO number</label>
+        <div class="inv-addon-row"><input type="text" id="invPo" maxlength="60" autocomplete="off" spellcheck="false" value="${escapeHtml(_inv.poText)}" aria-describedby="invPoMsg">
+        <button type="button" class="inv-btn second" id="invPoBtn"${_inv.busy === "po" ? " disabled" : ""}>${_inv.busy === "po" ? "Saving…" : "Add PO number"}</button></div>
+        <div class="inv-err" id="invPoMsg" role="alert">${escapeHtml(_inv.poMsg)}</div></div>` : "";
+  return `<h2>Terms</h2><div class="inv-note inv-terms">${escapeHtml(label)}${whenDue ? " — " + whenDue : ""}<div><b>PO needed:</b> ${t.canSetPo ? "add your PO number below." : "please send us your PO number."}</div></div>${box}`;
+}
+// A PO number typed on the invoice (setInvoicePo): saved on this order as the customer's, for the shop to confirm.
+async function invSetPo_(){
+  const text = _inv.poText.trim();
+  if (!text) { _inv.poMsg = "Enter your PO number."; invDraw_(); return; }
+  if (text.length > 60) { _inv.poMsg = "A PO number can be up to 60 characters."; invDraw_(); return; }
+  _inv.poMsg = ""; _inv.busy = "po"; invDraw_();
+  try {
+    const res = await fetch("/api/invoice", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: _inv.token, action: "setInvoicePo", poNumber: text }) });
+    const data = await res.json().catch(() => null);
+    _inv.busy = "";
+    if (data && data.status === "ok") {
+      _inv.poText = ""; _inv.poOk = "Thanks — we'll confirm your PO.";
+      announceStatus(_inv.poOk);
+      invApply_(data.invoice);
+    } else {
+      _inv.poMsg = res.status === 429 ? "Too many tries — please wait a minute and try again." : (data && data.message && res.status < 500 ? String(data.message) : "We couldn't save that just now. Please try again.");
+      invDraw_();
+    }
+  } catch (e) { _inv.busy = ""; _inv.poMsg = "We couldn't reach the server — try again."; invDraw_(); }
 }
 function invReadAddr_(){
   const g = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
@@ -912,6 +964,9 @@ function invWire_(){
   const giftBtn = document.getElementById("invGiftBtn"); if (giftBtn) giftBtn.onclick = () => invAddOn_("applyGiftCard");
   const codeBox = document.getElementById("invCode");
   if (codeBox) { codeBox.oninput = () => { _inv.codeText = codeBox.value; }; codeBox.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); invAddOn_("applyCode"); } }; }
+  const poBtn = document.getElementById("invPoBtn"); if (poBtn) poBtn.onclick = invSetPo_;
+  const poBox = document.getElementById("invPo");
+  if (poBox) { poBox.oninput = () => { _inv.poText = poBox.value; if (_inv.poMsg) { _inv.poMsg = ""; const m = document.getElementById("invPoMsg"); if (m) m.textContent = ""; } }; poBox.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); invSetPo_(); } }; }
   const giftBox = document.getElementById("invGift");
   if (giftBox) { giftBox.oninput = () => { _inv.giftText = giftBox.value; }; giftBox.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); invAddOn_("applyGiftCard"); } }; }
 }
@@ -2356,6 +2411,68 @@ async function recheckDiscountCode_(){
   if(notes.length){ discountMsg_ = notes.join(" "); announceStatus(discountMsg_); }
   renderTicket(currentOrg, currentOrgId);
 }
+// ---- Net 30 (pay by invoice, migrations/0121) ----
+// Never in the catalog's payment list: a customer the shop allows Net 30 (admin → Customers → Allow Net 30) sees it once
+// the email they type is one the server recognises. The page asks checkNet30 {orgId, email} after a pause in typing
+// (and at once when the field is left); the answer is { ok, termsDays } or just { ok: false } — the same for an address
+// that isn't a customer at all, so the box can't be used to find out who is one. The server checks again when the order
+// is placed, so this is only what the select offers. A PO number is optional here: it can be added from the invoice.
+const NET30_METHOD_ = "Net 30";
+const NET30_PO_MAX_ = 60;
+let net30_ = { key: "", ok: false, termsDays: null };   // the answer for `key` (shop + address as typed, lower case)
+let net30Seq_ = 0, net30Timer_ = null;
+let net30Po_ = "";                                     // the PO number typed, kept across the panel's redraws
+const net30Key_ = (orgId, email) => String(orgId || "") + "|" + String(email || "").trim().toLowerCase();
+const net30EmailOk_ = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim());
+// Offered at this shop for the address in the box now (a stale answer for another address offers nothing).
+function net30Offered_(org){
+  const el = document.getElementById("custContact");
+  return !!(org && !org.preview && org.net30Offered === true && net30_.ok && net30_.key === net30Key_(org.orgId, el ? el.value : ""));
+}
+async function askNet30_(orgId, email){
+  const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "checkNet30", orgId, email }) });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || !data || data.ok !== true) return { ok: false };
+  const days = Number(data.termsDays);
+  return { ok: true, termsDays: Number.isInteger(days) && days > 0 ? days : null };
+}
+// Asks about the address in the box now (unless that answer is already in hand) and redraws the checkout when what the
+// select offers changes. A reply for an address typed over meanwhile is dropped.
+async function checkNet30_(){
+  if(net30Timer_){ clearTimeout(net30Timer_); net30Timer_ = null; }
+  const org = currentOrg, el = document.getElementById("custContact");
+  // Only where asking can say yes (/api/catalog's net30Offered: Net 30 ticked in Global settings, not off for this shop),
+  // so a shop without Net 30 sends nothing while the customer types.
+  if(!org || org.preview || !el || org.net30Offered !== true) return;
+  const email = el.value.trim(), key = net30Key_(org.orgId, email);
+  if(key === net30_.key) return;
+  const before = net30Offered_(org);
+  const seq = ++net30Seq_;
+  if(!net30EmailOk_(email)){ net30_ = { key, ok: false, termsDays: null }; if(before) renderTicket(org, currentOrgId); return; }
+  let r;
+  try{ r = await askNet30_(org.orgId, email); }catch(_){ r = { ok: false, failed: true }; }
+  if(seq !== net30Seq_ || currentOrg !== org) return;
+  // No answer (offline, a server error): nothing is remembered, so leaving the field or ordering asks again.
+  net30_ = r.failed ? { key: "", ok: false, termsDays: null } : { key, ok: r.ok, termsDays: r.termsDays };
+  if(net30Offered_(org) !== before){
+    renderTicket(org, currentOrgId);
+    if(net30Offered_(org)) announceStatus("Net 30 (pay by invoice) is available for this order.");
+  }
+}
+function scheduleNet30Check_(){
+  if(net30Timer_) clearTimeout(net30Timer_);
+  net30Timer_ = setTimeout(checkNet30_, 700);
+}
+// The PO number box under the select: shown while Net 30 is chosen.
+function net30PoHtml_(show){
+  return `<div class="net30-po" id="net30PoWrap"${show ? "" : " hidden"}>
+        <input type="text" id="custPoNumber" maxlength="${NET30_PO_MAX_}" autocomplete="off" spellcheck="false" placeholder="PO number (optional)" aria-label="PO number" aria-describedby="custPoHint" value="${escapeHtml(net30Po_)}">
+        <div class="form-hint" id="custPoHint">Your PO number, if you have it — you can add it later from your invoice.</div>
+      </div>`;
+}
+function net30Days_(n){ const d = Number(n); return Number.isInteger(d) && d > 0 ? d : null; }
+
 // Shop news and discounts (email campaigns, migrations/0117): a box under the email address, ticked to start with.
 // Unticked, the order puts the address on the no-marketing list; ticked takes off only what an earlier checkout put
 // there. Kept across redraws; shown while the Email campaigns feature is on (never on a preview).
@@ -2660,6 +2777,8 @@ document.addEventListener("keydown", (e)=>{
 document.addEventListener("change", (e)=>{
   // Fields that name what a change does (the page has no inline handlers: public/_headers runs no inline script).
   const ch = e.target.dataset && e.target.dataset.change;
+  // The email box left (or filled in by the browser): ask about Net 30 for it now rather than after the pause.
+  if(e.target.id === "custContact"){ checkNet30_(); return; }
   if(ch){
     if(ch === "rush") setRush_(e.target.checked);
     else if(ch === "rush-date"){ rushNeededBy = e.target.value; renderTicket(currentOrg, currentOrgId); }
@@ -2719,8 +2838,10 @@ document.addEventListener("input", (e)=>{
   if(e.target.id === "custContact"){
     if(discountMsgAboutEmail_(discountMsg_)) discountMsgEl_("");
     if(discountApplied_) scheduleDiscountRecheck_();
+    scheduleNet30Check_();   // Net 30 is offered per address (after a pause in typing)
     return;
   }
+  if(e.target.id === "custPoNumber"){ net30Po_ = e.target.value.slice(0, NET30_PO_MAX_); return; }
   if(e.target.id === "shippingZipInput"){
     shippingZip = isUS_() ? e.target.value.replace(/\D/g,"").slice(0,5) : e.target.value.slice(0,20);
     e.target.value = shippingZip; // normalize in-place (US: strip non-digits)
@@ -3364,15 +3485,18 @@ function renderTicket(org, orgId){
       <input type="email" id="custContact" required placeholder="Email address" aria-label="Email address" value="${escapeHtml(savedContact)}">
       ${marketingBoxHtml_(currentOrg)}
       ${(function(){
-        const methods = currentOrg.enabledPayments || [];
+        // Net 30 joins the shop's methods only for an address the server said yes to (checkNet30_).
+        const net30 = net30Offered_(currentOrg);
+        const methods = (currentOrg.enabledPayments || []).filter(m => m !== NET30_METHOD_).concat(net30 ? [NET30_METHOD_] : []);
         if(giftAll) return '<div class="form-hint gift-covers" id="paymentHint" role="status">Your gift card covers it — there\'s nothing to pay.</div>';
         if(methods.length === 0) return '<div class="form-hint">Payment is handled separately — your order will be recorded and we\'ll follow up with payment details.</div>';
-        const labels = {"Card":"Credit / Debit Card","Venmo":"Venmo","Zelle":"Zelle","Check":"Check"};
-        const opts = methods.map(m => `<option value="${m}">${labels[m] || m}</option>`).join("");
+        const labels = {"Card":"Credit / Debit Card","Venmo":"Venmo","Zelle":"Zelle","Check":"Check","Net 30":"Net 30 (pay by invoice)"};
+        const opts = methods.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(labels[m] || m)}</option>`).join("");
         return `<select id="custPaymentMethod" aria-label="Payment method" data-change="payment-method">
         <option value="">How will you pay?</option>
         ${opts}
       </select>
+      ${net30 ? net30PoHtml_(savedPayment === NET30_METHOD_) : ""}
       <div class="form-hint" id="paymentHint">Choose how you'll pay — you'll see how to pay after you place the order.</div>`;
       })()}
       <div class="checkout-msg" id="checkoutMsg" role="alert"${checkoutMsg_ ? "" : " hidden"}>${escapeHtml(checkoutMsg_)}</div>
@@ -3501,6 +3625,19 @@ async function placeOrder(orgId){
     return;
   }
   if(cart.length===0) return;
+  // Net 30 chosen while the address was being changed: ask about this address before sending it (the server decides
+  // again anyway, and refuses with its own sentence).
+  const net30Chosen = paymentMethod === NET30_METHOD_ && !giftAllNow;
+  if(net30Chosen && !net30Offered_(currentOrg)){
+    await checkNet30_();
+    if(!net30Offered_(currentOrg)){
+      checkoutError_("Net 30 isn't available for this email address — please choose another way to pay.", "custPaymentMethod");
+      return;
+    }
+  }
+  const poEl = document.getElementById("custPoNumber");
+  if(poEl) net30Po_ = poEl.value.slice(0, NET30_PO_MAX_);
+  const poNumber = net30Chosen ? net30Po_.trim() : "";
   // A code typed but not applied isn't sent unseen: the customer sees what it does (or why not) first.
   const codeBoxOn = discountBoxOn_(currentOrg);
   if(codeBoxOn && discountInput_.trim() && (!discountApplied_ || discountMulti_(currentOrg))){
@@ -3544,7 +3681,7 @@ async function placeOrder(orgId){
   // lost answer resends THIS order, which the server recognises, instead of placing a second one.
   const _attemptSig = JSON.stringify([orgId, name, contact, paymentMethod, cart.map(({ cdPreviews, ...line }) => line),
     delivery.kind, delivery.label || "", delivery.kind === "option" ? delivery.option.id : null, shippingAddress, orderShippingCost, !!rush, rushNeededBy || "", discountCode,
-    giftPlanNow.map(p => [p.card.last4, p.take])]);   // never the card numbers: this record is kept in the tab's session storage
+    giftPlanNow.map(p => [p.card.last4, p.take]), poNumber]);   // never the card numbers: this record is kept in the tab's session storage
   const order = {
     orderId: orderIdForAttempt_(_orderPrefix, _attemptSig),
     orgId, customerName: name, contact, paymentMethod,
@@ -3576,6 +3713,9 @@ async function placeOrder(orgId){
     ...(marketingBoxOn_(currentOrg) ? { marketingOptIn: !!marketingOptIn_ } : {}),
     ...(rush ? { rush: true, rushFee: rush.fee, rushFeePending: rush.pending } : {}),
     ...(rush && rushNeededBy ? { neededBy: rushNeededBy } : {}),
+    // Net 30 (migrations/0121): the server checks the address allows it and saves the PO as typed by the customer —
+    // staff accept it before the order counts as cleared for work.
+    ...(net30Chosen && poNumber ? { poNumber } : {}),
     placedAt: new Date().toISOString(),
     paid: false
   };
@@ -3598,6 +3738,11 @@ async function placeOrder(orgId){
     }
     if(freeShipNow) order.freeShippingCodes = freeShipCodes;
     if(saved && typeof saved.owed === "number") order.owed = saved.owed;
+    // Net 30: the days the invoice gives (the server's word when it says, else what checkNet30 said).
+    if(net30Chosen){
+      order.termsDays = net30Days_(saved && saved.termsDays) || net30Days_(net30_.termsDays);
+      net30Po_ = "";
+    }
     // Gift cards: what each took (a card the server turned down is told to the customer; the rest is paid the usual way).
     if(giftPlanNow.length){
       const got = Array.isArray(saved && saved.giftCards) ? saved.giftCards : [];
@@ -3714,6 +3859,11 @@ function updatePaymentHint(method, skipTicketRender){
     "Zelle": business.zelle ? `Send payment to ${business.zelle} — include your order number in the memo.` : "After placing your order, you’ll be contacted with Zelle details.",
     "Check": `Make check payable to “${business.legalName || bizName_()}”` + (business.mailingAddress ? ` and mail to ${business.mailingAddress}.` : " — you’ll be told where to send it.")
   };
+  const days = net30Days_(net30_.termsDays);
+  hints[NET30_METHOD_] = "No payment now — we'll send you an invoice" + (days ? ", due within " + days + " days" : "") + ".";
+  // The PO box belongs to Net 30: shown while it's chosen (what was typed is kept if the customer switches back).
+  const poWrap = document.getElementById("net30PoWrap");
+  if(poWrap) poWrap.hidden = method !== NET30_METHOD_;
   const baseHint = hints[method] || "Choose how you'll pay — you'll see how to pay after you place the order.";
   const discountNote = (CASH_DISCOUNT_PERCENT && (method === "Zelle" || method === "Check"))
     ? " A " + CASH_DISCOUNT_PERCENT + "% discount applies — mention this when sending payment."
@@ -3755,6 +3905,11 @@ function confirmationPaymentBase_(order){
   if(order.owed === 0) return Number(order.giftTaken) > 0 ? "Your order is in. Your gift card covers it — there's nothing to pay." : "Your order is in. Your discount covers it — there's nothing to pay.";
   if(m === "Card") return order.cardStartFailed ? "Your order is saved, but the card payment couldn't be started. Try it again below, or contact the shop to pay another way — there's no need to order again." : "Your order is saved.";
   if(m === "Venmo" || m === "Zelle" || m === "Check") return "Your order is in. Please pay using the details below — we'll email you once your payment is received.";
+  if(m === NET30_METHOD_){
+    const days = net30Days_(order.termsDays);
+    return "Your order is in — there's nothing to pay now. We'll send an invoice; payment is due within " + (days ? days + " days" : "the terms on it") + "." +
+      (order.poNumber ? " Your PO number " + order.poNumber + " is on the order; we'll confirm it." : " Add your PO number from your invoice when you have it.");
+  }
   return "Your order is in. We'll contact you about payment.";
 }
 // The items, delivery and total, so the shopper can see what they ordered.

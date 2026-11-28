@@ -54,6 +54,10 @@ const ADMIN_ACTIONS_ = {
   showRushFeeModal_(){ showRushFeeModal_(this.dataset.org,this.dataset.order); },
   markOrderPaid(){ markOrderPaid(this.dataset.org, this.dataset.order); },
   setPayOnDelivery_(){ setPayOnDelivery_(this.dataset.org, this.dataset.order, this.dataset.on === "1"); },
+  // Net 30 terms and customer-supplied garments (migrations/0121).
+  showOrderTerms_(){ showOrderTerms_(this.dataset.org, this.dataset.order); },
+  acceptOrderPoRow_(){ acceptOrderPoRow_(this.dataset.org, this.dataset.order); },
+  showGarmentCheckinFor_(){ showGarmentCheckinFor_(this.dataset.org, this.dataset.order, this.dataset.item); },
   resendEmail(){ resendEmail(this.dataset.org, this.dataset.order); },
   editOrder(){ editOrder(this.dataset.org,this.dataset.order); },
   pickFulfillmentStage_(){ if (this.value) { setFulfillmentStage(this.dataset.org, this.dataset.order, this.value); this.value = ""; } },
@@ -795,6 +799,20 @@ async function adminRoute() {
   if (raw === "revenue")   { renderRevenueReport(app); return; }
   if (raw === "salestax")  { renderSalesTaxReport(app); return; }
   if (raw === "fundraising") { renderFundraisingReport(app); return; }
+  // Unpaid POs (migrations/0121): Net 30 orders with money owed. Its own script (public/admin-receivables.js), loaded the
+  // first time, like Gift cards.
+  if (raw === "unpaidpos") {
+    try { await ensureReceivablesPage_(); }
+    catch (e) {
+      adminSetHash(raw);
+      document.title = adminTitle_("Unpaid POs");
+      app.innerHTML = adminPageHead_("Unpaid POs") + `<div class="admin-panel" style="--org-accent:var(--accent);"><div class="admin-empty">${escapeHtml(e.message)}. Check your connection and reload the page.</div></div>`;
+      return;
+    }
+    if (location.hash.replace(/^#\/?/, "") !== raw) return;
+    await renderUnpaidPos(app);
+    return;
+  }
   if (raw === "cogs")      { renderInventoryReport(app); return; }
   if (raw === "blankorder") { renderBlanksToOrder(app); return; }
   if (raw === "books")     { renderBooks(app); return; }
@@ -1568,6 +1586,8 @@ async function fetchOrders(orgId, retried){
     rows.sort((a,b)=> new Date(b.placedAt) - new Date(a.placedAt));
     (window._ordersMore = window._ordersMore || {})[orgId] = data && data.more ? rows.length : 0;
     (window._ordersPod = window._ordersPod || {})[orgId] = (data && data.payOnDelivery) || { allowed: false, localSaleOnly: false };
+    // Net 30 terms (migrations/0121): whether this shop's orders may be put on Net 30 ({ allowed }) — net30Rule_.
+    (window._ordersNet30 = window._ordersNet30 || {})[orgId] = (data && data.net30 && typeof data.net30 === "object") ? data.net30 : { allowed: false };
     return rows;
   }catch(e){
     console.error("Admin orders fetch threw an exception:", e);
@@ -1830,13 +1850,16 @@ function homeUpdatedAt_(iso){
 const HOME_BLOCKS_ = [
   { key: "orders", label: "Orders", hint: "Open orders by the step each is waiting on" },
   { key: "totals", label: "Business totals", hint: "Revenue and expenses, year and month to date", money: true },
+  // Net 30 orders with money owed (migrations/0121): for a role that may open Reports → Unpaid POs. The server sends the
+  // money in it only to a role that sees the money blocks; the counts (orders, POs to check) to anyone with orders.
+  { key: "unpaidpos", label: "Unpaid POs", hint: "Net 30 orders still owed, late, and POs to check", po: true },
   { key: "inout", label: "Money in and out", hint: "Cash in and out, month by month", money: true },
   { key: "pies", label: "Where the money went", hint: "Expenses by type, year and month", money: true },
   { key: "sales", label: "Product sales", hint: "Revenue, cost of goods and margin", money: true },
 ];
 const HOME_LOCAL_KEY_ = "oddHomeHidden";   // a passphrase session (no user account): this browser only
 function homeHasAccount_(){ return !!(adminMe && adminMe.id != null); }
-function homeAvailable_(){ return HOME_BLOCKS_.filter(b => !b.money || adminCanOpen_("revenue")); }
+function homeAvailable_(){ return HOME_BLOCKS_.filter(b => (!b.money || adminCanOpen_("revenue")) && (!b.po || adminCanOpen_("unpaidpos"))); }
 function homeHidden_(){
   if (homeHasAccount_()) return ((adminPrefs && adminPrefs.home && adminPrefs.home.hidden) || []).slice();
   try { const v = JSON.parse(localStorage.getItem(HOME_LOCAL_KEY_) || "[]"); return Array.isArray(v) ? v : []; } catch (e) { return []; }
@@ -1935,6 +1958,10 @@ async function loadHome_(fresh){
     t.querySelector(".home-num").textContent = n;
     t.classList.toggle("home-tile-zero", !n);
   });
+  // The New tile counts the Net 30 orders waiting on a PO too (migrations/0121): say how many have a PO to check.
+  const poCheck = Number((d.unpaidPos || {}).toCheck != null ? d.unpaidPos.toCheck : d.poToCheck) || 0;
+  const newHint = document.querySelector('#homeStages .home-tile[data-stage="new"] .home-hint');
+  if (newHint) newHint.textContent = HOME_STAGES_[0].hint + (poCheck ? ` · ${poCheck} PO${poCheck === 1 ? "" : "s"} to check` : "");
   const open = Number(d.open) || 0;
   if (document.getElementById("homeStagesNote")) document.getElementById("homeStagesNote").textContent = `${open} open order${open === 1 ? "" : "s"}` + (d.onTheWay ? ` · ${d.onTheWay} shipped and on the way` : "");
   if (document.getElementById("homeMoney")) drawHomeMoney_(d);
@@ -2101,7 +2128,8 @@ function drawHomeMoney_(d){
   const needMoney = ["totals", "pies", "sales"].some(on);
   const y = d.year || {}, m = d.month || {};
   if ((needMoney && (!d.year || !d.month)) || (on("inout") && !d.inOut)) { el.innerHTML = `<div class="home-note">The money figures didn't come back — try Refresh.</div>`; return; }
-  if (!needMoney) { el.innerHTML = on("inout") ? `<div data-home-block="inout"><h3 class="home-h">Money in and out</h3>${homeInOut_(d.inOut)}</div>` : ""; return; }
+  const poBlock = on("unpaidpos") ? homeUnpaidPos_(d.unpaidPos) : "";
+  if (!needMoney) { el.innerHTML = poBlock + (on("inout") ? `<div data-home-block="inout"><h3 class="home-h">Money in and out</h3>${homeInOut_(d.inOut)}</div>` : ""); return; }
   const monthName = adminDate_(d.monthFrom, { month: "long" });
   const card = (label, v, sub, title) => `<div class="home-card" title="${escapeHtml(title || "")}"><span class="home-lbl">${escapeHtml(label)}</span><span class="home-val">${homeMoney_(v)}</span><span class="home-hint">${escapeHtml(sub)}</span></div>`;
   // From the same reply as the figures (getDashboardMoney), so the label always matches what was added up.
@@ -2138,6 +2166,7 @@ function drawHomeMoney_(d){
       ${card("Capital purchases · month to date", m.capital, capSub)}
     </div>
     <div class="home-note">Operating profit leaves out capital purchases — expenses in a category marked Capital (equipment, tools) — and sales tax paid to the state. Mark which categories are capital in Expenses → ⚙ (Manage categories).</div></div>` : ""}
+    ${poBlock}
     ${on("inout") && d.inOut ? `<div data-home-block="inout"><h3 class="home-h">Money in and out</h3>${homeInOut_(d.inOut)}</div>` : ""}
     ${on("pies") && y.byType ? `<div data-home-block="pies">
     <h3 class="home-h">Where the money went</h3>
@@ -2157,6 +2186,28 @@ function drawHomeMoney_(d){
     <div class="home-note home-basis">Revenue is goods sold less sales tax and discounts; COGS is the blanks, finished stock and transfers used on those same orders — ${escapeHtml(saleDateNote_(d.saleDate))}.</div>
     ${warn}</div>` : ""}
     ${links ? `<div class="home-note">${links}</div>` : ""}`;
+}
+
+// Home's "Unpaid POs" (migrations/0121, db.js getDashboard unpaidPos): Net 30 orders with money owed, the part of it that
+// is late, and POs typed by customers waiting for Accept PO, with a link to the report. Money comes as whole cents; a role
+// that isn't shown money gets the counts only (the server leaves the money out). "" is never returned for a shown block:
+// a server that sent nothing says so.
+function homeUnpaidPos_(p){
+  const head = `<h3 class="home-h">Unpaid POs</h3>`;
+  const link = adminCanOpen_("unpaidpos") ? `<div class="home-note"><a href="#unpaidpos">Unpaid POs report →</a></div>` : "";
+  if (!p || typeof p !== "object") return `<div data-home-block="unpaidpos">${head}<div class="home-note">The Unpaid POs figures didn't come back — try Refresh.</div>${link}</div>`;
+  const dollars = (name) => p[name + "Cents"] != null ? (Number(p[name + "Cents"]) || 0) / 100 : p[name] != null ? Number(p[name]) || 0 : null;
+  const count = Number(p.count) || 0, toCheck = Number(p.toCheck) || 0, owed = dollars("owed"), late = dollars("late");
+  // home-po-card, not home-card: these are counts of what customers owe, not the business totals (styled the same).
+  const card = (label, val, sub, warn) => `<div class="home-po-card${warn ? " home-card-warn" : ""}"><span class="home-lbl">${escapeHtml(label)}</span><span class="home-val">${val}</span><span class="home-hint">${escapeHtml(sub)}</span></div>`;
+  const money = (v) => v == null ? "—" : adminMoney_(v);
+  return `<div data-home-block="unpaidpos">${head}
+    <div class="home-po">
+      ${card("Unpaid POs", String(count), count === 1 ? "Net 30 order still owed" : "Net 30 orders still owed")}
+      ${owed != null ? card("Owed", money(owed), "On Net 30 terms, all shops") : ""}
+      ${late != null ? card("Late", money(late), late > 0 ? "Past the due date" : "Nothing past its due date", late > 0) : ""}
+      ${card("POs to check", String(toCheck), toCheck ? "Typed by customers — accept each one" : "None waiting", toCheck > 0)}
+    </div>${link}</div>`;
 }
 
 // #home/<stage>: the open orders waiting on that step, every shop, oldest first. A row opens the order in its shop.
@@ -2200,7 +2251,7 @@ async function renderHomeStage(app, key){
       <td style="${td}white-space:nowrap;">${o.placedAt ? escapeHtml(adminDate_(o.placedAt)) : ""}${days !== null ? `<br><span style="${sub}${days >= 21 ? "color:#b45309;font-weight:600;" : ""}">${days} day${days === 1 ? "" : "s"} ago</span>` : ""}</td>
       <td style="${td}white-space:nowrap;font-family:monospace;font-size:12px;">${dashOpenBtn_(o)}${o.dueDate ? `<br><span style="${sub}">due ${escapeHtml(adminDate_(o.dueDate))}</span>` : ""}</td>
       <td style="${td}">${escapeHtml(o.orgName)}</td>
-      <td style="${td}">${escapeHtml(o.customerName || "")}${rushPill_(o)}</td>
+      <td style="${td}">${escapeHtml(o.customerName || "")}${rushPill_(o)}${o.net30 ? " " + net30Tag_(o) : ""}</td>
       <td style="${td}font-size:13px;">${lines}</td>
       <td style="${td}text-align:right;white-space:nowrap;">${money(o.effectiveTotal)}</td>
       <td style="${td}text-align:right;white-space:nowrap;font-weight:600;color:${due > 0.005 ? "#b03a2e" : "#15803d"};">${due > 0.005 ? money(due) : "Paid"}</td>
@@ -2230,7 +2281,7 @@ const ADMIN_NAV_GROUPS = [
   ]},
   { label: "Inventory", items: [ ["inventory", "Blanks"], ["blankorder", "Blanks to order"], ["transfers", "Transfers"] ]},
   { label: "Finance", items: [ ["expenses", "Expenses"], ["money", "Accounts & money"], ["reconcile", "Reconcile"], ["accountviewer", "Account viewer"], ["shoprate", "Shop rate"] ]},
-  { label: "Reports", items: [ ["audit", "Audit log"], ["revenue", "Revenue report"], ["salestax", "Sales tax report"], ["fundraising", "Fundraising"], ["cogs", "Inventory & COGS"], ["runreport", "Run times"], ["books", "Periods & export"], ["taxpacket", "Tax packet"] ]},
+  { label: "Reports", items: [ ["audit", "Audit log"], ["revenue", "Revenue report"], ["salestax", "Sales tax report"], ["fundraising", "Fundraising"], ["unpaidpos", "Unpaid POs"], ["cogs", "Inventory & COGS"], ["runreport", "Run times"], ["books", "Periods & export"], ["taxpacket", "Tax packet"] ]},
   { label: "Settings", items: [
     ["settings", "Global settings"], ["vendors", "Vendor integrations"], ["comms", "Communications"], ["orphans", "Orphaned images"],
     ["users", "Users"], ["security", "Security (2FA)"], ["password", "Change password"],
@@ -2254,7 +2305,7 @@ const ADMIN_PAGE_FEATURE = {
   giftcards: "giftCards",
 };
 // Names for the "turned off" page; replaced by the server's own list once Global settings has loaded it.
-let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products", quotes: "Quotes", discounts: "Discount codes", giftCards: "Gift cards", emailCampaigns: "Email campaigns" };
+let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products", quotes: "Quotes", discounts: "Discount codes", giftCards: "Gift cards", emailCampaigns: "Email campaigns", ownGarments: "Customer-supplied garments" };
 function adminFeatureOn_(key){ return typeof featureOn_ !== "function" || featureOn_(key); }
 function adminPageFeature_(hash){ return ADMIN_PAGE_FEATURE[String(hash || "").replace(/^#\/?/, "").split("/")[0]] || ""; }
 function adminPageOn_(hash){ const f = adminPageFeature_(hash); return !adminDesktopHides_(hash) && (!f || adminFeatureOn_(f)) && decorationPageOn_(hash); }
@@ -2691,6 +2742,17 @@ function gEmailPanelHtml_(saved, { web = false } = {}){
             ${web ? `<div style="margin-bottom:6px;"><button type="button" class="admin-btn admin-btn-secondary" id="gEmailCheck" style="padding:3px 10px;font-size:12px;">Check the mailbox</button> <span id="gEmailCheckResult" style="font-size:13px;"></span></div>` : ""}
             ${saved && saved.on ? `<div><button type="button" class="admin-btn admin-btn-secondary" id="gEmailTest" style="padding:3px 10px;font-size:12px;">Send a test email</button> <span id="gEmailTestResult" style="font-size:13px;"></span></div>` : `<div class="admin-note">Save signs in to the mailbox first; nothing is saved if it can't.</div>`}`;
 }
+// Customer-supplied garments (migrations/0121): the waiver line printed on a garment check-in slip. `waiver` is what is
+// saved (null when the server didn't say: the usual sentence is offered, and sent only once it's changed).
+const OWN_GARMENTS_WAIVER_DEFAULT_ = "Customer's garments are decorated at the customer's risk; we're not responsible for garments damaged in normal production.";
+function gOwnGarmentsPanelHtml_(waiver){
+  const known = typeof waiver === "string";
+  return `<div class="admin-note" style="margin-bottom:8px;">Staff can mark a line on a Local sale, a quote or an order's Edit items as <strong>Customer's own garment</strong>: no blank is ordered or used for it and it carries no blank cost; instead the work waits until the garments are checked in (<strong>Check in garments…</strong> on the order: counted per size, their condition noted). Customers can't choose it on the shop.</div>
+            <label style="display:block;">Waiver line on the check-in slip
+              <textarea id="gOwnWaiver" rows="3" maxlength="500" data-known="${known ? "1" : ""}" style="width:100%;box-sizing:border-box;">${escapeHtml(known ? waiver : OWN_GARMENTS_WAIVER_DEFAULT_)}</textarea>
+            </label>
+            <div class="admin-note">Printed under the counts when the slip is printed (it can be left off each time). Leave it empty to print none.</div>`;
+}
 // Supplier connections (desktop): the vendors, once the program has them on.
 function gSuppliersPanelHtml_(on){
   return `<div class="admin-note" style="margin-bottom:10px;">Importing a supplier's files (product files, CSV, PDF invoices) always works. These need the internet; your logins with each supplier are saved encrypted on this computer, and shipment notices are checked every two hours while the program is open.</div>
@@ -2700,7 +2762,8 @@ function gSuppliersPanelHtml_(on){
 // approval under it) and Supplier connections, and leaves out the storefront (it can't be on there).
 function globalFeaturesHtml_(c){
   const desc = (k) => escapeHtml((c.featureList.find(f => f.key === k) || {}).description || "");
-  const on = (k) => c.features[k] !== false;
+  // Every feature is on until switched off — except Customer-supplied garments (migrations/0121), which starts off.
+  const on = (k) => k === "ownGarments" ? c.features[k] === true : c.features[k] !== false;
   const rows = [];
   for (const f of c.featureList) {
     const k = f.key;
@@ -2708,7 +2771,8 @@ function globalFeaturesHtml_(c){
     const locked = c.lockedFeatures.includes(k) && !(c.desktop && k === "shipping");
     const panel = k === "production" ? gProductionPanelHtml_(c.machineSettings, c.machineLoaded)
       : k === "digital" ? gDigitalPanelHtml_(c.digitalSettings)
-      : k === "shipping" ? gShippingPanelHtml_(c) : "";
+      : k === "shipping" ? gShippingPanelHtml_(c)
+      : k === "ownGarments" ? gOwnGarmentsPanelHtml_(c.ownGarmentsWaiver) : "";
     rows.push(gFeatureRowHtml_(k, { label: f.label, desc: desc(k), checked: on(k) && !locked, panel, hidden: c.desktop && locked, disabled: locked }));
   }
   if (c.desktop) {
@@ -2940,6 +3004,7 @@ function adminCanOpenPage_(hash){
   if (page === "fundraising") return adminCanFundraising_();   // and for Fundraising (migrations/0110)
   if (page === "discounts") return adminCanDiscounts_();       // and for Discount codes (migrations/0115)
   if (page === "giftcards") return adminCanGiftCards_();       // and for Gift cards (migrations/0120)
+  if (page === "unpaidpos") return adminCanUnpaidPos_();       // and for Reports → Unpaid POs (migrations/0121)
   // The one Run order is for a role that has the production queue or the transfer queue (#runtransfer is the DTF filter).
   if (page === "runorder" || page === "runtransfer") return adminCan_("run.queue", "read") || adminCan_("transfer.queue", "read");
   return adminItemOn_(adminPageItem_(hash));
@@ -2954,6 +3019,13 @@ function adminCanQuotes_(){ return adminCan_("quotes.estimates", "read"); }
 function adminCanDiscounts_(){ return adminCan_("discounts.codes", "read"); }
 // May this user open Gift cards (giftcards.cards, read)? Issuing and resending need edit; adjusting and voiding need full.
 function adminCanGiftCards_(){ return adminCan_("giftcards.cards", "read"); }
+// May this user open Reports → Unpaid POs (reports.receivables, read)? It has no feature switch of its own: it follows the
+// Net 30 payment method (Global settings → Payment methods), and says so when that is off and no order is on terms.
+// Accepting a PO from it needs Net 30 terms on orders (orders.terms, edit).
+function adminCanUnpaidPos_(){ return adminCan_("reports.receivables", "read"); }
+// Customer-supplied garments (migrations/0121) is the one feature that starts OFF: a switch the catalog hasn't sent
+// (an older server, or one that never had it) is off, where featureOn_ would call it on.
+function ownGarmentsOn_(){ return typeof siteFeatures !== "undefined" && !!siteFeatures && siteFeatures.ownGarments === true; }
 // The menu without the pages of switched-off features or the role's hidden items (a group left empty disappears).
 function adminNavGroups_(){
   return ADMIN_NAV_GROUPS.map(g => ({ label: g.label, items: g.items.filter(it => !Array.isArray(it) || (adminPageOn_(it[0]) && adminCanOpenPage_(it[0]))) }))
@@ -3377,7 +3449,8 @@ function orderViewFilter_(orders){
 // Delivered, paid in full, not voided, something still active, not already completed. Downloads only (digital
 // products, migrations/0086): nothing is delivered, so paid in full is enough.
 function canCompleteOrder(o){
-  return !!o && !o.voidedAt && !o.completedAt && (!!o.deliveredAt || !!o.digitalOnly) && !!o.paid && (o.items || []).some(it => !it.cancelDate);
+  // Net 30 with an accepted PO (migrations/0121) completes while money is still owed: it stays on Unpaid POs until paid.
+  return !!o && !o.voidedAt && !o.completedAt && (!!o.deliveredAt || !!o.digitalOnly) && (!!o.paid || (!!o.net30 && !!String(o.poNumber || "").trim() && !!o.poAcceptedAt)) && (o.items || []).some(it => !it.cancelDate);
 }
 // Close out (or reopen) orders, then repaint the list — completed ones drop out of the default view.
 // `at`: when it was completed (asked for when completing — see completeOrdersAsk_); reopening needs no date.
@@ -5017,11 +5090,118 @@ async function setLineItemRefund(orgId, sheetRow, defaultAmount, paymentMethod){
 }
 
 // Whether an order's work may go ahead (db.js workCleared): paid, paid for everything but a rush fee (migrations/0082),
-// or set to pay on delivery (migrations/0105) — its steps go on and it's paid when it's delivered.
-function workCleared_(o){ return !!(o && (o.paid === true || o.paidForWork === true || o.payOnDelivery === true)); }
+// or set to pay on delivery (migrations/0105) — its steps go on and it's paid when it's delivered — or on Net 30 with a
+// PO that was accepted (migrations/0121, db.js net30Cleared: written out here on one line, as tests lift it on its own).
+function workCleared_(o){ return !!(o && (o.paid === true || o.paidForWork === true || o.payOnDelivery === true || (!!o.net30 && !!String(o.poNumber || "").trim() && !!o.poAcceptedAt))); }
 // This shop's pay-on-delivery rule ({ allowed, localSaleOnly }), as its last getOrders said (db.js payOnDeliveryRule).
-// The Paid cell: "Paid", "Unpaid", or — set to pay on delivery and not paid yet — "Unpaid · on delivery".
-function paidLabel_(o){ return o.paid ? "Paid" : o.payOnDelivery ? "Unpaid · on delivery" : "Unpaid"; }
+// The Paid cell: "Paid", "Unpaid", or — set to pay on delivery and not paid yet — "Unpaid · on delivery"; on Net 30
+// terms (migrations/0121), "Unpaid · Net 30".
+function paidLabel_(o){ return o.paid ? "Paid" : o.payOnDelivery ? "Unpaid · on delivery" : o.net30 ? "Unpaid · Net 30" : "Unpaid"; }
+// ---- Net 30 terms (migrations/0121) -------------------------------------------------------------------------------
+// An order on Net 30 is cleared for work once its PO is accepted (a PO typed by staff is accepted as it is typed; one the
+// customer typed waits for Accept PO). The money stays owed until it is paid; the due date is the server's (termsDueDate,
+// worked out when read from Global settings → Net 30 terms). Whether this shop's orders may be put on Net 30 at all
+// ({ allowed }) comes with its getOrders, like pay on delivery; a server that doesn't say offers it only on orders that
+// are on Net 30 already.
+function net30Rule_(orgId){ return ((window._ordersNet30 || {})[orgId]) || { allowed: false }; }
+// "" | "PO needed" | "PO to check" | "accepted" — the server's poStatus, or the same rule worked out from the fields.
+function net30Status_(o){
+  if(!o || !o.net30) return "";
+  if(o.poStatus) return o.poStatus;
+  return !String(o.poNumber || "").trim() ? "PO needed" : o.poAcceptedAt ? "accepted" : "PO to check";
+}
+// The PO as people say it: "PO 1001", or the number as typed when it already starts with PO.
+function net30PoText_(po){ const p = String(po || "").trim(); return !p ? "" : /^po\b/i.test(p) ? p : "PO " + p; }
+// The order's Net 30 tag for the Orders list, its card and Home: "Net 30 — PO needed", "Net 30 — PO to check" or
+// "PO 1001 · due Dec 31" (red once that day has passed with money owed). "" for an order not on terms.
+function net30Tag_(o){
+  const s = net30Status_(o);
+  if(!s) return "";
+  if(s === "PO needed") return `<span class="n30-tag n30-tag-need" title="On Net 30 terms: the work waits for a PO number">Net 30 — PO needed</span>`;
+  if(s === "PO to check") return `<span class="n30-tag n30-tag-check" title="The customer typed ${escapeHtml(net30PoText_(o.poNumber))}: accept it to clear the order for work">Net 30 — PO to check</span>`;
+  const due = o.termsDueDate || "";
+  const late = !!(due && Number(o.balanceDue) > 0 && localToday_() > due);
+  const bits = [net30PoText_(o.poNumber), due ? (late ? "was due " : "due ") + adminDate_(due, { month: "short", day: "numeric" }) : Number(o.balanceDue) > 0 ? "due date to come" : ""].filter(Boolean);
+  return `<span class="n30-tag${late ? " n30-tag-late" : ""}" title="Net ${Number(o.termsDays) || 30}${o.poAcceptedBy ? " · PO accepted by " + escapeHtml(o.poAcceptedBy) : ""}">${escapeHtml(bits.join(" · "))}</span>`;
+}
+// The order's Net 30… window: put it on Net 30 (or take it off), its days, its PO, Accept PO, and when it falls due.
+async function showOrderTerms_(orgId, orderId){
+  const o = ((window._ordersCache || {})[orgId] || []).find(x => x.orderId === orderId);
+  if(!o){ showToast("Order not found — refresh the list.", true); return; }
+  const canEdit = adminCan_("orders.terms", "edit");
+  const status = net30Status_(o);
+  const facts = o.net30 ? [
+    `<div><strong>${status === "PO needed" ? "No PO yet" : status === "PO to check" ? "PO typed by the customer, not accepted yet" : "PO accepted"}</strong>${o.poNumber ? " — " + escapeHtml(net30PoText_(o.poNumber)) : ""}</div>`,
+    o.poTypedAt ? `<div>Typed by the customer ${escapeHtml(adminDateTime_(o.poTypedAt))}</div>` : "",
+    o.poAcceptedAt ? `<div>Accepted ${escapeHtml(adminDateTime_(o.poAcceptedAt))}${o.poAcceptedBy ? " by " + escapeHtml(o.poAcceptedBy) : ""}</div>` : "",
+    `<div>${o.termsDueDate ? `Due <strong>${escapeHtml(adminDate_(o.termsDueDate, { month: "short", day: "numeric", year: "numeric" }))}</strong>` : "Due date: not known yet"} · Net ${Number(o.termsDays) || 30}${o.invoicedAt ? " · invoice first sent " + escapeHtml(adminDate_(o.invoicedAt)) : " · no invoice sent yet"}</div>`,
+    Number(o.balanceDue) > 0 ? `<div>Still owed: <strong>${adminMoney_(o.balanceDue)}</strong></div>` : `<div>Paid in full.</div>`,
+  ].join("") : `<div>Not on Net 30: the work waits for payment as usual${o.payOnDelivery ? " (it is set to pay on delivery)" : ""}.</div>`;
+  const { ov, close } = inventoryModal_("Net 30 — " + escapeHtml(orderId), `
+    <form class="n30-box" id="n30Form" novalidate>
+      <div class="n30-facts" id="n30Facts">${facts}</div>
+      ${canEdit ? `<label class="cust-check"><input type="checkbox" id="n30On" ${o.net30 ? "checked" : ""}> Net 30: the customer pays by invoice, within the days below</label>
+      <div class="n30-row" id="n30Fields"${o.net30 ? "" : " hidden"}>
+        <label class="cust-field"><span>Days to pay</span><input type="number" id="n30Days" min="1" max="365" step="1" value="${o.termsDays != null ? Number(o.termsDays) : ""}" placeholder="Default (30)"></label>
+        <label class="cust-field"><span>PO number</span><input type="text" id="n30Po" maxlength="60" autocomplete="off" spellcheck="false" value="${escapeHtml(o.poNumber || "")}" placeholder="e.g. PO-1001"></label>
+      </div>
+      <div class="cust-note">A PO typed here counts at once: the order is cleared for work — blanks, the run, delivery and completing it — while the money stays owed, on Reports → Unpaid POs until it is paid. Blank days use the customer's own terms, else the default under Global settings.</div>
+      <div class="cust-err" id="n30Err" role="alert"></div>
+      <div class="cust-dialog-actions">
+        ${status === "PO to check" ? `<button type="button" class="admin-btn admin-btn-secondary" id="n30Accept" style="margin-right:auto;">Accept PO</button>` : ""}
+        <button type="button" class="admin-btn admin-btn-secondary" id="n30Cancel">Cancel</button>
+        <button type="submit" class="admin-btn" id="n30Save">Save</button>
+      </div>` : `<div class="cust-note">Changing an order's terms needs Net 30 terms on orders (Users → Roles and permissions).</div>
+      <div class="cust-dialog-actions"><button type="button" class="admin-btn" id="n30Cancel">Close</button></div>`}
+    </form>`, 520, { guard: canEdit });
+  const $ = (s) => ov.querySelector(s);
+  $("#n30Cancel").onclick = () => $("[data-modal-close]").click();
+  if(!canEdit) return;
+  const done = (msg) => { close(); showToast(msg); refreshOrderRows_(orgId, [orderId]); };
+  $("#n30On").onchange = () => { $("#n30Fields").hidden = !$("#n30On").checked; };
+  if($("#n30Accept")) $("#n30Accept").onclick = async () => {
+    const b = $("#n30Accept"); b.disabled = true;
+    try { await hoopApi_({ action: "acceptOrderPo", orderId, org: orgId }); done(net30PoText_(o.poNumber) + " accepted: order " + orderId + " is cleared for work."); }
+    catch(e){ $("#n30Err").textContent = e.message || "Couldn't accept the PO."; b.disabled = false; }
+  };
+  $("#n30Form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = $("#n30Err"); err.textContent = "";
+    const on = $("#n30On").checked;
+    const daysRaw = $("#n30Days").value.trim(), days = daysRaw === "" ? null : Number(daysRaw);
+    const po = $("#n30Po").value.trim();
+    if(on && days !== null && !(Number.isInteger(days) && days >= 1 && days <= 365)){ err.textContent = "Days to pay: a whole number from 1 to 365, or blank for the default."; $("#n30Days").focus(); return; }
+    if(on && po.length > 60){ err.textContent = "A PO number is at most 60 characters."; $("#n30Po").focus(); return; }
+    if(!on && o.net30 && !(await askConfirm_("Take order " + orderId + " off Net 30?\n\nSteps not done yet wait for payment again.", { confirmLabel: "Take it off" }))) return;
+    const b = $("#n30Save"); b.disabled = true;
+    try {
+      await hoopApi_({ action: "setOrderTerms", orderId, org: orgId, net30: on, ...(on ? { termsDays: days, poNumber: po } : {}) });
+      done(!on ? "Order " + orderId + " is off Net 30." : po ? "Order " + orderId + " is on Net 30 with " + net30PoText_(po) + "." : "Order " + orderId + " is on Net 30 — it waits for a PO number.");
+    } catch(ex){ err.textContent = ex.message || "Couldn't save the terms."; b.disabled = false; }
+  });
+}
+// The Accept PO button on an order's row (a PO the customer typed): accepted after a yes.
+async function acceptOrderPoRow_(orgId, orderId){
+  const o = ((window._ordersCache || {})[orgId] || []).find(x => x.orderId === orderId);
+  const po = net30PoText_(o && o.poNumber) || "the PO";
+  if(!(await askConfirm_("Accept " + po + " for order " + orderId + "?\n\nThe order is cleared for work: blanks, the run and delivery go ahead. The money stays owed until it's paid.", { confirmLabel: "Accept PO" }))) return;
+  try { await hoopApi_({ action: "acceptOrderPo", orderId, org: orgId }); showToast(po + " accepted for order " + orderId + "."); refreshOrderRows_(orgId, [orderId]); }
+  catch(e){ showToast("Couldn't accept the PO: " + (e.message || "unknown error"), true); }
+}
+// ---- Customer-supplied garments (migrations/0121) ----------------------------------------------------------------
+// A line decorated on the customer's own garments: its tag on the Orders list and card, and Check in garments… while the
+// order is live (the garments in: counted per size, their condition noted — public/admin-garments.js).
+function ownGarmentLineHtml_(o, it, orgId){
+  if(!it || !it.customerOwned) return "";
+  const tag = it.ownReceivedAt
+    ? `<span class="og-tag og-tag-in" title="Checked in ${escapeHtml(adminDate_(it.ownReceivedAt))}">Customer's garments · in</span>`
+    : `<span class="og-tag" title="Decorated on the customer's own garments: no blank is ordered or used">Customer's garments</span>`;
+  const itemId = it.sheetRow != null ? it.sheetRow : it.id;
+  const live = !o.voidedAt && !it.cancelDate && !o.completedAt && itemId != null;
+  const btn = live && (adminCan_("orders.stepsEarly", "edit") || it.ownReceivedAt)
+    ? ` <button type="button" class="admin-btn admin-btn-secondary og-btn" data-org="${escapeHtml(orgId)}" data-order="${escapeHtml(o.orderId)}" data-item="${escapeHtml(String(itemId))}" data-admin-action="showGarmentCheckinFor_">${it.ownReceivedAt ? "Garments…" : "Check in garments…"}</button>` : "";
+  return ` ${tag}${btn}`;
+}
 function podRule_(orgId){ return ((window._ordersPod || {})[orgId]) || { allowed: false, localSaleOnly: false }; }
 
 // Fulfillment stages in strict progression order.
@@ -5092,6 +5272,15 @@ function adminActionCell(org, o){
   const podOffBtn = o.payOnDelivery && !o.paid && !o.completedAt && can("orders.payOnDelivery", "edit")
     ? `<button class="admin-btn" ${dataAttrs} data-on="0" data-need="orders.payOnDelivery:edit" data-admin-action="setPayOnDelivery_" title="Back to the usual rule: the steps wait for payment" style="margin-top:4px;">Not pay on delivery</button>` : "";
   const podTag = o.payOnDelivery && !o.paid ? `<div class="mono" style="font-size:11px;color:#b45309;margin-bottom:4px;" title="The steps go on before it's paid; it's completed once paid in full">Pay on delivery</div>` : "";
+  // Net 30 terms (migrations/0121): Net 30… where the shop's orders may go on terms (or the order is on them already), and
+  // Accept PO for a PO the customer typed — for a role with Net 30 terms on orders. Written out here, not through a helper
+  // (tests lift this function out of the file on its own).
+  const n30Allowed = !!(((window._ordersNet30 || {})[org.orgId]) || {}).allowed;
+  const n30Status = !o.net30 ? "" : o.poStatus || (!String(o.poNumber || "").trim() ? "PO needed" : o.poAcceptedAt ? "accepted" : "PO to check");
+  const termsBtn = !o.voidedAt && (o.net30 || (n30Allowed && !o.paid && !o.completedAt)) && can("orders.terms", "edit")
+    ? `<button class="admin-btn" ${dataAttrs} data-need="orders.terms:edit" data-admin-action="showOrderTerms_" title="${o.net30 ? "This order's Net 30 terms: its PO, days and due date" : "Let the customer pay by invoice: the work goes ahead once a PO is in"}" style="margin-top:4px;">Net 30…</button>` : "";
+  const acceptPoBtn = n30Status === "PO to check" && !o.voidedAt && can("orders.terms", "edit")
+    ? `<button class="admin-btn" ${dataAttrs} data-need="orders.terms:edit" data-admin-action="acceptOrderPoRow_" title="The customer typed this PO: accept it to clear the order for work" style="margin-top:4px;">Accept PO</button>` : "";
 
   // Digitizing is often sent out before the order is paid, so Digitizing… is offered on an unpaid order too.
   const digitizingBtn = !can("production.digitizing", "read") ? "" : `<button class="admin-btn" ${dataAttrs} data-admin-action="showOrderDigitizing_" title="Designs sent to an outside digitizer for this order, and what they cost" style="margin-top:4px;">Digitizing…</button>`;
@@ -5099,7 +5288,7 @@ function adminActionCell(org, o){
   // Paid for everything but a rush fee (migrations/0082) counts as paid for the work: the stages go on — and so does
   // an order set to pay on delivery (migrations/0105).
   if(!workCleared_(o)){
-    return (can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid">Mark as paid</button>` : `<span class="muted-cell" style="font-size:12px;">Not paid</span>`) + podOnBtn +
+    return (can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid">Mark as paid</button>` : `<span class="muted-cell" style="font-size:12px;">Not paid</span>`) + podOnBtn + acceptPoBtn + termsBtn +
       (adminDesktopNoEmail_() || !can("orders.invoices", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.invoices:edit" data-admin-action="resendEmail" style="margin-top:4px;">${resendLabel}</button>`) +
       (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") +
       (can("orders.details", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" data-admin-action="editOrder" style="margin-top:4px;">Edit items</button>` : "") +
@@ -5134,7 +5323,7 @@ function adminActionCell(org, o){
       : "";
   // The rush fee still owed (the rest is paid), or a pay-on-delivery order's balance: Mark as paid settles it.
   const payRushBtn = !o.paid && Number(o.balanceDue) > 0 && can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid" title="${o.payOnDelivery && !o.paidForWork ? "Record the balance as paid" : "Record the rest of the balance — the rush fee — as paid"}" style="margin-top:4px;">Mark as paid</button>` : "";
-  return podTag + stageEl + completeBtn + payRushBtn + podOffBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + digitizingBtn + rushBtn + dlBtn + customerBtn + reorderBtn + paymentsBtn + deleteBtn;
+  return podTag + stageEl + completeBtn + payRushBtn + podOffBtn + acceptPoBtn + termsBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + digitizingBtn + rushBtn + dlBtn + customerBtn + reorderBtn + paymentsBtn + deleteBtn;
 }
 
 // The order row's Resend downloads (digital products, migrations/0086): a new download link, emailed with the files
@@ -6356,7 +6545,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" data-admin-action="editOrderDueDate" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
         <td>${orderCustomerNameHtml_(o)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}${orderEstimatePill_(o)}${orderFundraiserPill_(o, org.orgId)}</td>
         <td>${escapeHtml(o.orderId)}</td>
-        <td>${escapeHtml(it.name)}</td>
+        <td>${escapeHtml(it.name)}${ownGarmentLineHtml_(o, it, org.orgId)}</td>
         <td>${itemHasSize_(it) ? escapeHtml(it.size) : "OSFA"}</td>
         <td>${it.qty}</td>
         <td>${lineDetail_(it) ? escapeHtml(lineDetail_(it)) : "—"}</td>
@@ -6364,7 +6553,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         <td>${cancelCol}</td>
         <td>${refundCol}</td>
         ${idx === 0 ? `
-          <td rowspan="${o.items.length}">${escapeHtml(o.paymentMethod || "—")}</td>
+          <td rowspan="${o.items.length}">${escapeHtml(o.paymentMethod || "—")}${o.net30 ? `<br>${net30Tag_(o)}` : ""}</td>
           <td rowspan="${o.items.length}" data-paid-td>${paidLabel_(o)}</td>
           <td rowspan="${o.items.length}" data-discount-td style="text-align:right;white-space:nowrap;">${o.discountAmount > 0 ? `<span style="color:#166534;">−$${Number(o.discountAmount).toFixed(2)}</span>${orderDiscountNote_(o) ? `<br><span style="font-size:11px;color:var(--ink-soft);">${escapeHtml(orderDiscountNote_(o))}</span>` : ""}` : "—"}</td>
           <td rowspan="${o.items.length}" data-balance-td style="text-align:right;white-space:nowrap;font-weight:600;color:${o.balanceDue > 0.005 ? "#b03a2e" : "var(--ink-soft)"};">${o.balanceDue > 0.005 ? `$${Number(o.balanceDue).toFixed(2)}` : o.amountReceived > 0 ? "Settled" : "—"}</td>
@@ -6443,7 +6632,7 @@ function orderCardHtml_(o, org, verif, showShop){
     const cancel = cancelCell(it, o, org.orgId), refund = refundCell(it, o, org.orgId);
     const extra = (canceled || !/muted-cell/.test(cancel) ? cancel : "") + (refund ? " " + refund : "");
     return `<li class="${canceled ? "oc-item-cancelled" : ""}">
-      <div class="oc-item-main"><span>${it.qty} × ${escapeHtml(it.name)} <span class="oc-dim">· ${escapeHtml(size || "")}</span>${it.personalized ? ` <span class="oc-dim">· “${escapeHtml(it.persName || "yes")}”</span>` : ""}${cfgSummary_(it) ? ` <span class="oc-dim">· ${escapeHtml(cfgSummary_(it))}</span>` : ""}</span>
+      <div class="oc-item-main"><span>${it.qty} × ${escapeHtml(it.name)} <span class="oc-dim">· ${escapeHtml(size || "")}</span>${ownGarmentLineHtml_(o, it, org.orgId)}${it.personalized ? ` <span class="oc-dim">· “${escapeHtml(it.persName || "yes")}”</span>` : ""}${cfgSummary_(it) ? ` <span class="oc-dim">· ${escapeHtml(cfgSummary_(it))}</span>` : ""}</span>
         <span class="oc-num">${canceled ? `<s>${money(it.lineTotal)}</s>` : money(it.lineTotal)}</span></div>
       ${extra ? `<div class="oc-item-extra">${extra}</div>` : ""}
     </li>`;
@@ -6471,7 +6660,7 @@ function orderCardHtml_(o, org, verif, showShop){
         ${showShop ? `<div class="oc-dim">${escapeHtml(org.name || org.orgId)}</div>` : ""}
       </div>
       <div class="oc-amt"><div class="oc-total">${money(total)}</div>
-        <div class="oc-dim"><span style="color:${o.paid ? "#166534" : o.payOnDelivery ? "#b45309" : "#b03a2e"};font-weight:600;">${paidLabel_(o)}</span> · ${escapeHtml(o.paymentMethod || "—")}</div></div>
+        <div class="oc-dim"><span style="color:${o.paid ? "#166534" : o.payOnDelivery ? "#b45309" : "#b03a2e"};font-weight:600;">${paidLabel_(o)}</span> · ${escapeHtml(o.paymentMethod || "—")}</div>${o.net30 ? `<div class="oc-dim">${net30Tag_(o)}</div>` : ""}</div>
     </div>
     <div class="oc-status">${status}</div>
     <ul class="oc-items">${items}</ul>
@@ -6546,6 +6735,8 @@ async function renderOrdersPage(app, opts){
       const orders = Array.isArray(shop.orders) ? shop.orders : [];
       window._ordersMore[shop.orgId] = shop.more ? orders.length : 0;
       window._ordersCache[shop.orgId] = orders;
+      // Net 30 terms (migrations/0121): the shop's rule, when the server sends it with the shop (net30Rule_).
+      if (shop.net30 && typeof shop.net30 === "object") (window._ordersNet30 = window._ordersNet30 || {})[shop.orgId] = shop.net30;
       const vm = {};
       (shop.verifications || []).forEach(v => { vm[v.orderId] = v; });
       window._verifCache[shop.orgId] = vm;
@@ -8377,6 +8568,42 @@ function ensureGiftCardsPage_(){
   });
   return _giftCardsPagePromise;
 }
+// Reports → Unpaid POs (migrations/0121) is public/admin-receivables.js, loaded the same way: it defines renderUnpaidPos(app).
+let _receivablesPagePromise = null;
+function ensureReceivablesPage_(){
+  if (typeof renderUnpaidPos === "function") return Promise.resolve();
+  if (!_receivablesPagePromise) _receivablesPagePromise = new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = "/admin-receivables.js";
+    sc.onload = () => resolve();
+    sc.onerror = () => { _receivablesPagePromise = null; sc.remove(); reject(new Error("Couldn't load the Unpaid POs page")); };
+    document.head.appendChild(sc);
+  });
+  return _receivablesPagePromise;
+}
+// The Check in garments window (customer-supplied garments, migrations/0121) is public/admin-garments.js, loaded the first
+// time it is opened: it defines showGarmentCheckin_(orderId, item, ctx).
+let _garmentsUiPromise = null;
+function ensureGarmentsUi_(){
+  if (typeof showGarmentCheckin_ === "function") return Promise.resolve();
+  if (!_garmentsUiPromise) _garmentsUiPromise = new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = "/admin-garments.js";
+    sc.onload = () => resolve();
+    sc.onerror = () => { _garmentsUiPromise = null; sc.remove(); reject(new Error("Couldn't load the garment check-in")); };
+    document.head.appendChild(sc);
+  });
+  return _garmentsUiPromise;
+}
+// An order line's Check in garments… (orderRowsHtml_ / orderCardHtml_): the line, from the loaded list, in its window.
+async function showGarmentCheckinFor_(orgId, orderId, itemId){
+  const caches = window._ordersCache || {};
+  const o = (caches[orgId] || []).find(x => x.orderId === orderId) || Object.values(caches).flat().find(x => x && x.orderId === orderId);
+  const it = o && (o.items || []).find(x => String(x.sheetRow != null ? x.sheetRow : x.id) === String(itemId));
+  if(!it){ showToast("That line isn't in the list — refresh it.", true); return; }
+  try { await ensureGarmentsUi_(); } catch(e){ showToast(e.message || "Couldn't load the garment check-in", true); return; }
+  await showGarmentCheckin_(orderId, it, { orgId, order: o, onDone: () => refreshOrderRows_(orgId, [orderId]) });
+}
 // The Email campaigns tab (migrations/0117) is public/admin-campaigns.js, with public/campaign-render.js (the renderer the
 // server sends with), loaded the same way: it defines renderCampaigns(app, sub).
 let _campaignsPagePromise = null;
@@ -8747,7 +8974,10 @@ async function createLocalSaleOnce_(orgId, opts){
   // The window stays open, with everything typed in it, until the server has answered: a session that ended asks
   // to sign in and sends the same sale again, and any other problem is shown in the window.
   let data = null;
-  const result = await showLocalSaleModal(products, blanks, { orgId, customer: opts.customer, reorder, payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"), graphics, tiersCents, submit: async (typed) => {
+  // Net 30 (migrations/0121): offered where the shop's orders may go on terms, to a role with Net 30 terms on orders; a line on
+  // the customer's own garments, while that feature is on.
+  const result = await showLocalSaleModal(products, blanks, { orgId, customer: opts.customer, reorder, payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"),
+    net30: net30Rule_(orgId).allowed && adminCan_("orders.terms", "edit"), ownGarments: ownGarmentsOn_(), graphics, tiersCents, submit: async (typed) => {
     const { sendInvoice: _later, ...sale } = typed;
     const send = () => adminSave_({action:"createLocalSale", org:orgId, requestId, ...sale});
     let r;
@@ -8851,6 +9081,13 @@ function showLocalSaleModal(products, blanks, opts = {}){
         ${LS("Qty", false, fid("lsQty", n))}
         <input type="number" id="${fid("lsQty", n)}" data-f="qty" min="1" max="${MAX_QTY}" value="1" style="${IS()}">
 
+        ${opts.ownGarments ? `<div data-f="ownWrap" style="margin:-4px 0 10px;">
+          <label style="font-size:14px;font-weight:500;display:flex;align-items:flex-start;gap:8px;" title="The customer brings the garments: no blank is ordered or used, and the work waits until they're checked in">
+            <input type="checkbox" id="${fid("lsOwn", n)}" data-f="customerOwned" style="width:auto;margin:3px 0 0;">
+            <span>Customer's own garment <span style="font-weight:400;color:var(--ink-soft,#888);font-size:13px;">— no blank; check the garments in on the order</span></span>
+          </label>
+        </div>` : ""}
+
         <div data-f="customDesignWrap" style="display:none;margin-bottom:10px;">
           <label style="font-size:14px;font-weight:500;display:flex;align-items:flex-start;gap:8px;">
             <input type="checkbox" id="${fid("lsCustomDesign", n)}" data-f="customDesign" style="width:auto;margin:3px 0 0;">
@@ -8924,7 +9161,15 @@ function showLocalSaleModal(products, blanks, opts = {}){
           <option value="Zelle">Zelle</option>
           <option value="Check">Check</option>
           <option value="Other">Other</option>
+          ${opts.net30 ? `<option value="Net 30">Net 30 (pay by invoice)</option>` : ""}
         </select>
+        ${opts.net30 ? `<div id="lsNet30Wrap" data-need="orders.terms:edit" style="display:none;margin:-4px 0 10px;padding:10px;border:1px solid var(--border,#ddd);border-radius:6px;">
+          <div style="display:flex;gap:8px;">
+            <div style="flex:2;">${LS("PO number", true, "lsPo")}<input type="text" id="lsPo" maxlength="60" autocomplete="off" spellcheck="false" placeholder="e.g. PO-1001" style="${IS()}"></div>
+            <div style="flex:1;">${LS("Days to pay", true, "lsTermsDays")}<input type="number" id="lsTermsDays" min="1" max="365" step="1" placeholder="Default" style="${IS()}"></div>
+          </div>
+          <div style="font-size:12px;color:var(--ink-soft,#888);margin-top:-4px;">With a PO the work goes ahead now and the money stays owed (Reports → Unpaid POs); without one it waits until a PO is added with Net 30… on the order. Blank days: the customer's own terms, else the default.</div>
+        </div>` : ""}
 
         ${adminFeatureOn_("giftCards") ? `<div id="lsGiftWrap" data-need="orders.payments:edit" style="margin-bottom:10px;">
           ${LS("Gift card", true, "lsGift")}
@@ -9407,9 +9652,11 @@ function showLocalSaleModal(products, blanks, opts = {}){
       lsField("#lsEmail").value = email;
       if (pickedCustomer.phone) lsField("#lsPhone").value = pickedCustomer.filled.phone;
       lsField("#lsCustomerInfo").open = true;   // so what was filled in can be seen (and changed)
+      // Net 30 (migrations/0121): a blank Days to pay takes the customer's own terms; say what they are.
+      if (lsField("#lsTermsDays")) lsField("#lsTermsDays").placeholder = Number(c.termsDays) > 0 ? String(Number(c.termsDays)) + " (theirs)" : "Default";
       showPicked();
     };
-    const forgetCustomer = () => { pickedCustomer = null; showPicked(); };
+    const forgetCustomer = () => { pickedCustomer = null; if (lsField("#lsTermsDays")) lsField("#lsTermsDays").placeholder = "Default"; showPicked(); };
     if (lsField("#lsCustomerWrap")) {
       wireCustomerSearch_(overlay, "lsCustomer", (c) => { pickCustomer(c); if (pickedCustomer) lsField("#lsCustomerClear").focus(); });
       lsField("#lsCustomerClear").addEventListener("click", () => {
@@ -9563,6 +9810,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
         fire(sel);
         const qty = Math.max(1, Math.min(MAX_QTY, parseInt(l.qty) || 1));
         f(line, "qty").value = String(qty);
+        if (l.customerOwned && f(line, "customerOwned")) f(line, "customerOwned").checked = true;   // migrations/0121
         if (isCustom) {
           f(line, "customDesc").value = String(l.name || "").slice(0, 200);
           f(line, "customUnitPrice").value = (Number(l.customUnitPrice) || 0).toFixed(2);
@@ -9614,10 +9862,24 @@ function showLocalSaleModal(products, blanks, opts = {}){
     }
     reorderFill();
 
+    // Net 30 (migrations/0121): its PO and days show while it is the payment picked.
+    const net30Wrap = overlay.querySelector("#lsNet30Wrap");
+    if(net30Wrap){
+      const showNet30 = () => { net30Wrap.style.display = overlay.querySelector("#lsPayment").value === "Net 30" ? "" : "none"; };
+      overlay.querySelector("#lsPayment").addEventListener("change", showNet30);
+      showNet30();
+    }
+
     const finish = (result) => { if(sending && !result) return; document.body.removeChild(overlay); resolve(result); };
 
     // One item read from its block: { item } or { error, focus }.
     function readLine(line){
+      const r = readLineOnly(line);
+      // On the customer's own garments (migrations/0121): no blank for it; the server refuses it while the feature is off.
+      if(r.item && f(line, "customerOwned") && f(line, "customerOwned").checked) r.item.customerOwned = true;
+      return r;
+    }
+    function readLineOnly(line){
       const pid = f(line, "product").value;
       const qty = Math.max(1, Math.min(MAX_QTY, parseInt(f(line, "qty").value) || 1));
       if(pid === "__custom__"){
@@ -9696,6 +9958,25 @@ function showLocalSaleModal(products, blanks, opts = {}){
         errEl.style.display = "";
         return;
       }
+      // Net 30 (migrations/0121): the customer pays later, by invoice — not Paid, and not pay on delivery as well.
+      const net30 = paymentMethod === "Net 30" && !!overlay.querySelector("#lsNet30Wrap");
+      let net30Days = null, net30Po = "";
+      if(net30){
+        if(overlay.querySelector("#lsPaid").checked || (podBox && podBox.checked)){
+          errEl.textContent = "Net 30 is paid later, by invoice: untick " + (overlay.querySelector("#lsPaid").checked ? "Paid" : "Pay on delivery") + ".";
+          errEl.style.display = "";
+          return;
+        }
+        net30Po = overlay.querySelector("#lsPo").value.trim();
+        const daysRaw = overlay.querySelector("#lsTermsDays").value.trim();
+        net30Days = daysRaw === "" ? null : Number(daysRaw);
+        if(net30Days !== null && !(Number.isInteger(net30Days) && net30Days >= 1 && net30Days <= 365)){
+          errEl.textContent = "Days to pay: a whole number from 1 to 365, or blank for the default.";
+          errEl.style.display = "";
+          overlay.querySelector("#lsTermsDays").focus();
+          return;
+        }
+      }
       if(contact && (!contact.includes("@") || !contact.includes("."))){
         errEl.textContent = "Enter a valid email address, or leave it blank.";
         errEl.style.display = "";
@@ -9749,6 +10030,8 @@ function showLocalSaleModal(products, blanks, opts = {}){
         paid:      overlay.querySelector("#lsPaid").checked,
         delivered: overlay.querySelector("#lsDelivered").checked,
         ...(podBox && podBox.checked ? { payOnDelivery: true } : {}),
+        // Net 30 (migrations/0121): a PO typed here is staff's, so it counts at once (the server accepts it).
+        ...(net30 ? { net30: true, ...(net30Days !== null ? { termsDays: net30Days } : {}), ...(net30Po ? { poNumber: net30Po } : {}) } : {}),
         placedAt:  (readWhen_(overlay.querySelector("#lsDate")).at) || null,   // when the sale happened — also when it was paid / handed over
         sendInvoice: wantsInvoice,
         // One code goes as it always did; several go as a list (the server takes up to 5 and refuses a second one when the
@@ -12054,13 +12337,15 @@ async function renderGlobalSettings(app){
           <input type="${/Email$/.test(key) ? "email" : "text"}" id="${id}" value="${escapeHtml(biz[key] || "")}" ${extra || ""}>
         </label>${note ? `<div class="admin-note" style="margin-top:-6px;">${note}</div>` : ""}`;
     // Features: the list (names and what each covers) and the switches come from the server.
-    let featureList = [], features = {}, lockedFeatures = [];
+    let featureList = [], features = {}, lockedFeatures = [], ownGarmentsWaiver = null;
     try{
       const fr = await fetch("/api/orders", { method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({action: "getFeatures", key: adminKey}) });
       const fd = await fr.json();
       if(fr.ok && fd.status === "ok"){
         featureList = fd.list || []; features = fd.features || {}; lockedFeatures = Array.isArray(fd.locked) ? fd.locked : [];
+        // Customer-supplied garments' waiver line (migrations/0121), kept with the switches; null when the server doesn't say.
+        ownGarmentsWaiver = typeof fd.ownGarmentsWaiver === "string" ? fd.ownGarmentsWaiver : typeof features.ownGarmentsWaiver === "string" ? features.ownGarmentsWaiver : null;
         window._gShippoKey = typeof fd.shippoKey === "boolean" ? fd.shippoKey : null;   // null: the server didn't say
         featureList.forEach(f => { FEATURE_LABELS_[f.key] = f.label; });
         if(typeof applyFeatures_ === "function") applyFeatures_(features);
@@ -12108,6 +12393,13 @@ async function renderGlobalSettings(app){
       if(r && Array.isArray(r.amounts)){ giftSettings = { sellOnline: !!r.sellOnline, amounts: r.amounts.map(Number).filter(Number.isFinite), minCents: Number(r.minCents) || 500, maxCents: Number(r.maxCents) || 50000 }; giftSettingsLoaded = true; }
     }catch(e){}
     const giftDollars = (c) => { c = Math.round(Number(c) || 0); return Math.floor(c / 100) + (c % 100 ? "." + String(c % 100).padStart(2, "0") : ""); };
+    // Net 30 terms (migrations/0121): the default days and when they start counting. Drawn, and so sent, only once read.
+    let terms = { defaultDays: 30, startsAt: "invoice" }, termsLoaded = false;
+    try{
+      const tr = await hoopApi_({ action: "getTermsSettings" });
+      const t = tr && (tr.terms || tr);
+      if(t && Number.isInteger(Number(t.defaultDays)) && ["invoice", "order", "completed"].includes(t.startsAt)){ terms = { defaultDays: Number(t.defaultDays), startsAt: t.startsAt }; termsLoaded = true; }
+    }catch(e){}
     // Decoration types: which kinds of work the shop does, and each one's prices (public/admin.js). Not drawn
     // (and so not sent) when the server can't say, so a failed read can't save the form's defaults over the real ones.
     let decoInfo = null;
@@ -12116,7 +12408,7 @@ async function renderGlobalSettings(app){
     // Desktop: what the program keeps for the Features panels — whether a Shippo key is saved (never
     // the key itself), the mailbox (never its password) and whether supplier connections are on.
     const desktop = adminDesktop_() && !!window.oddDesktop;
-    const ctx = window._gSettingsCtx = { desktop, featureList, features, lockedFeatures, shipFrom, us, machineSettings, machineLoaded: productionOn,
+    const ctx = window._gSettingsCtx = { desktop, featureList, features, lockedFeatures, ownGarmentsWaiver, shipFrom, us, machineSettings, machineLoaded: productionOn,
       keySet: desktop ? !!(await adminDesktopHasShippoKey_()) : false, cloudKey: window._gShippoKey,
       emailSaved: desktop ? (await adminDesktopEmailSettings_()) || null : null, suppliersOn: desktop && adminDesktopSuppliers_(),
       emailSending: desktop ? null : emailSending,
@@ -12186,6 +12478,24 @@ async function renderGlobalSettings(app){
         <label class="checkbox-row" style="margin-top:14px;"><input type="checkbox" id="gPayOnDelivery" ${pay.onDelivery === true ? "checked" : ""}> Payment on delivery</label>
         <label class="checkbox-row" style="margin-left:26px;"><input type="checkbox" id="gPayOnDeliveryLocal" ${pay.onDeliveryLocalOnly === true ? "checked" : ""}> Only for local sales (the Local sale window on Orders)</label>
         <div class="admin-note" style="margin-top:6px;">An order set to pay on delivery goes through its steps — blanks, digitizing, the run, packing and delivery — before it's paid, and is completed once it's paid in full. It's set on Orders by a role with <strong>Set orders to pay on delivery</strong> (Manager and Admin unless changed under Users → Roles). Off here, no shop can use it; each shop can also turn it off or limit it to local sales for itself.</div>
+        <label class="checkbox-row" style="margin-top:14px;"><input type="checkbox" id="gPayNet30" ${pay.net30 === true ? "checked" : ""}> Net 30 (with a PO)</label>
+        <div class="admin-note" style="margin-top:6px;">The customer pays by invoice within the days set under Net 30 terms below. An order on Net 30 goes ahead — blanks, the run, delivery and completing it — once it has a PO: one typed by staff counts at once, one the customer types (at checkout or on the invoice page) waits for <strong>Accept PO</strong>. The money stays owed until it is paid, on Reports → Unpaid POs. Staff can put any order on Net 30 (<strong>Net 30…</strong> on the order, or the Local sale); at checkout it is offered only to customers whose record allows it (Customers → the customer → Allow Net 30).</div>
+
+        ${termsLoaded ? `<h2 style="margin:22px 0 12px;">Net 30 terms</h2>
+        <div class="admin-note" style="margin-bottom:10px;">When a Net 30 order falls due. A customer can have days of their own (Customers → the customer → Terms), and an order can too (Net 30… on the order); otherwise it's the default here. The due date is worked out when it's shown, so a change here moves the due dates of orders already on terms.</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <label style="flex:0 0 170px;">Default days to pay
+            <input type="number" id="gTermsDays" min="1" max="365" step="1" value="${escapeHtml(String(terms.defaultDays))}">
+          </label>
+          <label style="flex:1 1 300px;">Terms start
+            <select id="gTermsStarts">
+              <option value="invoice" ${terms.startsAt === "invoice" ? "selected" : ""}>When the invoice is sent (the order date when none was sent)</option>
+              <option value="order" ${terms.startsAt === "order" ? "selected" : ""}>On the order date</option>
+              <option value="completed" ${terms.startsAt === "completed" ? "selected" : ""}>When the order is completed (shipped or picked up)</option>
+            </select>
+          </label>
+        </div>
+        <div class="admin-note" style="margin-top:2px;">The invoice date is the first time it was sent; sending it again doesn't move it. With “completed”, an order isn't due until it has shipped or been picked up.</div>` : ""}
 
         ${discountRulesLoaded ? `<h2 style="margin:22px 0 12px;">Discount codes</h2>
         <label class="checkbox-row"><input type="checkbox" id="gDiscMultiple" ${discountRules.multiple ? "checked" : ""}> More than one discount code can be used on an order</label>
@@ -12537,7 +12847,8 @@ async function submitGlobalSettings(){
     const settings = {
       payments: { card: $g("gPayCard").checked, venmo: $g("gPayVenmo").checked, zelle: $g("gPayZelle").checked, check: $g("gPayCheck").checked,
         onDelivery: $g("gPayOnDelivery").checked, onDeliveryLocalOnly: $g("gPayOnDeliveryLocal").checked,
-        ...($g("gPayGiftCard") ? { giftCard: $g("gPayGiftCard").checked } : {}) },
+        ...($g("gPayGiftCard") ? { giftCard: $g("gPayGiftCard").checked } : {}),
+        ...($g("gPayNet30") ? { net30: $g("gPayNet30").checked } : {}) },
       salesTax: { ratePercent: parseFloat($g("gTaxRate").value), jurisdiction: $g("gTaxJurisdiction").value.trim(), taxMode: ($g("gTaxMode") || {}).value || undefined },
     };
     // Region: the country decides how the ship-from address, and the tax state, are checked (the server does it first).
@@ -12548,6 +12859,10 @@ async function submitGlobalSettings(){
     featBoxes.forEach(b => { want[b.dataset.feature] = b.checked; });
     if(featBoxes.length){
       settings.features = want;
+      // Customer-supplied garments' waiver line (migrations/0121) goes with the switches — once the server has said what is
+      // saved, or once it's been changed from the usual sentence (an older server isn't sent a field it doesn't know).
+      const waiverBox = $g("gOwnWaiver");
+      if(waiverBox && (waiverBox.dataset.known === "1" || waiverBox.value !== waiverBox.defaultValue)) settings.features = Object.assign({}, want, { ownGarmentsWaiver: waiverBox.value.trim().slice(0, 500) });
       const sv = (id) => (($g(id) || {}).value || "").trim();
       if(want.shipping && $g("gShipStreet1")) settings.shipFrom = { name: sv("gShipName"), street1: sv("gShipStreet1"), city: sv("gShipCity"),
         state: sv("gShipState"), zip: sv("gShipZip"), phone: sv("gShipPhone"), email: sv("gShipEmail") };
@@ -12588,6 +12903,12 @@ async function submitGlobalSettings(){
       if(!amounts.length || amounts.length > 6 || amounts.some(c => !(c >= 100 && c <= 1000000))) return { error: "Gift cards: enter 1 to 6 amounts, each from $1 to $10,000, like 25, 50, 100." };
       if(!(minCents >= 100) || !(maxCents >= minCents) || maxCents > 1000000) return { error: "Gift cards: the custom amount's two figures must run from at least $1 up to no more than $10,000, the second not below the first." };
       settings.giftCards = { sellOnline: $g("gGiftSell").checked, amounts: [...new Set(amounts)].sort((a, b) => a - b), minCents, maxCents };
+    }
+    // Net 30 terms (migrations/0121): sent only when the section was drawn (it loaded).
+    if($g("gTermsDays") && adminCan_("settings.global", "edit")){
+      const days = Number($g("gTermsDays").value.trim());
+      if(!(Number.isInteger(days) && days >= 1 && days <= 365)) return { error: "Net 30 terms: the default days to pay is a whole number from 1 to 365." };
+      settings.terms = { defaultDays: days, startsAt: $g("gTermsStarts").value };
     }
     const rushRule = readRushRule_("gRush");   // checked before anything was sent (globalSettingsProblem_)
     if(rushRule.error) return { error: "Rush fee: " + rushRule.error };
@@ -30235,6 +30556,8 @@ function showEditOrderModal(order, products, ctx){
           personalizationFee: it.personalizationFee,
           personalized: it.personalized,
           persName: it.persName || "",
+          // On the customer's own garments (migrations/0121): no blank; the garments are checked in instead.
+          customerOwned: !!it.customerOwned,
           configurable,
           _origConfigurable: configurable,   // a line ordered with choices keeps its product; another line can change it
           config,
@@ -30357,6 +30680,9 @@ function showEditOrderModal(order, products, ctx){
                   ${extraOpt}${prodOpts}
                 </select>`
             }
+            ${!row._removed && ownGarmentsOn_()
+              ? `<label style="display:flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap;margin-top:3px;" title="The customer brings the garments: no blank is ordered or used, and the work waits until they're checked in"><input type="checkbox" data-rowidx="${idx}" data-field="customerOwned" ${row.customerOwned ? "checked" : ""}> Customer's own garment</label>`
+              : row.customerOwned ? `<div style="margin-top:3px;"><span class="og-tag">Customer's garments</span></div>` : ""}
           </td>
           <td style="padding:6px 4px;vertical-align:top;">
             ${row._removed
@@ -30541,6 +30867,8 @@ function showEditOrderModal(order, products, ctx){
       } else if(field === "customDesign"){
         row.customDesign = el.checked;
         renderRows(tbody);
+      } else if(field === "customerOwned"){
+        row.customerOwned = el.checked;   // the price is the line's as it is (the decoration); only the blank goes
       } else if(field === "size"){
         row.size = el.value;
         const prod = getProductById(row.productId);
@@ -30663,7 +30991,10 @@ function showEditOrderModal(order, products, ctx){
           const cfgChanged = row.configurable && JSON.stringify(row.config) !== row._origConfigJson;
           const changed = !orig || orig.productId !== row.productId || orig.size !== row.size || orig.qty !== row.qty ||
             !!orig.personalized !== !!row.personalized || (orig.persName || "") !== (row.persName || "") || cfgChanged;
-          if(changed){
+          // The customer's own garment (migrations/0121) is sent only when it was changed, so a server or a switch that
+          // doesn't know it is never asked about it otherwise.
+          const ownChanged = !!orig && !!orig.customerOwned !== !!row.customerOwned;
+          if(changed || ownChanged){
             updates.push({
               itemId: row.itemId,
               productId: row.productId,
@@ -30672,6 +31003,7 @@ function showEditOrderModal(order, products, ctx){
               personalized: row.personalized,
               persName: row.persName,
               ...(row.configurable ? { config: row.config } : {}),
+              ...(ownChanged ? { customerOwned: !!row.customerOwned } : {}),
             });
           }
         } else if(!row._removed && row.itemId == null){
@@ -30683,6 +31015,7 @@ function showEditOrderModal(order, products, ctx){
             persName: row.persName,
             ...(row.configurable ? { config: row.config } : {}),
             ...(!row.configurable && row.customDesign ? { customDesign: true } : {}),
+            ...(row.customerOwned ? { customerOwned: true } : {}),
           });
         }
       }

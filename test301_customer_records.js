@@ -61,7 +61,7 @@ const NOT_FOUND = "That customer wasn't found.";
   const patId = r.id;
   ok("a new customer answers with its id (a number), created, and nothing before", Number.isInteger(patId) && patId > 0 && r.created === true && r.before === null && !r.error);
   ok("…and with the customer as it now is, in the shape getCustomer gives",
-    keys(r.after) === "address,archived,company,createdAt,email,id,name,notes,phone,taxExempt,taxExemptCertificate,taxExemptExpires,updatedAt");
+    keys(r.after) === "address,allowNet30,archived,company,createdAt,email,id,name,notes,phone,taxExempt,taxExemptCertificate,taxExemptExpires,termsDays,updatedAt");
   ok("the text fields are stored trimmed, the email lower case", same([r.after.name, r.after.company, r.after.email, r.after.phone, r.after.notes], ["Pat Example", "Example Club", "pat@example.com", "555-0100", "Prefers pickup."]));
   ok("the exemption is stored: ticked, the certificate and the expiry date trimmed", r.after.taxExempt === true && r.after.taxExemptCertificate === "CERT-1" && r.after.taxExemptExpires === "2030-06-30");
   ok("the address comes back as an object", r.after.address && r.after.address.line1 === "1 Example Street" && r.after.address.city === "Exampleville" && r.after.address.zip === "00000");
@@ -395,8 +395,8 @@ const NOT_FOUND = "That customer wasn't found.";
 
   let g = await lib.getCustomer(db, pat);
   ok("a customer answers with the customer, its orders and their totals", keys(g) === "customer,orders,totals");
-  ok("the customer has exactly: id, name, company, email, phone, address, notes, the three exemption fields, archived, createdAt, updatedAt",
-    keys(g.customer) === "address,archived,company,createdAt,email,id,name,notes,phone,taxExempt,taxExemptCertificate,taxExemptExpires,updatedAt");
+  ok("the customer has exactly: id, name, company, email, phone, address, notes, the three exemption fields, Net 30 (allowNet30, termsDays), archived, createdAt, updatedAt",
+    keys(g.customer) === "address,allowNet30,archived,company,createdAt,email,id,name,notes,phone,taxExempt,taxExemptCertificate,taxExemptExpires,termsDays,updatedAt");
   ok("…with its own details", g.customer.id === pat && g.customer.name === "pat Example" && g.customer.email === "pat@example.com" && g.customer.phone === "555-0100" && g.customer.address === null && g.customer.archived === false);
   ok("each order has exactly: orderId, orgId, placedAt, total, paidAmount, balanceDue, voided, isTest, completed",
     g.orders.length === 6 && g.orders.every(o => keys(o) === "balanceDue,completed,isTest,orderId,orgId,paidAmount,placedAt,total,voided"));

@@ -296,7 +296,9 @@ test("a role without costs.view gets products, stock, transfers, orders, Home an
     // Home: the order counts only, none of the business's money.
     const [od, td] = await both("getDashboard", { today: today() });
     expect(Object.keys(od).length).toBeGreaterThan(Object.keys(td).length);
-    for (const k of Object.keys(td)) expect(["status", "stages", "open", "onTheWay", "blocks", "cachedAt", "cached"]).toContain(k);
+    for (const k of Object.keys(td)) expect(["status", "stages", "open", "onTheWay", "blocks", "cachedAt", "cached", "unpaidPos"]).toContain(k);
+    // Unpaid POs (phase 7): how many Net 30 orders are owed and how many POs wait to be checked — counts, no money.
+    if (td.unpaidPos) expect(Object.keys(td.unpaidPos).sort()).toEqual(["count", "toCheck"]);
 
     // The audit log keeps the money entries' rows, not their details: the payment on order B, and the expense.
     const [oa, ta] = await both("getAuditLog", { orderId: D.orderB.orderId, filter: "payment.added", limit: 50 });

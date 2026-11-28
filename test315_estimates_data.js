@@ -97,10 +97,11 @@ const TOKEN_A = "a".repeat(32), TOKEN_B = "b".repeat(32);
     ["configJson", "TEXT", 1, "''", 0], ["personalized", "INTEGER", 1, "0", 0], ["persName", "TEXT", 1, "''", 0], ["feeKind", "TEXT", 1, "''", 0],
     ["qty", "INTEGER", 1, "1", 0], ["unitPriceCents", "INTEGER", 1, "0", 0], ["listUnitCents", "INTEGER", 1, "0", 0],
     ["personalizationFeeCents", "INTEGER", 1, "0", 0], ["customPrice", "INTEGER", 1, "0", 0], ["taxable", "INTEGER", 1, "1", 0], ["lineTotalCents", "INTEGER", 1, "0", 0],
+    ["customerOwned", "INTEGER", 1, "0", 0],   // migrations/0121: the line is on the customer's own garment
   ];
   ok("the migrated estimates table has the 26 columns, with their types and defaults, in order", cols(migrated, "estimates") === JSON.stringify(wantEstimates));
   ok("schema.sql's estimates table has exactly the same columns", cols(fresh, "estimates") === cols(migrated, "estimates"));
-  ok("the migrated estimate_items table has the 19 columns, with their types and defaults, in order", cols(migrated, "estimate_items") === JSON.stringify(wantItems));
+  ok("the migrated estimate_items table has the 20 columns, with their types and defaults, in order", cols(migrated, "estimate_items") === JSON.stringify(wantItems));
   ok("schema.sql's estimate_items table has exactly the same columns", cols(fresh, "estimate_items") === cols(migrated, "estimate_items"));
   const qb = (db) => JSON.stringify(db.q("PRAGMA table_info(products)").filter(c => c.name === "qtyBreaksJson").map(c => [c.type, c.notnull, c.dflt_value]));
   ok("products have qtyBreaksJson, text, required, '[]' by default, in both", qb(migrated) === `[["TEXT",1,"'[]'"]]` && qb(fresh) === qb(migrated));
@@ -271,7 +272,7 @@ const TOKEN_A = "a".repeat(32), TOKEN_B = "b".repeat(32);
   ok("the lines come in the order they were saved", same(g.items.map(i => i.kind), ["product", "custom", "fee"]) && same(g.items.map(i => i.position), [0, 1, 2]));
   const [pl, cl, fl] = g.items;
   ok("a line has every field, in dollars", keys(pl) === ["breakOff", "config", "customPrice", "feeKind", "id", "kind", "lineTotal", "listUnitPrice", "name", "persName",
-    "personalizationFee", "personalized", "position", "productId", "qty", "size", "taxable", "type", "unitPrice"].sort().join(","));
+    "personalizationFee", "personalized", "position", "productId", "qty", "size", "taxable", "type", "unitPrice", "customerOwned"].sort().join(","));
   ok("a product line: product, size, the choices, personalization, the price after the break and before it",
     pl.productId === "tee" && pl.name === "Club Tee" && pl.type === "Tee" && pl.size === "M" && same(pl.config, { color: "Navy" }) && pl.personalized === true && pl.persName === "PAT" &&
     pl.qty === 3 && pl.unitPrice === 18 && pl.listUnitPrice === 20 && pl.personalizationFee === 5 && pl.customPrice === false);

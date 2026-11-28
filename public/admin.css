@@ -626,8 +626,8 @@
   .cust-form{display:flex; flex-direction:column; gap:12px; max-width:760px;}
   .cust-grid{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
   .cust-grid-3{grid-template-columns:2fr 1fr 1fr;}
-  .cust-exempt{border:1px solid var(--card-line,#ddd); border-radius:6px; padding:8px 14px 10px; margin:4px 0 0; min-width:0;}
-  .cust-exempt legend{font-size:12px; font-weight:700; padding:0 6px;}
+  .cust-exempt,.cust-terms{border:1px solid var(--card-line,#ddd); border-radius:6px; padding:8px 14px 10px; margin:4px 0 0; min-width:0;}
+  .cust-exempt legend,.cust-terms legend{font-size:12px; font-weight:700; padding:0 6px;}
   .cust-form-actions, .cust-dialog-actions{display:flex; gap:8px; justify-content:flex-end;}
   .cust-form-actions{justify-content:flex-start;}
   .cust-pick-list{display:flex; flex-direction:column; gap:6px; margin-top:10px;}
@@ -821,3 +821,69 @@
   .gc-facts{grid-template-columns:1fr; gap:0;}
   .gc-facts dd{margin-bottom:6px;}
 }
+
+/* ---- Net 30 terms and unpaid POs (migrations/0121): the Unpaid POs report (public/admin-receivables.js), the order's
+   Net 30 tag and window, Home's Unpaid POs block ---- */
+.ar-filter{flex:0 1 170px;}
+.ar-filter-wide{flex:0 1 240px;}
+.ar-total-warn .gc-total-n{color:#b03a2e;}
+.ar-groups{display:flex; flex-wrap:wrap; gap:8px; margin:0 0 14px;}
+.ar-group{display:flex; flex-direction:column; align-items:flex-start; gap:1px; flex:1 1 120px; min-width:110px; padding:8px 10px; font:inherit; text-align:left; cursor:pointer; border:1px solid var(--line,#e2e2e2); border-radius:8px; background:var(--surface,#fff); color:var(--ink,#1a1a1a);}
+.ar-group:hover, .ar-group:focus-visible{border-color:var(--accent,#333);}
+.ar-group.on{border-color:var(--accent,#333); background:var(--accent-soft,#f5f5f0); box-shadow:inset 0 0 0 1px var(--accent,#333);}
+.ar-group-l{font-size:12px; font-weight:600;}
+.ar-group-n{font-size:18px; font-weight:700; font-variant-numeric:tabular-nums;}
+.ar-group-m{font-size:12px; color:var(--ink-soft,#666); font-variant-numeric:tabular-nums;}
+.ar-group-zero .ar-group-n{color:var(--ink-soft,#888);}
+.ar-linkbtn{background:none; border:none; padding:0; font:inherit; font-weight:600; color:#1d4ed8; text-decoration:underline; cursor:pointer; text-align:left;}
+.ar-sub{font-size:11px; color:var(--ink-soft,#777); margin-top:2px;}
+.ar-late{color:#b03a2e; font-weight:700;}
+.ar-tag-check{background:#fff4e0; color:#8a4b00;}
+.ar-tag-ok{background:#e3f2e6; color:#1b5e20;}
+.ar-empty{padding:14px 0;}
+.n30-tag{display:inline-block; font-size:11px; font-weight:700; line-height:1.4; padding:1px 7px; border-radius:10px; background:#e0e7ff; color:#3730a3; white-space:nowrap;}
+.n30-tag-need{background:#fdecea; color:#b03a2e;}
+.n30-tag-check{background:#fff4e0; color:#8a4b00;}
+.n30-tag-late{background:#fdecea; color:#b03a2e;}
+.n30-box{display:flex; flex-direction:column; gap:10px;}
+.n30-facts{font-size:13px; line-height:1.5; padding:8px 10px; border:1px solid var(--line,#e2e2e2); border-radius:6px; background:#fafafa;}
+.n30-row{display:flex; flex-wrap:wrap; gap:10px;}
+.n30-row .cust-field{flex:1 1 160px;}
+.home-po{display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:10px;}
+.home-po-card{display:flex; flex-direction:column; gap:2px; background:#fff; border:1px solid var(--card-line); border-radius:8px; padding:12px 14px; color:var(--ink);}
+.home-po .home-card-warn .home-val{color:#b03a2e;}
+@media(max-width:760px){
+  .ar-group{flex-basis:calc(50% - 8px);}
+  .home-po{grid-template-columns:repeat(2, minmax(0, 1fr));}
+}
+
+/* ---- Customer-supplied garments (migrations/0121): the line's tag and the Check in garments window and slip
+   (public/admin-garments.js) ---- */
+.og-tag{display:inline-block; font-size:10px; font-weight:700; line-height:1.4; padding:1px 6px; border-radius:10px; background:#ede9fe; color:#5b21b6; white-space:nowrap; vertical-align:middle;}
+.og-tag-in{background:#e3f2e6; color:#1b5e20;}
+.og-btn{font-size:11px; padding:2px 8px; margin-left:4px; vertical-align:middle;}
+.og-head{font-size:14px;}
+.og-dim{font-size:12px; color:var(--ink-soft,#666);}
+.og-last{font-size:13px; margin:6px 0; padding:6px 10px; border-radius:6px; background:#e3f2e6; color:#1b5e20;}
+.og-table input, .og-table select{font:inherit; font-size:13px; padding:5px 6px; border:1px solid #ccc; border-radius:4px; background:#fff; color:var(--ink,#1a1a1a); width:100%; box-sizing:border-box;}
+.og-table .og-exp, .og-table .og-rec{width:72px; text-align:right;}
+.og-table .og-size{min-width:70px;}
+.og-table .og-note{min-width:140px;}
+.og-remove{border:none; background:none; font-size:18px; line-height:1; cursor:pointer; color:var(--ink-soft,#666); padding:2px 6px;}
+.og-sum{font-size:13px; font-weight:600; margin:8px 0 2px;}
+.og-waiver{font-size:12px; color:var(--ink-soft,#555); font-style:italic; margin:-4px 0 6px 26px;}
+.og-actions{flex-wrap:wrap; margin-top:6px;}
+.og-slip{display:none;}
+@media print{
+  body.og-printing > *:not(#ogSlipPrint){display:none !important;}
+  body.og-printing #ogSlipPrint{display:block; color:#000; background:#fff; font:12pt/1.4 system-ui, sans-serif; padding:0;}
+  .og-slip-h{font-size:16pt; font-weight:700; margin:0 0 10pt;}
+  .og-slip table{border-collapse:collapse; width:100%; margin:0 0 12pt;}
+  .og-slip th, .og-slip td{border:1px solid #999; padding:4pt 6pt; text-align:left; vertical-align:top;}
+  .og-slip-facts th{width:25%; background:#f2f2f2;}
+  .og-slip-counts thead th{background:#f2f2f2;}
+  .og-slip-waiver{font-size:10pt; margin:10pt 0;}
+  .og-slip-sign{display:flex; gap:40pt; margin-top:28pt;}
+  .og-slip-sign span{flex:1; border-top:1px solid #000; padding-top:3pt; font-size:10pt;}
+}
+.cust-tag-net30{background:#e0e7ff; color:#3730a3;}

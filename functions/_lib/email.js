@@ -1,4 +1,4 @@
-import { addOwnerNotice, recordSystemIssue, getBusinessProfile, resolveTimeZone, getLocaleSettings, getGlobalSettings, getOrgById, getEmailSettings, getEmailMailbox, splitTaxInclusive } from "./db.js";
+import { addOwnerNotice, recordSystemIssue, getBusinessProfile, resolveTimeZone, getLocaleSettings, getGlobalSettings, getOrgById, getEmailSettings, getEmailMailbox, splitTaxInclusive, getTerms } from "./db.js";
 import { pdfDocument, pdfWrap, pdfTextWidth, pdfBase64 } from "./pdf.js";
 import { smtpSend } from "./smtp.js";
 import { decryptVendorCredentials } from "./vendorCredentials.js";
@@ -381,6 +381,10 @@ function lineDetail_(it) {
   return [cfg, pers].filter(Boolean).join(" · ");
 }
 
+// A line decorated on the customer's own garments (migrations/0121: customerOwned on order and quote lines) says so
+// after its name, on receipts, invoices and the quote: "Polo (your garments)".
+const ownGarmentsTag_ = (it) => it && Number(it.customerOwned) ? " (your garments)" : "";
+
 const RUSH_FOLLOW_TEXT_ = "to follow — we'll send it separately";
 // The delivery line's label. A shop's own option ("Delivery at practice" — migrations/0045) has a
 // method name but no ship-to address, and reads as itself; a carrier reads "Shipping (USPS Priority)".
@@ -449,7 +453,7 @@ function receiptLines_(order) {
   const lines = items.map((it, i) => {
     const qty = Math.max(1, Number(it.qty) || 1);
     const amountCents = rcCents_(it.lineTotal) - (!exclusive && known ? taxes[i] : 0);
-    return { name: String(it.name || ""), detail: lineDetail_(it), size: String(it.size || ""), qty, amountCents, unitCents: Math.round(amountCents / qty) };
+    return { name: String(it.name || "") + ownGarmentsTag_(it), detail: lineDetail_(it), size: String(it.size || ""), qty, amountCents, unitCents: Math.round(amountCents / qty) };
   });
   const lineTaxCents = known ? taxes.reduce((t, x) => t + x, 0) : 0;
   const subtotalCents = lines.reduce((t, l) => t + l.amountCents, 0);
@@ -649,8 +653,57 @@ async function paymentsAllowed_(env, order) {
   try { if (typeof getOrgById === "function" && order && order.orgId) { const org = await getOrgById(env.DB, order.orgId); o = org && org.enabledPayments; } } catch (e) { o = null; }
   return (k) => (!g || g[k] !== false) && (!o || o[k] !== false);
 }
+// ---- Net 30 terms (migrations/0121) --------------------------------------------------------------------------
+// An order on Net 30, as the customer is told it: the days (the order's own, else Global settings → Net 30 terms'
+// default, else 30), the PO, and the due date db.js worked out when the order was read (`termsDueDate`, "" while
+// it isn't known yet — a "completed" start before the order is shipped or picked up). Null for any other order.
+//   label  "Net 30 · PO 1001 · Due Dec 31, 2026"   (what the invoice, the PDF and the emails show after "Terms:")
+//   ask    "Payment is due within 30 days of the invoice (PO 1001)." — or, with no PO yet, that plus a request for it.
+const NET30_STARTS_ = { invoice: "of the invoice", order: "of the order date", completed: "of when your order ships or is picked up" };
+// "PO 1001" — a PO number that already starts with "PO" ("PO-1001") is shown as it is.
+const poLabel_ = (po) => /^p\.?o\b/i.test(String(po || "").trim()) ? String(po).trim() : "PO " + String(po || "").trim();
+const isDay_ = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
+// "Dec 31, 2026" from YYYY-MM-DD (a calendar day — no time zone shift).
+function shortDate_(day) {
+  const d = new Date(String(day) + "T12:00:00Z");
+  return isNaN(d) ? String(day || "") : d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+const termsAddDays_ = (day, n) => { const d = new Date(String(day) + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+async function termsSettings_(env) {
+  try { if (typeof getTerms === "function") { const t = await getTerms(env && env.DB); if (t && typeof t === "object") return t; } } catch (e) { /* the default */ }
+  return { defaultDays: 30, startsAt: "invoice" };
+}
+async function net30Terms_(env, order, { inEmail = true } = {}) {
+  if (!order || !Number(order.net30)) return null;
+  const t = await termsSettings_(env);
+  const days = Number(order.termsDays) || Number(t.defaultDays) || 30;
+  const startsAt = NET30_STARTS_[t.startsAt] ? t.startsAt : "invoice";
+  const po = String(order.poNumber || "").trim();
+  const dueDay = isDay_(order.termsDueDate) ? String(order.termsDueDate) : "";
+  const due = dueDay ? shortDate_(dueDay) : "";
+  const label = [`Net ${days}`, po ? poLabel_(po) : "", due ? "Due " + due : ""].filter(Boolean).join(" · ");
+  const within = `Payment is due within ${days} days ${NET30_STARTS_[startsAt]}`;
+  const ask = po ? `${within} (${poLabel_(po)}).`
+    : `${within}. Please send your PO number${inEmail ? " — reply to this email" : ""}.`;
+  return { days, startsAt, po, dueDay, due, label, ask, accepted: !!(po && order.poAcceptedAt) };
+}
+// The order as it reads on the invoice being sent now: with the days starting at the invoice (the default) and no
+// invoice sent before, the due date counts from today — the send is about to record today as invoicedAt (db.js
+// markInvoiced_), while the order read before it still counts from the order date.
+async function invoicingOrder_(env, order) {
+  if (!order || !Number(order.net30) || order.invoicedAt) return order;
+  const t = await termsSettings_(env);
+  if ((t.startsAt || "invoice") !== "invoice") return order;
+  const days = Number(order.termsDays) || Number(t.defaultDays) || 30;
+  const tz = await timeZone_(env);
+  let today = "";
+  try { today = new Date().toLocaleDateString("en-CA", { timeZone: tz }); } catch (e) { today = new Date().toISOString().slice(0, 10); }
+  return isDay_(today) ? { ...order, termsDueDate: termsAddDays_(today, days) } : order;
+}
+
 async function howToPay_(env, order, { inEmail = true, payUrl = "", profile = null } = {}) {
   const p = profile || await businessProfile_(env);
+  const terms = await net30Terms_(env, order, { inEmail });
   const allowed = await paymentsAllowed_(env, order);
   const due = Number(order.balanceDue != null ? order.balanceDue : order.effectiveTotal != null ? order.effectiveTotal : order.total) || 0;
   const amt = due > 0 ? fmt$(due) : "the amount due";
@@ -673,17 +726,19 @@ async function howToPay_(env, order, { inEmail = true, payUrl = "", profile = nu
   const lineHtml = (w) => `<strong>${escHtml(w.title)}:</strong> ${escHtml(w.text)}${w.href ? ` <a href="${escHtml(w.href)}">${escHtml(w.link)} &rarr;</a>` : ""}`;
   const html = `<div style="margin:20px 0;padding:12px 16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:14px;line-height:1.5">
       <div style="font-size:16px;font-weight:bold;margin-bottom:6px">How to pay${due > 0 ? " " + escHtml(fmt$(due)) : ""}</div>
+      ${terms ? `<div style="margin-bottom:8px"><strong>Terms:</strong> ${escHtml(terms.label)}<br>${escHtml(terms.ask)}</div>` : ""}
       ${first ? `<div style="margin-bottom:8px">${lineHtml(first)}</div>` : ""}
       ${others.length ? `<div style="color:#555;margin:6px 0 2px">${first ? "Other ways to pay:" : "Ways to pay:"}</div><ul style="margin:0;padding-left:20px">${others.map(w => `<li>${lineHtml(w)}</li>`).join("")}</ul>` : ""}
       ${p.paymentNote ? `<div style="margin-top:8px">${escHtml(p.paymentNote)}</div>` : ""}
       ${close ? `<div style="margin-top:8px;font-size:13px;color:#555">${escHtml(close)}</div>` : ""}
     </div>`;
   const textLines = [`How to pay${due > 0 ? " " + fmt$(due) : ""}:`];
+  if (terms) textLines.push(`  Terms: ${terms.label}`, `  ${terms.ask}`);
   if (first) textLines.push(`  ${first.title}: ${first.text}${first.href ? "\n    " + first.href : ""}`);
   if (others.length) { textLines.push(first ? "Other ways to pay:" : "Ways to pay:"); for (const w of others) textLines.push(`  ${w.title}: ${w.text}${w.href ? "\n    " + w.href : ""}`); }
   if (p.paymentNote) textLines.push(p.paymentNote);
   if (close) textLines.push(close);
-  return { html, text: textLines.join("\n"), first, others, note: p.paymentNote || "", close, any: !!(first || others.length) };
+  return { html, text: textLines.join("\n"), first, others, note: p.paymentNote || "", close, terms, any: !!(terms || first || others.length) };
 }
 
 // ---- The PDF of an order: an invoice while something is owed, a receipt once it's paid -------------------
@@ -721,13 +776,16 @@ export async function orderPdf(env, order, { kind = "", orgName = "", message = 
   const title = isReceipt ? "RECEIPT" : "INVOICE";
   const b = businessLines_(p, env);
   const pay = !isReceipt && due > 0 ? await howToPay_(env, order, { inEmail: false, payUrl, profile: p }) : null;
+  // Net 30 (migrations/0121): "Terms  Net 30 · PO 1001 · Due Dec 31, 2026" with the details while money is owed.
+  const terms = due > 0 ? (pay && pay.terms) || await net30Terms_(env, order, { inEmail: false }) : null;
   const doc = pdfDocument({ pageSize: country === "US" ? "Letter" : "A4", title: `${isReceipt ? "Receipt" : "Invoice"} ${order.orderId}` });
   const M = 50, W = doc.width, R = W - M, BLUE = "#1f5f8b", GREY = "#5a6573";
   let y = 60;
   const ensure = (h, header) => { if (y + h > doc.height - 70) { doc.newPage(); y = 60; if (header) header(); } };
   // Header: who you are (left), INVOICE / RECEIPT and its details (right).
   const meta = [[isReceipt ? "Receipt no." : "Invoice no.", order.orderId], ["Date", day()], ...(order.placedAt ? [["Order date", day(order.placedAt)]] : []),
-    ...(orgName ? [["Shop", orgName]] : []), ...(order.paymentMethod ? [["Payment", String(order.paymentMethod)]] : [])];
+    ...(orgName ? [["Shop", orgName]] : []), ...(order.paymentMethod ? [["Payment", String(order.paymentMethod)]] : []),
+    ...(terms ? [["Terms", terms.label]] : [])];
   // The details' values are as wide as the widest one (up to 200pt; longer ones wrap), with their labels
   // just left of them — a long order number or shop name used to run over its label.
   const valueW = Math.min(200, Math.max(110, ...meta.map(([, v]) => pdfTextWidth(String(v), 10))));
@@ -811,6 +869,7 @@ export async function orderPdf(env, order, { kind = "", orgName = "", message = 
     ensure(40);
     doc.text(M, y, `How to pay${due > 0 ? " " + fmt$(due) : ""}`, { size: 12, bold: true }); y += 16;
     const put = (t, opt = {}) => { for (const l of pdfWrap(t, R - M - 12, 10, opt.bold)) { ensure(14); doc.text(M + (opt.indent || 0), y, l, { size: 10, ...opt }); y += 13; } };
+    if (pay.terms) { put(`Terms: ${pay.terms.label}`, { bold: true }); put(pay.terms.ask); y += 3; }
     if (pay.first) put(`${pay.first.title}: ${pay.first.text}${pay.first.href && pay.first.title === "Venmo" ? " " + pay.first.href : ""}`);
     if (pay.others.length) { y += 3; put(pay.first ? "Other ways to pay:" : "Ways to pay:", { color: GREY }); for (const w of pay.others) put(`• ${w.title}: ${w.text}`, { indent: 8 }); }
     if (pay.note) { y += 3; put(pay.note); }
@@ -837,6 +896,7 @@ export async function orderPdf(env, order, { kind = "", orgName = "", message = 
 function orderReceivedSubject_(order) {
   const r = receiptLines_(order), due = order.balanceDue != null ? rcCents_(order.balanceDue) : r.totalCents;
   if (r.tbd) return `Order received — ${order.orderId}`;
+  if (due > 0 && Number(order.net30)) return `Order received — ${order.orderId} · Net 30, nothing to pay now`;
   return due > 0 ? `Order received — ${order.orderId} · ${fmtCents_(due)} due` : `Order received and paid — ${order.orderId}`;
 }
 export async function buildOrderReceivedEmail(env, order, { pdf = true } = {}) {
@@ -845,9 +905,18 @@ export async function buildOrderReceivedEmail(env, order, { pdf = true } = {}) {
   const rushNotice = rushPayByNotice_(order);
   const r = receiptLines_(order);
   const due = order.balanceDue != null ? Number(order.balanceDue) || 0 : r.totalCents / 100;
-  const pay = !r.tbd && due > 0 ? await howToPay_(env, order, { profile: p }) : null;
+  // Net 30 (migrations/0121): nothing to pay now — the terms and the PO instead of how to pay; the invoice comes later.
+  const terms = !r.tbd && due > 0 ? await net30Terms_(env, order) : null;
+  const pay = !r.tbd && due > 0 && !terms ? await howToPay_(env, order, { profile: p }) : null;
   const attachment = pdf && !r.tbd ? await orderPdfAttachment_(env, order, { kind: due > 0 ? "invoice" : "receipt" }) : null;
   const biz = businessBlock_(p, env);
+  const termsNext = !terms ? "" : !terms.po ? "Please send us your PO number (reply to this email) — we'll start on your order once we have it."
+    : terms.accepted ? `Your ${poLabel_(terms.po)} is on file — we'll start on your order.` : `We'll confirm your ${poLabel_(terms.po)} and then start on your order.`;
+  const termsLead = terms ? `No payment is needed now: we'll send you an invoice, and payment is due within ${terms.days} days ${NET30_STARTS_[terms.startsAt]}.` : "";
+  const termsHtml = terms ? `<div style="margin:20px 0;padding:12px 16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:14px;line-height:1.5">
+      <div style="font-size:16px;font-weight:bold;margin-bottom:6px">Terms: ${escHtml(terms.label)}</div>
+      <div>${escHtml(termsNext)}</div></div>` : "";
+  const termsText = terms ? `Terms: ${terms.label}\n${termsNext}` : "";
   const manualShippingNote = r.tbd
     ? `<p style="background:#fef9c3;border:1px solid #fde047;border-radius:4px;padding:10px 14px;font-size:14px;margin-top:12px;">
         <strong>Shipping quote pending:</strong> Your order requires a custom shipping quote.
@@ -856,22 +925,23 @@ export async function buildOrderReceivedEmail(env, order, { pdf = true } = {}) {
     : "";
   const paidNow = due <= 0 && !r.tbd;
   const gcNote = giftCardOrderNote_(order);
-  const attachedLine = paidNow ? " Your receipt is attached as a PDF." : " Your invoice is attached as a PDF.";
+  const attachedLine = paidNow ? " Your receipt is attached as a PDF." : terms ? " A copy of your order is attached as a PDF." : " Your invoice is attached as a PDF.";
   const html = `<div style="font-family:sans-serif;max-width:600px;margin:auto">
     <h2 style="color:#1d4ed8">Order received${paidNow ? " — paid" : ""}</h2>
-    <p>Hi ${escHtml(order.customerName)}, thank you — we received your order${paidNow ? " and your payment" : due > 0 && !r.tbd ? " and will start on it once it's paid" : ""}.${attachment ? attachedLine : ""}</p>
+    <p>Hi ${escHtml(order.customerName)}, thank you — we received your order${paidNow ? " and your payment" : terms ? "" : due > 0 && !r.tbd ? " and will start on it once it's paid" : ""}.${terms ? " " + escHtml(termsLead) : ""}${attachment ? attachedLine : ""}</p>
     ${rushNotice ? rushNotice.html : ""}
     <p><strong>Order number:</strong> ${escHtml(order.orderId)}${order.paymentMethod ? ` &nbsp;·&nbsp; <strong>Payment:</strong> ${escHtml(order.paymentMethod)}` : ""}</p>
     ${itemsTableHtml_(r)}
     ${totalsHtml_(r.rows)}
     ${manualShippingNote}
     ${gcNote ? gcNote.html : ""}
+    ${termsHtml}
     ${pay && pay.any ? pay.html : ""}
     ${biz.html}
   </div>`;
-  const text = `Order received${paidNow ? " — paid" : ""} — ${order.orderId}\n\nHi ${order.customerName},\nThank you — we received your order${paidNow ? " and your payment" : ""}.${attachment ? attachedLine : ""}\n${rushNotice ? "\n" + rushNotice.text + "\n" : ""}` +
+  const text = `Order received${paidNow ? " — paid" : ""} — ${order.orderId}\n\nHi ${order.customerName},\nThank you — we received your order${paidNow ? " and your payment" : ""}.${terms ? " " + termsLead : ""}${attachment ? attachedLine : ""}\n${rushNotice ? "\n" + rushNotice.text + "\n" : ""}` +
     `\nOrder number: ${order.orderId}${order.paymentMethod ? "\nPayment: " + order.paymentMethod : ""}\n\n${itemsText_(r)}\n\n${totalsText_(r, r.rows)}\n` +
-    (gcNote ? "\n" + gcNote.text + "\n" : "") + (pay && pay.any ? "\n" + pay.text + "\n" : "") + `\n${biz.text}`;
+    (gcNote ? "\n" + gcNote.text + "\n" : "") + (termsText ? "\n" + termsText + "\n" : "") + (pay && pay.any ? "\n" + pay.text + "\n" : "") + `\n${biz.text}`;
   return { to: order.contact, subject, html, text, ...(attachment ? { attachments: [attachment] } : {}) };
 }
 export async function sendOrderReceivedEmail(env, order) {
@@ -917,7 +987,59 @@ function unconfirmedText_(u, tz) {
 // How many orders one roll-up lists at most (db.js DIGEST_MAX_ORDERS, repeated for the email's wording).
 const DIGEST_LIST_MAX = 200;
 
-export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit = [], awaitingPickup = [], awaitingBlanks = [], maintenanceDue = [], rushToSet = [], recurringRecorded = [], unconfirmed = null, adminUrl = adminSiteUrl_(env) } = {}) {
+// ---- Net 30 in the roll-up (migrations/0121) -----------------------------------------------------------------
+// A new order's Payment cell: "Net 30 · PO 1001" / "Net 30 · PO needed" on Net 30, else the method as chosen; the
+// tag under it says "PO to check" while a PO the customer typed waits for staff to accept it.
+function digestPayment_(o) {
+  if (!o || !Number(o.net30)) return String((o && o.paymentMethod) || "");
+  const po = String(o.poNumber || "").trim();
+  return `Net ${Number(o.termsDays) || 30} · ${po ? poLabel_(po) : "PO needed"}`;
+}
+function digestPoTag_(o) {
+  if (!o || !Number(o.net30)) return "";
+  return o.poStatus === "PO to check" || (String(o.poNumber || "").trim() && !o.poAcceptedAt) ? "PO to check" : "";
+}
+// `unpaidPos` (daily-digest.js, from db.js getUnpaidPoReport): { toCheck: rows, late: rows (each may carry
+// newlyLate: due since the last roll-up), totals: { count, owedCents, lateCents, toCheck } }.
+const DIGEST_PO_MAX_ = 50;
+function unpaidPoLine_(x, orgName) {
+  const who = [x.customerName, x.company && x.company !== x.customerName ? x.company : ""].filter(Boolean).join(", ");
+  const late = Number(x.daysLate) > 0 ? `${x.daysLate} day${Number(x.daysLate) === 1 ? "" : "s"} late` : "";
+  return [`${x.orderId}${who ? " — " + who : ""} (${x.orgName || orgName(x.orgId)})`, x.poNumber ? poLabel_(x.poNumber) : "no PO",
+    fmtCents_(x.owedCents) + " owed", x.dueDate ? "due " + shortDate_(x.dueDate) : "", late, x.newlyLate ? "newly late" : ""].filter(Boolean).join(" · ");
+}
+function unpaidPosSummary_(t) {
+  const n = Number(t && t.count) || 0;
+  return `${n} unpaid PO${n === 1 ? "" : "s"} in all: ${fmtCents_(t && t.owedCents)} owed, ${fmtCents_(t && t.lateCents)} of it late.`;
+}
+function unpaidPosHtml_(up, orgName, adminUrl) {
+  const toCheck = up.toCheck || [], late = up.late || [];
+  const list = (rows) => `<ul style="margin:0;padding-left:18px;font-size:14px">${rows.slice(0, DIGEST_PO_MAX_).map(x => `<li${x.newlyLate ? ' style="font-weight:600"' : ""}>${escHtml(unpaidPoLine_(x, orgName))}</li>`).join("")}${rows.length > DIGEST_PO_MAX_ ? `<li>…and ${rows.length - DIGEST_PO_MAX_} more</li>` : ""}</ul>`;
+  return `<h3 style="margin:22px 0 6px;font-size:17px">📄 Unpaid POs</h3>
+    <p style="margin:0 0 6px;color:#555;font-size:13px">${escHtml(unpaidPosSummary_(up.totals))}</p>
+    ${toCheck.length ? `<h4 style="margin:10px 0 4px;font-size:15px">POs to check — ${toCheck.length}</h4>
+    <p style="margin:0 0 4px;color:#555;font-size:13px">The customer typed these. Accept each one on the order (or on the Unpaid POs report) so the work can start.</p>${list(toCheck)}` : ""}
+    ${late.length ? `<h4 style="margin:10px 0 4px;font-size:15px">Late — ${late.length}</h4>
+    <p style="margin:0 0 4px;color:#555;font-size:13px">Past the due date and still owed${late.some(x => x.newlyLate) ? "; the ones in bold became late since the last roll-up" : ""}.</p>${list(late)}` : ""}
+    ${adminUrl ? `<p style="margin:6px 0 0;font-size:13px"><a href="${escHtml(adminUrl)}/#unpaidpos">Unpaid POs report</a></p>` : ""}`;
+}
+function unpaidPosText_(up, orgName, adminUrl) {
+  const toCheck = up.toCheck || [], late = up.late || [];
+  const list = (rows) => rows.slice(0, DIGEST_PO_MAX_).map(x => "  " + unpaidPoLine_(x, orgName)).join("\n") + (rows.length > DIGEST_PO_MAX_ ? `\n  …and ${rows.length - DIGEST_PO_MAX_} more` : "");
+  return [`UNPAID POS — ${unpaidPosSummary_(up.totals)}`,
+    toCheck.length ? `POs to check — ${toCheck.length}\n${list(toCheck)}` : "",
+    late.length ? `Late — ${late.length}\n${list(late)}` : "",
+    adminUrl ? `${adminUrl}/#unpaidpos` : ""].filter(Boolean).join("\n");
+}
+// The quiet-morning email's "still being watched" part: "2 unpaid POs ($1250.00 owed, 1 to check)".
+function unpaidPosWatching_(up) {
+  const t = up && up.totals, n = Number(t && t.count) || 0;
+  if (!n) return "";
+  const k = Number(t.toCheck) || 0, lateC = Number(t.lateCents) || 0;
+  return `${n} unpaid PO${n === 1 ? "" : "s"} (${[fmtCents_(t.owedCents) + " owed", lateC > 0 ? fmtCents_(lateC) + " late" : "", k ? k + " to check" : ""].filter(Boolean).join(", ")})`;
+}
+
+export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit = [], awaitingPickup = [], awaitingBlanks = [], maintenanceDue = [], rushToSet = [], recurringRecorded = [], unconfirmed = null, unpaidPos = null, adminUrl = adminSiteUrl_(env) } = {}) {
   const tz = await timeZone_(env);   // Region setting, else TIMEZONE, else UTC
   const when = (iso) => new Date(iso).toLocaleString("en-US", { timeZone: tz, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
@@ -926,6 +1048,7 @@ export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit
     awaitingPickup.length ? n(awaitingPickup.length, "label waiting for the carrier", "labels waiting for the carrier") : "",
     awaitingBlanks.length ? n(awaitingBlanks.length, "blank order not yet received", "blank orders not yet received") : "",
     (rushToSet || []).length ? n(rushToSet.length, "rush fee still to set", "rush fees still to set") : "",
+    unpaidPosWatching_(unpaidPos),
   ].filter(Boolean);
   const since = lastSentAt ? `since the last roll-up on ${when(lastSentAt)}` : "yet";
   const lines = [
@@ -952,12 +1075,14 @@ export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit
 // scanned yet (listed for the record, never a reason to send).
 // more = real orders still waiting after these (a roll-up takes at most 200: db.js getOrdersForDigest);
 // unconfirmed = shipments the tracking check has stopped looking up (db.js getUnconfirmedShipments).
-export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices = [], orgNames = {}, security = null, inTransit = [], awaitingPickup = [], issues = [], awaitingBlanks = [], priceReminder = null, belowTarget = [], maintenanceDue = [], rushToSet = [], recurringRecorded = [], unconfirmed = null, adminUrl = adminSiteUrl_(env) }) {
+export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices = [], orgNames = {}, security = null, inTransit = [], awaitingPickup = [], issues = [], awaitingBlanks = [], priceReminder = null, belowTarget = [], maintenanceDue = [], rushToSet = [], recurringRecorded = [], unconfirmed = null, unpaidPos = null, adminUrl = adminSiteUrl_(env) }) {
   issues = issues || [];
   recurringRecorded = recurringRecorded || [];
   rushToSet = rushToSet || [];
   belowTarget = belowTarget || [];
   const pr = priceReminder && ((priceReminder.blanks || []).length || (priceReminder.products || []).length) ? priceReminder : null;
+  // Unpaid POs (Net 30, migrations/0121): listed whenever the roll-up goes out, never a reason to send on their own.
+  const up = unpaidPos && ((unpaidPos.toCheck || []).length || (unpaidPos.late || []).length) ? unpaidPos : null;
   awaitingBlanks = awaitingBlanks || [];
   const blanksOverdue = awaitingBlanks.filter(x => x.overdue);
   if (!orders.length && !notices.length && !(security && security.count) && !issues.length && !blanksOverdue.length && !pr && !belowTarget.length) return false;
@@ -1007,13 +1132,13 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
   ].filter(Boolean);
   const subject = `Daily roll-up — ${subjectParts.join(", ")}`;
 
-  const itemLine = (it) => `${it.qty}× ${it.name}${it.size ? ` (${it.size})` : ""}${lineDetail_(it) ? ` [${lineDetail_(it)}]` : ""}${it.cancelDate ? " — cancelled" : ""}`;
+  const itemLine = (it) => `${it.qty}× ${it.name}${it.size ? ` (${it.size})` : ""}${lineDetail_(it) ? ` [${lineDetail_(it)}]` : ""}${Number(it.customerOwned) ? " — customer's own garments" : ""}${it.cancelDate ? " — cancelled" : ""}`;
   const orderHtml = (o) => `
     <tr style="border-top:1px solid #e5e7eb">
       <td style="padding:6px 8px;vertical-align:top;white-space:nowrap">${escHtml(o.orderId)}<br><span style="color:#666;font-size:12px">${escHtml(when(o.placedAt))}</span></td>
       <td style="padding:6px 8px;vertical-align:top">${escHtml(o.customerName)}<br><span style="color:#666;font-size:12px">${escHtml(o.contact || "")}</span>${o.rushRequested ? `<br><span style="color:#b45309;font-size:12px;font-weight:600">${escHtml(rushTag_(o))}</span>` : ""}</td>
       <td style="padding:6px 8px;vertical-align:top;font-size:13px">${(o.items || []).map(it => escHtml(itemLine(it))).join("<br>")}</td>
-      <td style="padding:6px 8px;vertical-align:top;white-space:nowrap">${escHtml(o.paymentMethod || "")}<br><span style="font-size:12px;color:${o.paid ? "#15803d" : "#b45309"}">${o.paid ? "Paid" : "Unpaid"}</span></td>
+      <td style="padding:6px 8px;vertical-align:top;white-space:nowrap">${escHtml(digestPayment_(o))}<br><span style="font-size:12px;color:${o.paid ? "#15803d" : "#b45309"}">${o.paid ? "Paid" : digestPoTag_(o) || "Unpaid"}</span></td>
       <td style="padding:6px 8px;vertical-align:top;text-align:right;white-space:nowrap">${fmt$(o.total)}</td>
     </tr>`;
   const KIND = { payment: "Payment", refund: "Refund", dispute: "Dispute", design: "Design", delivered: "Delivered", invoice: "Invoice", picked_up: "Picked up", quote: "Quote", gift_card: "Gift card", po: "PO" };
@@ -1092,6 +1217,7 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
     ${rushToSet.length ? `<h3 style="margin:22px 0 6px;font-size:17px">⚡ Rush fees to set — ${rushToSet.length}</h3>
     <p style="margin:0 0 6px;color:#555;font-size:13px">These rush orders were placed with the fee to follow. Set it on the order (Orders → Rush…) and send the customer an invoice.</p>
     <ul style="margin:0;padding-left:18px;font-size:14px">${rushToSet.map(x => `<li>${escHtml(x.orderId)} — ${escHtml(x.customerName)} <span style="color:#666">(${escHtml(orgName(x.orgId))})</span>${x.dueDate ? ` · needed by ${escHtml(x.dueDate)}` : ""}</li>`).join("")}</ul>` : ""}
+    ${up ? unpaidPosHtml_(up, orgName, adminUrl) : ""}
     ${maintenanceDue.length ? `<h3 style="margin:22px 0 6px;font-size:17px">🔧 Machine maintenance due — ${maintenanceDue.length}</h3>
     <ul style="margin:0;padding-left:18px;font-size:14px">${maintenanceText_(maintenanceDue).map(x => `<li>${escHtml(x)}</li>`).join("")}</ul>
     ${adminUrl ? `<p style="margin:6px 0 0;font-size:13px"><a href="${escHtml(adminUrl)}/#maintenance">Machine maintenance</a></p>` : ""}` : ""}
@@ -1108,7 +1234,7 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
     urgent.length ? "NEEDS ATTENTION\n" + urgent.map(noticeText).join("\n") : "",
     n ? `${plural(n, "new order")} — ${fmt$(total)}\n\n` + groups.map(g =>
       `${g.name} — ${plural(g.orders.length, "order")}, ${fmt$(g.total / 100)}\n` + g.orders.map(o =>
-        `  ${o.orderId}  ${o.customerName} <${o.contact || ""}>  ${o.paymentMethod || ""} ${o.paid ? "(paid)" : "(unpaid)"}  ${fmt$(o.total)}${o.rushRequested ? "  " + rushTag_(o) : ""}\n` +
+        `  ${o.orderId}  ${o.customerName} <${o.contact || ""}>  ${digestPayment_(o)} ${o.paid ? "(paid)" : digestPoTag_(o) ? "(" + digestPoTag_(o).toLowerCase() + ")" : "(unpaid)"}  ${fmt$(o.total)}${o.rushRequested ? "  " + rushTag_(o) : ""}\n` +
         (o.items || []).map(it => "    " + itemLine(it)).join("\n")).join("\n")).join("\n\n") : "",
     more ? `${moreText}${adminUrl ? ": " + adminUrl + "/#orders" : ""} (a roll-up lists ${DIGEST_LIST_MAX} orders at most; the rest are in the next one)` : "",
     delivered.length ? `DELIVERED — ${delivered.length}\n` + delivered.map(noticeText).join("\n") : "",
@@ -1125,6 +1251,7 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
     pr ? priceReminderText_(pr, orgName, tz) : "",
     belowTarget.length ? `PRODUCTS NOW BELOW YOUR PRICE TARGETS — ${belowTarget.length}\n` + belowTarget.map(p => `  ${p.name} (${orgName(p.orgId)})\n` + (p.problems || []).map(x => "    " + x).join("\n")).join("\n") : "",
     rushToSet.length ? `RUSH FEES TO SET — ${rushToSet.length}\n` + rushToSet.map(x => `  ${x.orderId} (${orgName(x.orgId)})  ${x.customerName}${x.dueDate ? "  needed by " + x.dueDate : ""}`).join("\n") : "",
+    up ? unpaidPosText_(up, orgName, adminUrl) : "",
     maintenanceDue.length ? `MACHINE MAINTENANCE DUE — ${maintenanceDue.length}\n` + maintenanceText_(maintenanceDue).map(x => "  " + x).join("\n") : "",
     recurringRecorded.length ? `RECURRING EXPENSES RECORDED — ${recurringRecorded.length}\n` + recurringText_(recurringRecorded).map(x => "  " + x).join("\n") : "",
     adminUrl,
@@ -1448,11 +1575,15 @@ export async function sendInvoiceEmail(env, args) {
   return send_(env, await buildInvoiceEmail(env, args));
 }
 export async function buildInvoiceEmail(env, { order, orgName, invoiceUrl, message, allowDelivery }) {
+  // Net 30 (migrations/0121): the terms, the PO and the due date (counted from today when this is the first invoice
+  // and the days start at the invoice) — in the subject, under the totals, in how to pay and on the PDF.
+  order = await invoicingOrder_(env, order);
+  const terms = Number(order.balanceDue) > 0 ? await net30Terms_(env, order) : null;
   // A rush order's payment deadline (migrations/0083) goes in the subject and at the top, before anything else.
   const rushNotice = rushPayByNotice_(order);
   const subject = rushNotice
     ? `Invoice for your rush order — ${order.orderId} — full payment due by ${new Date(order.rushPayBy + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`
-    : `Invoice — ${order.orderId}${Number(order.balanceDue) > 0 ? " · " + fmt$(order.balanceDue) + " due" : ""}`;
+    : `Invoice — ${order.orderId}${Number(order.balanceDue) > 0 ? " · " + fmt$(order.balanceDue) + " due" + (terms ? terms.due ? " by " + terms.due : ` · Net ${terms.days}` : "") : ""}`;
   const name = String(order.customerName || "").trim();
   const hello = name && name !== "Local Sale" ? `Hi ${name},` : "Hello,";
   // No invoice page to link to (the desktop program: it isn't on the web): the email is the invoice,
@@ -1478,6 +1609,7 @@ export async function buildInvoiceEmail(env, { order, orgName, invoiceUrl, messa
     ${itemsTable(items, order)}
     ${receiptTotalsHtml_(order)}
     ${Number(order.amountReceived) > 0 ? `<p style="font-size:14px">Paid so far: ${fmt$(order.amountReceived)} &nbsp;·&nbsp; <strong>Balance due: ${fmt$(due)}</strong></p>` : ""}
+    ${terms && invoiceUrl ? `<p style="font-size:14px"><strong>Terms:</strong> ${escHtml(terms.label)}<br>${escHtml(terms.ask)}</p>` : ""}
     ${invoiceUrl ? `<div style="margin:24px 0;text-align:center">
       <a href="${escHtml(invoiceUrl)}" style="display:inline-block;background:#1d4ed8;color:#fff;font-size:16px;font-weight:bold;padding:14px 32px;border-radius:6px;text-decoration:none">View &amp; pay invoice &rarr;</a>
     </div>
@@ -1487,6 +1619,7 @@ export async function buildInvoiceEmail(env, { order, orgName, invoiceUrl, messa
   </div>`;
   const text = `Invoice for order ${order.orderId}\n\n${hello} ${lead}${attached ? " It's also attached as a PDF." : ""}\n${rushNotice ? "\n" + rushNotice.text : ""}${note ? "\n" + note + "\n" : ""}\n${itemsText_(receiptLines_({ ...order, items }))}\n\n${receiptTotalsText_(order)}\n` +
     (Number(order.amountReceived) > 0 ? `Paid so far: ${fmt$(order.amountReceived)} · Balance due: ${fmt$(due)}\n` : "") +
+    (terms && invoiceUrl ? `Terms: ${terms.label}\n${terms.ask}\n` : "") +
     (invoiceUrl ? `\nView and pay: ${invoiceUrl}\n\n%%FOOTER_TEXT%%` : `\n${pay.text}\n\n%%FOOTER_TEXT%%`);
   return { to: order.contact, subject, html, text, ...(pdf ? { pdf } : {}), ...(attachment ? { attachments: [attachment] } : {}) };
 }
@@ -1505,6 +1638,7 @@ export async function invoiceDocument(env, order, { orgName = "", message = "" }
   const items = (order.items || []).filter(it => !it.cancelDate);
   const due = Math.max(0, Number(order.balanceDue) || 0), received = Number(order.amountReceived) || 0;
   const pay = due > 0 ? await howToPay_(env, order, { inEmail: false }) : null;
+  const terms = due > 0 ? (pay && pay.terms) || await net30Terms_(env, order, { inEmail: false }) : null;   // Net 30 (migrations/0121)
   const lines = (v) => escHtml(String(v || "").trim()).replace(/\s*\n\s*/g, "<br>");
   const name = String(order.customerName || "").trim();
   const customer = name && name !== "Local Sale" ? name : "";
@@ -1540,7 +1674,8 @@ export async function invoiceDocument(env, order, { orgName = "", message = "" }
       <table class="meta"><tr><td class="muted">Invoice no.</td><td>${escHtml(order.orderId)}</td></tr>
         <tr><td class="muted">Date</td><td>${escHtml(day())}</td></tr>
         ${order.placedAt ? `<tr><td class="muted">Order date</td><td>${escHtml(day(order.placedAt))}</td></tr>` : ""}
-        ${orgName ? `<tr><td class="muted">Shop</td><td>${escHtml(orgName)}</td></tr>` : ""}</table>
+        ${orgName ? `<tr><td class="muted">Shop</td><td>${escHtml(orgName)}</td></tr>` : ""}
+        ${terms ? `<tr><td class="muted">Terms</td><td>${escHtml(terms.label)}</td></tr>` : ""}</table>
     </div>
   </div>
   <div class="parties">
@@ -1591,7 +1726,7 @@ export function estimateLinesView(items) {
     let config = it.config;
     if (!config && it.configJson) { try { config = JSON.parse(it.configJson); } catch (e) { config = null; } }
     const unit = estimateMoney_(it.unitPrice), list = estimateMoney_(it.listUnitPrice != null ? it.listUnitPrice : it.listUnit);
-    lines.push({ kind: it.kind === "custom" ? "custom" : "product", name: String(it.name || ""),
+    lines.push({ kind: it.kind === "custom" ? "custom" : "product", name: String(it.name || "") + ownGarmentsTag_(it),
       size: it.size && it.size !== "OSFA" ? String(it.size) : "", qty: Math.max(1, Number(it.qty) || 1),
       detail: lineDetail_({ config, personalized: !!it.personalized, persName: it.persName }),
       unitPrice: unit, wasPrice: it.kind === "product" && !it.customPrice && list > unit ? list : null,

@@ -53,6 +53,8 @@ import {
   getAllOrgs, getOrgById, createOrg, updateOrg, cleanDeliveryOptions, setOrgDeliveryOptions, defaultDeliveryOptions, cleanShippingAddress, stagePrereqError, stageTimeError, shopTime_, ORDER_DATE_FIELDS, orderDatesError, setOrderDates, whyNotCompletable_, getSystemIssues, clearSystemIssues,
   getProductsByOrg, getProductsByIds, priceLookups, productShipWeightOz, createProduct, updateProduct, setProductVisible,
   getGlobalSettings, setGlobalSettings, getMachineSettings, setMachineSettings, getPayOnDeliveryRule, setOrderPayOnDelivery,
+  getTerms, buildTermsSettings, setTerms, setOrderTerms, acceptOrderPo, getUnpaidPoReport, net30Cleared,
+  checkInGarments, listGarmentCheckins, undoGarmentCheckin, OWN_GARMENTS_WAIVER_MAX, OWN_GARMENTS_OFF_MESSAGE, GARMENT_CONDITIONS,
   getShipFromAddress, setShipFromAddress, shipFromMissing, getBusinessProfile, setBusinessProfile, getLocaleSettings, setLocaleSettings, FEATURES, getFeatures, setFeatures, resolveTimeZone, localDayEndInstant, setOrdersCompleted, getShippedAwaitingDelivery,
   getBoxPresets, setBoxPresets,
   addShippingPaidAmount, setShippingPaidAmount,
@@ -348,7 +350,9 @@ const ESTIMATE_FEE_NAMES_ = { setup: "Setup fee", digitizing: "Digitizing fee", 
 // are what they are now, not what the caller read). `actor` / `ip` go in the audit row ("customer" from the quote's
 // page). `sendInvoice`: email the new order's invoice when it has an email address and a balance (`origin`: the address
 // its link starts with when the shop has no subdomain). Answers { orderId, repeated?, invoiceSent } or { error, status }.
-export async function convertEstimateToOrder_(env, estimate, { actor = "", ip = null, sendInvoice = false, origin = "" } = {}) {
+// `terms` (staff only, phase 7): { net30: true, termsDays, poNumber } — the order is put on Net 30 as it is made (a PO typed
+// by staff counts at once). The customer's Accept never sets it. Refused when the shop doesn't take Net 30.
+export async function convertEstimateToOrder_(env, estimate, { actor = "", ip = null, sendInvoice = false, origin = "", terms = null } = {}) {
   const ref = estimate && typeof estimate === "object" ? (estimate.estimate ? estimate.estimate.id : estimate.id) : estimate;
   const id = Number(ref);
   if (!Number.isInteger(id) || id <= 0) return { error: "That quote wasn't found.", status: 404 };
@@ -360,6 +364,7 @@ export async function convertEstimateToOrder_(env, estimate, { actor = "", ip = 
   const lines = Array.isArray(got.items) ? got.items : [];
   if (!lines.length) return { error: "This quote has no lines to order.", status: 400 };
   const customer = got.customer || {};
+  if (terms && terms.net30 && !(await net30AllowedFor_(env.DB, await getOrgById(env.DB, est.orgId)))) return { error: NET30_OFF_MSG_, status: 409 };
 
   const orgPrefix = String(est.orgId || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 4).toUpperCase() || "ORD";
   const orderId = orgPrefix + "-" + (String(est.number || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase() || "Q" + id);
@@ -389,14 +394,17 @@ export async function convertEstimateToOrder_(env, estimate, { actor = "", ip = 
       const config = configOf(it.config !== undefined ? it.config : it.configJson);
       return { productId: String(it.productId || ""), name: String(it.name || it.productId || "").slice(0, 200), type: String(it.type || ""), size: String(it.size || "").slice(0, 40),
         qty, unitPrice, personalized: !!it.personalized, persName: String(it.persName || "").slice(0, 200),
-        personalizationFee: Math.max(0, Number(it.personalizationFee) || 0), ...(config ? { config } : {}) };
+        personalizationFee: Math.max(0, Number(it.personalizationFee) || 0), ...(config ? { config } : {}),
+        // The customer's own garment (phase 7): decorated on theirs, so the order line uses no blank.
+        ...(it.customerOwned === true || Number(it.customerOwned) === 1 ? { customerOwned: true } : {}) };
     }
     // A custom or fee line is a Local sale's custom line ("__custom__"): its own name and its own taxability.
     const label = it.kind === "fee" ? (ESTIMATE_FEE_NAMES_[it.feeKind] || "Fee") : "";
     const desc = String(it.name || "").trim();
     const name = label ? (desc && desc.toLowerCase() !== label.toLowerCase() ? label + " — " + desc : label) : desc || "Custom item";
     return { productId: "__custom__", name: name.slice(0, 200), type: String(it.type || ""), size: "", qty: it.kind === "fee" ? 1 : qty, unitPrice,
-      personalized: false, persName: "", personalizationFee: 0, taxable: !(it.taxable === false || Number(it.taxable) === 0) };
+      personalized: false, persName: "", personalizationFee: 0, taxable: !(it.taxable === false || Number(it.taxable) === 0),
+      ...(it.kind !== "fee" && (it.customerOwned === true || Number(it.customerOwned) === 1) ? { customerOwned: true } : {}) };
   });
   const totals = got.totals || {};
   const order = {
@@ -438,7 +446,7 @@ export async function convertEstimateToOrder_(env, estimate, { actor = "", ip = 
   // As a Local sale: a stocked product's lines come out of finished stock when there is enough. They aren't pulled
   // now (pullStockLines) — nothing is handed over yet; they go when the order ships, as a storefront order's do.
   try {
-    await insertOrder(env.DB, order, pricedItems, { fillFromStock: true, customerId: Number(est.customerId),
+    await insertOrder(env.DB, order, pricedItems, { fillFromStock: true, fromEstimate: true, customerId: Number(est.customerId),
       ...(frozenTax ? { taxRateBps: Number(totals.taxRateBps) || 0 } : {}) });
   } catch (e) {
     // Two calls at the same moment: the order and its lines go in as one batch, so the second fails whole on the
@@ -451,9 +459,21 @@ export async function convertEstimateToOrder_(env, estimate, { actor = "", ip = 
     throw e;
   }
   await markConverted();
+  // Net 30 (staff's convert only): set once the order is made. Should it fail, the order stands and the failure is logged
+  // (and answered), for staff to set the terms on the order.
+  let termsNotSaved = false;
+  if (terms && terms.net30) {
+    try {
+      const r = await setOrderTerms(env.DB, orderId, { net30: true, ...(terms.termsDays != null ? { termsDays: terms.termsDays } : {}),
+        ...(terms.poNumber ? { poNumber: terms.poNumber, accept: true } : {}), by: String(actor || "").slice(0, 200), typedByCustomer: false });
+      if (r && r.error) throw new Error(r.error);
+    } catch (e) { termsNotSaved = true; console.error("Net 30 terms weren't saved on the order made from quote", est.number || id, e); }
+  }
   await insertAuditLog(env.DB, { orgId: est.orgId, orderId, action: "estimate.converted", actor: actor || null, ip: ip || null,
     detail: { estimateId: id, number: est.number || "", customerId: Number(est.customerId) || null, total: Number(totals.total) || 0, items: pricedItems.length,
-      ...(codeUse ? { discountCodes: codeUse.names, discount: codeUse.goodsOffCents / 100 } : {}) } })
+      ...(codeUse ? { discountCodes: codeUse.names, discount: codeUse.goodsOffCents / 100 } : {}),
+      ...(terms && terms.net30 ? { net30: true, ...(terms.poNumber ? { poNumber: terms.poNumber } : {}), ...(terms.termsDays != null ? { termsDays: terms.termsDays } : {}),
+        ...(termsNotSaved ? { termsNotSaved: true } : {}) } : {}) } })
     .catch((e) => console.error("AUDIT WRITE FAILED:", "estimate.converted", orderId, e));
 
   // The invoice, when asked for: the order is made whatever happens to the email, so a failure here is logged and
@@ -477,12 +497,85 @@ export async function convertEstimateToOrder_(env, estimate, { actor = "", ip = 
       }
     } catch (e) { console.error("The invoice for the order made from quote", est.number || id, "wasn't sent:", e); }
   }
-  return { orderId, repeated: false, invoiceSent };
+  return { orderId, repeated: false, invoiceSent, ...(termsNotSaved ? { termsNotSaved: true } : {}) };
 }
 
 // Whether an order counts as paid, for a money action's reply: the Payments window redraws the row from it (Mark as
 // paid, the steps), so a payment that settles the order shows it at once, not after a reload.
-const paidState_ = (o) => o ? { paid: !!o.paid, paidForWork: !!o.paidForWork, paidAt: o.paidAt || null, payOnDelivery: !!o.payOnDelivery } : {};
+// Net 30 (migrations/0121) is in it too: an order on terms with an accepted PO is cleared for work while still owed
+// (db.js net30Cleared, the one rule), and the row's payment tag says which PO step it is at. (A harness that loads this
+// file with db.js stubbed and no net30Cleared gets false: not cleared, the safe answer.)
+const paidState_ = (o) => o ? { paid: !!o.paid, paidForWork: !!o.paidForWork, paidAt: o.paidAt || null, payOnDelivery: !!o.payOnDelivery,
+  net30: !!o.net30, poNumber: o.poNumber || "", poStatus: o.poStatus || "", net30Cleared: typeof net30Cleared === "function" && !!net30Cleared(o) } : {};
+
+// ---- Net 30 terms and customer-supplied garments (migrations/0121; phase 7) ----------------------
+// What staff and customers send, checked here; db.js does the work (setOrderTerms, acceptOrderPo, checkInGarments…).
+const NET30_OFF_MSG_ = "Net 30 isn't switched on for this shop (Global settings and Shop settings → Payment methods).";
+const NET30_NOT_AVAILABLE_MSG_ = "Net 30 isn't available for this order.";
+const TERMS_NOT_READY_MSG_ = "Net 30 and customer-supplied garments need the latest database update. Apply the migrations, then try again.";
+// A PO number: optional, trimmed, 1–60 characters, no control characters. `{ value }` ("" = none) or `{ error }`.
+function poNumberOf_(v) {
+  if (v === undefined || v === null) return { value: "" };
+  if (typeof v !== "string") return { error: "That PO number isn't valid." };
+  const value = v.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  if (value.length > 60) return { error: "A PO number is at most 60 characters." };
+  return { value };
+}
+// Days to pay: a whole number from 1 to 365, or null (blank) for the usual (Global settings → Net 30 terms). `{ value }` or `{ error }`.
+function termsDaysOf_(v) {
+  if (v === undefined || v === null || v === "") return { value: null };
+  const n = typeof v === "string" ? Number(v.trim()) : v;
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > 365) return { error: "Terms are a whole number of days from 1 to 365 (leave it blank for the usual)." };
+  return { value: n };
+}
+// Global settings → Net 30 terms, as updateTermsSettings and Save all send it: { defaultDays, startsAt }.
+function termsSettingsInput_(b) {
+  b = b && typeof b === "object" && !Array.isArray(b) ? b : {};
+  const days = typeof b.defaultDays === "string" ? Number(b.defaultDays.trim()) : b.defaultDays;
+  if (typeof days !== "number" || !Number.isInteger(days) || days < 1 || days > 365) return { error: "The usual terms are a whole number of days from 1 to 365." };
+  if (!["invoice", "order", "completed"].includes(b.startsAt)) return { error: "Choose when the days start: the invoice, the order date or the order completed." };
+  return { value: { defaultDays: days, startsAt: b.startsAt } };
+}
+// Whether a shop takes Net 30: Global settings → Payment methods ticks it (enabledPayments.net30 — off until ticked, like
+// pay on delivery) and the shop hasn't switched it off for itself (its enabledPayments.net30 false). `org`: the shop's
+// row, or null. The settings unreadable: no.
+async function net30AllowedFor_(db, org) {
+  let g;
+  try { g = ((await getGlobalSettings(db)) || {}).enabledPayments || {}; } catch (_) { return false; }
+  return g.net30 === true && !(org && org.enabledPayments && org.enabledPayments.net30 === false);
+}
+// The live customer an email belongs to when their record allows Net 30 ({ id, termsDays }), else null. Nothing else
+// is learned from it: an unknown email, an archived or merged record and one that doesn't allow Net 30 are all null.
+async function net30CustomerFor_(db, email) {
+  const em = String(email == null ? "" : email).trim().toLowerCase();
+  if (!em || em.length > 200 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) return null;
+  try {
+    const row = await db.prepare("SELECT id, termsDays FROM customers WHERE email = ? AND mergedIntoId IS NULL AND archivedAt IS NULL AND allowNet30 = 1").bind(em).first();
+    return row ? { id: Number(row.id), termsDays: row.termsDays == null ? null : Number(row.termsDays) } : null;
+  } catch (e) {
+    if (!/no such (table|column)/i.test(String(e && e.message))) console.error("Net 30 customer check failed:", e);
+    return null;
+  }
+}
+// A garment check-in's counts, per size: [{ size, expectedQty, receivedQty, condition, note }]. `{ counts }` or `{ error }`.
+function garmentCountsOf_(raw) {
+  if (!Array.isArray(raw) || !raw.length) return { error: "Count at least one size." };
+  if (raw.length > 50) return { error: "A check-in has at most 50 sizes." };
+  const whole = (v) => { const n = typeof v === "string" && v.trim() !== "" ? Number(v) : v; return typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 100000 ? n : null; };
+  const counts = [];
+  for (const c of raw) {
+    if (!c || typeof c !== "object" || Array.isArray(c)) return { error: "Those counts aren't valid." };
+    const size = c.size == null ? "" : String(c.size).trim().slice(0, 40);
+    const expectedQty = whole(c.expectedQty), receivedQty = whole(c.receivedQty);
+    if (expectedQty === null || receivedQty === null) return { error: "Counts are whole numbers from 0 to 100,000." };
+    const condition = c.condition == null || c.condition === "" ? "good" : String(c.condition).toLowerCase();
+    if (!GARMENT_CONDITIONS.includes(condition)) return { error: "The condition is Good, Damaged or Other." };
+    const note = c.note == null ? "" : String(c.note).trim().slice(0, 500);
+    if ((receivedQty !== expectedQty || condition !== "good") && !note) return { error: "Say what's different (a note) when the count or condition isn't as expected." };
+    counts.push({ size, expectedQty, receivedQty, condition, note });
+  }
+  return { counts };
+}
 
 // The most orders one shop's list returns (getOrders), and the All shops page in all (getOrdersAllShops): the newest that many.
 const ORDERS_LIST_MAX = 2000;
@@ -580,6 +673,8 @@ const CATALOG_ADMIN_ACTIONS = new Set([
   "getEmailSettings", "updateEmailSettings", "checkMailbox", "previewCustomerEmail", "samplePdf", "sendSampleEmail",
   // Phase 6: whether more than one discount code can be used on an order, and gift cards (sell online, amounts).
   "getDiscountRules", "updateDiscountRules", "getGiftCardSettings", "updateGiftCardSettings",
+  // Phase 7: Net 30 terms — the usual days and when they start.
+  "getTermsSettings", "updateTermsSettings",
   "getSalesTaxSettings", "updateSalesTaxSettings",
   "getAccountingSettings", "updateAccountingSettings",
   "saveGlobalSettingsAll",   // Global settings → Save: every section above in one request, all or nothing
@@ -703,6 +798,7 @@ const GLOBAL_SETTINGS_SECTIONS_ = {
   decoration: { action: "updateDecorationSettings", label: "Decoration types" },
   discountRules: { action: "updateDiscountRules", label: "Discount codes" },
   giftCards: { action: "updateGiftCardSettings", label: "Gift cards" },
+  terms: { action: "updateTermsSettings", label: "Net 30 terms" },
 };
 
 // A product's price must be entered: a flat price, or at least one size's (a blank box used to save as $0).
@@ -745,6 +841,11 @@ const NO_MONTH_ACTIONS = new Set([
   "deleteBlankShipment", "setOrderCompleted", "checkDeliveries", "recordTracking", "bulkRecordTracking", "createShippingPaymentLink", "sendInvoice",
   "resendEmail", "resendDownloads", "resetDownloads", "revokeDownloads", "importOrders",
   "setPayOnDelivery",   // pay on delivery (migrations/0105): no money moves, only whether the steps wait for it
+  // Net 30 with a PO (migrations/0121): no money moves either — the order stays owed until payments arrive, which are
+  // dated as any payment is. Terms, days, the PO and accepting it only decide when the steps may go on and when it's due.
+  "setOrderTerms", "acceptOrderPo", "updateTermsSettings",
+  // Customer-supplied garments: counting the customer's own garments in touches no stock and no cost.
+  "checkInGarments", "undoGarmentCheckin",
   // Customer records (migrations/0108): who an order belongs to and who is tax-exempt from now on. An order's own
   // tax was settled when it was placed, so linking, merging or exempting a customer changes no month's numbers.
   "saveCustomer", "setCustomerArchived", "mergeCustomers", "setOrderCustomer",
@@ -912,6 +1013,12 @@ const FEATURE_ACTIONS = {
   emailCampaigns: [
     "getCampaignStatus", "listCampaigns", "getCampaign", "previewAudience", "saveCampaign", "copyCampaign", "deleteCampaign",
     "sendCampaignTest", "scheduleCampaign", "cancelCampaign", "runCampaignQueue", "setMarketingOptOut",
+  ],
+  // Customer-supplied garments (migrations/0121): checking them in. The one feature that is off until switched on
+  // (db.js normalizeFeatures); each action also asks ownGarmentsOn_ itself, so a catalog cached before the switch
+  // existed can't let them through. A line marked as the customer's own on a sale, a quote or Edit items is refused there.
+  ownGarments: [
+    "checkInGarments", "undoGarmentCheckin", "listGarmentCheckins",
   ],
 };
 const ACTION_FEATURE = {};
@@ -1458,6 +1565,24 @@ async function handleOrdersPost_(context, listBefore = null) {
     } catch (_) { /* settings unreadable: the feature switch above is the answer */ }
     return !(orgRow && orgRow.enabledPayments && orgRow.enabledPayments.giftCard === false);
   };
+  // Customer-supplied garments (migrations/0121): the one feature that is OFF unless it was switched on, so here only an
+  // explicit true counts (featureOn's "anything but false" would take a catalog cached before the switch existed as on).
+  const ownGarmentsOn_ = () => (catalogData.features || {}).ownGarments === true;
+  // A line marked "Customer's own garment" (a sale, a quote, Edit items) while the feature is off.
+  const ownGarmentsLineOff_ = () => jsonResponse({ status: "error", feature: "ownGarments", message: OWN_GARMENTS_OFF_MESSAGE + "." }, 400);
+  // A db.js call of phase 7 (Net 30, garments): its answer `{ value }`, or `{ reply }` — the refusal to send. db.js refuses
+  // with { error } or a userFacing throw; a database without migrations/0121 says it needs the update.
+  const termsCall_ = async (run) => {
+    let value;
+    try { value = await run(); }
+    catch (e) {
+      if (e && e.userFacing) return { reply: jsonResponse({ status: "error", message: e.message }, 400) };
+      if (/no such (table|column)/i.test(String(e && e.message))) return { reply: jsonResponse({ status: "error", message: TERMS_NOT_READY_MSG_ }, 503) };
+      throw e;
+    }
+    if (value && value.error) return { reply: jsonResponse({ status: "error", message: value.error }, value.notReady ? 503 : value.status || 409) };
+    return { value };
+  };
 
   // ---- listOrgs — admin org picker -------------------------------------------
   if (body.action === "listOrgs") {
@@ -1478,14 +1603,17 @@ async function handleOrdersPost_(context, listBefore = null) {
     const org = body.org;
     if (!org) return jsonResponse({ status: "error", message: "Unknown org" }, 404);
     // Optional date window (the Orders page's filter) — see getOrdersByOrg.
-    const [orders, podRule] = await Promise.all([
+    const [orders, podRule, net30Rule] = await Promise.all([
       getOrdersByOrg(env.DB, org, { from: body.dateFrom, to: body.dateTo }, { limit: ORDERS_LIST_MAX + 1 }),
       // A harness that loads this file without db.js's rule gets "not allowed", as a failed read does.
-      (async () => getPayOnDeliveryRule(env.DB, org))().catch(() => ({ allowed: false, localSaleOnly: false }))]);
+      (async () => getPayOnDeliveryRule(env.DB, org))().catch(() => ({ allowed: false, localSaleOnly: false })),
+      (async () => ({ allowed: await net30AllowedFor_(env.DB, await getOrgById(env.DB, org)), defaultDays: (await getTerms(env.DB)).defaultDays }))()
+        .catch(() => ({ allowed: false, defaultDays: 30 }))]);
     const more = orders.length > ORDERS_LIST_MAX;
     // payOnDelivery: whether this shop's orders may be set to pay on delivery ({ allowed, localSaleOnly }), so the page
-    // offers it only where the server would take it (setPayOnDelivery, createLocalSale).
-    return jsonResponse({ status: "ok", orders: orderCostsFor_(more ? orders.slice(0, ORDERS_LIST_MAX) : orders), more, max: ORDERS_LIST_MAX, payOnDelivery: podRule });
+    // offers it only where the server would take it (setPayOnDelivery, createLocalSale). net30 (migrations/0121): whether
+    // they may be put on Net 30 terms ({ allowed, defaultDays }: setOrderTerms, createLocalSale, convertEstimate).
+    return jsonResponse({ status: "ok", orders: orderCostsFor_(more ? orders.slice(0, ORDERS_LIST_MAX) : orders), more, max: ORDERS_LIST_MAX, payOnDelivery: podRule, net30: net30Rule });
   }
 
   // ---- getOrdersByIds — some of one shop's orders, after an action on them ----
@@ -1519,11 +1647,15 @@ async function handleOrdersPost_(context, listBefore = null) {
     const more = all.length > ORDERS_LIST_MAX;
     const byOrg = byId_();
     for (const o of (more ? all.slice(0, ORDERS_LIST_MAX) : all)) (byOrg[o.orgId] = byOrg[o.orgId] || []).push(o);
+    // Net 30 terms (migrations/0121): each shop's rule, as getOrders gives it, so the page offers Net 30… where it may.
+    let n30Global = false, n30Days = 30;
+    try { n30Global = ((await getGlobalSettings(env.DB)) || {}).enabledPayments?.net30 === true; n30Days = (await getTerms(env.DB)).defaultDays; } catch (_) { n30Global = false; }
     const shops = await Promise.all(orgs.map(async (o) => {
       const orders = byOrg[o.orgId] || [];
       // The latest proof of each order loaded: the shop's newest that many in the window, the same orders.
       const verifications = orders.length ? await getLatestVerificationsByOrg(env.DB, o.orgId, range, { limit: orders.length }).catch(() => []) : [];
-      return { orgId: o.orgId, name: o.name || o.orgId, orders: orderCostsFor_(orders), more: false, verifications };
+      return { orgId: o.orgId, name: o.name || o.orgId, orders: orderCostsFor_(orders), more: false, verifications,
+        net30: { allowed: n30Global && !(o.enabledPayments && o.enabledPayments.net30 === false), defaultDays: n30Days } };
     }));
     return jsonResponse({ status: "ok", shops, more, max: ORDERS_LIST_MAX });
   }
@@ -1579,10 +1711,14 @@ async function handleOrdersPost_(context, listBefore = null) {
     // Only the blocks the page shows (the user's choice, Home's ⚙) are worked out; none named = all of them.
     // The business's money is a manager's (seesPricing_'s rule): staff get the order counts only, so nothing
     // else is worked out for them. The kept parts are the same for every role.
+    // Unpaid POs (migrations/0121): how many Net 30 orders are owed and how many POs wait to be checked are an order
+    // count (orders.details read); what they come to is money, a manager's like the rest.
     let blocks = Array.isArray(body.blocks) ? body.blocks.filter(b => typeof b === "string") : undefined;
-    if (!seesPricing_()) blocks = !blocks || blocks.includes("orders") ? ["orders"] : [];
+    const posCounts = !seesPricing_() && can_("orders.details", "read") && (!blocks || blocks.includes("unpaidpos"));
+    if (!seesPricing_()) blocks = (!blocks || blocks.includes("orders") ? ["orders"] : []).concat(posCounts ? ["unpaidpos"] : []);
     const d = await getDashboard(env.DB, { today, fresh: body.fresh === true, blocks });
-    if (!seesPricing_()) return jsonResponse({ status: "ok", stages: d.stages, open: d.open, onTheWay: d.onTheWay, blocks: d.blocks, cachedAt: d.cachedAt, cached: d.cached });
+    if (!seesPricing_()) return jsonResponse({ status: "ok", stages: d.stages, open: d.open, onTheWay: d.onTheWay, blocks: d.blocks, cachedAt: d.cachedAt, cached: d.cached,
+      ...(posCounts && d.unpaidPos ? { unpaidPos: { count: Number(d.unpaidPos.count) || 0, toCheck: Number(d.unpaidPos.toCheck) || 0 } } : {}) });
     // Home's pies split recorded expenses by category, which is the Expenses page's (finance.expenses). A role that
     // sees the money but not Expenses gets them as one "Recorded expenses" slice, so the pie still adds up.
     if (!seesExpenses_()) {
@@ -2667,6 +2803,30 @@ async function handleOrdersPost_(context, listBefore = null) {
     });
   }
 
+  // ---- getUnpaidPoReport — every Net 30 order still owed, by how late it is (migrations/0121) ----
+  // db.js getUnpaidPoReport works out each order's due date (Global settings → Net 30 terms) and what is still owed (the
+  // order's own owed / received figures), as of `asOf` (default: the business's today). Optional `org` / `orgId` and
+  // `customerId` narrow it. Money comes back in cents, as db.js gives it. `net30On`: whether Net 30 is ticked in Global
+  // settings, so the page can say why the report is empty.
+  if (body.action === "getUnpaidPoReport") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const asOf = body.asOf == null || body.asOf === "" ? await localToday(env) : String(body.asOf).trim();
+    if (!fundraisingYmd_(asOf)) return jsonResponse({ status: "error", message: "Invalid date — expected YYYY-MM-DD" }, 400);
+    const { org, error } = await fundraisingOrg_(body.orgId != null && body.orgId !== "" ? body.orgId : body.org, false);
+    if (error) return error;
+    let customerId;
+    if (body.customerId != null && body.customerId !== "") {
+      customerId = customerIdOf_(body.customerId);
+      if (!customerId) return jsonResponse({ status: "error", message: "That customer isn't valid. Pick one from the list." }, 400);
+    }
+    const got = await termsCall_(() => getUnpaidPoReport(env.DB, { asOf, ...(org ? { orgId: org.orgId } : {}), ...(customerId ? { customerId } : {}) }));
+    if (got.reply) return got.reply;
+    let net30On = false;
+    try { net30On = ((await getGlobalSettings(env.DB)) || {}).enabledPayments?.net30 === true; } catch (_) { net30On = false; }
+    return jsonResponse({ status: "ok", ...got.value, asOf: got.value.asOf || asOf, orgId: org ? org.orgId : null, customerId: customerId || null, net30On });
+  }
+
   // ---- setOrgFundraiser — a shop's fundraiser, or none (fundraiser: null) ----
   // Applies to orders placed from now on. The storefront's "… supports …" line comes from the cached catalog, so the
   // catalog moves to a new version, as other shop changes that show at once do.
@@ -3124,6 +3284,78 @@ async function handleOrdersPost_(context, listBefore = null) {
     return jsonResponse({ status: "ok", orderId, ...paidState_(updated) });
   }
 
+  // ---- setOrderTerms — Net 30 with a PO (migrations/0121) -----------------------------------------
+  // `net30` (true / false), `termsDays` (1–365, or null / "" for the customer's own or the usual) and `poNumber` (up to
+  // 60 characters, "" to clear it): each one left out stays as it is. A PO typed here by staff counts at once (accepted
+  // by them); clearing it takes the acceptance away. An order on Net 30 with an accepted PO is cleared for work while
+  // still owed (db.js net30Cleared) and stays on the Unpaid POs report until it is paid. No money moves and no month's
+  // numbers change, so no periodGuard. Needs "Net 30 terms and PO numbers" (permissions.js orders.terms) and, to turn
+  // Net 30 on, a shop that takes it (Global settings and Shop settings → Payment methods). Turning it off always works.
+  if (body.action === "setOrderTerms") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const orderId = String(body.orderId || "").trim();
+    if (!orderId || !ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
+    if (body.net30 !== undefined && typeof body.net30 !== "boolean") return jsonResponse({ status: "error", message: "Say whether the order is on Net 30 (true or false)." }, 400);
+    const days = body.termsDays === undefined ? null : termsDaysOf_(body.termsDays);
+    if (days && days.error) return jsonResponse({ status: "error", message: days.error }, 400);
+    const po = body.poNumber === undefined ? null : poNumberOf_(body.poNumber);
+    if (po && po.error) return jsonResponse({ status: "error", message: po.error }, 400);
+    const before = await getOrderById(env.DB, orderId);
+    if (!before || (body.org && String(body.org) !== before.orgId)) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    if (before.voidedAt) return jsonResponse({ status: "error", message: "This order is voided." }, 409);
+    const was = { net30: !!before.net30, termsDays: before.termsDays == null ? null : Number(before.termsDays), poNumber: before.poNumber || "" };
+    const net30 = body.net30 === undefined ? was.net30 : body.net30;
+    // Taking an order off Net 30 takes its PO and days with it (the PO is a promise to pay on terms).
+    const to = net30 ? { net30, termsDays: days ? days.value : was.termsDays, poNumber: po ? po.value : was.poNumber } : { net30, termsDays: null, poNumber: "" };
+    if (!net30 && ((po && po.value) || (days && days.value != null))) return jsonResponse({ status: "error", message: "Tick Net 30 to give the order a PO number or terms." }, 400);
+    if (to.net30 && !was.net30) {
+      if (before.paid) return jsonResponse({ status: "error", message: "This order is already paid in full." }, 409);
+      if (!(await net30AllowedFor_(env.DB, await getOrgById(env.DB, before.orgId)))) return jsonResponse({ status: "error", message: NET30_OFF_MSG_ }, 409);
+    }
+    const changes = {};
+    for (const k of Object.keys(to)) if (to[k] !== was[k]) changes[k] = { from: was[k], to: to[k] };
+    if (Object.keys(changes).length) {
+      // Audited first: taking Net 30 or a PO off (or putting them on) changes whether the order's work may go on unpaid.
+      const auditErr = await auditStrict({ orgId: before.orgId, orderId, action: "order.terms_set", detail: { from: was, to, changes } });
+      if (auditErr) return auditErr;
+      // Only what changed is sent: a PO sent back unchanged (the page's whole Terms form) is not accepted by it — a
+      // customer's PO is accepted with Accept PO (acceptOrderPo). A new PO typed here by staff counts at once.
+      const got = await termsCall_(() => setOrderTerms(env.DB, orderId, { net30: to.net30, ...(changes.termsDays ? { termsDays: to.termsDays } : {}),
+        ...(changes.poNumber ? { poNumber: to.poNumber, accept: !!to.poNumber } : {}), by: String(adminActor(request) || "").slice(0, 200), typedByCustomer: false }));
+      if (got.reply) return got.reply;
+      // Cleared now and not before: its downloads go out, as when a payment pays it (grantOrderDownloads counts net30Cleared).
+      if (got.value && got.value.cleared && !got.value.wasCleared && !before.paid) await deliverDigital_(orderId);
+    }
+    const updated = await getOrderById(env.DB, orderId);
+    return jsonResponse({ status: "ok", orderId, order: updated ? orderCostsFor_([updated])[0] : null, ...paidState_(updated) });
+  }
+
+  // ---- acceptOrderPo — staff accept the PO number a customer typed (checkout or invoice page) ----------
+  // Until then a Net 30 order waits like an unpaid one ("PO to check"); accepted, its work goes on (db.js net30Cleared).
+  if (body.action === "acceptOrderPo") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const orderId = String(body.orderId || "").trim();
+    if (!orderId || !ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
+    const before = await getOrderById(env.DB, orderId);
+    if (!before || (body.org && String(body.org) !== before.orgId)) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    if (before.voidedAt) return jsonResponse({ status: "error", message: "This order is voided." }, 409);
+    if (!before.net30) return jsonResponse({ status: "error", message: "This order isn't on Net 30." }, 409);
+    if (!String(before.poNumber || "").trim()) return jsonResponse({ status: "error", message: "There's no PO number to accept yet." }, 409);
+    if (!before.poAcceptedAt) {
+      const auditErr = await auditStrict({ orgId: before.orgId, orderId, action: "order.po_accepted",
+        detail: { poNumber: before.poNumber, typedAt: before.poTypedAt || null } });
+      if (auditErr) return auditErr;
+      const got = await termsCall_(() => acceptOrderPo(env.DB, orderId, String(adminActor(request) || "").slice(0, 200)));
+      if (got.reply) return got.reply;
+      // Cleared for work now: its downloads go out, as when a payment pays it.
+      if (got.value && got.value.cleared && !got.value.wasCleared && !before.paid) await deliverDigital_(orderId);
+    }
+    const updated = await getOrderById(env.DB, orderId);
+    return jsonResponse({ status: "ok", orderId, order: updated ? orderCostsFor_([updated])[0] : null, ...paidState_(updated) });
+  }
+
   // ---- setDiscount — apply or clear a discount on an order -------------------
   if (body.action === "setDiscount") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
@@ -3318,6 +3550,18 @@ async function handleOrdersPost_(context, listBefore = null) {
     // even when it's limited to local sales).
     if (body.payOnDelivery && !can_("orders.payOnDelivery", "edit")) return forbidden_("Your role can't set orders to pay on delivery. Ask an admin.");
     if (body.payOnDelivery && body.paid) return jsonResponse({ status: "error", message: "Choose Paid or Pay on delivery, not both." }, 400);
+    // Net 30 with a PO (migrations/0121): its own permission (orders.terms) and only where the shop takes it. A PO typed
+    // here is staff's, so it counts at once: the sale is cleared for work while it is still owed.
+    const saleNet30 = body.net30 === true;
+    const saleDays = termsDaysOf_(body.termsDays), salePo = poNumberOf_(body.poNumber);
+    if (saleNet30 && !can_("orders.terms", "edit")) return forbidden_("Your role can't set Net 30 terms. Ask an admin.");
+    if (saleNet30 && (body.paid || body.payOnDelivery)) return jsonResponse({ status: "error", message: "Choose one of Paid, Pay on delivery or Net 30." }, 400);
+    if (saleDays.error) return jsonResponse({ status: "error", message: saleDays.error }, 400);
+    if (salePo.error) return jsonResponse({ status: "error", message: salePo.error }, 400);
+    if (!saleNet30 && (salePo.value || saleDays.value != null)) return jsonResponse({ status: "error", message: "Tick Net 30 to give the sale a PO number or terms." }, 400);
+    // Customer-supplied garments: a line marked as the customer's own is decoration on their garments — no blank, no
+    // stock (db.js insertOrder) — and needs the feature on.
+    if (Array.isArray(body.items) && body.items.some(it => it && it.customerOwned === true) && !ownGarmentsOn_()) return ownGarmentsLineOff_();
     // The customer picked on the form (migrations/0108). Picking one can make the sale tax-exempt, so it needs
     // the Customers page's own permission, not only the sale's.
     const saleCustomerId = customerIdOf_(body.customerId);
@@ -3330,6 +3574,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (body.payOnDelivery && !(await getPayOnDeliveryRule(env.DB, org)).allowed) {
       return jsonResponse({ status: "error", message: "Payment on delivery isn't allowed for this shop (Global settings and Shop settings → Payment methods)." }, 409);
     }
+    if (saleNet30 && !(await net30AllowedFor_(env.DB, await getOrgById(env.DB, org)))) return jsonResponse({ status: "error", message: NET30_OFF_MSG_ }, 409);
     // Bulk sales (migrations/0109): staff record up to STAFF_MAX_LINES lines of up to STAFF_MAX_LINE_QTY pieces — a
     // team order of hundreds. The storefront keeps its own, smaller limits (lineQty in db.js).
     if (!Array.isArray(body.items) || body.items.length === 0 || body.items.length > STAFF_MAX_LINES) {
@@ -3390,6 +3635,8 @@ async function handleOrdersPost_(context, listBefore = null) {
             ...(lineConfig ? { config: lineConfig } : {}),
             // Custom lines choose their own taxability; catalog lines use the product's.
             ...(isCustomItem ? { taxable: it.taxable !== false } : {}),
+            // The customer's own garment (phase 7): priced as any line (the price is the decoration), never a blank or stock.
+            ...(it.customerOwned === true ? { customerOwned: true } : {}),
           };
         })
       );
@@ -3519,17 +3766,30 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (body.paid)      await settleOrderBalance(env.DB, orderId,
                           "Local sale" + (order.paymentMethod ? " (" + order.paymentMethod + ")" : ""), placedAt, saleKey);
     if (body.payOnDelivery) await setOrderPayOnDelivery(env.DB, orderId, true);
+    // Net 30: the days (blank = the customer's own, else the usual) and the PO, typed by staff — so accepted at once.
+    // The sale is already made: should this fail it is logged and the answer says so, to set them on the order.
+    let termsNotSaved = false;
+    if (saleNet30) {
+      try {
+        const r = await setOrderTerms(env.DB, orderId, { net30: true, ...(saleDays.value != null ? { termsDays: saleDays.value } : {}),
+          ...(salePo.value ? { poNumber: salePo.value, accept: true } : {}), by: String(adminActor(request) || "").slice(0, 200), typedByCustomer: false });
+        if (r && r.error) throw new Error(r.error);
+      } catch (e) { termsNotSaved = true; console.error("Net 30 terms weren't saved on local sale", orderId, e); }
+    }
     if (body.delivered) await setFulfillmentStage(env.DB, orderId, "delivered", { at: placedAt });
     // Gift cards that leave the sale paid: its downloads go out, as when a payment pays an order in full (redeemGiftCard).
     if (cardResults.some(c => c.ok)) { const after = await getOrderById(env.DB, orderId); if (after && after.paid) await deliverDigital_(orderId); }
 
     audit({ orgId: org, orderId, action: "order.created_local_sale",
       detail: { customerName: order.customerName, total: subtotal, paid: !!body.paid, payOnDelivery: !!body.payOnDelivery, items: pricedItems.length, ...(saleCustomerId ? { customerId: saleCustomerId } : {}),
+        ...(saleNet30 ? { net30: true, ...(salePo.value ? { poNumber: salePo.value } : {}), ...(saleDays.value != null ? { termsDays: saleDays.value } : {}), ...(termsNotSaved ? { termsNotSaved: true } : {}) } : {}),
+        ...(pricedItems.some(it => it.customerOwned) ? { customerOwnedLines: pricedItems.filter(it => it.customerOwned).length } : {}),
         ...(discountUse ? { discountCode: discountUse.names.join(", "), discountCodes: discountUse.names, discount: discountUse.goodsOffCents / 100,
           ...(discountUse.shippingOffCents ? { shippingDiscount: discountUse.shippingOffCents / 100 } : {}) } : {}),
         ...(order.reorderOf ? { reorderOf: order.reorderOf } : {}),
         ...(cardResults.some(c => c.ok) ? { giftCards: cardResults.filter(c => c.ok).map(c => ({ last4: c.last4, amount: c.taken })) } : {}) } });
-    return jsonResponse({ status: "ok", orderId, ...(cardResults.length ? { giftCards: cardResults } : {}) });
+    return jsonResponse({ status: "ok", orderId, ...(cardResults.length ? { giftCards: cardResults } : {}),
+      ...(termsNotSaved ? { warning: "The sale was saved, but its Net 30 terms weren't. Set them on the order (Terms)." } : {}) });
   }
 
   // ---- Customer records (migrations/0108): the Customers page, the Local sale picker, an order's customer ----
@@ -3771,7 +4031,10 @@ async function handleOrdersPost_(context, listBefore = null) {
         if (!Object.prototype.hasOwnProperty.call(ESTIMATE_FEE_NAMES_, it.feeKind)) return { error: at + "pick the kind of fee (setup, digitizing, art or other)." };
         if (moneyOf(it.amount) === null) return { error: at + "enter the fee's amount (0 or more)." };
       }
+      // "Customer's own garment" (phase 7): a product or custom line decorated on the customer's garments, not a fee.
+      if (it.customerOwned === true && it.kind === "fee") return { error: at + "a fee can't be the customer's own garment." };
     }
+    if (raw.some(it => it.customerOwned === true) && !ownGarmentsOn_()) return { error: OWN_GARMENTS_OFF_MESSAGE + "." };
     // Quantity breaks: the pieces of each product across the quote's product lines (every size, color and version line).
     const productLines = raw.filter(it => it.kind === "product").map(it => ({ productId: it.productId, qty: qtyOf(it.qty) }));
     const breakQty = orderBreakQty_(productLines);
@@ -3795,7 +4058,8 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (it.kind === "custom") {
         const unitPrice = moneyOf(it.unitPrice);
         items.push({ kind: "custom", productId: "", name: String(it.name).trim().slice(0, 200), type: String(it.type || "").slice(0, 80), size: String(it.size || "").slice(0, 40), config: null,
-          personalized: false, persName: "", feeKind: "", qty, unitPrice, listUnitPrice: unitPrice, personalizationFee: 0, customPrice: false, taxable: it.taxable !== false });
+          personalized: false, persName: "", feeKind: "", qty, unitPrice, listUnitPrice: unitPrice, personalizationFee: 0, customPrice: false, taxable: it.taxable !== false,
+          customerOwned: it.customerOwned === true });
         continue;
       }
       const custom = typed(it.customUnitPrice) ? moneyOf(it.customUnitPrice) : null;
@@ -3813,7 +4077,7 @@ async function handleOrdersPost_(context, listBefore = null) {
         config: priced.config || null, personalized: custom === null ? !!it.personalized : false, persName: String(it.persName || "").slice(0, 200), feeKind: "", qty,
         unitPrice: custom === null ? Number(priced.unitPrice) || 0 : custom, listUnitPrice: custom === null ? list : custom,
         personalizationFee: custom === null ? Number(priced.personalizationFee) || 0 : 0, customPrice: custom !== null,
-        taxable: taxableOf.has(it.productId) ? taxableOf.get(it.productId) : true });
+        taxable: taxableOf.has(it.productId) ? taxableOf.get(it.productId) : true, customerOwned: it.customerOwned === true });
     }
     return { items };
   };
@@ -4018,13 +4282,22 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (denied) return denied;
     if (!can_("orders.details", "edit")) return forbidden_("Your role can't make orders. Ask an admin.");
     if (body.sendInvoice && !can_("orders.invoices", "edit")) return forbidden_("Your role can't send invoices. Ask an admin.");
+    // Net 30 with a PO (phase 7): staff may put the new order on terms as they convert (the quote itself keeps nothing of it).
+    const convNet30 = body.net30 === true;
+    const convDays = termsDaysOf_(body.termsDays), convPo = poNumberOf_(body.poNumber);
+    if (convNet30 && !can_("orders.terms", "edit")) return forbidden_("Your role can't set Net 30 terms. Ask an admin.");
+    if (convDays.error) return jsonResponse({ status: "error", message: convDays.error }, 400);
+    if (convPo.error) return jsonResponse({ status: "error", message: convPo.error }, 400);
+    if (!convNet30 && (convPo.value || convDays.value != null)) return jsonResponse({ status: "error", message: "Tick Net 30 to give the order a PO number or terms." }, 400);
     { const locked = await periodGuard(body); if (locked) return locked; }
     const id = customerIdOf_(body.id);
     if (!id) return jsonResponse({ status: "error", message: "That quote isn't valid." }, 400);
     return estimatesReady_(async () => {
-      const r = await convertEstimateToOrder_(env, id, { actor: adminActor(request), ip: clientIp, sendInvoice: !!body.sendInvoice, origin: new URL(request.url).origin });
+      const r = await convertEstimateToOrder_(env, id, { actor: adminActor(request), ip: clientIp, sendInvoice: !!body.sendInvoice, origin: new URL(request.url).origin,
+        ...(convNet30 ? { terms: { net30: true, termsDays: convDays.value, poNumber: convPo.value } } : {}) });
       if (r.error) return jsonResponse({ status: "error", message: r.error }, r.status || 400);
-      return jsonResponse({ status: "ok", orderId: r.orderId, invoiceSent: !!r.invoiceSent, ...(r.repeated ? { repeated: true } : {}) });
+      return jsonResponse({ status: "ok", orderId: r.orderId, invoiceSent: !!r.invoiceSent, ...(r.repeated ? { repeated: true } : {}),
+        ...(r.termsNotSaved ? { warning: "The order was made, but its Net 30 terms weren't. Set them on the order (Terms)." } : {}) });
     });
   }
 
@@ -4710,6 +4983,80 @@ async function handleOrdersPost_(context, listBefore = null) {
     await sendShippedEmail(env, o, { carrier: (label && label.carrier) || shownMethod_(o.shippingMethod), tracking, shippedAt: o.shippedAt });
   })().catch((e) => console.error("Shipped email failed for", orderId, e)));
 
+  // ---- Customer-supplied garments (migrations/0121): checking the customer's own garments in -------------------
+  // A line marked "Customer's own garment" never uses a blank: production waits for the customer's garments instead, and
+  // they are counted in here, per size, with their condition (db.js checkInGarments: a re-count replaces the last one,
+  // and the line's — then the order's — blank step moves on once garments are in). Who may: whoever receives an order's
+  // blanks (orders.stepsEarly); undoing a check-in voids its rows (Full). The Customer-supplied garments feature
+  // (FEATURE_ACTIONS) — asked again here, as it is off unless switched on. `waiver`: the slip's line (Global settings).
+  const garmentLine_ = async (b) => {
+    const orderId = String(b.orderId || "").trim();
+    if (!orderId || !ORDER_ID_RE.test(orderId)) return { reply: jsonResponse({ status: "error", message: "Invalid order ID" }, 400) };
+    const order = await getOrderById(env.DB, orderId);
+    if (!order || (b.org && String(b.org) !== order.orgId)) return { reply: jsonResponse({ status: "error", message: "Order not found" }, 404) };
+    if (b.itemId === undefined) return { order, orderId };
+    const itemId = Number(b.itemId);
+    const item = Number.isInteger(itemId) && itemId > 0 ? (order.items || []).find(i => Number(i.sheetRow) === itemId) : null;
+    if (!item) return { reply: jsonResponse({ status: "error", message: "That line isn't on this order. Reload the order and try again." }, 400) };
+    return { order, orderId, itemId, item };
+  };
+  const garmentAnswer_ = async (orderId, extra = {}) => {
+    const [updated, list, features] = await Promise.all([getOrderById(env.DB, orderId), listGarmentCheckins(env.DB, orderId), getFeatures(env.DB)]);
+    const waiver = typeof features.ownGarmentsWaiver === "string" ? features.ownGarmentsWaiver : "";
+    return jsonResponse({ status: "ok", orderId, checkins: Array.isArray(list) ? list : (list && list.checkins) || [], waiver,
+      order: updated ? orderCostsFor_([updated])[0] : null, ...extra });
+  };
+  if (body.action === "listGarmentCheckins") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    if (!ownGarmentsOn_()) return featureOffResponse("ownGarments", featureLabel_("ownGarments"));
+    const line = await garmentLine_({ orderId: body.orderId, org: body.org });
+    if (line.reply) return line.reply;
+    const got = await termsCall_(() => garmentAnswer_(line.orderId));
+    return got.reply || got.value;
+  }
+  if (body.action === "checkInGarments") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    if (!ownGarmentsOn_()) return featureOffResponse("ownGarments", featureLabel_("ownGarments"));
+    if (body.itemId === undefined) return jsonResponse({ status: "error", message: "Say which line the garments are for." }, 400);
+    const counted = garmentCountsOf_(body.counts);
+    if (counted.error) return jsonResponse({ status: "error", message: counted.error }, 400);
+    const when = actionTime(body);
+    if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
+    const line = await garmentLine_(body);
+    if (line.reply) return line.reply;
+    if (line.order.voidedAt) return jsonResponse({ status: "error", message: "This order is voided." }, 409);
+    if (!line.item.customerOwned) return jsonResponse({ status: "error", message: "That line isn't marked as the customer's own garments." }, 409);
+    if (line.item.cancelDate) return jsonResponse({ status: "error", message: "That line was cancelled." }, 409);
+    const at = when ? when.at : new Date().toISOString();
+    const got = await termsCall_(() => checkInGarments(env.DB, { orderId: line.orderId, itemId: line.itemId, counts: counted.counts, by: String(adminActor(request) || "").slice(0, 200), at }));
+    if (got.reply) return got.reply;
+    const expected = counted.counts.reduce((n, c) => n + c.expectedQty, 0), received = counted.counts.reduce((n, c) => n + c.receivedQty, 0);
+    audit({ orgId: line.order.orgId, orderId: line.orderId, action: "order.garments_checked_in",
+      detail: { itemId: line.itemId, name: line.item.name || "", expected, received, at,
+        counts: counted.counts.map(c => ({ size: c.size, expected: c.expectedQty, received: c.receivedQty, condition: c.condition, ...(c.note ? { note: c.note } : {}) })) } });
+    return garmentAnswer_(line.orderId, { itemId: line.itemId });
+  }
+  if (body.action === "undoGarmentCheckin") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    if (!ownGarmentsOn_()) return featureOffResponse("ownGarments", featureLabel_("ownGarments"));
+    if (body.itemId === undefined) return jsonResponse({ status: "error", message: "Say which line the garments are for." }, 400);
+    const line = await garmentLine_(body);
+    if (line.reply) return line.reply;
+    if (line.order.voidedAt) return jsonResponse({ status: "error", message: "This order is voided." }, 409);
+    if (!line.item.customerOwned) return jsonResponse({ status: "error", message: "That line isn't marked as the customer's own garments." }, 409);
+    // Audited first, with what is being taken back: the line goes back to waiting on the customer's garments.
+    const auditErr = await auditStrict({ orgId: line.order.orgId, orderId: line.orderId, action: "order.garments_checkin_undone",
+      detail: { itemId: line.itemId, name: line.item.name || "", before: { ownReceivedAt: line.item.ownReceivedAt || null,
+        counts: (Array.isArray(line.item.checkins) ? line.item.checkins : []).map(c => ({ size: c.size, expected: c.expectedQty, received: c.receivedQty, condition: c.condition })) } } });
+    if (auditErr) return auditErr;
+    const got = await termsCall_(() => undoGarmentCheckin(env.DB, { orderId: line.orderId, itemId: line.itemId, by: String(adminActor(request) || "").slice(0, 200) }));
+    if (got.reply) return got.reply;
+    return garmentAnswer_(line.orderId, { itemId: line.itemId });
+  }
+
   if (body.action === "setFulfillmentStage") {
     const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
     if (denied) return denied;
@@ -5019,6 +5366,9 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (removals.length && !can_("orders.details", "full")) return forbidden_("Your role can't remove items from an order. Ask an admin.");
     if (removals.some(r => Number(r.refundAmount) > 0) && !can_("orders.payments", "full")) return forbidden_("Your role can't record refunds. Ask an admin.");
     if (body.requestPayment && !can_("orders.payments", "edit")) return forbidden_("Your role can't request payments. Ask an admin.");
+    // Customer-supplied garments (phase 7): marking a line as the customer's own (customerOwned true) needs the feature on;
+    // unmarking one (false) always works. Left out, a changed line keeps what it was.
+    if (updates.concat(additions).some(x => x.customerOwned === true) && !ownGarmentsOn_()) return ownGarmentsLineOff_();
     { const locked = await periodGuard(body); if (locked) return locked; }
 
     const orderId = String(body.orderId || "").trim();
@@ -5095,6 +5445,7 @@ async function handleOrdersPost_(context, listBefore = null) {
         persName: String(upd.persName || "").slice(0, 200),
         personalizationFee,
         ...(lineConfig ? { config: lineConfig } : {}),
+        ...(typeof upd.customerOwned === "boolean" ? { customerOwned: upd.customerOwned } : {}),
       }]);
     }
     const additionWrites = [];
@@ -5122,6 +5473,7 @@ async function handleOrdersPost_(context, listBefore = null) {
         persName: String(add.persName || "").slice(0, 200),
         personalizationFee,
         ...(lineConfig ? { config: lineConfig } : {}),
+        ...(add.customerOwned === true ? { customerOwned: true } : {}),
       });
     }
 
@@ -6068,6 +6420,24 @@ async function handleOrdersPost_(context, listBefore = null) {
       return jsonResponse({ status: "ok", giftCards: saved });
     }
 
+    // ---- Net 30 terms: the usual days to pay, and when they start (Global settings → Net 30 terms; migrations/0121) ----
+    // startsAt: "invoice" (the first invoice sent; the order date when none was), "order" (the order date) or "completed"
+    // (shipped or picked up). Due dates are worked out when read (db.js net30DueDate_), so a change applies to every
+    // Net 30 order at once; an order's own days (or its customer's) still win over the usual.
+    if (body.action === "getTermsSettings") {
+      return jsonResponse({ status: "ok", terms: await getTerms(env.DB) });
+    }
+    if (body.action === "updateTermsSettings") {
+      const input = termsSettingsInput_(body.terms && typeof body.terms === "object" ? body.terms : body);
+      if (input.error) return jsonResponse({ status: "error", message: input.error }, 400);
+      const before = await getTerms(env.DB);
+      let saved;
+      try { saved = await setTerms(env.DB, input.value); }
+      catch (e) { if (e && e.userFacing) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
+      audit({ orgId: null, orderId: null, action: "settings.terms_set", detail: { from: before, to: saved } });
+      return jsonResponse({ status: "ok", terms: saved });
+    }
+
     // ---- Pricing awareness (migrations/0067): fees, supplies, targets, and the analysis itself ----
     if (body.action === "getPricingSettings") {
       const sr = ((await getShopRate(env.DB).catch(() => ({}))) || {}).result;
@@ -6201,7 +6571,8 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (body.action === "resetDownloads") { await resetOrderDownloads(env.DB, orderId); audit({ orgId: o.orgId, orderId, action: "order.downloads_reset", detail: {} }); }
       if (body.action === "revokeDownloads") { const n = await revokeOrderDownloads(env.DB, orderId); audit({ orgId: o.orgId, orderId, action: "order.downloads_revoked", detail: { grants: n } }); }
       if (body.action === "resendDownloads") {
-        if (!o.paid) return jsonResponse({ status: "error", message: "The order isn't paid yet — the files go out once it is." }, 400);
+        // Net 30 with an accepted PO (migrations/0121) counts as paid for the files (db.js net30Cleared).
+        if (!o.paid && !net30Cleared(o)) return jsonResponse({ status: "error", message: "The order isn't paid yet — the files go out once it is." }, 400);
         if (!o.contact || !o.contact.includes("@")) return jsonResponse({ status: "error", message: "No email address on this order." }, 400);
         const d = await deliverOrderDownloads(env, orderId, { resend: true, origin: new URL(request.url).origin });
         if (d.status !== "emailed") return jsonResponse({ status: "error", message: d.status === "none" ? "No files to send on this order." : "The email couldn't be sent — see Communications." }, 400);
@@ -6310,8 +6681,17 @@ async function handleOrdersPost_(context, listBefore = null) {
     // `country` is the Region the address is checked by (on Global settings, the one being saved with it).
     const featuresPlan_ = async (wantIn, shipFromIn, country) => {
       const before = await getFeatures(env.DB);
-      const want = wantIn && typeof wantIn === "object" ? wantIn : {};
+      const want = wantIn && typeof wantIn === "object" ? { ...wantIn } : {};
       const refused = (status, b) => ({ refused: { status, body: { status: "error", ...b } } });
+      // The Customer-supplied garments panel's waiver line (text, not a switch): saved with the switches
+      // (features.ownGarmentsWaiver, db.js normalizeFeatures). Left out = unchanged; "" = no waiver line on the slip.
+      let waiver;
+      if (Object.prototype.hasOwnProperty.call(want, "ownGarmentsWaiver")) {
+        waiver = want.ownGarmentsWaiver;
+        delete want.ownGarmentsWaiver;
+        if (typeof waiver !== "string" || waiver.length > OWN_GARMENTS_WAIVER_MAX) return refused(400, { message: `The garment waiver is text of at most ${OWN_GARMENTS_WAIVER_MAX.toLocaleString("en-US")} characters.` });
+        waiver = waiver.replace(/\r\n?/g, "\n").trim();
+      }
       for (const k of Object.keys(want)) {
         if (!FEATURES.some(f => f.key === k)) return refused(400, { message: `"${String(k).slice(0, 40)}" isn't a feature.` });
         if (typeof want[k] !== "boolean") return refused(400, { message: "Each feature is either on (true) or off (false)." });
@@ -6342,6 +6722,9 @@ async function handleOrdersPost_(context, listBefore = null) {
       }
       const changes = {};
       for (const f of FEATURES) if (typeof want[f.key] === "boolean" && want[f.key] !== before[f.key]) changes[f.key] = { from: before[f.key], to: want[f.key] };
+      // The waiver goes back with the switches (db.js buildFeatureSettings saves it), and in the audit when it changed.
+      if (waiver !== undefined) want.ownGarmentsWaiver = waiver;
+      if (waiver !== undefined && waiver !== before.ownGarmentsWaiver) changes.ownGarmentsWaiver = { from: before.ownGarmentsWaiver, to: waiver };
       return { want, before, shipFrom, changes };
     };
     if (body.action === "updateFeatures") {
@@ -6525,6 +6908,13 @@ async function handleOrdersPost_(context, listBefore = null) {
         before.giftCards = await getGiftCardSettings(env.DB);
         if ((r = await build("giftCards", () => buildGiftCardSettings(env.DB, input.value)))) return r;
       }
+      // Net 30 terms (phase 7): checked as updateTermsSettings checks them.
+      if (s.terms) {
+        const input = termsSettingsInput_(s.terms);
+        if (input.error) return refuse("terms", input.error);
+        before.terms = await getTerms(env.DB);
+        if ((r = await build("terms", () => buildTermsSettings(env.DB, input.value)))) return r;
+      }
 
       // Everything checked: the write, all of it or none of it.
       const writes = Object.values(builds);
@@ -6560,6 +6950,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (builds.machine) audit({ orgId: null, orderId: null, action: "settings.machine_set", detail: s.machine });
       if (builds.discountRules) audit({ orgId: null, orderId: null, action: "settings.discount_rules_set", detail: { from: before.discountRules, to: v("discountRules") } });
       if (builds.giftCards) audit({ orgId: null, orderId: null, action: "settings.gift_cards_set", detail: { from: before.giftCards, to: v("giftCards") } });
+      if (builds.terms) audit({ orgId: null, orderId: null, action: "settings.terms_set", detail: { from: before.terms, to: v("terms") } });
       if (decorationChanges && decorationChanges.prices) decorationAuditPrices_(decorationChanges);
       if (builds.pricing) audit({ orgId: null, orderId: null, action: "settings.pricing_set", detail: v("pricing") });
       if (builds.rush) {
@@ -9410,6 +9801,42 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (!r || !r.ok) { const reason = (r && r.reason) || "That gift card number isn't right."; return jsonResponse({ status: "ok", ok: false, reason, message: reason }); }
     return jsonResponse({ status: "ok", ok: true, last4: r.card.last4, balance: r.card.balance });
   }
+  // ---- checkNet30 — may this email pay on Net 30 at this shop's checkout? (migrations/0121) ----
+  // The customer's side, not a back-office action (named by a constant, as checkDiscountCode is). Yes only when the shop
+  // takes Net 30 (Global settings and the shop's own Payment methods) AND a live customer with that email has Net 30
+  // allowed on their record: then `{ ok: true, termsDays }` (theirs, else the usual), so the checkout adds "Net 30 (pay by
+  // invoice)". Every other case — an unknown email, a customer without Net 30, the shop not taking it, the storefront off —
+  // is the same `{ ok: false }`, so the answer never says whether an email is a customer's. No sign-in, so it is
+  // rate-limited per address (10 a minute). The order itself asks again (net30ForCheckout_ below).
+  const STOREFRONT_CHECK_NET30_ = "checkNet30";
+  // The same check for an order being placed: { termsDays, customerId } or null.
+  const net30ForCheckout_ = async (orgRow, email) => {
+    if (!featureOn("storefront") || !orgRow || !orgRow.ready) return null;
+    if (!(await net30AllowedFor_(env.DB, orgRow))) return null;
+    const c = await net30CustomerFor_(env.DB, email);
+    if (!c) return null;
+    let days = c.termsDays;
+    if (days == null) { try { days = (await getTerms(env.DB)).defaultDays; } catch (_) { days = 30; } }
+    return { termsDays: Number(days) || 30, customerTermsDays: c.termsDays, customerId: c.id };
+  };
+  if (body.action === STOREFRONT_CHECK_NET30_) {
+    const no = () => jsonResponse({ status: "ok", ok: false });
+    let checkOrgId = body.orgId;
+    if (host.kind === "locked") checkOrgId = host.orgId;
+    else {
+      const h = new URL(request.url).hostname;
+      if (h !== "localhost" && h !== "127.0.0.1") return jsonResponse({ status: "error", message: "Orders are placed from a shop's own page." }, 403);
+    }
+    const rl = await rateLimited(env, "net30_check", request, 10);
+    if (rl.blocked) return rateLimitResponse(rl.retryAfter);
+    if (typeof checkOrgId !== "string" || !checkOrgId || checkOrgId.length > 100) return no();
+    if (typeof body.email !== "string" || body.email.length > 254) return no();
+    let orgRow = null;
+    try { orgRow = await getPublishedOrg(env.DB, checkOrgId, priceLookups()); } catch (_) { orgRow = null; }
+    const t = await net30ForCheckout_(orgRow, body.email);
+    return t ? jsonResponse({ status: "ok", ok: true, termsDays: t.termsDays }) : no();
+  }
+
   // ---- buyGiftCard — a customer buys a gift card online (phase 6) ----
   // Makes an ordinary order in the shop for the buyer — one line, productId "__giftcard__", the gift's details in its
   // configJson — and answers what the storefront needs to start Stripe Checkout exactly as for a card order (orderId,
@@ -9809,6 +10236,23 @@ async function handleOrdersPost_(context, listBefore = null) {
   const wantedCards = giftCardsOf_(body);
   if (wantedCards.error) return jsonResponse({ status: "error", message: wantedCards.error }, 400);
   if (wantedCards.cards.length && !(await giftCardsAvailable_(orgRow))) return jsonResponse({ status: "error", message: GIFT_CARDS_OFF_MSG_ }, 400);
+  // Net 30 (migrations/0121): only for an email whose customer record allows it, at a shop that takes it — asked again
+  // here, whatever the checkout was told (checkNet30). The order is saved on Net 30 with the customer's days and the PO
+  // they typed (optional; it waits for staff to accept it), and there is no card step.
+  let net30Terms = null;
+  if (String(paymentMethod || "").trim() === "Net 30") {
+    const po = poNumberOf_(body.poNumber);
+    if (po.error) return jsonResponse({ status: "error", message: po.error }, 400);
+    const t = await net30ForCheckout_(orgRow, contact);
+    if (!t) return jsonResponse({ status: "error", message: NET30_NOT_AVAILABLE_MSG_ }, 400);
+    net30Terms = { ...t, poNumber: po.value };
+    order.paymentMethod = "Net 30";
+    // Saved on terms as the order is written (insertOrder), so nothing reads it back unpaid and off terms: the
+    // customer's own days (else the usual applies) and their PO, if typed — noted, waiting for staff to accept it.
+    order.net30 = true;
+    if (t.customerTermsDays != null) order.termsDays = t.customerTermsDays;
+    if (po.value) { order.poNumber = po.value; order.poTypedByCustomer = true; }
+  }
   if (wantedCodes.codes.length) {
     if (!featureOn("discounts")) return jsonResponse({ status: "error", message: DISCOUNTS_OFF_MSG }, 400);
     const got = await resolveDiscountCodes_(env.DB, { codes: wantedCodes.codes, orgId, email: contact.trim(), goodsCents: Math.round(subtotal * 100),
@@ -9920,6 +10364,8 @@ async function handleOrdersPost_(context, listBefore = null) {
     withCode = { ...withCode, giftCards: cardResults,
       ...(cardAfter ? { owed: Number(cardAfter.balanceDue), paid: !!cardAfter.paid, ...(withCode.total == null ? { total: Number(cardAfter.effectiveTotal) } : {}) } : {}) };
   }
+  // Net 30: no card step — the thank-you page says an invoice follows, due within `termsDays` days.
+  if (net30Terms) withCode = { ...withCode, net30: true, termsDays: net30Terms.termsDays };
   return jsonResponse(placed.taxMode === "exclusive"
     ? { status: "ok", taxMode: "exclusive", salesTax: placed.salesTax, total: placed.total, checkoutToken, emailOn, ...withCode }
     : { status: "ok", checkoutToken, emailOn, ...withCode });

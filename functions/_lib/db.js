@@ -1523,14 +1523,33 @@ const noBlankLineSql_ = (alias) => `(${GIFT_CARD_LINE_SQL_(alias)} OR EXISTS (SE
 // A line filled from the shop's finished stock (order_items.fromStock, migrations/0060) skips the blank
 // steps too — its blanks were used when the stock was made — so it counts here as well: nothing to buy,
 // set aside or receive for it. (Run Order and the transfer queue leave it out on top: fromStockLine_.)
+// A customer's own garment (order_items.customerOwned, migrations/0121) needs no blank either — nothing to buy, no blank
+// stock, no blank cost — but production waits for its garments to be checked in instead (ownGarmentSql_.waiting).
 const _hasNoBlankColumn = new WeakSet();
 async function noBlankLine_(db) {
   if (!_hasNoBlankColumn.has(db)) {
     try { await db.prepare("SELECT noBlankNeeded FROM products LIMIT 0").all(); _hasNoBlankColumn.add(db); }
     catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; return (alias) => `(${GIFT_CARD_LINE_SQL_(alias)})`; }
   }
-  if (!(await hasFromStockColumn_(db))) return noBlankLineSql_;
-  return (alias) => `(${noBlankLineSql_(alias)} OR COALESCE(${alias}.fromStock, 0) = 1)`;
+  const fs = await hasFromStockColumn_(db), own = await hasOwnGarmentColumn_(db);
+  if (!fs && !own) return noBlankLineSql_;
+  return (alias) => `(${noBlankLineSql_(alias)}${fs ? ` OR COALESCE(${alias}.fromStock, 0) = 1` : ""}${own ? ` OR COALESCE(${alias}.customerOwned, 0) = 1` : ""})`;
+}
+// order_items.customerOwned / ownReceivedAt (migrations/0121) — only a "yes" is remembered, like the checks here.
+const _hasOwnGarmentColumn = new WeakSet();
+async function hasOwnGarmentColumn_(db) {
+  if (_hasOwnGarmentColumn.has(db)) return true;
+  try { await db.prepare("SELECT customerOwned, ownReceivedAt FROM order_items LIMIT 0").all(); _hasOwnGarmentColumn.add(db); return true; }
+  catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; return false; }
+}
+// SQL for a customer's own garment line (alias): `own` = the line is one, `waiting` = it is one whose garments haven't
+// been checked in yet (production waits for it, as for a blank not received). A constant "no" before migrations/0121.
+async function ownGarmentSql_(db) {
+  const on = await hasOwnGarmentColumn_(db);
+  return {
+    own: (a) => on ? `(COALESCE(${a}.customerOwned, 0) = 1)` : "(0)",
+    waiting: (a) => on ? `(COALESCE(${a}.customerOwned, 0) = 1 AND ${a}.ownReceivedAt IS NULL)` : "(0)",
+  };
 }
 // order_items.fromStock (migrations/0060) — only a "yes" is remembered, like the check above.
 const _hasFromStockColumn = new WeakSet();
@@ -1550,11 +1569,28 @@ async function hasPayOnDeliveryColumn_(db) {
   try { await db.prepare("SELECT payOnDelivery FROM orders LIMIT 0").all(); _hasPayOnDeliveryColumn.add(db); return true; }
   catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; return false; }
 }
+// orders.net30 / poNumber / poAcceptedAt (migrations/0121) — only a "yes" is remembered, like the checks above.
+const _hasNet30Column = new WeakSet();
+async function hasNet30Column_(db) {
+  if (_hasNet30Column.has(db)) return true;
+  try { await db.prepare("SELECT net30, poNumber, poAcceptedAt FROM orders LIMIT 0").all(); _hasNet30Column.add(db); return true; }
+  catch (e) { if (!/no such (column|table)/i.test(String(e && e.message))) throw e; return false; }
+}
+// SQL for net30Cleared(): Net 30 with a PO that staff accepted (migrations/0121). Keep the two forms the same rule.
+const NET30_CLEARED_SQL_ = (a = "o") => `(${a}.net30 = 1 AND ${a}.poNumber <> '' AND ${a}.poAcceptedAt IS NOT NULL)`;
 // SQL for "the work on this order (alias, default o) may go ahead": paid, paid for everything but a rush fee
-// (migrations/0082), or set to pay on delivery (migrations/0105) — the queues' version of workCleared().
+// (migrations/0082), set to pay on delivery (migrations/0105), or Net 30 with an accepted PO (migrations/0121) — the
+// queues' version of workCleared().
 async function workClearedSql_(db) {
-  const pod = await hasPayOnDeliveryColumn_(db);
-  return (a = "o") => `(${a}.paid = 1 OR ${a}.paidForWork = 1${pod ? ` OR ${a}.payOnDelivery = 1` : ""})`;
+  const pod = await hasPayOnDeliveryColumn_(db), n30 = await hasNet30Column_(db);
+  return (a = "o") => `(${a}.paid = 1 OR ${a}.paidForWork = 1${pod ? ` OR ${a}.payOnDelivery = 1` : ""}${n30 ? ` OR ${NET30_CLEARED_SQL_(a)}` : ""})`;
+}
+// SQL for "the customer has paid enough to get it" (downloads, fundraising credit): paid, or Net 30 with an accepted
+// PO — the money stays owed (the Unpaid POs report) but the order counts as paid for these. Pay on delivery and the
+// rush-fee rule don't count here, as before.
+async function paidOrNet30Sql_(db) {
+  const n30 = await hasNet30Column_(db);
+  return (a = "o") => n30 ? `(${a}.paid = 1 OR ${NET30_CLEARED_SQL_(a)})` : `${a}.paid = 1`;
 }
 // SQL for "this line (alias) is a digital product" (products.digital, migrations/0086): sold as files, so there's
 // nothing to make, pack or ship for it — the order's stages and the production backlog leave it out. A constant "no"
@@ -1694,9 +1730,12 @@ export async function orderDownloadSalt(db, orderId, { fresh = false } = {}) {
   return (r && r.downloadSalt) || "";
 }
 // Once the order is paid (and not voided): a grant per digital line × file, with the limits as they are now. Safe to
-// call again — an existing grant isn't touched. { paid, created, grants }.
+// call again — an existing grant isn't touched. { paid, created, grants }. Net 30 with an accepted PO (migrations/0121,
+// net30Cleared) counts as paid here: the files go out while the invoice is still owed.
 export async function grantOrderDownloads(db, orderId, { now = new Date() } = {}) {
-  const o = await db.prepare("SELECT paid, paidAt, voidedAt FROM orders WHERE orderId=?").bind(orderId).first();
+  const n30 = await hasNet30Column_(db);
+  const row = await db.prepare(`SELECT paid, paidAt, voidedAt${n30 ? ", net30, poNumber, poAcceptedAt" : ""} FROM orders WHERE orderId=?`).bind(orderId).first();
+  const o = row ? { ...row, paid: Number(row.paid) || net30Cleared(row) ? 1 : 0 } : row;
   if (!o || !Number(o.paid) || o.voidedAt) return { paid: !!(o && Number(o.paid) && !o.voidedAt), created: 0, grants: await listDownloadGrants(db, orderId) };
   const global = await getDigitalSettings(db);
   const nowIso = now.toISOString();
@@ -3433,10 +3472,270 @@ export async function getPayOnDeliveryRule(db, orgId) {
 }
 // Whether the work on order `o` may go ahead (the stage rules, Home's step): paid, paid for everything but a rush fee,
 // or set to pay on delivery — its steps go on and it's paid when it's delivered.
-export const workCleared = (o) => !!(o && (o.paid || o.paidForWork || o.payOnDelivery));
+// Net 30 with a PO (migrations/0121) counts once staff have accepted the PO (a PO staff type is accepted at once) —
+// net30Cleared, the ONE rule for "Net 30 counts as paid for the work"; NET30_CLEARED_SQL_ is its SQL form.
+export const net30Cleared = (o) => !!(o && o.net30 && String(o.poNumber || "").trim() && o.poAcceptedAt);
+export const workCleared = (o) => !!(o && (o.paid || o.paidForWork || o.payOnDelivery || net30Cleared(o)));
 // Sets or clears an order's pay on delivery. Checked by the caller (setPayOnDelivery / createLocalSale in orders.js).
 export async function setOrderPayOnDelivery(db, orderId, on) {
   await db.prepare("UPDATE orders SET payOnDelivery = ? WHERE orderId = ?").bind(on ? 1 : 0, orderId).run();
+}
+
+// ---- Net 30 terms with a PO (migrations/0121) --------------------------------------------------------------------
+// An order on Net 30 is paid by invoice within the order's days (orders.termsDays, else the customer's, else Global
+// settings → Net 30 terms' defaultDays). It counts as paid for the WORK (net30Cleared above) once its PO is accepted —
+// a PO staff type is accepted at once, one the customer types (checkout, the invoice page) waits for Accept PO — while
+// the money stays owed until real payments arrive (the Unpaid POs report, getUnpaidPoReport). The due date is never
+// stored: net30DueDate_ works it out from the terms setting when it's read.
+// Whether a shop may use Net 30: the allow-list rule of payOnDeliveryRule — Global settings allows it for every shop
+// (enabledPayments.net30, off until ticked) and a shop can only turn it off for itself (its enabledPayments.net30 false).
+export function net30Rule(globalPayments, orgPayments) {
+  const g = globalPayments && typeof globalPayments === "object" ? globalPayments : {};
+  const o = orgPayments && typeof orgPayments === "object" ? orgPayments : {};
+  return { allowed: g.net30 === true && o.net30 !== false };
+}
+export async function getNet30Rule(db, orgId) {
+  const [g, org] = await Promise.all([getGlobalSettings(db), orgId ? getOrgById(db, orgId) : null]);
+  return net30Rule(g.enabledPayments, org && org.enabledPayments);
+}
+// Global settings → Net 30 terms ('terms'): the days when neither the order nor its customer has its own, and when they
+// start — "invoice" (the first invoice sent; the order date when none was sent), "order" (the order date) or
+// "completed" (shipped, or delivered / picked up).
+export const TERMS_STARTS = ["invoice", "order", "completed"];
+export const TERMS_DEFAULT = Object.freeze({ defaultDays: 30, startsAt: "invoice" });
+const termsDaysOk_ = (n) => Number.isInteger(n) && n >= 1 && n <= 365;
+export function normalizeTerms(v) {
+  const t = v && typeof v === "object" ? v : {};
+  const days = Number(t.defaultDays);
+  return { defaultDays: termsDaysOk_(days) ? days : TERMS_DEFAULT.defaultDays, startsAt: TERMS_STARTS.includes(t.startsAt) ? t.startsAt : TERMS_DEFAULT.startsAt };
+}
+export async function getTerms(db) {
+  return normalizeTerms(await getSettingJson_(db, "terms", null));
+}
+// The build step (writeSettingBuilds): defaultDays and / or startsAt, whichever is passed; one left out keeps its value.
+// Checks first (throwing a userFacing error), writes nothing.
+export async function buildTermsSettings(db, v = {}) {
+  const bad = (m) => { const e = new Error(m); e.userFacing = true; return e; };
+  const next = { ...(await getTerms(db)) };
+  if (v && v.defaultDays !== undefined) {
+    const n = Number(v.defaultDays);
+    if (v.defaultDays === null || v.defaultDays === "" || !termsDaysOk_(n)) throw bad("The terms' days must be a whole number from 1 to 365.");
+    next.defaultDays = n;
+  }
+  if (v && v.startsAt !== undefined) {
+    if (!TERMS_STARTS.includes(v.startsAt)) throw bad("Choose when the terms start: when the invoice is sent, the order date, or when the order is completed.");
+    next.startsAt = v.startsAt;
+  }
+  // Home's Unpaid POs figure depends on when the days start.
+  return { value: next, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('terms', ?)").bind(JSON.stringify(next))],
+    after: [dropDashboardCache_(db)] };
+}
+export async function setTerms(db, v) {
+  const b = await buildTermsSettings(db, v);
+  await writeSettingBuilds(db, [b]);
+  return b.value;
+}
+// "PO needed" (Net 30, no PO yet), "PO to check" (the customer typed one; not accepted), "accepted", or "" (not Net 30).
+export function orderPoStatus_(o) {
+  if (!o || !o.net30) return "";
+  if (!String(o.poNumber || "").trim()) return "PO needed";
+  return o.poAcceptedAt ? "accepted" : "PO to check";
+}
+// The business-local day ("YYYY-MM-DD") of a stored time: a date-only stamp (noon UTC) is its own day.
+function termsDay_(iso, tz) {
+  const s = String(iso || "");
+  if (!s) return "";
+  if (DATE_ONLY_NOON_.test(s) || /^\d{4}-\d{2}-\d{2}$/.test(s)) return s.slice(0, 10);
+  const d = new Date(s);
+  return isNaN(d) ? "" : dateInTimeZone(d, tz);
+}
+function addDaysYmd_(ymd, days) {
+  const t = Date.parse(String(ymd) + "T00:00:00Z");
+  return isNaN(t) ? "" : new Date(t + days * 864e5).toISOString().slice(0, 10);
+}
+// Whole calendar days from `fromYmd` to `toYmd` (negative when toYmd is earlier).
+function daysBetweenYmd_(fromYmd, toYmd) {
+  const a = Date.parse(String(fromYmd) + "T00:00:00Z"), b = Date.parse(String(toYmd) + "T00:00:00Z");
+  return isNaN(a) || isNaN(b) ? 0 : Math.round((b - a) / 864e5);
+}
+// When a Net 30 order is due ("YYYY-MM-DD", on the business's calendar), or "" when that isn't known yet (not Net 30;
+// "completed" terms on an order not shipped or handed over yet). Pure: `terms` is getTerms' answer, `completedAt` an
+// optional stand-in for the order's own completion, `tz` the business time zone (default the one last resolved).
+export function net30DueDate_(o, terms, completedAt, tz = _shopTimeZone_ || DEFAULT_TIME_ZONE) {
+  if (!o || !o.net30) return "";
+  const t = normalizeTerms(terms);
+  const start = t.startsAt === "order" ? o.placedAt
+    : t.startsAt === "completed" ? (completedAt || o.shippedAt || o.deliveredAt || o.completedAt)
+    : (o.invoicedAt || o.placedAt);
+  const day = termsDay_(start, tz);
+  if (!day) return "";
+  const own = Number(o.termsDays);
+  return addDaysYmd_(day, termsDaysOk_(own) ? own : t.defaultDays);
+}
+// The terms columns of an order row, as the readers give them (one place, so parseOrder_ and the report agree).
+function orderTermsFields_(row, terms) {
+  const t = { net30: !!Number(row.net30), poNumber: row.poNumber || "", poAcceptedAt: row.poAcceptedAt || "",
+    poAcceptedBy: row.poAcceptedBy || "", poTypedAt: row.poTypedAt || "",
+    termsDays: termsDaysOk_(Number(row.termsDays)) && row.termsDays != null ? Number(row.termsDays) : null, invoicedAt: row.invoicedAt || "" };
+  t.poStatus = orderPoStatus_(t);
+  t.termsDueDate = net30DueDate_({ ...t, placedAt: row.placedAt, shippedAt: row.shippedAt, deliveredAt: row.deliveredAt, completedAt: row.completedAt }, terms || TERMS_DEFAULT);
+  return t;
+}
+const noNet30Yet_ = (e) => /no such column: (\w+\.)?(net30|poNumber|poAcceptedAt|poAcceptedBy|poTypedAt|termsDays|invoicedAt|allowNet30)\b|no column named (net30|poNumber|poAcceptedAt|poTypedAt|termsDays|invoicedAt|allowNet30)/i.test(String(e && e.message));
+const NET30_NOT_READY_ = "Net 30 isn't ready yet: the database needs its latest update (migrations/0121).";
+// The fields an audit compares (order.terms_set's {from, to}).
+const termsAuditFields_ = (r) => ({ net30: !!Number(r.net30), termsDays: r.termsDays == null ? null : Number(r.termsDays), poNumber: r.poNumber || "",
+  poAcceptedAt: r.poAcceptedAt || null, poAcceptedBy: r.poAcceptedBy || "", poTypedAt: r.poTypedAt || null });
+// Sets an order's terms. Each of net30 / termsDays / poNumber left undefined keeps what it has. Turning Net 30 on fills
+// termsDays from the order's customer when the customer has days of their own (and none was given). A new PO typed by
+// staff is accepted at once (poAcceptedAt/By); typed by the customer (typedByCustomer) it is only noted (poTypedAt) and
+// waits for Accept PO — and a customer can't change a PO once it's accepted. Clearing the PO clears its acceptance.
+// `accept` accepts the PO already on it. Nothing else moves: `paid` stays as the payments ledger says. Checked by the
+// caller (orders.terms, the Net 30 switch). { ok, before, after } or { error } with nothing changed.
+export async function setOrderTerms(db, orderId, { net30, termsDays, poNumber, accept = false, by = "", typedByCustomer = false, now = new Date().toISOString() } = {}) {
+  let row;
+  try {
+    row = await db.prepare("SELECT orderId, voidedAt, customerId, net30, poNumber, poAcceptedAt, poAcceptedBy, poTypedAt, termsDays FROM orders WHERE orderId = ?").bind(String(orderId || "")).first();
+  } catch (e) { if (noNet30Yet_(e)) return { error: NET30_NOT_READY_ }; throw e; }
+  if (!row) return { error: "That order wasn't found." };
+  if (row.voidedAt) return { error: "This order is voided." };
+  const before = termsAuditFields_(row), next = { ...before };
+  if (net30 !== undefined) next.net30 = !!net30;
+  if (termsDays !== undefined) {
+    if (termsDays === null || termsDays === "") next.termsDays = null;
+    else {
+      const n = Number(termsDays);
+      if (!termsDaysOk_(n)) return { error: "The terms' days must be a whole number from 1 to 365." };
+      next.termsDays = n;
+    }
+  } else if (next.net30 && !before.net30 && next.termsDays == null && customerId_(row.customerId)) {
+    const c = await db.prepare("SELECT termsDays FROM customers WHERE id = ?").bind(customerId_(row.customerId)).first().catch(() => null);
+    if (c && termsDaysOk_(Number(c.termsDays)) && c.termsDays != null) next.termsDays = Number(c.termsDays);
+  }
+  if (poNumber !== undefined) {
+    const po = String(poNumber == null ? "" : poNumber).trim();
+    if (po.length > 60) return { error: "A PO number can be at most 60 characters." };
+    if (typedByCustomer && before.poAcceptedAt) return { error: "Your PO number has already been accepted." };
+    if (!po) Object.assign(next, { poNumber: "", poAcceptedAt: null, poAcceptedBy: "", poTypedAt: null });
+    else if (po !== before.poNumber || typedByCustomer || !before.poAcceptedAt) {
+      next.poNumber = po;
+      if (typedByCustomer) Object.assign(next, { poTypedAt: now, poAcceptedAt: null, poAcceptedBy: "" });
+      else Object.assign(next, { poAcceptedAt: now, poAcceptedBy: String(by || "").slice(0, 200), poTypedAt: null });
+    }
+  }
+  if (accept && !typedByCustomer) {
+    if (!next.poNumber) return { error: "There's no PO number to accept yet." };
+    if (!next.poAcceptedAt) Object.assign(next, { poAcceptedAt: now, poAcceptedBy: String(by || "").slice(0, 200) });
+  }
+  await db.prepare("UPDATE orders SET net30 = ?, termsDays = ?, poNumber = ?, poAcceptedAt = ?, poAcceptedBy = ?, poTypedAt = ? WHERE orderId = ?")
+    .bind(next.net30 ? 1 : 0, next.termsDays, next.poNumber, next.poAcceptedAt, next.poAcceptedBy, next.poTypedAt, row.orderId).run();
+  return { ok: true, before, after: next, cleared: net30Cleared(next), wasCleared: net30Cleared(before) };
+}
+// The customer with this email who may pick Net 30 at checkout (a live, not archived customer with allowNet30), as
+// { customerId, termsDays } — their own days, else the default — or null. The caller (checkNet30, the storefront order)
+// says nothing more than "not available" when it's null, so the answer never tells whether the email is a customer.
+export async function getNet30Customer(db, email) {
+  const e = normalizeCustomerEmail_(email);
+  if (!e) return null;
+  try {
+    const row = await db.prepare("SELECT id, allowNet30, termsDays FROM customers WHERE email = ? AND email <> '' AND mergedIntoId IS NULL AND archivedAt IS NULL").bind(e).first();
+    if (!row || !Number(row.allowNet30)) return null;
+    const own = Number(row.termsDays);
+    return { customerId: Number(row.id), termsDays: row.termsDays != null && termsDaysOk_(own) ? own : (await getTerms(db)).defaultDays };
+  } catch (err) { if (noNet30Yet_(err) || noCustomersYet_(err)) return null; throw err; }
+}
+// Accept PO: the PO the customer typed now counts (the order is cleared for work). Refused when the order isn't Net 30
+// or has no PO. Accepting one already accepted changes nothing ({ ok, already }).
+export async function acceptOrderPo(db, orderId, by = "", now = new Date().toISOString()) {
+  let row;
+  try {
+    row = await db.prepare("SELECT orderId, voidedAt, net30, poNumber, poAcceptedAt, poAcceptedBy, poTypedAt, termsDays FROM orders WHERE orderId = ?").bind(String(orderId || "")).first();
+  } catch (e) { if (noNet30Yet_(e)) return { error: NET30_NOT_READY_ }; throw e; }
+  if (!row) return { error: "That order wasn't found." };
+  if (row.voidedAt) return { error: "This order is voided." };
+  if (!Number(row.net30)) return { error: "This order isn't on Net 30." };
+  if (!String(row.poNumber || "").trim()) return { error: "There's no PO number to accept yet." };
+  const before = termsAuditFields_(row);
+  if (row.poAcceptedAt) return { ok: true, already: true, before, after: before, cleared: true, wasCleared: true };
+  await db.prepare("UPDATE orders SET poAcceptedAt = ?, poAcceptedBy = ? WHERE orderId = ? AND poAcceptedAt IS NULL AND poNumber <> ''")
+    .bind(now, String(by || "").slice(0, 200), row.orderId).run();
+  const after = { ...before, poAcceptedAt: now, poAcceptedBy: String(by || "").slice(0, 200) };
+  return { ok: true, before, after, cleared: true, wasCleared: false };
+}
+// The first time an invoice went out (orders.invoicedAt): set once, never moved by a resend. Safe before 0121.
+export async function markInvoiced_(db, orderId, at = new Date().toISOString()) {
+  await db.prepare("UPDATE orders SET invoicedAt = ? WHERE orderId = ? AND invoicedAt IS NULL").bind(at, String(orderId || "")).run()
+    .catch((e) => { if (!noNet30Yet_(e)) throw e; });
+}
+// The Unpaid POs report: every Net 30 order (not void, not a test, placed by asOf) with a balance still due — what it
+// comes to (orderAmounts, gift card lines included) less what's been received (balanceReceivedSql_), the same math as
+// the order's own balance. Grouped (in this order): nopo (No PO yet), tocheck (PO to check), notdue (not yet due — and a
+// "completed" basis order not completed yet), then days late 1-30, 31-60, 61-90, 90+ (calendar days on the business's
+// calendar; due today isn't late). `orgId` / `customerId` narrow it. Money in cents.
+export const UNPAID_PO_GROUPS = [
+  { key: "nopo", label: "No PO yet" }, { key: "tocheck", label: "PO to check" }, { key: "notdue", label: "Not yet due" },
+  { key: "1-30", label: "1–30 days late" }, { key: "31-60", label: "31–60 days late" }, { key: "61-90", label: "61–90 days late" }, { key: "90+", label: "Over 90 days late" },
+];
+export async function getUnpaidPoReport(db, { asOf, orgId = null, customerId = null, tz } = {}) {
+  const zone = tz || _shopTimeZone_ || DEFAULT_TIME_ZONE;
+  const day = ymdOk_(asOf) ? String(asOf) : dateInTimeZone(new Date(), zone);
+  const terms = await getTerms(db);
+  const empty = { asOf: day, startsAt: terms.startsAt, defaultDays: terms.defaultDays, groups: UNPAID_PO_GROUPS.map(g => ({ ...g, count: 0, owedCents: 0 })),
+    rows: [], customers: [], totals: { count: 0, owedCents: 0, lateCents: 0, toCheck: 0 } };
+  if (!(await hasNet30Column_(db))) return empty;
+  const where = ["o.net30 = 1", "o.voidedAt IS NULL", "o.isTest = 0", "o.placedAt <= ?"], binds = [dayEnd_(day)];
+  if (orgId) { where.push("o.orgId = ?"); binds.push(String(orgId)); }
+  const cid = customerId_(customerId);
+  if (customerId != null && customerId !== "") { where.push("o.customerId = ?"); binds.push(cid || 0); }
+  let results;
+  try {
+    ({ results } = await withTaxMode_((tm) => db.prepare(rushSql_(tm, `
+      SELECT o.orderId, o.orgId, g.name AS orgName, o.customerId, o.customerName, c.name AS custName, c.company AS custCompany,
+             o.net30, o.poNumber, o.poAcceptedAt, o.poAcceptedBy, o.poTypedAt, o.termsDays, o.invoicedAt,
+             o.placedAt, o.shippedAt, o.deliveredAt, o.completedAt, ${ORDER_AMOUNT_COLS_.replace("o.taxMode", tm + " AS taxMode")},
+             ${balanceReceivedSql_("o.orderId", tm)} AS receivedCents
+        FROM orders o LEFT JOIN orgs g ON g.orgId = o.orgId LEFT JOIN customers c ON c.id = o.customerId
+       WHERE ${where.join(" AND ")} ORDER BY o.placedAt, o.orderId`)).bind(...binds).all()));
+  } catch (e) { if (noNet30Yet_(e) || noCustomersYet_(e)) return empty; throw e; }
+  const groupOf = (row) => {
+    if (row.poStatus === "PO needed") return "nopo";
+    if (row.poStatus === "PO to check") return "tocheck";
+    if (!row.dueDate || row.daysLate <= 0) return "notdue";
+    return row.daysLate <= 30 ? "1-30" : row.daysLate <= 60 ? "31-60" : row.daysLate <= 90 ? "61-90" : "90+";
+  };
+  const rows = [];
+  for (const r of results || []) {
+    const totalCents = orderAmountsOfRow_(r).owedCents, receivedCents = Number(r.receivedCents) || 0;
+    const owedCents = Math.max(0, totalCents - receivedCents);
+    if (owedCents <= 0) continue;
+    const t = orderTermsFields_(r, terms);
+    const dueDate = net30DueDate_({ ...t, placedAt: r.placedAt, shippedAt: r.shippedAt, deliveredAt: r.deliveredAt, completedAt: r.completedAt }, terms, null, zone);
+    const daysLate = dueDate ? Math.max(0, daysBetweenYmd_(dueDate, day)) : 0;
+    const out = { orderId: r.orderId, orgId: r.orgId, orgName: r.orgName || r.orgId, customerId: customerId_(r.customerId),
+      customerName: r.custName || r.customerName || "", company: r.custCompany || "", poNumber: t.poNumber, poStatus: t.poStatus,
+      placedAt: r.placedAt || "", invoicedAt: t.invoicedAt, completedAt: r.completedAt || r.shippedAt || r.deliveredAt || "",
+      termsDays: termsDaysOk_(Number(r.termsDays)) && r.termsDays != null ? Number(r.termsDays) : terms.defaultDays,
+      dueDate, daysLate, owedCents, receivedCents: Math.max(0, receivedCents), totalCents };
+    out.group = groupOf(out);
+    rows.push(out);
+  }
+  const order = UNPAID_PO_GROUPS.map(g => g.key);
+  rows.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group) || (b.daysLate - a.daysLate)
+    || String(a.dueDate || "9999").localeCompare(String(b.dueDate || "9999")) || String(a.placedAt).localeCompare(String(b.placedAt)) || String(a.orderId).localeCompare(String(b.orderId)));
+  const groups = UNPAID_PO_GROUPS.map(g => {
+    const in_ = rows.filter(r => r.group === g.key);
+    return { ...g, count: in_.length, owedCents: in_.reduce((s, r) => s + r.owedCents, 0) };
+  });
+  const byCustomer = new Map();
+  for (const r of rows) {
+    const k = r.customerId != null ? "c" + r.customerId : "n" + (r.company || r.customerName).toLowerCase();
+    const c = byCustomer.get(k) || byCustomer.set(k, { customerId: r.customerId, name: r.customerName || r.company, company: r.company, count: 0, owedCents: 0, lateCents: 0 }).get(k);
+    c.count++; c.owedCents += r.owedCents; if (r.daysLate > 0) c.lateCents += r.owedCents;
+  }
+  const customers = [...byCustomer.values()].sort((a, b) => b.owedCents - a.owedCents || String(a.name).localeCompare(String(b.name)));
+  return { asOf: day, startsAt: terms.startsAt, defaultDays: terms.defaultDays, groups, rows, customers,
+    totals: { count: rows.length, owedCents: rows.reduce((s, r) => s + r.owedCents, 0),
+      lateCents: rows.filter(r => r.daysLate > 0).reduce((s, r) => s + r.owedCents, 0), toCheck: rows.filter(r => r.group === "tocheck").length } };
 }
 
 // The payment-method boxes (enabledPayments): stored as sent.
@@ -3763,7 +4062,7 @@ export async function getUserById(db, id) {
 
 // A user's own settings (migrations/0091): a JSON object, {} when none or unreadable. On a database from before
 // 0091 there's nowhere to keep them: {} to read, and saving says so.
-export const HOME_BLOCKS = ["orders", "totals", "inout", "pies", "sales"];   // Home's blocks, top to bottom
+export const HOME_BLOCKS = ["orders", "totals", "unpaidpos", "inout", "pies", "sales"];   // Home's blocks, top to bottom (unpaidpos: migrations/0121)
 export const USER_PREFS_MAX = 4096;
 export async function getUserPrefs(db, id) {
   try {
@@ -3993,12 +4292,23 @@ export const FEATURES = [
     description: "Gift cards: staff issue a card (a 16-character number, emailed to the person it's for), customers can buy one online when Global settings allows it, and a card's balance pays part or all of an order — at checkout, on a Local sale, on the order page or on the invoice page — across as many orders as it takes. A gift card is a payment, not a discount, so it works alongside a discount code. Cards never expire and can't be cashed out; unspent balances are a liability, not revenue. Off: the Gift cards page is hidden, the checkout has no gift card box or Gift cards button and a card can't be spent." },
   { key: "emailCampaigns", label: "Email campaigns",
     description: "Marketing emails to your customers from the Discount codes page: pick who gets one (shops, when they last ordered, how many orders, or addresses you type), start from a holiday theme, add a discount code, and send now or later. The checkout and Local sale get a box, ticked by default, for customers to say yes to shop news and discounts, and every email has a way to unsubscribe. The tab shows once email is set up. Off: the tab and the box are hidden and nothing is sent." },
+  // The one switch that starts OFF (FEATURES_OFF_UNLESS_ON_): a new install, and one that never saved it, doesn't have it.
+  { key: "ownGarments", label: "Customer-supplied garments",
+    description: "Contract work on garments the customer brings: on a Local sale, a quote or an order's Edit items a line can be marked “Customer's own garment”. Such a line never orders or uses a blank and has no blank cost; its garments are checked in by size with their condition (and a printable slip with your waiver line), and production waits for the check-in. Off: the tick is hidden and lines can't be marked; lines marked earlier keep their mark." },
 ];
 const FEATURE_KEYS_ = FEATURES.map(f => f.key);
-// { production: true, … } from whatever was saved: only an explicit false turns a feature off.
+// The switches that are off until ticked (migrations/0121): missing counts as off for these, as on for every other.
+const FEATURES_OFF_UNLESS_ON_ = ["ownGarments"];
+// The waiver line on the garment check-in slip, saved with the switches (features.ownGarmentsWaiver).
+export const OWN_GARMENTS_WAIVER_DEFAULT = "Customer's garments are decorated at the customer's risk; we're not responsible for garments damaged in normal production.";
+export const OWN_GARMENTS_WAIVER_MAX = 1000;
+// { production: true, …, ownGarments: false, ownGarmentsWaiver: "…" } from whatever was saved: only an explicit false
+// turns a feature off — except the FEATURES_OFF_UNLESS_ON_ ones, which only an explicit true turns on.
 export function normalizeFeatures(saved) {
   const out = {};
-  for (const k of FEATURE_KEYS_) out[k] = !(saved && saved[k] === false);
+  for (const k of FEATURE_KEYS_) out[k] = FEATURES_OFF_UNLESS_ON_.includes(k) ? !!(saved && saved[k] === true) : !(saved && saved[k] === false);
+  const w = saved && typeof saved.ownGarmentsWaiver === "string" ? saved.ownGarmentsWaiver.trim().slice(0, OWN_GARMENTS_WAIVER_MAX) : null;
+  out.ownGarmentsWaiver = w == null ? OWN_GARMENTS_WAIVER_DEFAULT : w;   // "" = no waiver line (saved empty on purpose)
   return out;
 }
 export async function getFeatures(db) {
@@ -4013,6 +4323,7 @@ export async function getFeatures(db) {
 export async function buildFeatureSettings(db, p) {
   const next = await getFeatures(db);
   for (const k of FEATURE_KEYS_) if (p && typeof p[k] === "boolean") next[k] = p[k];
+  if (p && typeof p.ownGarmentsWaiver === "string") next.ownGarmentsWaiver = p.ownGarmentsWaiver.trim().slice(0, OWN_GARMENTS_WAIVER_MAX);
   // Home's kept figures depend on Bookkeeping (getDashboardMoney): work them out again on the next visit.
   return { value: next, stmts: [db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('features', ?)").bind(JSON.stringify(next))],
     after: [dropDashboardCache_(db)] };
@@ -4071,9 +4382,9 @@ export async function setDecorationPricing(db, obj) {
   return b.value.pricing;
 }
 
-// SQL: true unless the feature was saved as false. For rules that live in a query (which orders
-// need design approval / digitizing), so they can't disagree with the setting.
-const featureOnSql_ = (key) => `(COALESCE((SELECT json_extract(gs.value, '$.${key}') FROM global_settings gs WHERE gs.key = 'features' AND json_valid(gs.value)), 1) <> 0)`;
+// SQL: true unless the feature was saved as false (for FEATURES_OFF_UNLESS_ON_: only when saved as true). For rules
+// that live in a query (which orders need design approval / digitizing), so they can't disagree with the setting.
+const featureOnSql_ = (key) => `(COALESCE((SELECT json_extract(gs.value, '$.${key}') FROM global_settings gs WHERE gs.key = 'features' AND json_valid(gs.value)), ${FEATURES_OFF_UNLESS_ON_.includes(key) ? 0 : 1}) <> 0)`;
 
 // ---- Region: time zone and country ------------------------------------------------------------
 // One global_settings value ("locale"), edited under Settings → Global settings → Region.
@@ -6627,7 +6938,7 @@ async function stageSql_(db) {
 
 export async function getProductionQueue(db) {
   const stage = await stageSql_(db);
-  const nb = await noBlankLine_(db), fs = await fromStockLine_(db), dg = await digitalLine_(db), cleared = await workClearedSql_(db);
+  const nb = await noBlankLine_(db), fs = await fromStockLine_(db), dg = await digitalLine_(db), cleared = await workClearedSql_(db), og = await ownGarmentSql_(db);
   const { results } = await db.prepare(`
     SELECT oi.id AS itemId, oi.orderId, oi.orgId, o.customerName, o.placedAt, o.dueDate, oi.qty,
            COALESCE(oi.manufacturedQty,0) AS manufacturedQty, oi.productId,
@@ -6655,6 +6966,7 @@ export async function getProductionQueue(db) {
     WHERE oi.cancelDate IS NULL
       AND ${cleared()} AND o.isTest = 0 AND o.voidedAt IS NULL
       AND (COALESCE(oi.blankReceivedAt, o.blankReceivedAt) IS NOT NULL OR ${nb("oi")})   -- no blank to wait for (0057)
+      AND NOT ${og.waiting("oi")}   -- the customer's own garments not checked in yet (0121)
       AND o.manufacturedAt IS NULL
       AND o.completedAt IS NULL AND o.shippedAt IS NULL AND o.deliveredAt IS NULL   -- shipped / delivered / completed: nothing left to make
       AND (o.designApprovedAt IS NOT NULL OR (NOT ${stage.approval}
@@ -7258,6 +7570,10 @@ export async function getPaidUnrunOrders(db) {
     blankReceived: !!o.blankReceivedAt, blankOrdered: !!o.blankOrderedAt,
     blanksInStock: !o.blankOrderedAt && !!(stock[o.orderId] && stock[o.orderId].covered),
     needsBlanks: o.needsBlanks !== false,   // false: nothing on it uses a blank (migrations/0057)
+    // The customer's own garments (migrations/0121): { lines, waiting }, and what the blanks column says about them —
+    // "Waiting on the customer's garments" until every such line is checked in, then "Garments in"; "" = none.
+    ownGarments: o.ownGarments,
+    garmentsStatus: !o.ownGarments.lines ? "" : o.ownGarments.waiting ? "Waiting on the customer's garments" : "Garments in",
     allFromStock: !!o.allFromStock,         // every line comes from finished stock (migrations/0060)
     items: o.items.filter(it => !it.cancelDate && !it.digital).map(it => ({ name: it.name, size: it.size, qty: it.qty })),
   }));
@@ -7551,7 +7867,8 @@ async function makeItemPieces_(db, item, fromQty, toQty, at = null) {
     const claimed = tookRow_(res.at(-1));
     return { claimed, consumed: claimed };
   }
-  const linked = !!(link && link.blankId != null);
+  // The customer's own garment (migrations/0121) uses no blank: no stock taken, no blank cost — its transfers still count.
+  const linked = !!(link && link.blankId != null) && !Number(item.customerOwned);
   if (linked) {
     const blankId = Number(link.blankId), color = link.blankColor || "", size = link.blankSize || "";
     const avgSql = "COALESCE((SELECT purchasePriceCents FROM blank_sizes WHERE blankId = ? AND color = ? AND size = ?), 0)";
@@ -7616,9 +7933,9 @@ function itemColor_(row) {
 }
 
 export async function consumeBlanksForOrder(db, orderId, at = null) {
-  const fs = await hasFromStockColumn_(db);
+  const fs = await hasFromStockColumn_(db), own = await hasOwnGarmentColumn_(db);
   const { results: items } = await db.prepare(
-    `SELECT id, orderId, orgId, productId, size, qty, configJson, COALESCE(manufacturedQty,0) AS manufacturedQty${fs ? ", fromStock, stockVariant" : ""}
+    `SELECT id, orderId, orgId, productId, size, qty, configJson, COALESCE(manufacturedQty,0) AS manufacturedQty${fs ? ", fromStock, stockVariant" : ""}${own ? ", customerOwned" : ""}
      FROM order_items WHERE orderId = ? AND cancelDate IS NULL`
   ).bind(orderId).all();
   let consumed = 0;
@@ -7651,7 +7968,7 @@ function lineTransferIds_(row) {
 export async function markItemPieceManufactured(db, orderId, itemId, at = null) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const item = await db.prepare(
-      `SELECT id, orderId, orgId, productId, size, qty, configJson, COALESCE(manufacturedQty,0) AS manufacturedQty, cancelDate${(await hasFromStockColumn_(db)) ? ", fromStock, stockVariant" : ""}
+      `SELECT id, orderId, orgId, productId, size, qty, configJson, COALESCE(manufacturedQty,0) AS manufacturedQty, cancelDate${(await hasFromStockColumn_(db)) ? ", fromStock, stockVariant" : ""}${(await hasOwnGarmentColumn_(db)) ? ", customerOwned" : ""}
        FROM order_items WHERE id = ? AND orderId = ?`
     ).bind(Number(itemId), orderId).first();
     if (!item) throw new Error("Line item not found");
@@ -8335,6 +8652,7 @@ export async function getRunReportByDesign(db, { from, to, before = null } = {})
 // preview and for the apply, so what you approve is what gets written.
 export async function planBlankCatchUp(db) {
   const fs = await fromStockLine_(db);   // a line filled from finished stock used no blank of its own (0060)
+  const og = await ownGarmentSql_(db);   // nor did one on the customer's own garment (0121)
   // The link is resolved by the item's color too (migrations/0037): a configurable line's
   // config.garmentColor, else '' for a classic product.
   const ITEM_COLOR_SQL = "(CASE WHEN i.configJson LIKE '{%' THEN COALESCE(json_extract(i.configJson,'$.garmentColor'),'') ELSE '' END)";
@@ -8348,7 +8666,7 @@ export async function planBlankCatchUp(db) {
             AND l.productColor = ${ITEM_COLOR_SQL} AND l.productSize = i.size
      WHERE i.cancelDate IS NULL AND o.voidedAt IS NULL AND o.isTest = 0
        AND COALESCE(o.manufacturedAt, o.shippedAt, o.deliveredAt) IS NOT NULL
-       AND (i.cogsCents IS NULL OR i.cogsSource = 'estimate') AND NOT ${fs("i")}
+       AND (i.cogsCents IS NULL OR i.cogsSource = 'estimate') AND NOT ${fs("i")} AND NOT ${og.own("i")}
      ORDER BY useDate, i.id`).all();
   if (!cands.length) return { lines: [], totalUnits: 0, totalCents: 0, replacedEstimateCents: 0, shortLines: 0 };
   // Only the history that can move these lines' costs: the movements of their blank / color / size (on
@@ -9674,11 +9992,12 @@ function resolveReorderQr_(productReorderQr, orgDefault) {
 //     stays listed HERE until its transfers are marked applied (transfersAppliedAt), even after the
 //     embroidery is done, until the order ships. `embroideryDone` says where the other half is.
 export async function getTransferQueue(db) {
-  const nb = await noBlankLine_(db), fs = await fromStockLine_(db), cleared = await workClearedSql_(db);
+  const nb = await noBlankLine_(db), fs = await fromStockLine_(db), cleared = await workClearedSql_(db), og = await ownGarmentSql_(db);
   const { results } = await db.prepare(
     `SELECT i.id AS itemId, i.orderId, i.orgId, i.name AS itemName, i.size AS itemSize, i.qty, i.configJson,
             COALESCE(i.manufacturedQty,0) AS manufacturedQty, i.transfersAppliedAt, o.manufacturedAt AS orderMadeAt,
             i.transferReceivedAt, COALESCE(i.blankReceivedAt, o.blankReceivedAt) AS blankReceivedAt, ${nb("i")} AS noBlank,
+            ${og.own("i")} AS ownGarment, ${og.waiting("i")} AS ownWaiting,
             org.name AS orgName, o.customerName, o.dueDate, o.placedAt,
             l.blankId, l.blankSize, b.name AS blankName, b.productType AS blankProductType, COALESCE(NULLIF(l.blankColor, ''), b.color) AS blankColor
      FROM order_items i
@@ -9724,7 +10043,9 @@ export async function getTransferQueue(db) {
         transferId: Number(t.transferId) || null, inStock: !!h.inStock[i],
         // The customer's own image (migrations/0054), in the private bucket — the page asks for a signed link.
         ...(t.custom ? { custom: true, fileKey: t.fileKey || "", fileName: t.fileName || "" } : {}) })),
-      blankReceived: !!r.blankReceivedAt || !!Number(r.noBlank),
+      // The customer's own garment (migrations/0121) is "in" once it's checked in, not because it needs no blank.
+      blankReceived: (!!r.blankReceivedAt || !!Number(r.noBlank)) && !Number(r.ownWaiting),
+      customerOwned: !!Number(r.ownGarment),
       // In hand when its transfers were already used (the line was made), it was marked received by hand,
       // or transfer stock covers every application on it (see transfersInHand_).
       transferReceived: !!h.source, transferSource: h.source, transferShort: h.short,
@@ -9876,13 +10197,14 @@ const OTHER_DECORATIONS_ = DECORATION_KEYS.filter(k => k !== "embroidery" && k !
 // not test / void / completed / shipped / delivered, not from stock, not cancelled), still to do when the line is not
 // made, or is also embroidered and its printing hasn't been marked made.
 async function getOtherDecorationCards_(db) {
-  const nb = await noBlankLine_(db), fs = await fromStockLine_(db), cleared = await workClearedSql_(db);
+  const nb = await noBlankLine_(db), fs = await fromStockLine_(db), cleared = await workClearedSql_(db), og = await ownGarmentSql_(db);
   let results;
   try {
     ({ results } = await db.prepare(
       `SELECT i.id AS itemId, i.orderId, i.orgId, i.productId, i.name AS itemName, i.size AS itemSize, i.qty, i.configJson,
               COALESCE(i.manufacturedQty,0) AS manufacturedQty, o.manufacturedAt AS orderMadeAt, i.decStartedAt, i.decMadeAt,
               COALESCE(i.blankReceivedAt, o.blankReceivedAt) AS blankReceivedAt, ${nb("i")} AS noBlank,
+              ${og.own("i")} AS ownGarment, ${og.waiting("i")} AS ownWaiting,
               org.name AS orgName, o.customerName, o.dueDate, o.placedAt, ${PRODUCT_DECORATION_COLS_},
               l.blankId, l.blankSize, b.name AS blankName, b.productType AS blankProductType, COALESCE(NULLIF(l.blankColor, ''), b.color) AS blankColor
        FROM order_items i
@@ -9919,7 +10241,8 @@ async function getOtherDecorationCards_(db) {
         locations: ((cfg && cfg.locations) || []).filter(l => l && l.location && locationDecoration_(l) === type).map(l => ({
           location: l.label || l.location, graphicName: l.graphicName || "", ink: l.ink || "", imageUrl: l.imageUrl || "", thumbUrl: l.thumbUrl || "",
           ...(l.custom ? { custom: true, fileKey: l.fileKey || "", fileName: l.fileName || "" } : {}) })),
-        blankReceived: !!r.blankReceivedAt || !!Number(r.noBlank),
+        blankReceived: (!!r.blankReceivedAt || !!Number(r.noBlank)) && !Number(r.ownWaiting),   // own garments: once checked in (0121)
+        customerOwned: !!Number(r.ownGarment),
         started: !!r.decStartedAt, hasEmbroidery, embroideryDone: hasEmbroidery && made,
       });
     }
@@ -11319,18 +11642,28 @@ export async function getOpenOrders(db, opts = {}) {
 // columns and counts of its lines — no lines, payments or labels loaded — for Home's counts and to pick the
 // orders of one step. [{orderId, orgId, placedAt, stage}].
 export async function getOpenOrderStages(db) {
-  const nb = await noBlankLine_(db), dg = await digitalLine_(db), pod = await hasPayOnDeliveryColumn_(db);
+  const nb = await noBlankLine_(db), dg = await digitalLine_(db), pod = await hasPayOnDeliveryColumn_(db), n30 = await hasNet30Column_(db), og = await ownGarmentSql_(db);
   const { results } = await db.prepare(
     `SELECT o.orderId, o.orgId, o.placedAt, o.paid, o.paidForWork, ${pod ? "o.payOnDelivery" : "0 AS payOnDelivery"}, o.blankOrderedAt, o.blankReceivedAt, o.manufacturedAt,
-            o.qaPackedAt, o.shippedAt, o.deliveredAt,
+            o.qaPackedAt, o.shippedAt, o.deliveredAt, ${n30 ? "o.net30, o.poNumber, o.poAcceptedAt, o.poTypedAt" : "0 AS net30, '' AS poNumber, NULL AS poAcceptedAt, NULL AS poTypedAt"},
             (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND NOT ${nb("i")}) AS blankLines,
-            (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND NOT ${dg("i")}) AS madeLines
+            (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND NOT ${dg("i")}) AS madeLines,
+            (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND ${og.own("i")}) AS ownLines,
+            (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND ${og.waiting("i")}) AS ownWaiting
        FROM orders o WHERE ${OPEN_ORDERS_SQL_} ORDER BY o.placedAt ASC`).all();
-  // The same fields parseOrder_ gives homeOrderStage (every open order has an active line).
-  return results.map(r => ({ orderId: r.orderId, orgId: r.orgId, placedAt: r.placedAt, stage: homeOrderStage({
-    paid: !!r.paid, paidForWork: !!r.paid || !!r.paidForWork, payOnDelivery: !!r.payOnDelivery, digitalOnly: !Number(r.madeLines), needsBlanks: Number(r.blankLines) > 0,
-    blankOrderedAt: r.blankOrderedAt, blankReceivedAt: r.blankReceivedAt, manufacturedAt: r.manufacturedAt,
-    qaPackedAt: r.qaPackedAt, shippedAt: r.shippedAt, deliveredAt: r.deliveredAt }) }));
+  // The same fields parseOrder_ gives homeOrderStage (every open order has an active line). poStatus (migrations/0121):
+  // why a Net 30 order is still "new" — "PO needed" or "PO to check"; "" otherwise.
+  return results.map(r => {
+    const terms = { net30: !!Number(r.net30), poNumber: r.poNumber || "", poAcceptedAt: r.poAcceptedAt || "", poTypedAt: r.poTypedAt || "" };
+    const stage = homeOrderStage({
+      paid: !!r.paid, paidForWork: !!r.paid || !!r.paidForWork, payOnDelivery: !!r.payOnDelivery, ...terms,
+      digitalOnly: !Number(r.madeLines), needsBlanks: Number(r.blankLines) > 0,
+      ownGarments: { lines: Number(r.ownLines) || 0, waiting: Number(r.ownWaiting) || 0 },
+      blankOrderedAt: r.blankOrderedAt, blankReceivedAt: r.blankReceivedAt, manufacturedAt: r.manufacturedAt,
+      qaPackedAt: r.qaPackedAt, shippedAt: r.shippedAt, deliveredAt: r.deliveredAt });
+    const poStatus = orderPoStatus_(terms);
+    return { orderId: r.orderId, orgId: r.orgId, placedAt: r.placedAt, stage, ...(stage === "new" && poStatus && poStatus !== "accepted" ? { poStatus } : {}) };
+  });
 }
 
 // These orders in full (as loadOrders_ gives them), in no set order; ids not found are left out. One search
@@ -11401,7 +11734,7 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
   // The orders' lines, payments, labels, blank shipments and invoices don't depend on each other: asked for together,
   // so a page waits for one round trip to D1, not one after another. (Brand reviews and catalog changes need the
   // lines, so they follow, together too.)
-  const [nb, dg] = await Promise.all([noBlankLine_(db), digitalLine_(db)]);
+  const [nb, dg, terms] = await Promise.all([noBlankLine_(db), digitalLine_(db), getTerms(db)]);
   const [missing, { results: itemRows }, { results: paymentRows }, { results: labelRows }, shipmentsByOrder, invoices, estimates, discountCodes] = await Promise.all([
     orderDesignsMissingBy_(db, sub, binds),
     db.prepare(`SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId IN (${sub}) ORDER BY oi.id`).bind(...binds).all(),
@@ -11450,6 +11783,7 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
     o.discountCode = o.discountCodes.join(", ");
     o.brandReview = reviews.get(r.orderId) || [];
     o.catalogDrift = r.manufacturedAt || r.completedAt || r.voidedAt ? [] : drift.get(r.orderId) || [];
+    if (o.net30) o.termsDueDate = net30DueDate_(o, terms);   // with the saved terms (migrations/0121)
     return o;
   });
 }
@@ -11459,7 +11793,7 @@ export async function getOrderById(db, orderId) {
   const row = await db.prepare(`SELECT o.*, ${stage.approval} AS needsDesignApproval, ${stage.digitizing} AS needsDigitizing FROM orders o WHERE o.orderId=?`).bind(orderId).first();
   if (!row) return null;
   // The order's parts, asked for together (as loadOrders_ does).
-  const [nb, dg] = await Promise.all([noBlankLine_(db), digitalLine_(db)]);
+  const [nb, dg, terms] = await Promise.all([noBlankLine_(db), digitalLine_(db), getTerms(db)]);
   const [missing, { results: itemRows }, { results: paymentRows }, { results: labelRows }, blankShipments, invoices, discountCodes] = await Promise.all([
     orderDesignsMissingBy_(db, "?", [orderId]),
     db.prepare(`SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId=? ORDER BY oi.id`).bind(orderId).all(),
@@ -11475,6 +11809,12 @@ export async function getOrderById(db, orderId) {
   order.invoice = invoices[orderId] || null;
   order.discountCodes = discountCodes[orderId] || [];   // the discount codes it used (migrations/0115, several since 0120)
   order.discountCode = order.discountCodes.join(", ");   // …joined for older callers, "" = none
+  if (order.net30) order.termsDueDate = net30DueDate_(order, terms);   // with the saved terms (migrations/0121)
+  // The customer's own garments counted in (migrations/0121): each such line's live check-in rows.
+  if (order.ownGarments.lines) {
+    const byItem = await garmentCheckinsByItem_(db, orderId);
+    for (const it of order.items) if (it.customerOwned) it.checkins = byItem.get(Number(it.id)) || [];
+  }
   // The quote it was made from (migrations/0109): { id, number } or null.
   order.estimate = await estimateOfOrder_(db, orderId).catch(() => null);
   const settled = row.manufacturedAt || row.completedAt || row.voidedAt;
@@ -11526,6 +11866,8 @@ function parseCustomer_(row) {
     address: address && typeof address === "object" ? address : null,
     notes: row.notes || "",
     taxExempt: !!row.taxExempt, taxExemptCertificate: row.taxExemptCertificate || "", taxExemptExpires: row.taxExemptExpires || "",
+    // Net 30 (migrations/0121): may pick it at checkout, and their own days (null = the Global settings default).
+    allowNet30: !!Number(row.allowNet30), termsDays: row.termsDays == null || !(Number(row.termsDays) >= 1) ? null : Number(row.termsDays),
     archived: !!row.archivedAt, createdAt: row.createdAt || "", updatedAt: row.updatedAt || "",
   };
 }
@@ -11694,6 +12036,19 @@ export async function saveCustomer(db, c = {}) {
   const certificate = text(c.taxExemptCertificate, old ? old.taxExemptCertificate : "", 200);
   const exempt = c.taxExempt === undefined ? (old && old.taxExempt ? 1 : 0) : (c.taxExempt ? 1 : 0);
   const addressJson = c.address === undefined ? (old ? old.addressJson || "" : "") : customerAddressJson_(c.address);
+  // Net 30 (migrations/0121): allowNet30 and termsDays ('' / null = the default days), each kept when left undefined.
+  let terms = null;
+  if (c.allowNet30 !== undefined || c.termsDays !== undefined) {
+    let days = old && old.termsDays != null ? Number(old.termsDays) : null;
+    if (c.termsDays !== undefined) {
+      if (c.termsDays === null || String(c.termsDays).trim() === "") days = null;
+      else {
+        days = Number(String(c.termsDays).trim());
+        if (!Number.isInteger(days) || days < 1 || days > 365) return { error: "Terms must be a whole number of days from 1 to 365 (or blank for the default)." };
+      }
+    }
+    terms = { allow: c.allowNet30 === undefined ? (old && Number(old.allowNet30) ? 1 : 0) : (c.allowNet30 ? 1 : 0), days };
+  }
   const now = new Date().toISOString();
   const values = [name, company, email, phone, addressJson, notes, exempt, certificate, expires];
   let savedId = id;
@@ -11710,6 +12065,10 @@ export async function saveCustomer(db, c = {}) {
     // Someone else took the email between the check and the write (idx_customers_email).
     if (/UNIQUE constraint failed/i.test(String(e && e.message))) return { error: "Another customer already has that email." };
     throw e;
+  }
+  if (terms && savedId) {
+    await db.prepare("UPDATE customers SET allowNet30 = ?, termsDays = ? WHERE id = ?").bind(terms.allow, terms.days, savedId).run()
+      .catch((e) => { if (!noNet30Yet_(e)) throw e; });   // before migrations/0121 there's nowhere to keep them
   }
   const saved = savedId ? await db.prepare("SELECT * FROM customers WHERE id = ?").bind(savedId).first() : null;
   return { id: savedId, created: !id, before, after: saved ? parseCustomer_(saved) : null };
@@ -11839,6 +12198,7 @@ function parseEstimateItem_(r) {
     breakOff: kind === "product" && !Number(r.customPrice) && list > unit ? fromCents(list - unit) : 0,
     personalizationFee: fromCents(r.personalizationFeeCents), customPrice: !!Number(r.customPrice), taxable: !!Number(r.taxable),
     lineTotal: fromCents(r.lineTotalCents),
+    customerOwned: !!Number(r.customerOwned),   // migrations/0121: on the customer's own garments (carried to the order's line)
   };
 }
 // Subtotal, tax and total of a quote's lines (rows with lineTotalCents and taxable) at a mode and rate — per line,
@@ -12101,6 +12461,8 @@ export async function setEstimateDiscountCodes(db, estimateId, codes) {
 //     whether it's taxable is the product's own flag, as insertOrder decides it
 //   { kind: "custom", name, qty, unitPrice, taxable }
 //   { kind: "fee", feeKind, name, amount (or unitPrice), taxable }  — always one
+// A product or custom line can be on the customer's own garments (customerOwned, migrations/0121 — needs the
+// ownGarments switch); a fee can't.
 // At most ESTIMATE_LINES_MAX lines of 1 to ESTIMATE_QTY_MAX each. { ok, lines } or { error } with nothing changed.
 // The write only happens while the quote is still editable, in one batch, so a quote sent or accepted meanwhile
 // keeps the lines it was sent with.
@@ -12117,6 +12479,8 @@ export async function saveEstimateItems(db, id, items) {
     ? await db.prepare("SELECT productId, taxable FROM products WHERE orgId = ? AND productId IN (SELECT value FROM json_each(?))").bind(row.orgId, JSON.stringify(productIds)).all()
     : { results: [] };
   const productTaxable = new Map((prows || []).map(p => [p.productId, !!Number(p.taxable)]));
+  const ownAny = items.some(it => it && it.kind !== "fee" && it.customerOwned);
+  if (ownAny) { const why = await ownGarmentsRefusal_(db); if (why) return { error: why }; }
   const lines = [];
   for (const [i, it] of items.entries()) {
     const n = i + 1;
@@ -12146,16 +12510,17 @@ export async function saveEstimateItems(db, id, items) {
       personalized: kind === "product" && it.personalized ? 1 : 0,
       persName: kind === "product" && it.personalized ? String(it.persName == null ? "" : it.persName).slice(0, 200) : "",
       feeKind, qty, unitCents, listCents, persFeeCents, customPrice: kind === "product" && it.customPrice ? 1 : 0,
-      taxable: taxable ? 1 : 0, lineCents: qty * (unitCents + persFeeCents),
+      taxable: taxable ? 1 : 0, lineCents: qty * (unitCents + persFeeCents), customerOwned: kind !== "fee" && it.customerOwned ? 1 : 0,
     });
   }
   const now = new Date().toISOString();
   const editable = "EXISTS (SELECT 1 FROM estimates WHERE id = ? AND status IN ('draft', 'changes'))";
   const stmts = [
     db.prepare(`DELETE FROM estimate_items WHERE estimateId = ? AND ${editable}`).bind(row.id, row.id),
+    // customerOwned (migrations/0121) is named only on a line that is one, so an older database still takes the rest.
     ...lines.map((l, i) => db.prepare(`INSERT INTO estimate_items (estimateId, position, kind, productId, name, type, size, configJson, personalized,
-        persName, feeKind, qty, unitPriceCents, listUnitCents, personalizationFeeCents, customPrice, taxable, lineTotalCents)
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${editable}`)
+        persName, feeKind, qty, unitPriceCents, listUnitCents, personalizationFeeCents, customPrice, taxable, lineTotalCents${l.customerOwned ? ", customerOwned" : ""})
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${l.customerOwned ? ", 1" : ""} WHERE ${editable}`)
       .bind(row.id, i, l.kind, l.productId, l.name, l.type, l.size, l.configJson, l.personalized, l.persName, l.feeKind, l.qty,
         l.unitCents, l.listCents, l.persFeeCents, l.customPrice, l.taxable, l.lineCents, row.id)),
     db.prepare("UPDATE estimates SET updatedAt = ? WHERE id = ? AND status IN ('draft', 'changes')").bind(now, row.id),
@@ -13025,6 +13390,11 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   });
   const subtotalCents = lines.reduce((sum, l) => sum + l.lineCents, 0);
   const shippingCents = Math.max(0, toCents(order.shippingCost || 0));
+  // A line on the customer's own garment (it.customerOwned, migrations/0121) only while the switch is on.
+  // A quote's lines (opts.fromEstimate) were checked when the quote was saved: the customer can still accept it after the
+  // switch was turned off, and their garments stay theirs.
+  const ownLines = pricedItems.some(it => it && it.customerOwned);
+  if (ownLines && !opts.fromEstimate) { const why = await ownGarmentsRefusal_(db); if (why) throw pricingError_(why); }
 
   // Sales tax: today's rate unless the org or the order's customer is tax-exempt; both are snapshotted
   // on the order so later rate/exemption changes never rewrite history.
@@ -13098,6 +13468,27 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   const shippingDiscountCents = order.discount ? Math.min(shippingCents, Math.max(0, Math.round(Number(order.discount.shippingCents) || 0))) : 0;
   if (shippingDiscountCents > 0) { extraCols.push("shippingDiscountCents"); extraBinds.push(shippingDiscountCents); }
   if (order.reorderOf) { extraCols.push("reorderOf"); extraBinds.push(String(order.reorderOf).slice(0, 100)); }
+  // Net 30 (migrations/0121), named only when it is: order.net30, order.termsDays (else the customer's own days, else
+  // the default), order.poNumber — accepted at once when staff typed it (order.poAcceptedBy, the default), only noted
+  // when the customer did (order.poTypedByCustomer: it waits for Accept PO). The caller checked Net 30 is allowed.
+  if (order.net30) {
+    let days = order.termsDays == null || order.termsDays === "" ? null : Number(order.termsDays);
+    if (days != null && !(Number.isInteger(days) && days >= 1 && days <= 365)) throw pricingError_("The terms' days must be a whole number from 1 to 365.");
+    if (days == null && customer.id) {
+      const c = await db.prepare("SELECT termsDays FROM customers WHERE id = ?").bind(customer.id).first().catch(() => null);
+      if (c && c.termsDays != null && Number(c.termsDays) >= 1) days = Number(c.termsDays);
+    }
+    const po = String(order.poNumber == null ? "" : order.poNumber).trim();
+    if (po.length > 60) throw pricingError_("A PO number can be at most 60 characters.");
+    const at = order.placedAt || new Date().toISOString();
+    extraCols.push("net30"); extraBinds.push(1);
+    if (days != null) { extraCols.push("termsDays"); extraBinds.push(days); }
+    if (po) {
+      extraCols.push("poNumber"); extraBinds.push(po);
+      if (order.poTypedByCustomer) { extraCols.push("poTypedAt"); extraBinds.push(at); }
+      else { extraCols.push("poAcceptedAt", "poAcceptedBy"); extraBinds.push(at, String(order.poAcceptedBy || "").slice(0, 200)); }
+    }
+  }
   let discountTaxCents = 0;
   if (discountCents > 0) {
     const taxableGross = lines.reduce((sum, l, n) => sum + (taxed[n].taxable ? l.lineCents : 0), 0);
@@ -13145,6 +13536,7 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
     const lineCols = [], lineBinds = [];
     if (hasConfig) { lineCols.push("configJson"); lineBinds.push(it.config ? JSON.stringify(it.config) : ""); }
     if (raised > 0) { lineCols.push("fundraiserCents"); lineBinds.push(raised); }
+    if (it.customerOwned) { lineCols.push("customerOwned"); lineBinds.push(1); }   // migrations/0121: the customer's own garment
     stmts.push(db.prepare(`INSERT INTO order_items
       (orderId,orgId,productId,name,type,size,qty,unitPriceCents,personalized,persName,
        personalizationFeeCents,lineTotalCents,taxRateBps,taxCents,taxable${lineCols.map(c => "," + c).join("")})
@@ -13160,7 +13552,7 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
     // Filled from finished stock when enough is available right now (this line isn't counted yet).
     // A product with choices is filled from the stock of the line's exact combination (migrations/0080).
     const prod = productRow[it.productId];
-    const combo = fillFromStock ? stockVariantForLine_(prod, it) : null;
+    const combo = fillFromStock && !it.customerOwned ? stockVariantForLine_(prod, it) : null;   // never the customer's own garment
     if (combo) {
       const sz = stockSize_(prod.pricingMode, it.size), held = setAsideSql_(order.orgId, it.productId, prod.pricingMode, sz, combo.key);
       stmts.push(db.prepare(
@@ -13242,6 +13634,8 @@ function manufacturedPrereq_(o) {
   const needsApproval = o.needsDesignApproval !== false, needsDigitizing = o.needsDigitizing !== false;
   if (needsApproval && !o.designApprovedAt) return [false, "the design isn't approved yet"];
   if (!needsApproval && needsDigitizing && !o.digitizingCompleteAt) return [false, "digitizing isn't complete yet"];
+  // The customer's own garments (migrations/0121) must be checked in first, like a blank.
+  if (o.ownGarments && Number(o.ownGarments.waiting) > 0) return [false, "the customer's garments haven't been checked in yet"];
   return [o.needsBlanks === false || !!o.blankReceivedAt, "the blank hasn't been received yet"];
 }
 
@@ -13387,16 +13781,26 @@ async function blankTargetItemIds_(db, orderId, extras) {
 // so every order-level reader (completion, CSV, prereqs, queues' legacy fallback) stays correct:
 // orders.blankOrderedAt is set only when EVERY active line is ordered, blankReceivedAt only when
 // every active line is received; vendor/est-delivery/condition summarize the items.
+// A customer's own garment (migrations/0121) uses no blank, but on an order that also has blanks, blankReceivedAt
+// waits for its garments to be checked in too (ownReceivedAt): "everything is in to make it". An order of nothing but
+// the customer's garments has no blank step (needsBlanks false) — Home and Mark manufactured wait on ownGarments.
 async function recomputeOrderBlankStatus_(db, orderId) {
-  const nb = await noBlankLine_(db);
-  const { results: active } = await db.prepare(
-    `SELECT oi.blankOrderedAt, oi.blankReceivedAt, oi.blankVendor, oi.blankVendorOrderId, oi.blankEstDelivery, oi.blankCondition
-     FROM order_items oi WHERE oi.orderId=? AND oi.cancelDate IS NULL AND NOT ${nb("oi")}`).bind(orderId).all();   // only lines that use a blank
+  const nb = await noBlankLine_(db), og = await ownGarmentSql_(db);
+  const [{ results: active }, { results: own }] = await Promise.all([
+    db.prepare(
+      `SELECT oi.blankOrderedAt, oi.blankReceivedAt, oi.blankVendor, oi.blankVendorOrderId, oi.blankEstDelivery, oi.blankCondition
+       FROM order_items oi WHERE oi.orderId=? AND oi.cancelDate IS NULL AND NOT ${nb("oi")}`).bind(orderId).all(),   // only lines that use a blank
+    (await hasOwnGarmentColumn_(db))
+      ? db.prepare(`SELECT oi.ownReceivedAt FROM order_items oi WHERE oi.orderId=? AND oi.cancelDate IS NULL AND ${og.own("oi")}`).bind(orderId).all()
+      : { results: [] },
+  ]);
   const n = active.length;
   const ordered = active.filter(r => r.blankOrderedAt);
   const received = active.filter(r => r.blankReceivedAt);
   const orderedAt = n > 0 && ordered.length === n ? ordered.map(r => r.blankOrderedAt).sort()[0] : null;
-  const receivedAt = n > 0 && received.length === n ? received.map(r => r.blankReceivedAt).sort().slice(-1)[0] : null;
+  const ownIn = own.every(r => r.ownReceivedAt);
+  const receivedAt = n > 0 && received.length === n && ownIn
+    ? [...received.map(r => r.blankReceivedAt), ...own.map(r => r.ownReceivedAt)].sort().slice(-1)[0] : null;
   const withVendor = ordered.find(r => r.blankVendor) || ordered[0] || {};
   const ests = ordered.map(r => r.blankEstDelivery).filter(Boolean).sort();
   const condition = receivedAt ? (active.some(r => r.blankCondition === "Other") ? "Other" : "Good") : "";
@@ -13404,6 +13808,105 @@ async function recomputeOrderBlankStatus_(db, orderId) {
     `UPDATE orders SET blankOrderedAt=?, blankReceivedAt=?, blankVendor=?, blankVendorOrderId=?, blankEstDelivery=?, blankCondition=? WHERE orderId=?`
   ).bind(orderedAt, receivedAt, withVendor.blankVendor || "", withVendor.blankVendorOrderId || "",
     ests.slice(-1)[0] || null, condition, orderId).run();
+}
+
+// ---- Customer-supplied garments (migrations/0121) ----------------------------------------------------------------
+// A line marked customerOwned is decorated on garments the customer brings: no blank is ordered, kept or costed for it
+// (noBlankLine_), and production waits for its garments to be checked in (ownReceivedAt) as it waits for a blank. A
+// check-in counts them per size with their condition (garment_checkins); a re-count voids the line's earlier rows.
+export const OWN_GARMENTS_OFF_MESSAGE = "Customer-supplied garments are switched off in Global settings";
+export const GARMENT_CONDITIONS = ["good", "damaged", "other"];
+const noGarmentsYet_ = (e) => /no such table: garment_checkins|no such column: (\w+\.)?(customerOwned|ownReceivedAt)\b|no column named (customerOwned|ownReceivedAt)/i.test(String(e && e.message));
+const GARMENTS_NOT_READY_ = "Customer-supplied garments aren't ready yet: the database needs its latest update (migrations/0121).";
+function parseGarmentCheckin_(r) {
+  return { id: Number(r.id), orderId: r.orderId, itemId: Number(r.itemId), size: r.size || "", expectedQty: Number(r.expectedQty) || 0,
+    receivedQty: Number(r.receivedQty) || 0, condition: GARMENT_CONDITIONS.includes(r.condition) ? r.condition : "other", note: r.note || "",
+    at: r.at || "", by: r.by || "", voidedAt: r.voidedAt || "" };
+}
+// The live check-in rows of an order's lines, by line id (Map). Empty before migrations/0121.
+async function garmentCheckinsByItem_(db, orderId) {
+  const out = new Map();
+  try {
+    const { results } = await db.prepare("SELECT * FROM garment_checkins WHERE orderId = ? AND voidedAt IS NULL ORDER BY itemId, id").bind(String(orderId || "")).all();
+    for (const r of results || []) (out.get(Number(r.itemId)) || out.set(Number(r.itemId), []).get(Number(r.itemId))).push(parseGarmentCheckin_(r));
+  } catch (e) { if (!noGarmentsYet_(e)) throw e; }
+  return out;
+}
+// Every check-in row of an order, voided ones too (newest last) — the history the order window shows.
+export async function listGarmentCheckins(db, orderId) {
+  try {
+    const { results } = await db.prepare("SELECT * FROM garment_checkins WHERE orderId = ? ORDER BY itemId, id").bind(String(orderId || "")).all();
+    return (results || []).map(parseGarmentCheckin_);
+  } catch (e) { if (noGarmentsYet_(e)) return []; throw e; }
+}
+// The customer-owned line `itemId` of a live order, or { error }.
+async function ownGarmentLine_(db, orderId, itemId) {
+  let row;
+  try {
+    row = await db.prepare(`SELECT oi.id, oi.orderId, oi.size, oi.qty, oi.cancelDate, oi.customerOwned, oi.ownReceivedAt, o.voidedAt, o.completedAt
+      FROM order_items oi JOIN orders o ON o.orderId = oi.orderId WHERE oi.id = ? AND oi.orderId = ?`).bind(Number(itemId) || 0, String(orderId || "")).first();
+  } catch (e) { if (noGarmentsYet_(e)) return { error: GARMENTS_NOT_READY_ }; throw e; }
+  if (!row) return { error: "That line isn't on this order." };
+  if (row.voidedAt) return { error: "This order is voided." };
+  if (row.completedAt) return { error: "This order is completed." };
+  if (row.cancelDate) return { error: "That line is cancelled." };
+  if (!Number(row.customerOwned)) return { error: "That line isn't marked as the customer's own garment." };
+  return { row };
+}
+// Checks the customer's garments in for one line: `counts` [{ size, expectedQty, receivedQty, condition, note }] (at
+// least one). A count that isn't as expected (received ≠ expected) or a condition other than good needs a note. The
+// rows replace the line's earlier live ones (voided in the same batch); the line is "in" (ownReceivedAt) once at least
+// one garment was received, and not when none was. The order's blank roll-up follows (recomputeOrderBlankStatus_), so
+// its card and Home step move on once every line has its blank or its garments. Checked by the caller (the
+// ownGarments switch, orders.fulfillment). { ok, checkins, ownReceivedAt, before } or { error } with nothing changed.
+export async function checkInGarments(db, { orderId, itemId, counts, by = "", at } = {}) {
+  const line = await ownGarmentLine_(db, orderId, itemId);
+  if (line.error) return line;
+  const list = Array.isArray(counts) ? counts : [];
+  if (!list.length) return { error: "Count at least one size." };
+  if (list.length > 100) return { error: "That's too many sizes for one line." };
+  const clean = [];
+  for (const c of list) {
+    if (!c || typeof c !== "object") return { error: "Each count needs a size, how many were expected and how many came in." };
+    const expectedQty = Number(c.expectedQty == null || c.expectedQty === "" ? 0 : c.expectedQty), receivedQty = Number(c.receivedQty == null || c.receivedQty === "" ? 0 : c.receivedQty);
+    if (!Number.isInteger(expectedQty) || expectedQty < 0 || expectedQty > 100000 || !Number.isInteger(receivedQty) || receivedQty < 0 || receivedQty > 100000)
+      return { error: "Counts must be whole numbers, 0 or more." };
+    const condition = c.condition == null || c.condition === "" ? "good" : String(c.condition).toLowerCase();
+    if (!GARMENT_CONDITIONS.includes(condition)) return { error: "The condition must be Good, Damaged or Other." };
+    const note = String(c.note == null ? "" : c.note).trim().slice(0, 1000);
+    if ((receivedQty !== expectedQty || condition !== "good") && !note) return { error: "Say what's different (a note) when the count or condition isn't as expected." };
+    clean.push({ size: String(c.size == null ? "" : c.size).trim().slice(0, 60), expectedQty, receivedQty, condition, note });
+  }
+  const now = at || new Date().toISOString(), who = String(by || "").slice(0, 200), id = Number(line.row.id), oid = line.row.orderId;
+  const before = (await garmentCheckinsByItem_(db, oid)).get(id) || [];
+  const received = clean.reduce((s, c) => s + c.receivedQty, 0);
+  const stmts = [db.prepare("UPDATE garment_checkins SET voidedAt = ? WHERE itemId = ? AND orderId = ? AND voidedAt IS NULL").bind(now, id, oid)];
+  for (const c of clean) stmts.push(db.prepare(`INSERT INTO garment_checkins (orderId, itemId, size, expectedQty, receivedQty, condition, note, at, by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(oid, id, c.size, c.expectedQty, c.receivedQty, c.condition, c.note, now, who));
+  stmts.push(db.prepare("UPDATE order_items SET ownReceivedAt = ? WHERE id = ? AND orderId = ?").bind(received >= 1 ? (line.row.ownReceivedAt || now) : null, id, oid));
+  try { await db.batch(stmts); }
+  catch (e) { if (noGarmentsYet_(e)) return { error: GARMENTS_NOT_READY_ }; throw e; }
+  await recomputeOrderBlankStatus_(db, oid);
+  return { ok: true, checkins: (await garmentCheckinsByItem_(db, oid)).get(id) || [], ownReceivedAt: received >= 1 ? (line.row.ownReceivedAt || now) : "", received, before };
+}
+// Undo a line's check-in: its live rows are voided and the line waits for its garments again. { ok, before } or { error }.
+export async function undoGarmentCheckin(db, { orderId, itemId, by = "", at } = {}) {
+  const line = await ownGarmentLine_(db, orderId, itemId);
+  if (line.error) return line;
+  const now = at || new Date().toISOString(), id = Number(line.row.id), oid = line.row.orderId;
+  const before = (await garmentCheckinsByItem_(db, oid)).get(id) || [];
+  if (!before.length && !line.row.ownReceivedAt) return { error: "Nothing has been checked in for that line." };
+  await db.batch([
+    db.prepare("UPDATE garment_checkins SET voidedAt = ? WHERE itemId = ? AND orderId = ? AND voidedAt IS NULL").bind(now, id, oid),
+    db.prepare("UPDATE order_items SET ownReceivedAt = NULL WHERE id = ? AND orderId = ?").bind(id, oid),
+  ]);
+  await recomputeOrderBlankStatus_(db, oid);
+  return { ok: true, before, by: String(by || "").slice(0, 200) };
+}
+// Whether lines may be marked as the customer's own garments (the ownGarments switch, off unless ticked): "" when they
+// may, else the refusal. insertOrder / addOrderItem / updateOrderItem / saveEstimateItems ask it only when a line is.
+async function ownGarmentsRefusal_(db) {
+  return (await getFeatures(db)).ownGarments ? "" : OWN_GARMENTS_OFF_MESSAGE;
 }
 
 export async function setFulfillmentStage(db, orderId, stage, extras = {}) {
@@ -13478,7 +13981,9 @@ export function whyNotCompletable_(o) {
   if (!Number(o.activeItems)) return "every item is cancelled";
   // Downloads only (migrations/0086): nothing is delivered — paid in full is enough.
   if (!o.deliveredAt && !(o.digitalOnly === true || (o.physicalItems != null && Number(o.physicalItems) === 0))) return "not delivered yet";
-  if (!o.paid) return "a balance is still due";
+  // Net 30 with an accepted PO (migrations/0121) is closed out while still owed: the money stays on the Unpaid POs
+  // report (getUnpaidPoReport) until it's paid. Pay on delivery still waits for the payment.
+  if (!o.paid && !net30Cleared(o)) return "a balance is still due";
   return "";
 }
 
@@ -13489,12 +13994,12 @@ export function whyNotCompletable_(o) {
 export async function setOrdersCompleted(db, orderIds, completed, at = null) {
   const out = { updated: [], skipped: [] };
   const now = at || new Date().toISOString();
-  const dg = await digitalLine_(db);
+  const dg = await digitalLine_(db), n30 = await hasNet30Column_(db);
   const ids = [...new Set((orderIds || []).map(String))];
   const rows = byId_();
   if (ids.length) {
     const { results } = await db.prepare(
-      `SELECT o.orderId, o.orgId, o.voidedAt, o.completedAt, o.deliveredAt, o.paid,
+      `SELECT o.orderId, o.orgId, o.voidedAt, o.completedAt, o.deliveredAt, o.paid${n30 ? ", o.net30, o.poNumber, o.poAcceptedAt" : ""},
               (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL) AS activeItems,
               (SELECT count(*) FROM order_items i WHERE i.orderId = o.orderId AND i.cancelDate IS NULL AND NOT ${dg("i")}) AS physicalItems
          FROM orders o WHERE o.orderId IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(ids)).all();
@@ -13676,12 +14181,16 @@ async function orderItemsHasConfigCol_(db) {
   return db.__oiHasConfig;
 }
 
-export async function updateOrderItem(db, id, { productId, name, type, size, qty, unitPrice, personalized, persName, personalizationFee, taxable: taxableIn, config }) {
+// customerOwned (migrations/0121): true / false marks the line as the customer's own garment or not (undefined keeps
+// it); marking one needs the ownGarments switch (a userFacing error otherwise). A marked line is never filled from
+// stock, and the order's blank roll-up follows the change.
+export async function updateOrderItem(db, id, { productId, name, type, size, qty, unitPrice, personalized, persName, personalizationFee, taxable: taxableIn, config, customerOwned }) {
   const q = Math.max(1, Math.floor(Number(qty) || 1));
   const unitCents = Math.max(0, toCents(unitPrice)), feeCents = Math.max(0, toCents(personalizationFee));
   const lineCents = q * (unitCents + feeCents);
   const item = await db.prepare("SELECT orderId, orgId FROM order_items WHERE id=?").bind(Number(id)).first();
   if (!item) return;
+  if (customerOwned) { const why = await ownGarmentsRefusal_(db); if (why) throw pricingError_(why); }
   const taxable = await productTaxable_(db, item.orgId, productId, taxableIn);
   await db.prepare(
     `UPDATE order_items SET productId=?, name=?, type=?, size=?, qty=?, unitPriceCents=?, personalized=?, persName=?, personalizationFeeCents=?, lineTotalCents=?, taxable=? WHERE id=?`
@@ -13697,13 +14206,17 @@ export async function updateOrderItem(db, id, { productId, name, type, size, qty
   if (config !== undefined && await orderItemsHasConfigCol_(db)) {
     await db.prepare("UPDATE order_items SET configJson=? WHERE id=?").bind(config ? JSON.stringify(config) : "", Number(id)).run();
   }
+  if (customerOwned !== undefined && await hasOwnGarmentColumn_(db)) {
+    await db.prepare("UPDATE order_items SET customerOwned=? WHERE id=?").bind(customerOwned ? 1 : 0, Number(id)).run();
+  }
   // A line filled from finished stock that hasn't been pulled yet is checked against stock again after
-  // the edit (another product, size or quantity) — still filled from stock only if enough is available.
+  // the edit (another product, size or quantity) — still filled from stock only if enough is available
+  // (and never once it's the customer's own garment, migrations/0121).
   if (await hasFromStockColumn_(db)) {
     const row = await db.prepare("SELECT * FROM order_items WHERE id=?").bind(Number(id)).first();
     if (row && Number(row.fromStock) && !Number(row.manufacturedQty)) {
       await db.prepare("UPDATE order_items SET fromStock = 0, stockVariant = '' WHERE id = ?").bind(Number(id)).run();
-      const prod = row.productId ? await db.prepare("SELECT pricingMode, configurable FROM products WHERE orgId=? AND productId=?").bind(row.orgId, row.productId).first() : null;
+      const prod = row.productId && !Number(row.customerOwned) ? await db.prepare("SELECT pricingMode, configurable FROM products WHERE orgId=? AND productId=?").bind(row.orgId, row.productId).first() : null;
       const combo = prod ? stockVariantForLine_(prod, { personalized: Number(row.personalized), config: tryParse_(row.configJson, null) }) : null;
       if (combo) {
         const sz = stockSize_(prod.pricingMode, row.size), held = setAsideSql_(row.orgId, row.productId, prod.pricingMode, sz, combo.key);
@@ -13713,6 +14226,7 @@ export async function updateOrderItem(db, id, { productId, name, type, size, qty
       }
     }
   }
+  if (customerOwned !== undefined) await recomputeOrderBlankStatus_(db, item.orderId);   // it uses a blank now, or doesn't
   await recomputeOrderTax_(db, item.orderId);
   await storeLineFundraiser_(db, id);   // what the changed line raises now (migrations/0110), at its new tax rate
 }
@@ -13727,10 +14241,12 @@ async function productTaxable_(db, orgId, productId, fallback) {
   return fallback !== false;
 }
 
-export async function addOrderItem(db, orderId, orgId, { productId, name, type, size, qty, unitPrice, personalized, persName, personalizationFee, taxable: taxableIn, config }) {
+// customerOwned (migrations/0121): the line is the customer's own garment — needs the ownGarments switch.
+export async function addOrderItem(db, orderId, orgId, { productId, name, type, size, qty, unitPrice, personalized, persName, personalizationFee, taxable: taxableIn, config, customerOwned }) {
   const q = Math.max(1, Math.floor(Number(qty) || 1));
   const unitCents = Math.max(0, toCents(unitPrice)), feeCents = Math.max(0, toCents(personalizationFee));
   const lineCents = q * (unitCents + feeCents);
+  if (customerOwned) { const why = await ownGarmentsRefusal_(db); if (why) throw pricingError_(why); }
   const taxable = await productTaxable_(db, orgId, productId, taxableIn);
   const result = await db.prepare(
     `INSERT INTO order_items (orderId, orgId, productId, name, type, size, qty, unitPriceCents, personalized, persName, personalizationFeeCents, lineTotalCents, taxRateBps, taxCents, taxable)
@@ -13744,6 +14260,10 @@ export async function addOrderItem(db, orderId, orgId, { productId, name, type, 
   const newId = Number(result.meta.last_row_id);
   if (config && await orderItemsHasConfigCol_(db)) {
     await db.prepare("UPDATE order_items SET configJson=? WHERE id=?").bind(JSON.stringify(config), newId).run();
+  }
+  if (customerOwned) {
+    await db.prepare("UPDATE order_items SET customerOwned=1 WHERE id=?").bind(newId).run();
+    await recomputeOrderBlankStatus_(db, orderId);   // a line waiting for its garments holds the order's blank step
   }
   await recomputeOrderTax_(db, orderId);
   await storeLineFundraiser_(db, newId);   // what the added line raises (migrations/0110), at its tax rate
@@ -14443,6 +14963,7 @@ export async function sendOrderInvoice(db, { orderId, orgId, sentTo, message, al
     await db.prepare("INSERT INTO order_invoices (token, orderId, orgId, sentTo, message, allowDelivery, sentAt) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .bind(token, orderId, orgId, to, msg, allowDelivery === false ? 0 : 1, now).run();
   }
+  await markInvoiced_(db, orderId, now);   // the FIRST send starts Net 30 terms (migrations/0121); a resend doesn't move it
   return getOrderInvoiceByOrder(db, orderId);
 }
 export async function markInvoiceViewed(db, token) {
@@ -16785,6 +17306,10 @@ function parseOrder_(row, items, payments, labels) {
     rushPayBy: row.rushPayBy || "",   // full payment due by, to keep the rush date (migrations/0083)
     paidForWork: !!row.paid || !!row.paidForWork,   // `paid` covers the work too
     payOnDelivery: !!row.payOnDelivery,             // migrations/0105: the steps go on before it's paid
+    // Net 30 with a PO (migrations/0121): net30, poNumber, poAcceptedAt/By, poTypedAt, termsDays (null = the default),
+    // invoicedAt, poStatus ("" | "PO needed" | "PO to check" | "accepted") and termsDueDate ("" = not known yet). The
+    // loaders work termsDueDate out again with the saved terms (here: the defaults).
+    ...orderTermsFields_(row, null),
     discountAmount,
     discountNote: row.discountNote || "",
     discountCode: "",   // the codes it used (migrations/0115), joined with ", ", filled in by the loaders; "" = none, or given back
@@ -16834,6 +17359,9 @@ function parseOrder_(row, items, payments, labels) {
     // false when every active line's product is made with no blank (migrations/0057): the order has
     // no blank steps at all, and Mark manufactured doesn't wait for one.
     needsBlanks: !(items || []).some(it => !it.cancelDate) || (items || []).some(it => !it.cancelDate && !it.noBlank),
+    // The customer's own garments (migrations/0121): how many active lines are, and how many still wait to be checked in.
+    ownGarments: { lines: (items || []).filter(it => !it.cancelDate && it.customerOwned).length,
+      waiting: (items || []).filter(it => !it.cancelDate && it.customerOwned && !it.ownReceivedAt).length },
     // Every active line is filled from the shop's finished stock (migrations/0060): "made" = pulled from stock.
     allFromStock: (items || []).some(it => !it.cancelDate) && (items || []).filter(it => !it.cancelDate).every(it => it.fromStock),
     // Digital products (migrations/0086). digitalOnly: every active line is sold as files — there's nothing to make,
@@ -16874,6 +17402,9 @@ function parseItem_(row) {
     noBlank: !!Number(row.noBlank),
     fromStock: !!Number(row.fromStock),   // filled from the shop's finished stock (migrations/0060)
     digital: !!Number(row.digital),       // its product is sold as files (migrations/0086): nothing to make or ship
+    // The customer's own garment (migrations/0121): no blank (noBlank is true too); ownReceivedAt = checked in.
+    customerOwned: !!Number(row.customerOwned),
+    ownReceivedAt: row.ownReceivedAt || "",
     name: row.name,
     type: row.type,
     size: row.size || "",
@@ -17477,6 +18008,8 @@ export async function getFundraisingReport(db, { dateFrom, dateTo, orgId = null,
   const empty = () => ({ shops: [], orders: [], totals: { orders: 0, pieces: 0, sales: 0, raised: 0, paidOut: 0, owed: 0 }, dateFrom, dateTo, owedAsOf: dateTo });
   const sale = saleDateSql_(basis || await getSaleDateBasis(db), "o");
   const orgFilter = only ? " AND o.orgId = ?" : "", orgBinds = only ? [only] : [];
+  // "Paid": paid, or Net 30 with an accepted PO (migrations/0121) — the group's share is earned once the PO is accepted.
+  const paidSql = (await paidOrNet30Sql_(db))("o");
   let orgRows, orderRows, raisedToDate, payoutRows;
   try {
     [orgRows, orderRows, raisedToDate, payoutRows] = await Promise.all([
@@ -17487,12 +18020,12 @@ export async function getFundraisingReport(db, { dateFrom, dateTo, orgId = null,
           COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL AND oi.productId <> '__giftcard__' THEN ${FUNDRAISER_SALES_SQL_("oi", tm)} ELSE 0 END), 0) AS salesCents,
           COALESCE(SUM(CASE WHEN oi.cancelDate IS NULL AND oi.productId <> '__giftcard__' THEN ${FUNDRAISER_RAISED_SQL_("oi")} ELSE 0 END), 0) AS raisedCents
         FROM orders o LEFT JOIN order_items oi ON oi.orderId = o.orderId
-        WHERE ${sale} >= ? AND ${sale} <= ? AND o.paid = 1 AND o.isTest = 0 AND o.voidedAt IS NULL AND NOT ${GIFT_ONLY_ORDER_SQL_}${orgFilter}
+        WHERE ${sale} >= ? AND ${sale} <= ? AND ${paidSql} AND o.isTest = 0 AND o.voidedAt IS NULL AND NOT ${GIFT_ONLY_ORDER_SQL_}${orgFilter}
         GROUP BY o.orderId ORDER BY ${sale}, o.orderId`).bind(dayStart_(dateFrom), dayEnd_(dateTo), ...orgBinds).all()).then(r => r.results || []),
       // Everything raised up to dateTo, per shop — for what's owed.
       db.prepare(`SELECT o.orgId, COALESCE(SUM(${FUNDRAISER_RAISED_SQL_("oi")}), 0) AS c
         FROM orders o JOIN order_items oi ON oi.orderId = o.orderId
-        WHERE ${sale} <= ? AND oi.cancelDate IS NULL AND oi.fundraiserCents > 0 AND o.paid = 1 AND o.isTest = 0 AND o.voidedAt IS NULL${orgFilter}
+        WHERE ${sale} <= ? AND oi.cancelDate IS NULL AND oi.fundraiserCents > 0 AND ${paidSql} AND o.isTest = 0 AND o.voidedAt IS NULL${orgFilter}
         GROUP BY o.orgId`).bind(dayEnd_(dateTo), ...orgBinds).all().then(r => r.results || []),
       // Every live payout up to dateTo, per shop: in the range (paid out) and in all (for what's owed).
       db.prepare(`SELECT fundraiserOrgId AS orgId, COALESCE(SUM(CASE WHEN expenseDate >= ? THEN amountCents ELSE 0 END), 0) AS inRange,
@@ -17583,12 +18116,15 @@ export async function listFundraiserPayouts(db, { orgId = null, dateFrom = null,
 // One step per order (FULFILLMENT_STAGES' order in admin.js): the first it hasn't done. "" once it's shipped
 // or delivered and only waiting to be closed out. `o` is an order as getOpenOrders returns it.
 export const HOME_STAGES = ["new", "paid", "blanks", "run", "qa", "ship"];
+// A customer's own garments (migrations/0121) not yet checked in hold it at "blanks" (ownGarments.waiting, as
+// parseOrder_ and getOpenOrderStages give it). A Net 30 order without an accepted PO is "new" (poStatus says why).
 export function homeOrderStage(o){
-  if (!workCleared(o)) return "new";   // pay on delivery (migrations/0105) goes on like a paid one
+  if (!workCleared(o)) return "new";   // pay on delivery (migrations/0105) and Net 30 with an accepted PO (0121) go on like a paid one
   if (o.digitalOnly) return "ship";   // downloads only: nothing to make; paid → deliver the files and complete it
   const blanks = o.needsBlanks !== false;
   if (blanks && !o.blankOrderedAt) return "paid";
   if (blanks && !o.blankReceivedAt) return "blanks";
+  if (o.ownGarments && Number(o.ownGarments.waiting) > 0) return "blanks";
   if (!o.manufacturedAt) return "run";
   if (!o.qaPackedAt) return "qa";
   if (!o.shippedAt && !o.deliveredAt) return "ship";
@@ -17606,13 +18142,14 @@ export function homeOrderStage(o){
 // (Home's Refresh). `blocks` omitted = all of them. `today` is the admin's own YYYY-MM-DD. The reply has only the
 // parts asked for, `blocks` (the ones it answers for), and `cachedAt` — when the oldest of them was worked out.
 export const DASHBOARD_TTL_MS = 60 * 60 * 1000;
-// Bumped when a part's shape changes (2: capital purchases and operating profit, migrations/0092), so an hour-old
-// answer in the old shape isn't handed back.
-const DASHBOARD_CACHE_V_ = 2;
+// Bumped when a part's shape changes (2: capital purchases and operating profit, migrations/0092; 3: the Unpaid POs
+// part and the orders part's POs to check, migrations/0121), so an hour-old answer in the old shape isn't handed back.
+//   unpaidPos  { count, owedCents, lateCents, toCheck } (getUnpaidPoReport's totals) ← the Unpaid POs block
+const DASHBOARD_CACHE_V_ = 3;
 export async function getDashboard(db, { today, fresh = false, now = Date.now(), blocks } = {}) {
   const shown = Array.isArray(blocks) ? HOME_BLOCKS.filter(k => blocks.includes(k)) : HOME_BLOCKS.slice();
   const want = { orders: shown.includes("orders"), money: ["totals", "sales", "pies"].some(k => shown.includes(k)),
-    cats: shown.includes("pies"), inOut: shown.includes("inout") };
+    cats: shown.includes("pies"), inOut: shown.includes("inout"), unpaidPos: shown.includes("unpaidpos") };
   const row = await db.prepare("SELECT value FROM global_settings WHERE key = 'dashboardCache'").first().catch(() => null);
   const c = row ? tryParse_(row.value, null) : null;
   const kept = c && c.today === today && c.v === DASHBOARD_CACHE_V_ && c.parts && typeof c.parts === "object" ? c.parts : {};
@@ -17627,13 +18164,18 @@ export async function getDashboard(db, { today, fresh = false, now = Date.now(),
     // Counted from the orders' own columns (getOpenOrderStages): no order is loaded in full to be counted.
     const open = await getOpenOrderStages(db);
     const stages = Object.fromEntries(HOME_STAGES.map(k => [k, 0]));
-    let onTheWay = 0;
-    for (const o of open) { if (o.stage) stages[o.stage]++; else onTheWay++; }
-    return { stages, open: open.length, onTheWay };
+    let onTheWay = 0, poToCheck = 0, poNeeded = 0;
+    for (const o of open) {
+      if (o.stage) stages[o.stage]++; else onTheWay++;
+      // Net 30 orders still "new" for want of a PO (migrations/0121): the New tile says how many have one to check.
+      if (o.poStatus === "PO to check") poToCheck++; else if (o.poStatus === "PO needed") poNeeded++;
+    }
+    return { stages, open: open.length, onTheWay, poToCheck, poNeeded };
   });
   // Kept money without the categories won't do once the pies are shown; kept with them does for anything.
   if (want.money) take("money", !want.cats || !!(kept.money && kept.money.cats), () => getDashboardMoney(db, { yearFrom, monthFrom, to: today, byCategory: want.cats }));
   if (want.inOut) take("inOut", true, async () => ({ inOut: await getMoneyInOutByMonth(db, { yearFrom, to: today }) }));
+  if (want.unpaidPos) take("unpaidPos", true, async () => ({ unpaidPos: (await getUnpaidPoReport(db, { asOf: today })).totals }));
   await Promise.all(work);
   if (work.length) {
     await db.prepare("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('dashboardCache', ?)")

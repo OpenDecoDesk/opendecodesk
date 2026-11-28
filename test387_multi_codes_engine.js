@@ -202,8 +202,12 @@ const shares = (r) => r.perCode.map(p => [p.goodsOffCents, p.shippingOffCents]);
   ok("the only things it changes are the four tables it adds columns to and that one index",
     same(changed, ["discount_codes", "estimates", "idx_discount_uses_order", "order_payments", "orders"]));
   ok("nothing it had is gone", objectsBefore.every(b => objectsAfter.some(o => o.name === b.name)));
+  // Later migrations add columns of their own (0121: Net 30 terms on orders): schema.sql has those too, so it is
+  // compared with this database once they have run on top of it.
+  const since = await makeDb(MIGRATION);
+  for (const f of migrationFiles.filter(f => f >= MIGRATION)) since.execFile(read("migrations/" + f));
   for (const t of ["discount_codes", "orders", "estimates", "order_payments", "gift_cards", "gift_card_ledger"])
-    ok(`after it, ${t} has schema.sql's columns`, colSet(before, t) === colSet(fresh, t));
+    ok(`after it (and the migrations since), ${t} has schema.sql's columns`, colSet(since, t) === colSet(fresh, t));
   ok("an existing code gets no minimum, no free shipping and still takes its value off the goods",
     same(before.q("SELECT minOrderCents, freeShipping, goodsOff FROM discount_codes WHERE code = 'OLD10'")[0], { minOrderCents: null, freeShipping: 0, goodsOff: 1 }));
   ok("an existing order reorders nothing and has no shipping discount, and is otherwise as it was",
@@ -215,7 +219,7 @@ const shares = (r) => r.perCode.map(p => [p.goodsOffCents, p.shippingOffCents]);
   ok("the gift card tables start empty", before.q("SELECT count(*) AS n FROM gift_cards")[0].n === 0 && before.q("SELECT count(*) AS n FROM gift_card_ledger")[0].n === 0);
   ok("after it, the old order can take a second, different code", addCode(before, { code: "OLD5" }) === "" &&
     insertRow(before, "discount_code_uses", { codeId: before.q("SELECT id FROM discount_codes WHERE code = 'OLD5'")[0].id, orderId: "OLD-1", usedAt: "t" }) === "");
-  ok("the Worker's migration list ships it, last", MIGRATIONS[MIGRATIONS.length - 1] === MIGRATION);
+  ok("the Worker's migration list ships it, after 0119 (0121, phase 7, comes next)", MIGRATIONS[MIGRATIONS.indexOf("0119_quote_notices.sql") + 1] === MIGRATION && MIGRATIONS[MIGRATIONS.indexOf(MIGRATION) + 1] === "0121_terms_and_own_garments.sql");
   ok("and the list matches the migrations folder", same(MIGRATIONS, fs.readdirSync(__dirname + "/migrations").filter(f => /^\d{4}_.*\.sql$/.test(f)).sort()));
 
   // =====================================================================================================

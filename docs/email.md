@@ -129,7 +129,10 @@ To customers, as things happen:
   your legal name, else your business name; mailed to your "Mail checks to" address; the order
   number on the memo line), Venmo (with a link carrying the amount and the order number), Zelle —
   then the other ways you take (Global settings → Payment methods, and the shop's own), then your
-  payment note.
+  payment note. A Net 30 order says instead "Payment is due within N days of the invoice (PO 1001)",
+  or asks for the PO number while there is none; its order-received email says no payment is needed
+  now, and the invoice email and PDF carry "Terms: Net 30 · PO 1001 · Due Dec 31, 2026"
+  ([operations.md](operations.md#net-30-terms-and-pos)).
 - **Who it's from**, at the bottom: your business name, legal name, mailing address, phone, contact
   email and website, then your footer line.
 - **A PDF**: an invoice while something is owed, a receipt once it's paid ("Invoice <order>.pdf" /

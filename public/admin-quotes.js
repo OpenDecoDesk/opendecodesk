@@ -52,6 +52,17 @@
   const canConvert = () => adminCan_(FN, "edit") && adminCan_("orders.details", "edit");
   const canOpenOrders = () => typeof openOrderFromDashboard_ === "function" && (typeof adminCanOpen_ !== "function" || adminCanOpen_("orders"));
   const canOpenCustomers = () => typeof adminCanCustomers_ !== "function" || adminCanCustomers_();
+  // Customer-supplied garments (Global settings → Features, migrations/0121): the one feature that starts off, so it
+  // counts as on only when the settings say so (featureOn_ takes a missing switch as on).
+  const ownGarmentsOn = () => typeof siteFeatures !== "undefined" && !!siteFeatures && siteFeatures.ownGarments === true;
+  const OWN_GARMENT_LABEL = "Customer's own garment";
+  // The tick on a product or custom line: offered while the feature is on, and on a line that already has it (so it
+  // can be taken off after the feature was switched off). `was` is the line as saveEstimate takes it, or null.
+  const ownGarmentTick = (id, was) => ownGarmentsOn() || (was && was.customerOwned)
+    ? `<label class="cust-check"><input type="checkbox" id="${id}"${was && was.customerOwned ? " checked" : ""}> <span>${OWN_GARMENT_LABEL} <span class="qt-muted">(the customer brings the garments: no blank is ordered and the price is for the decoration)</span></span></label>` : "";
+  // Net 30 when a quote is made into an order (migrations/0121): a role that may set an order's terms, where the shop
+  // takes Net 30 (admin.js net30Allowed_, when it knows; otherwise the server says so).
+  const canNet30 = (orgId) => adminCan_("orders.terms", "edit") && (typeof net30Allowed_ !== "function" || !!net30Allowed_(orgId));
 
   // ---- What the shop sells and prices (Global settings → Decoration types) ------------------------------------
   // The stitch-count and screen-print helpers show only where that pricing is on; the picker for a configurable
@@ -263,10 +274,11 @@
   // and are otherwise priced again by the server; custom and fee lines carry their own price.
   function toRequest(it) {
     if (it.kind === "fee") return { kind: "fee", feeKind: it.feeKind || "other", name: it.name || "", amount: Number(it.unitPrice) || 0, taxable: !!Number(it.taxable) };
-    if (it.kind === "custom") return { kind: "custom", name: it.name || "", qty: Number(it.qty) || 1, unitPrice: Number(it.unitPrice) || 0, taxable: !!Number(it.taxable) };
+    const own = Number(it.customerOwned) ? { customerOwned: true } : {};
+    if (it.kind === "custom") return { kind: "custom", name: it.name || "", qty: Number(it.qty) || 1, unitPrice: Number(it.unitPrice) || 0, taxable: !!Number(it.taxable), ...own };
     let config = it.config || null;
     if (!config && it.configJson) { try { config = JSON.parse(it.configJson); } catch (e) { config = null; } }
-    const r = { kind: "product", productId: it.productId, size: it.size || "OSFA", qty: Number(it.qty) || 1, personalized: !!Number(it.personalized), persName: it.persName || "" };
+    const r = { kind: "product", productId: it.productId, size: it.size || "OSFA", qty: Number(it.qty) || 1, personalized: !!Number(it.personalized), persName: it.persName || "", ...own };
     if (config) r.config = config;
     if (Number(it.customPrice)) r.customUnitPrice = Number(it.unitPrice) || 0;
     return r;
@@ -396,6 +408,7 @@
         Number(it.personalized) ? "Personalized" + (it.persName ? ": " + it.persName : "") + (Number(it.personalizationFee) > 0 ? " (+" + adminMoney_(it.personalizationFee) + " each)" : "") : "",
         it.kind === "product" && Number(it.customPrice) ? "Price set by hand" : "",
         it.kind === "custom" ? "Custom line" : "",
+        it.kind !== "fee" && Number(it.customerOwned) ? OWN_GARMENT_LABEL : "",
         it.kind !== "product" && !Number(it.taxable) ? "Not taxed" : "",
       ].filter(Boolean).join(" · ");
       return `<tr>
@@ -806,6 +819,7 @@
           <label class="cust-field" id="qtProdSizeWrap"><span>Size</span><select id="qtProdSize"></select></label>
           <label class="cust-field"><span>Quantity</span><input type="number" id="qtProdQty" min="1" max="${MAX_QTY}" step="1" value="${escapeHtml(was ? was.qty : 1)}"></label>
         </div>
+        ${ownGarmentTick("qtProdOwnGarment", was)}
         <div id="qtProdPersWrap" hidden>
           <label class="cust-check"><input type="checkbox" id="qtProdPers"> <span>Personalize <span id="qtProdPersPrice" class="qt-muted"></span></span></label>
           <div id="qtProdPersFields" hidden>
@@ -959,6 +973,7 @@
       const qty = wholeNum($("#qtProdQty").value);
       if (!(qty >= 1 && qty <= MAX_QTY)) { err.textContent = `Enter a quantity from 1 to ${MAX_QTY.toLocaleString("en-US")}.`; $("#qtProdQty").focus(); return; }
       const line = { kind: "product", productId: p.productId, size: isSized(p) ? $("#qtProdSize").value : "OSFA", qty, personalized: false, persName: "" };
+      if ($("#qtProdOwnGarment") && $("#qtProdOwnGarment").checked) line.customerOwned = true;
       if (isCfg(p)) line.config = cfgConfig(p);
       if (p.personalizationPrice != null && $("#qtProdPers").checked) {
         line.personalized = true;
@@ -995,6 +1010,7 @@
           <label class="cust-field"><span>${fee ? "Amount ($)" : "Price per piece ($)"}</span><input type="number" id="qtOtherPrice" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(was ? Number(fee ? was.amount : was.unitPrice).toFixed(2) : "")}"></label>
         </div>
         ${fee ? "" : `<div id="qtOtherDeco" hidden></div>`}
+        ${fee ? "" : ownGarmentTick("qtOtherOwnGarment", was)}
         <label class="cust-check"><input type="checkbox" id="qtOtherTax"${!was || was.taxable ? " checked" : ""}> Subject to sales tax</label>
         <div class="cust-err" id="qtOtherErr" role="alert"></div>
         <div class="cust-dialog-actions">
@@ -1024,6 +1040,7 @@
         if (!(qty >= 1 && qty <= MAX_QTY)) { err.textContent = `Enter a quantity from 1 to ${MAX_QTY.toLocaleString("en-US")}.`; $("#qtOtherQty").focus(); return; }
         if (isNaN(price)) { err.textContent = "Enter the price per piece (0 or more, like 12.50)."; $("#qtOtherPrice").focus(); return; }
         line = { kind: "custom", name, qty, unitPrice: price, taxable: $("#qtOtherTax").checked };
+        if ($("#qtOtherOwnGarment") && $("#qtOtherOwnGarment").checked) line.customerOwned = true;
       }
       $("#qtOtherSave").disabled = true; err.textContent = "";
       const problem = await done(line, tools.extra());
@@ -1091,6 +1108,8 @@
     const { ov, close } = inventoryModal_(escapeHtml("Convert " + number + " to an order"), `
       <form id="qtConvForm" class="cust-form" novalidate>
         <div class="cust-merge-text">An order is recorded for ${escapeHtml(custLabel(c))}${manyShops() ? " in " + escapeHtml(shopName(e.orgId)) : ""}, at the quote's prices (${escapeHtml(adminMoneyOr_((d.totals || {}).total))}), not yet paid. The quote is then marked converted.</div>
+        ${canNet30(e.orgId) ? `<label class="cust-check"><input type="checkbox" id="qtConvNet30"> <span>Net 30 terms (the customer pays by invoice)</span></label>
+        <label class="cust-field" id="qtConvPoWrap" hidden><span>PO number (optional — a PO typed here counts as accepted)</span><input type="text" id="qtConvPo" maxlength="60" autocomplete="off" placeholder="PO-1001"></label>` : ""}
         ${mayInvoice ? `<label class="cust-check"><input type="checkbox" id="qtConvInvoice"${hasEmail ? " checked" : " disabled"}> <span>Email the customer the invoice${hasEmail ? "" : " (no email address on the customer)"}</span></label>` : ""}
         <div class="cust-err" id="qtConvErr" role="alert"></div>
         <div class="cust-dialog-actions">
@@ -1101,13 +1120,20 @@
     const $ = (s) => ov.querySelector(s);
     const err = $("#qtConvErr");
     $("#qtConvCancel").onclick = () => close();
+    if ($("#qtConvNet30")) $("#qtConvNet30").addEventListener("change", () => { $("#qtConvPoWrap").hidden = !$("#qtConvNet30").checked; });
     // The question is read first, and Enter must not make the order by accident: focus goes to the safe button.
     $("#qtConvCancel").focus();
     $("#qtConvForm").addEventListener("submit", async (ev) => {
       ev.preventDefault();
       $("#qtConvGo").disabled = true; err.textContent = "";
       try {
-        const a = await adminApi_({ action: "convertEstimate", id: e.id, sendInvoice: !!($("#qtConvInvoice") && $("#qtConvInvoice").checked) });
+        const body = { action: "convertEstimate", id: e.id, sendInvoice: !!($("#qtConvInvoice") && $("#qtConvInvoice").checked) };
+        if ($("#qtConvNet30") && $("#qtConvNet30").checked) {
+          body.net30 = true;
+          const po = $("#qtConvPo").value.trim();
+          if (po) body.poNumber = po;
+        }
+        const a = await adminApi_(body);
         close();
         showToast("Order " + (a.orderId || "") + " made from quote " + number + ".");
         reload();

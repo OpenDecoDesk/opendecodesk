@@ -76,7 +76,7 @@ const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'
   d = await lib.getDashboard(d1, { today, blocks: ["totals"], fresh: true, now: t0 + 4000 });
   ok("Refresh works out only what's shown", d.cached === false && !sqlRan(/owner_transactions|GROUP BY e\.categoryId/));
   d = await lib.getDashboard(d1, { today, now: t0 + 5000 });
-  ok("no blocks named: everything, as before", d.stages && d.year && Array.isArray(d.year.byType) && d.inOut && d.blocks.length === 5);
+  ok("no blocks named: everything, as before", d.stages && d.year && Array.isArray(d.year.byType) && d.inOut && d.blocks.length === 6);   // 6: Unpaid POs (phase 7)
   d = await lib.getDashboard(d1, { today, blocks: [], now: t0 + 6000 });
   ok("nothing shown: nothing worked out", !d.stages && !d.year && !d.inOut && d.blocks.length === 0);
 
@@ -116,31 +116,31 @@ const strip = (src) => src.replace(/import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'
   const home = async (w, expect) => { w.history.replaceState(null, "", "#home"); await w.adminRoute(); await wait(() => blocksOn(w) === expect); return blocksOn(w); };
 
   let w = await browser();
-  ok("Home starts with every block, top to bottom", (await home(w, "orders,totals,inout,pies,sales")) === "orders,totals,inout,pies,sales");
+  ok("Home starts with every block, top to bottom", (await home(w, "orders,totals,unpaidpos,inout,pies,sales")) === "orders,totals,unpaidpos,inout,pies,sales");
   const cog = w.document.getElementById("homeCog");
   ok("a ⚙ in the corner says what it does", !!cog && cog.getAttribute("aria-label") === "Choose what Home shows");
   cog.click();
   const boxes = () => [...w.document.querySelectorAll(".admin-modal [data-block]")];
-  ok("it opens a window with a checkbox per block, all ticked", boxes().map(c => c.dataset.block + (c.checked ? "+" : "-")).join() === "orders+,totals+,inout+,pies+,sales+");
+  ok("it opens a window with a checkbox per block, all ticked", boxes().map(c => c.dataset.block + (c.checked ? "+" : "-")).join() === "orders+,totals+,unpaidpos+,inout+,pies+,sales+");
   boxes().find(c => c.dataset.block === "inout").checked = false;
   boxes().find(c => c.dataset.block === "pies").checked = false;
   asked = [];
   w.document.getElementById("homeLayoutSave").click();
-  await wait(() => !w.document.querySelector(".admin-modal") && blocksOn(w) === "orders,totals,sales");
-  ok("Save hides them at once, without reloading the page", blocksOn(w) === "orders,totals,sales" && !w.document.querySelector(".home-inout") && !w.document.querySelector(".home-pie"));
+  await wait(() => !w.document.querySelector(".admin-modal") && blocksOn(w) === "orders,totals,unpaidpos,sales");
+  ok("Save hides them at once, without reloading the page", blocksOn(w) === "orders,totals,unpaidpos,sales" && !w.document.querySelector(".home-inout") && !w.document.querySelector(".home-pie"));
   ok("…keeps the choice on the account", JSON.stringify(saved) === '{"home":{"hidden":["inout","pies"]}}');
-  ok("…and asks the server only for the blocks still shown", asked.length === 1 && asked[0].join() === "orders,totals,sales");
+  ok("…and asks the server only for the blocks still shown", asked.length === 1 && asked[0].join() === "orders,totals,unpaidpos,sales");
 
   w = await browser();   // another browser, same user: nothing kept in it
   asked = [];
-  ok("another browser signed in as the same user opens Home the same way", (await home(w, "orders,totals,sales")) === "orders,totals,sales" && asked[0].join() === "orders,totals,sales");
+  ok("another browser signed in as the same user opens Home the same way", (await home(w, "orders,totals,unpaidpos,sales")) === "orders,totals,unpaidpos,sales" && asked[0].join() === "orders,totals,unpaidpos,sales");
   w.document.getElementById("homeCog").click();
-  ok("…and its ⚙ shows the hidden ones unticked", boxes().map(c => c.checked ? 1 : 0).join("") === "11001");
+  ok("…and its ⚙ shows the hidden ones unticked", boxes().map(c => c.checked ? 1 : 0).join("") === "111001");
   w.document.getElementById("homeLayoutAll").click();
   asked = [];
   w.document.getElementById("homeLayoutSave").click();
-  await wait(() => blocksOn(w) === "orders,totals,inout,pies,sales");
-  ok("Show all brings them back, fetching them then", blocksOn(w) === "orders,totals,inout,pies,sales" && asked[0].join() === "orders,totals,inout,pies,sales" && !!w.document.querySelector(".home-pie"));
+  await wait(() => blocksOn(w) === "orders,totals,unpaidpos,inout,pies,sales");
+  ok("Show all brings them back, fetching them then", blocksOn(w) === "orders,totals,unpaidpos,inout,pies,sales" && asked[0].join() === "orders,totals,unpaidpos,inout,pies,sales" && !!w.document.querySelector(".home-pie"));
 
   w.document.getElementById("homeCog").click();
   boxes().forEach(c => { c.checked = false; });

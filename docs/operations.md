@@ -772,10 +772,19 @@ message, a private note, and **Email it now**. The full code is shown once, with
 letters and digits without look-alikes, shown in four groups (`XXXX-XXXX-XXXX-XXXX`). Afterwards the page
 shows it masked (`••••-••••-••••-1234`); **Show** reveals it and is audited (`giftcard.code_shown`).
 
-**Selling them online.** **Global settings → Gift cards**: **Sell gift cards online** (off to start), the
-amount buttons (to start $25, $50 and $100) and the lowest and highest custom amount (to start $5 and
-$500). With it on and card payments on, every shop page has a **Gift cards** button: amount, recipient
-name and email, the buyer's name and email, and a message (up to 300 characters). It is an ordinary card
+**Selling them online.** **Global settings → Gift cards**: **Customers can buy gift cards on the shop** (off
+to start), the amount buttons (to start $25, $50 and $100) and the lowest and highest custom amount (to
+start $5 and $500). Gift cards are paid by card, so selling them needs **card payments set up and on**: your
+Stripe keys added (see Setup) and **Card** ticked under Global settings → Payment methods. Until then the
+tick is greyed out with a note saying so (the amounts can still be changed), and a save that ticks it — or
+that unticks Card while it is ticked — is refused ("Set up card payments before selling gift cards on a
+shop."). A shop also needs **Card** on in its own payment methods: a shop without card payments shows no
+gift cards. With all of that on, the shop page has a **Gift cards** button by its name, and a **Gift card**
+tile first in its product list (in a small "Gift cards" section of its own when the shop's products are in
+category sections) showing the price range, like "$25 – $500", and "Emailed to the person you choose." The
+tile is not a product — it never goes in the cart — and it and the button open the same form: amount, recipient
+name and email, the buyer's name and email, and a message (up to 300 characters). Neither shows on a shop
+preview. It is an ordinary card
 order with one line, "Gift card for <recipient>". The card is made and emailed to the recipient once the
 card payment is confirmed — a repeated confirmation makes no second card or email — and the buyer's receipt
 says so. The gift card line is never taxed, raises nothing for a fundraiser and isn't made or packed.

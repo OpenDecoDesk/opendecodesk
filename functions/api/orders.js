@@ -309,6 +309,17 @@ function giftCardSettingsInput_(b) {
   if (minCents > maxCents) return { error: "The smallest amount can't be more than the largest." };
   return { value: { sellOnline: b.sellOnline, amounts, minCents, maxCents } };
 }
+// Whether a shop can sell gift cards by card at all (Global settings → Gift cards, "Customers can buy gift cards on the
+// shop"): Stripe is set up on this install (STRIPE_SECRET_KEY — the catalog's stripeConfigured) and the Global Card
+// payment method isn't switched off (computeEnabledPayments: card !== false). `enabledPayments`: the Global boxes as they
+// are or will be after this save; left out, the stored ones (unreadable: not ready).
+const GIFT_CARD_NEEDS_CARD_MSG_ = "Set up card payments before selling gift cards on a shop.";
+async function giftCardCardReady_(env, enabledPayments) {
+  if (!env || !env.STRIPE_SECRET_KEY) return false;
+  let g = enabledPayments;
+  if (!g) { try { g = ((await getGlobalSettings(env.DB)) || {}).enabledPayments || {}; } catch (_) { return false; } }
+  return g.card !== false;
+}
 // Spends the gift cards a customer (or staff, on a Local sale) typed on an order that is now saved, in order, each up
 // to its amount (all it can, when none was given) and never more than is still owed: db.js redeemGiftCard takes the
 // least of the three with ONE conditional update, and records the payment. A card that is refused is reported and the
@@ -6602,11 +6613,12 @@ async function handleOrdersPost_(context, listBefore = null) {
 
     // ---- Gift cards: sell them online? which amounts? (Global settings → Gift cards; phase 6) ----
     if (body.action === "getGiftCardSettings") {
-      return jsonResponse({ status: "ok", giftCards: await getGiftCardSettings(env.DB) });
+      return jsonResponse({ status: "ok", giftCards: { ...(await getGiftCardSettings(env.DB)), cardReady: await giftCardCardReady_(env) } });
     }
     if (body.action === "updateGiftCardSettings") {
       const input = giftCardSettingsInput_(body);
       if (input.error) return jsonResponse({ status: "error", message: input.error }, 400);
+      if (input.value.sellOnline && !(await giftCardCardReady_(env))) return jsonResponse({ status: "error", message: GIFT_CARD_NEEDS_CARD_MSG_ }, 400);
       const before = await getGiftCardSettings(env.DB);
       let saved;
       try { saved = await setGiftCardSettings(env.DB, input.value); }
@@ -7101,6 +7113,8 @@ async function handleOrdersPost_(context, listBefore = null) {
       if (s.giftCards) {
         const input = giftCardSettingsInput_(s.giftCards);
         if (input.error) return refuse("giftCards", input.error);
+        // Selling on the shop needs card payments: checked against the Payment methods boxes as this save leaves them.
+        if (input.value.sellOnline && !(await giftCardCardReady_(env, builds.payments ? builds.payments.value.enabledPayments : null))) return refuse("giftCards", GIFT_CARD_NEEDS_CARD_MSG_);
         before.giftCards = await getGiftCardSettings(env.DB);
         if ((r = await build("giftCards", () => buildGiftCardSettings(env.DB, input.value)))) return r;
       }

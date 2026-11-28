@@ -417,6 +417,13 @@
   /* The shop page's "Gift cards" button and its buying form */
   .gift-buy-row{margin-top:14px;}
   .gift-buy-btn{font-family:'IBM Plex Mono',monospace; font-size:12px; text-transform:uppercase; letter-spacing:.06em; background:none; border:1px solid var(--org-accent); color:var(--org-accent); padding:8px 16px; border-radius:var(--radius); cursor:pointer; font-weight:600;}
+  /* The "Gift card" tile, first in the product list: laid out like a product, the whole tile opens the buying form */
+  .gift-tile{display:flex; gap:16px; align-items:flex-start; padding:20px 0; cursor:pointer; color:var(--org-accent, var(--accent));}
+  .gift-tile-pic{flex:0 0 auto; border-radius:8px;}
+  .gift-tile-text{flex:1 1 auto; min-width:0; color:var(--ink);}
+  .gift-tile-text .product-controls{margin-top:10px;}
+  .cat-heading + .gift-tile{padding-top:14px;}
+  @media (max-width:480px){ .gift-tile-pic{width:84px; height:53px;} }
   .gb-form{margin-top:18px; display:flex; flex-direction:column; gap:12px; max-width:480px;}
   .gb-label{font-size:13px; font-weight:600;}
   .gb-amounts{display:flex; flex-wrap:wrap; gap:8px;}

@@ -12492,11 +12492,11 @@ async function renderGlobalSettings(app){
       const r = dr && (dr.discountRules || dr.rules || dr);
       if(r && typeof r.multiple === "boolean"){ discountRules = { multiple: r.multiple }; discountRulesLoaded = true; }
     }catch(e){}
-    let giftSettings = { sellOnline: false, amounts: [2500, 5000, 10000], minCents: 500, maxCents: 50000 }, giftSettingsLoaded = false;
+    let giftSettings = { sellOnline: false, amounts: [2500, 5000, 10000], minCents: 500, maxCents: 50000, cardReady: true }, giftSettingsLoaded = false;
     if(features.giftCards !== false) try{
       const gr = await hoopApi_({ action: "getGiftCardSettings" });
       const r = gr && (gr.giftCards || gr.settings || gr);
-      if(r && Array.isArray(r.amounts)){ giftSettings = { sellOnline: !!r.sellOnline, amounts: r.amounts.map(Number).filter(Number.isFinite), minCents: Number(r.minCents) || 500, maxCents: Number(r.maxCents) || 50000 }; giftSettingsLoaded = true; }
+      if(r && Array.isArray(r.amounts)){ giftSettings = { sellOnline: !!r.sellOnline, amounts: r.amounts.map(Number).filter(Number.isFinite), minCents: Number(r.minCents) || 500, maxCents: Number(r.maxCents) || 50000, cardReady: r.cardReady !== false }; giftSettingsLoaded = true; }
     }catch(e){}
     const giftDollars = (c) => { c = Math.round(Number(c) || 0); return Math.floor(c / 100) + (c % 100 ? "." + String(c % 100).padStart(2, "0") : ""); };
     // Net 30 terms (migrations/0121): the default days and when they start counting. Drawn, and so sent, only once read.
@@ -12609,7 +12609,10 @@ async function renderGlobalSettings(app){
 
         ${giftSettingsLoaded ? `<h2 style="margin:22px 0 12px;">Gift cards</h2>
         <div class="admin-note" style="margin-bottom:10px;">You can always issue a gift card from the Gift cards page. A card's balance can be spent on any order, never expires and can't be cashed out. Whether cards can be spent is the Gift cards box under Payment methods.</div>
-        <label class="checkbox-row"><input type="checkbox" id="gGiftSell" ${giftSettings.sellOnline ? "checked" : ""}> Customers can buy gift cards on the shop (paid by card; the card is emailed once it is paid)</label>
+        <label class="checkbox-row"><input type="checkbox" id="gGiftSell" ${giftSettings.cardReady ? (giftSettings.sellOnline ? "checked" : "") : `disabled aria-describedby="gGiftSellNote"`}> Customers can buy gift cards on the shop (paid by card; the card is emailed once it is paid)</label>
+        ${giftSettings.cardReady
+          ? `<div id="gGiftSellNote" class="admin-note" style="margin:-4px 0 10px;">Only shops that take card payments show gift cards.</div>`
+          : `<div id="gGiftSellNote" class="admin-note" style="margin:-4px 0 10px;">Card payments must be set up and switched on to sell gift cards on a shop: add your Stripe keys (see Setup) and tick Card under Payment methods. A shop also needs Card switched on in its own payment methods.</div>`}
         <label>Amounts offered (dollars, up to 6, separated by commas)
           <input type="text" id="gGiftAmounts" value="${escapeHtml(giftSettings.amounts.map(giftDollars).join(", "))}" placeholder="25, 50, 100" style="max-width:260px;">
         </label>
@@ -13008,7 +13011,7 @@ async function submitGlobalSettings(){
       const minCents = cents($g("gGiftMin").value), maxCents = cents($g("gGiftMax").value);
       if(!amounts.length || amounts.length > 6 || amounts.some(c => !(c >= 100 && c <= 1000000))) return { error: "Gift cards: enter 1 to 6 amounts, each from $1 to $10,000, like 25, 50, 100." };
       if(!(minCents >= 100) || !(maxCents >= minCents) || maxCents > 1000000) return { error: "Gift cards: the custom amount's two figures must run from at least $1 up to no more than $10,000, the second not below the first." };
-      settings.giftCards = { sellOnline: $g("gGiftSell").checked, amounts: [...new Set(amounts)].sort((a, b) => a - b), minCents, maxCents };
+      settings.giftCards = { sellOnline: !$g("gGiftSell").disabled && $g("gGiftSell").checked, amounts: [...new Set(amounts)].sort((a, b) => a - b), minCents, maxCents };
     }
     // Net 30 terms (migrations/0121): sent only when the section was drawn (it loaded).
     if($g("gTermsDays") && adminCan_("settings.global", "edit")){

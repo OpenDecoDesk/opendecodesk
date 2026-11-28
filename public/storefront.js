@@ -582,6 +582,35 @@ function renderStripeSuccess(app, orgId, org, orderId){
 const gb_ = { amount: 0, custom: "", recipientName: "", recipientEmail: "", buyerName: "", buyerEmail: "", message: "", busy: false, err: "", attempt: null };
 const GIFT_MESSAGE_MAX_ = 300;
 function giftSellOn_(org){ return !!(org && org.giftCards && org.giftCards.sellOnline === true && Array.isArray(org.giftCards.amounts) && !org.preview); }
+// The "Gift card" tile, first in the shop's product list when gift cards are sold on the shop (giftSellOn_): a built-in
+// picture in the shop's colour, the name, "$25 – $500" (the smallest to the largest amount a buyer can choose) and its
+// "Buy a gift card" button — it and a click anywhere on the tile open the buy form, as the header button does. Not a
+// product: no cart, no id, not counted (it isn't a .product).
+function giftTileHtml_(org){
+  if(!giftSellOn_(org)) return "";
+  const g = org.giftCards, nums = g.amounts.map(Number).concat([Number(g.min), Number(g.max)]).filter(n => Number.isFinite(n) && n > 0);
+  if(!nums.length) return "";
+  const money = (n) => "$" + (n % 1 ? n.toFixed(2) : String(n));
+  const lo = Math.min(...nums), hi = Math.max(...nums);
+  const price = lo === hi ? money(lo) : money(lo) + " – " + money(hi);
+  return `
+    <div class="gift-tile" data-action="giftbuy-open">
+      <svg class="gift-tile-pic" viewBox="0 0 120 76" width="120" height="76" aria-hidden="true" focusable="false">
+        <rect x="1" y="1" width="118" height="74" rx="8" fill="currentColor"/>
+        <rect x="78" y="1" width="10" height="74" fill="#fff" opacity=".85"/>
+        <rect x="1" y="28" width="118" height="10" fill="#fff" opacity=".85"/>
+        <path d="M83 33c-10-14-24-12-20-3 3 6 14 5 20 3zm0 0c10-14 24-12 20-3-3 6-14 5-20 3z" fill="none" stroke="#fff" stroke-width="3"/>
+      </svg>
+      <div class="gift-tile-text">
+        <div class="product-head">
+          <h3>Gift card</h3>
+          <div class="product-price">${escapeHtml(price)}</div>
+        </div>
+        <div class="product-desc">Emailed to the person you choose.</div>
+        <div class="product-controls"><button type="button" class="add-btn" data-action="giftbuy-open">Buy a gift card</button></div>
+      </div>
+    </div>`;
+}
 function giftBuyCents_(){
   const custom = String(gb_.custom || "").replace(/[$,\s]/g, "");
   const dollars = custom ? (/^\d+(\.\d{1,2})?$/.test(custom) ? Number(custom) : NaN) : gb_.amount;
@@ -1570,9 +1599,17 @@ function renderOrgPage(app, orgId, org){
       ).join("")}</nav>`
     : "";
 
-  const sectionsHtml = activeCategories.map(t => `
+  // The "Gift card" tile (giftTileHtml_) comes first: in the one Products section, or its own small section at the top
+  // when the shop's products are in category sections.
+  const giftTile = giftTileHtml_(org);
+  const sectionsHtml = (giftTile && activeCategories.length !== 1 ? `
+    <section class="cat-section gift-tile-section" aria-label="Gift cards">
+      <h2 class="cat-heading">Gift cards</h2>
+      ${giftTile}
+    </section>` : "") + activeCategories.map(t => `
     <section class="cat-section" id="cat-${escapeHtml(t)}" aria-label="${escapeHtml(CATEGORY_LABELS[t] || t)}">
       ${activeCategories.length > 1 ? `<h2 class="cat-heading">${escapeHtml(CATEGORY_LABELS[t] || t)}</h2>` : `<h2 class="cat-heading">Products</h2>`}
+      ${activeCategories.length === 1 ? giftTile : ""}
       ${versionCardsHtml_(byCategory[t], org)}
     </section>
   `).join("");

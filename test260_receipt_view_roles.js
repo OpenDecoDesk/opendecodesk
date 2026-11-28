@@ -1,9 +1,13 @@
 // Receipts open for every role that sees a receipt's View button, and only an editor adds one (review #78).
 // /api/receipt used to let a request through only at Edit on expenses, money or payments, for viewing and uploading
-// alike, while the View buttons show on read-only screens too: Blanks (a stock movement's receipt), Brand rules
-// (an approval's letter), the Account viewer, Expenses and Money. Now viewing (the signed link) needs Read on any of
-// those, and uploading still needs Edit on expenses, money or payments. Also: Global settings' Bookkeeping section is
-// read at Global settings' read level (getAccountingSettings), as every other section of the page.
+// alike, while the View buttons show on read-only screens too: Brand rules (an approval's letter), the Account viewer,
+// Expenses and Money. Now viewing (the signed link) needs Read on any of those, and uploading still needs Edit on
+// expenses, money or payments. Also: Global settings' Bookkeeping section is read at Global settings' read level
+// (getAccountingSettings), as every other section of the page.
+// Blanks and Transfers follow the owner's rule (2026-11-23): Read on Blanks = stock and details only, no money. A stock
+// movement's receipt is the vendor's invoice, with what the stock cost, so Read there opens one only together with
+// costs.view (Money, costs and margins); Edit there (whoever receives the stock) opens it. Read alone is refused, and
+// its History is sent without the receipt (orders.js movementCostsFor_, test297).
 // The real sign-in (testlib/auth-harness: adminAuth.js, permissions.js) on real SQL, the real receipt.js. Invented data.
 const { makeAuth, prelude, strip, read, request, answer } = require("./testlib/auth-harness");
 const R = require("./testlib/roles");
@@ -38,7 +42,16 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
     "Account viewer Read": await roleUser("Account viewer", { "finance.accountviewer": "read" }, "av@example.test"),
     "Payments Read": await roleUser("Payment viewer", { "orders.payments": "read" }, "pv@example.test"),
     "Brand approvals Read": await roleUser("Approvals viewer", { "catalog.brandApprovals": "read" }, "bv@example.test"),
+    "Blank stock Read + costs.view": await roleUser("Blanks viewer with costs", { "inventory.blanks": "read", "costs.view": "read" }, "ic@example.test"),
+    "Blank stock Edit": await roleUser("Blanks editor", { "inventory.blanks": "edit" }, "ie@example.test"),
+    "Transfers Read + costs.view": await roleUser("Transfers viewer with costs", { "inventory.transfers": "read", "costs.view": "read" }, "tc@example.test"),
+    "Transfers Edit": await roleUser("Transfers editor", { "inventory.transfers": "edit" }, "te@example.test"),
+  };
+  // Read on Blanks or Transfers alone is stock and details, no money; costs.view alone opens no screen with a receipt.
+  const stockOnly = {
     "Blank stock Read": await roleUser("Blanks viewer", { "inventory.blanks": "read" }, "iv@example.test"),
+    "Transfers Read": await roleUser("Transfers viewer", { "inventory.transfers": "read" }, "tv@example.test"),
+    "costs.view alone": await roleUser("Costs only", { "costs.view": "read" }, "co@example.test"),
   };
   const nobody = await roleUser("Counts only", { "home.counts": "read" }, "nv@example.test");
   const editor = await roleUser("Expense editor", { "finance.expenses": "edit" }, "ee@example.test");
@@ -50,9 +63,13 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   }
   let r = await view(nobody);
   ok("a role with none of them is refused", r.status === 403 && !r.body.url);
+  for (const [label, cookie] of Object.entries(stockOnly)) {
+    r = await view(cookie);
+    ok(label + ": refused (403), no link", r.status === 403 && !r.body.url);
+  }
   ok("…and the link a reader got opens the file", await (async () => {
     stored.set(KEY, PDF);
-    const u = new URL("https://admin.example.com" + (await view(readers["Blank stock Read"])).body.url);
+    const u = new URL("https://admin.example.com" + (await view(readers["Blank stock Read + costs.view"])).body.url);
     const res = await receipt.get({ request: { url: u.toString(), headers: { get: () => null } }, env });
     return res.status === 200 && res.headers.get("Content-Type") === "application/pdf";
   })());
@@ -67,9 +84,9 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   ok("Expenses Edit uploads it, under a key the server chose", r.status === 200 && /^receipts\/\d{4}\/[a-z0-9]{32}\.pdf$/.test(r.body.key) && stored.has(r.body.key));
   r = await upload(admin);
   ok("…and so does an admin", r.status === 200 && stored.size === 2);
-  ok("the gate lists the six read levels; the upload check the three edit levels", (() => {
+  ok("the gate lists the read levels (Blanks and Transfers then asking for more); the upload check the three edit levels", (() => {
     const src = read("functions/api/receipt.js");
-    return ["finance.expenses", "finance.money", "finance.accountviewer", "orders.payments", "catalog.brandApprovals", "inventory.blanks"].every(f => src.includes(`["${f}", "read"]`)) &&
+    return ["finance.expenses", "finance.money", "finance.accountviewer", "orders.payments", "catalog.brandApprovals", "inventory.blanks", "inventory.transfers"].every(f => src.includes(`["${f}", "read"]`)) &&
       ["finance.expenses", "finance.money", "orders.payments"].every(f => src.includes(`adminCan(request, "${f}", "edit")`));
   })());
 

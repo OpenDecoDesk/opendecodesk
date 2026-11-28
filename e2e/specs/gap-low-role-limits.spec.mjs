@@ -1,7 +1,8 @@
 // Role limits on files and dates (the low-priority review, #78, #80, #89):
-//   - #78 Receipts: the View buttons show on read-only screens (Blanks, Brand rules, the Account viewer…), so
+//   - #78 Receipts: the View buttons show on read-only screens (Brand rules, the Account viewer…), so
 //     /api/receipt signs a link for Read on any of them; adding a receipt still needs Edit on expenses, money or
-//     payments (functions/api/receipt.js).
+//     payments (functions/api/receipt.js). Blanks (owner's rule, 2026-11-23: Read on Blanks = stock and details only):
+//     Read there opens a vendor receipt only together with costs.view, or at Edit.
 //   - #80 Private files: /api/design signs a link only for a role that may see that kind of file: a design's files
 //     for the design, order and production screens; an order line's own files (a customer's photo) for the order
 //     and production screens, not Designs; a digital product's files for the product-files and downloads screens.
@@ -67,7 +68,7 @@ const askLink = async (ctx, path, key) => {
 };
 const PDF = Buffer.from("%PDF-1.4\n1 0 obj << >> endobj\ntrailer << >>\n%%EOF\n", "latin1");
 
-test("Receipts: Read on Blanks, Brand approvals or the Account viewer opens one; only Edit on expenses adds one", async ({ api }, testInfo) => {
+test("Receipts: Read on Blanks with costs.view, Brand approvals or the Account viewer opens one; only Edit on expenses adds one", async ({ api }, testInfo) => {
   const P = people(api, testInfo.workerIndex);
   const owner = await apiContext("owner", testInfo.workerIndex);
   try {
@@ -77,7 +78,8 @@ test("Receipts: Read on Blanks, Brand approvals or the Account viewer opens one;
     expect(res.ok(), JSON.stringify(up)).toBe(true);
     expect(up.key).toMatch(/^receipts\/\d{4}\/[a-z0-9]{32}\.pdf$/);
 
-    for (const [label, fns] of [["Blanks reader", { "inventory.blanks": "read" }], ["Approvals reader", { "catalog.brandApprovals": "read" }],
+    // Blanks: Read there opens a vendor receipt only with costs.view (Read on Blanks alone is stock and details, no money).
+    for (const [label, fns] of [["Blanks reader with costs", { "inventory.blanks": "read", "costs.view": "read" }], ["Approvals reader", { "catalog.brandApprovals": "read" }],
       ["Account reader", { "finance.accountviewer": "read" }]]) {
       const { ctx } = await P.make(label, fns);
       const link = await askLink(ctx, "/api/receipt", up.key);
@@ -90,6 +92,8 @@ test("Receipts: Read on Blanks, Brand approvals or the Account viewer opens one;
     }
     const none = await P.make("Counts only", { "home.counts": "read" });
     expect((await askLink(none.ctx, "/api/receipt", up.key)).status, "a role with none of them gets no link").toBe(403);
+    const blanksOnly = await P.make("Blanks reader", { "inventory.blanks": "read" });
+    expect((await askLink(blanksOnly.ctx, "/api/receipt", up.key)).status, "Read on Blanks alone gets no link").toBe(403);
     const editor = await P.make("Expense editor", { "finance.expenses": "edit" });
     res = await editor.ctx.post("/api/receipt?name=y.pdf", { headers: { "Content-Type": "application/pdf" }, data: PDF });
     expect(res.status(), "Expenses Edit adds one").toBe(200);

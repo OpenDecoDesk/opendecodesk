@@ -441,12 +441,22 @@ const COST_FIELDS_ = {
   // money — no average cost, vendor price (or when it was entered), MAP, movement cost, or anything worked out from them.
   blanks: (k) => /^(purchasePrice|vendorPrice|vendorPriceAt|mapPrice)(Cents)?$/.test(k),   // a blank's sizes
   blankPrices: (k) => /^(price|previous)(Cents)?$/.test(k),                                // a blank's vendor-price history
-  catchUp: (k) => /^(unitCost|cost|oldCost|total|replacedEstimate)(Cents)?$/.test(k),     // Use blanks for past orders
+  catchUp: (k) => /^(unitCost|cost|oldCost|total|replacedEstimate|recostTotal)(Cents)?$/.test(k),   // Use blanks / transfers for past orders
   vendorPlan: (k) => /^(price|current|map|mapCurrent)$/.test(k),                         // a vendor file's plan, per size
   vendorProducts: (k) => /^(prices|maps)$/.test(k),                                      // products fetched from a vendor
   colorGroups: (k) => /^(costs|sizePricing|flatPrice)$/.test(k),                         // color groups priced on blank cost
   blankOrder: (k) => /^(price|vendorPrice|vendorPriceAt|purchasePrice|cost)(Cents)?$/.test(k),   // Blanks to Order, free shipping
+  // A blank or transfer stock movement: its cost, and the vendor invoice it was received on (a receipt shows the prices).
+  // The "(landed cost incl. $X …)" part of its note goes too (movementCostsFor_).
+  movements: (k) => /^(cost|avgCost|value|unitCost)(Cents)?$/.test(k) || /^receipt(Key|Name)$/.test(k),
+  // A received transfer sheet (db.js getTransferSheet): its total, each row's dollars and per-item price, the written-off
+  // and personal amounts, and its invoice. The rows' % of the sheet, counts, vendor and date stay.
+  transferSheet: (k) => /^(total|stock|amount|perItem|cents)(Cents)?$/.test(k) || /^receipt(Key|Name)$/.test(k),
+  supplierOrders: (k) => /^(total|unit|price)(Cents)?$/.test(k),                         // a supplier order's total, its lines' prices
 };
+// The landed-cost part of a received blank's note, "(landed cost incl. $12.50 shipping & other costs)", as receiveBlanks
+// and Record order write it: money, so it is taken out when read for a role that isn't sent costs (old notes included).
+const LANDED_NOTE_RE_ = /\s*\(landed cost incl\.[^)]*\)/g;
 // A copy of `v` without the fields `drop` names, at any depth.
 const dropFields_ = (v, drop) => Array.isArray(v) ? v.map(x => dropFields_(x, drop))
   : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).filter(([k]) => !drop(k)).map(([k, x]) => [k, dropFields_(x, drop)])) : v;
@@ -677,6 +687,13 @@ async function handleOrdersPost_(context, listBefore = null) {
   // product) still sees them, as does a role with costs.view. `fn` is the screen's function, `kind` which fields
   // are costs (COST_FIELDS_); they are left out wherever they sit in the answer (a size row, its blank, a link).
   const stripCosts_ = (data, fn, kind) => seesPricing_() || can_(fn, "edit") ? data : dropFields_(data, COST_FIELDS_[kind]);
+  // Stock movements (Blanks or Transfers → History) the same way, without their receipt, and with their note's
+  // landed-cost amount taken out: Read there is stock and details only (owner's decision, 2026-11-23).
+  const movementCostsFor_ = (moves, fn) => seesPricing_() || can_(fn, "edit") ? moves
+    : dropFields_(moves, COST_FIELDS_.movements).map(m => m && typeof m.note === "string" ? { ...m, note: m.note.replace(LANDED_NOTE_RE_, "") } : m);
+  // Supplier orders: their total and line prices go with the costs, except to whoever receives blanks (Receive… fills
+  // its form from the order's prices, and Edit on Blanks is sent blank costs anyway).
+  const supplierOrderCostsFor_ = (data) => can_("inventory.blanks", "edit") ? data : stripCosts_(data, "inventory.supplierOrders", "supplierOrders");
   // The audit log's money entries (pricing settings, shop rate, payments, expenses) keep their row without costs.view,
   // not their detail: the amounts are in it.
   const auditCostsFor_ = (entries) => seesPricing_() ? entries : entries.map(e => {
@@ -5100,7 +5117,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       const conns = all.filter(c => c.endpoints && c.endpoints.po)
         .map(c => ({ id: c.id, name: c.name, companyCode: c.companyCode, environment: c.endpoints.environment === "test" ? "test" : "production", hasCredentials: c.hasCredentials,
           stock: !!c.endpoints.inv, shipments: !!c.endpoints.osn, shipMethods: supplierShipMethods(c.companyCode) }));
-      return jsonResponse({ status: "ok", orders: await listSupplierOrders(env.DB, { limit: Number(body.limit) || 30 }), connections: conns, companies });
+      return jsonResponse({ status: "ok", orders: supplierOrderCostsFor_(await listSupplierOrders(env.DB, { limit: Number(body.limit) || 30 })), connections: conns, companies });
     }
     if (body.action === "previewSupplierOrder" || body.action === "placeSupplierOrder") {
       const rl = await rateLimited(env, "vendor_api", request, 30);
@@ -5205,7 +5222,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       let one = null;
       if (body.id) { one = await getSupplierOrder(env.DB, body.id); if (!one) return jsonResponse({ status: "error", message: "That supplier order wasn't found" }, 404); }
       const r = await checkSupplierShipments(env, one ? { order: one, context: body.action, actor: adminActor(request) } : { limit: 10, context: body.action, actor: adminActor(request) });
-      return jsonResponse({ status: "ok", ...r, orders: await listSupplierOrders(env.DB, { limit: 30 }) });
+      return jsonResponse(supplierOrderCostsFor_({ status: "ok", ...r, orders: await listSupplierOrders(env.DB, { limit: 30 }) }));
     }
 
     // An image a vendor lists that isn't in the downloaded image folder: fetched once into our image bucket.
@@ -5563,7 +5580,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (body.action === "getTransferSheet") {
       const sheet = await getTransferSheet(env.DB, Number(body.movementId));
       if (!sheet) return jsonResponse({ status: "error", message: "That sheet wasn't found — it may have been voided." }, 404);
-      return jsonResponse({ status: "ok", sheet });
+      return jsonResponse({ status: "ok", sheet: stripCosts_(sheet, "inventory.transfers", "transferSheet") });
     }
     // Correct a received sheet: its rows (item, count, % of sheet), total, written-off and personal parts, date,
     // vendor and payer. Held to the Receive rules (checkTransferSheet_) and to closed months (periodGuard: the
@@ -5626,7 +5643,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       return jsonResponse({ status: "ok", corrected: done, failed, transfers: await listTransfers(env.DB, body.org || null) });
     }
     if (body.action === "getTransferMovements") {
-      return jsonResponse({ status: "ok", movements: stripCosts_(await getTransferMovements(env.DB, Number(body.transferId)), "inventory.transfers", "purchases") });
+      return jsonResponse({ status: "ok", movements: movementCostsFor_(await getTransferMovements(env.DB, Number(body.transferId)), "inventory.transfers") });
     }
     // Void a mistaken transfer movement. Held to the same rules as voiding a blank movement: a closed month
     // refuses it (periodGuard), and the audit row is written FIRST — no record, no change.
@@ -6252,7 +6269,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       return withList_({ status: "ok", corrected: done, failed }, "blanks", "blanks", blankCostsFor_);
     }
     if (body.action === "getBlankMovements") {
-      return jsonResponse({ status: "ok", movements: stripCosts_(await getBlankMovements(env.DB, Number(body.blankId)), "inventory.blanks", "stock") });
+      return jsonResponse({ status: "ok", movements: movementCostsFor_(await getBlankMovements(env.DB, Number(body.blankId)), "inventory.blanks") });
     }
     if (body.action === "voidInventoryMovement") {
       const locked = await periodGuard(body); if (locked) return locked;
@@ -6335,10 +6352,10 @@ async function handleOrdersPost_(context, listBefore = null) {
       }
       const plan = await planTransferCatchUp(env.DB, ids, pick);
       const money = (c) => c / 100;
-      if (preview) return jsonResponse({ status: "ok",
+      if (preview) return jsonResponse(stripCosts_({ status: "ok",
         lines: plan.lines.map(l => ({ ...l, cost: money(l.costCents), uses: l.uses.map(u => ({ ...u, unitCost: money(u.unitCostCents) })) })),
         totalUnits: plan.totalUnits, total: money(plan.totalCents), shortLines: plan.shortLines,
-        recostLines: plan.recostLines, recostTotal: money(plan.recostCents), skippedClosed: plan.skippedClosed, skippedFinished: plan.skippedFinished });
+        recostLines: plan.recostLines, recostTotal: money(plan.recostCents), skippedClosed: plan.skippedClosed, skippedFinished: plan.skippedFinished }, "inventory.transfers", "catchUp"));
       if (!plan.lines.length) return jsonResponse({ status: "error", message: "Nothing to apply — those lines were already done or no longer qualify" }, 400);
       const locked = plan.lines.find(l => l.locked);
       if (locked) {

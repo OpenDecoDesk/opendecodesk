@@ -15822,7 +15822,8 @@ async function showBlankCatchUp_(onDone, filter){
 async function showTransferCatchUp_(onDone, filter){
   if (!adminKey) adminKey = (await adminLogin()) || "";
   if (!adminKey) return;
-  const fmt = adminMoney_;
+  // Read on Transfers without costs.view gets the preview without costs (orders.js stripCosts_): a dash, never $NaN.
+  const fmt = (n) => adminMoneyOr_(Number.isFinite(n) ? n : null);
   const { ov, close } = inventoryModal_("Use transfers for past orders", `<div id="tcuBody" style="font-size:13px;color:#777;">Checking past orders…</div>`, 1100);
   const body = ov.querySelector("#tcuBody");
   let d;
@@ -15861,7 +15862,7 @@ async function showTransferCatchUp_(onDone, filter){
       <tbody>${shops.map(s => `<tr><td colspan="7" style="${td}background:#fafafa;font-weight:700;"><label style="cursor:pointer;"><input type="checkbox" data-tcu-shop="${escapeHtml(s)}"> ${escapeHtml(shopName(s))}</label></td></tr>` +
         d.lines.filter(l => l.orgId === s).map(row).join("")).join("")}</tbody></table></div>
     <div id="tcuShort" style="display:none;margin-top:10px;padding:8px 12px;border:1px solid #fcd34d;background:#fffbeb;border-radius:6px;font-size:12px;color:#78350f;"></div>
-    <div style="margin-top:10px;font-size:12px;color:#666;">A use dated in the past changes how many were on hand when later sheets came in, so later uses whose average moved are re-costed too (except in a closed month, and pieces made for stock).${d.recostLines && !filter ? ` With every transfer ticked that's ${d.recostLines} order line${d.recostLines === 1 ? "" : "s"}, ${d.recostTotal >= 0 ? "+" : "−"}${fmt(Math.abs(d.recostTotal))}.` : ""}</div>
+    <div style="margin-top:10px;font-size:12px;color:#666;">A use dated in the past changes how many were on hand when later sheets came in, so later uses whose average moved are re-costed too (except in a closed month, and pieces made for stock).${d.recostLines && !filter ? ` With every transfer ticked that's ${d.recostLines} order line${d.recostLines === 1 ? "" : "s"}${d.recostTotal == null ? "" : `, ${d.recostTotal >= 0 ? "+" : "−"}${fmt(Math.abs(d.recostTotal))}`}.` : ""}</div>
     <div id="tcuErr" style="color:#b03a2e;font-size:13px;min-height:18px;margin-top:8px;"></div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
       <button type="button" class="admin-btn" id="tcuCancel" style="background:#fff;color:#232323;border:1px solid #999;">Cancel</button>
@@ -16714,7 +16715,7 @@ async function showBlankHistoryModal(blank, onDone){
       const d = await r.json();
       const body = ov.querySelector("#histBody");
       if (!r.ok || d.status === "error") { body.textContent = (d && d.message) || "Could not load history."; return; }
-      const costs = adminSeesBlankCosts_();   // Read on Blanks alone: no Unit cost column (the server sends none)
+      const costs = adminSeesBlankCosts_();   // Read on Blanks alone: no Unit cost column or Receipt button (the server sends neither)
       body.innerHTML = d.movements.length ? `<table style="border-collapse:collapse;width:100%;font-size:12px;color:#1a1a1a;">
         <thead><tr style="text-align:left;background:#f3f4f6;"><th style="padding:4px 6px;">Date</th><th style="padding:4px 6px;">Color / size</th><th style="padding:4px 6px;">Type</th><th style="padding:4px 6px;text-align:right;">Qty</th>${costs ? `<th style="padding:4px 6px;text-align:right;">Unit cost</th>` : ""}<th style="padding:4px 6px;">Details</th><th style="padding:4px 6px;"></th></tr></thead>
         <tbody>${d.movements.map(m => { const dim = m.voidedAt ? "opacity:.5;text-decoration:line-through;" : ""; return `<tr style="border-bottom:1px solid #eee;">
@@ -16724,7 +16725,7 @@ async function showBlankHistoryModal(blank, onDone){
           <td style="${dim}padding:4px 6px;text-align:right;color:${m.qtyDelta < 0 ? "#b03a2e" : "#166534"};">${m.qtyDelta > 0 ? "+" : ""}${m.qtyDelta}</td>
           ${costs ? `<td style="${dim}padding:4px 6px;text-align:right;">${adminMoneyOr_(m.unitCost)}</td>` : ""}
           <td style="${dim}padding:4px 6px;">${escapeHtml([m.orderId && "Order " + m.orderId, m.vendor, m.vendorRef && "#" + m.vendorRef, m.note].filter(Boolean).join(" · "))}
-            ${m.receiptKey && adminFeatureOn_("bookkeeping") ? ` <button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;" title="${escapeHtml(m.receiptName || "Receipt")}" data-key="${escapeHtml(m.receiptKey)}" data-admin-action="expViewReceipt_">📎 Receipt</button>` : ""}
+            ${m.receiptKey && adminFeatureOn_("bookkeeping") && costs ? ` <button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;" title="${escapeHtml(m.receiptName || "Receipt")}" data-key="${escapeHtml(m.receiptKey)}" data-admin-action="expViewReceipt_">📎 Receipt</button>` : ""}
             ${m.voidedAt ? `<div style="color:#b03a2e;">Voided${m.voidReason ? ": " + escapeHtml(m.voidReason) : ""}</div>` : ""}</td>
           <td style="padding:4px 6px;text-align:right;white-space:nowrap;">${!m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn admin-btn-danger" style="padding:2px 6px;font-size:11px;" data-mid="${m.id}" data-need="inventory.blanks:full" data-admin-action="voidBlankMovement_">Void</button>` : ""}${m.voidedAt && VOIDABLE.has(m.kind) ? `<button type="button" class="admin-btn" style="padding:2px 6px;font-size:11px;text-decoration:none;background:#dcfce7;color:#166534;border:1px solid #86efac;" data-mid="${m.id}" data-need="inventory.blanks:edit" title="Make this entry count toward stock and cost again" data-admin-action="restoreBlankMovement_">Undo void</button>` : ""}</td>
         </tr>`; }).join("")}</tbody></table>` : "No movements yet.";
@@ -17614,7 +17615,7 @@ function supplierOrdersHtml_(orders){
       <td style="${td}">${escapeHtml(adminDay_(o.placedAt || o.createdAt))}</td>
       <td style="${td}">${escapeHtml(o.vendor)}</td>
       <td style="${td}">${(o.lines || []).length} line${(o.lines || []).length === 1 ? "" : "s"} · ${pieces} pc</td>
-      <td style="${td}text-align:right;">$${Number(o.total || 0).toFixed(2)}</td>
+      <td style="${td}text-align:right;">${o.total == null ? "—" : "$" + Number(o.total).toFixed(2)}</td>
       <td style="${td}color:${color};">${escapeHtml(statusText)}${o.cancelledAt && o.cancelNote ? `<div style="font-size:11px;color:#555;">${escapeHtml(o.cancelNote)}</div>` : ""}${o.error && !o.cancelledAt ? `<div style="font-size:11px;color:#7f1d1d;">${escapeHtml(o.error)}</div>` : ""}</td>
       <td style="${td}font-size:12px;">${ships || (o.status === "placed" && !o.cancelledAt ? `<span style="color:#888;">none yet</span>` : "")}</td>
       <td style="${td}white-space:nowrap;">
@@ -23875,7 +23876,7 @@ function showTransferSheetModal_(transfers, onDone, existing){
     ${lockNote}
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:end;">
       <label style="font-size:12px;font-weight:600;">Date<br><input id="trDate" type="date" value="${escapeHtml(ed ? ed.date : today)}" max="${today}" style="${inp}"></label>
-      <label style="font-size:12px;font-weight:600;">Sheet total ($)<br>$<input id="trTotal" type="number" min="0" step="0.01" value="${ed ? Number(ed.total).toFixed(2) : ""}" style="${inp}width:100px;"></label>
+      <label style="font-size:12px;font-weight:600;">Sheet total ($)<br>$<input id="trTotal" type="number" min="0" step="0.01" value="${ed && ed.total != null ? Number(ed.total).toFixed(2) : ""}" style="${inp}width:100px;"></label>
       <label style="font-size:12px;font-weight:600;">Vendor<br>${vendorPickerHtml_("trVendor", ed ? ed.vendor : "", { style: inp + "width:150px;" })}</label>
       <label style="font-size:12px;font-weight:600;">Invoice #<br><input id="trRef" value="${escapeHtml(ed ? ed.vendorRef : "")}" style="${inp}width:120px;"></label>
       <label style="font-size:12px;font-weight:600;">Paid from<br><select id="trPaid" style="${inp}"><option value="">Loading…</option></select></label>
@@ -23921,14 +23922,16 @@ function showTransferSheetModal_(transfers, onDone, existing){
   const recompute = () => {
     unpreview();
     const total = parseFloat(ov.querySelector("#trTotal").value) || 0;
+    // No total yet (or a sheet sent without its amounts): the dollar columns are a dash, not $0.00.
+    const noTotal = ov.querySelector("#trTotal").value.trim() === "";
     const rows = [...ov.querySelectorAll(".trRow")];
     const pcts = rows.map(r => parseFloat(r.querySelector(".trPct").value) || 0);
     const pctSum = pcts.reduce((a, b) => a + b, 0);
     rows.forEach((r, i) => {
       const count = parseInt(r.querySelector(".trCount").value) || 0;
       const dollars = pctSum ? total * (pcts[i] / 100) : 0;
-      r.querySelector(".trRowDollars").textContent = "$" + dollars.toFixed(2);
-      r.querySelector(".trRowPer").textContent = count ? "$" + (dollars / count).toFixed(2) : "—";
+      r.querySelector(".trRowDollars").textContent = noTotal ? "—" : "$" + dollars.toFixed(2);
+      r.querySelector(".trRowPer").textContent = count && !noTotal ? "$" + (dollars / count).toFixed(2) : "—";
     });
     const woPct = Math.max(0, parseFloat(ov.querySelector("#trWoPct").value) || 0), pePct = Math.max(0, parseFloat(ov.querySelector("#trPePct").value) || 0);
     const all = pctSum + woPct + pePct, left = 100 - all, over = all > 100.05, done = Math.abs(left) <= 0.05;

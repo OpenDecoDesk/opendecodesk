@@ -225,6 +225,8 @@ ok("the test workflow runs the scan in strict mode", /scan-private\.sh --strict/
   ok("…on the same Node as the test job", (unit.match(/node-version: (\S+)/) || [])[1] === "22" && (e2e.match(/node-version: (\S+)/) || [])[1] === "22");
   ok("…and when it fails it keeps the report and the traces as an artifact", /- uses: actions\/upload-artifact@[0-9a-f]{40} # v\d+\n        if: failure\(\)\n/.test(e2e) &&
     /e2e\/\.report\n/.test(e2e) && /e2e\/\.results\n/.test(e2e) && /e2e-state\/wrangler-dev\.log\n/.test(e2e) && /include-hidden-files: true/.test(e2e));
+  ok("a failed end-to-end test runs once more on GitHub only (CI set), never on a person's computer",
+    /^  retries: process\.env\.CI \? 1 : 0,$/m.test(read("e2e/playwright.config.mjs")));
   ok("every action the workflows use is pinned to a full commit", [tw, desk, read(".github/workflows/d1-backup.yml")]
     .every(w => [...w.matchAll(/uses: (\S+)/g)].every(m => /^\.\//.test(m[1]) || /@[0-9a-f]{40}$/.test(m[1]))) && /actions\/upload-artifact@/.test(e2e));
 }

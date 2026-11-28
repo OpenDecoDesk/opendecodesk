@@ -106,7 +106,9 @@ data with unique names, so a file passes on its own as well as with the others, 
 install-wide totals that another file changes. A test that changes an install-wide setting (sales tax rate,
 rush fee, pricing, a feature switch) sets it back in a `finally`, and picks values that can't disturb the others
 (shops made by `makeShop` are tax-exempt; only the Digital products switch is toggled; the time zone stays UTC).
-Nothing is retried: a flaky test is a bug to fix.
+Nothing is retried on your computer: a flaky test is a bug to fix. On GitHub a failed test runs once more, as its
+slower runner shows timing faults a fast machine hides; a test that passes the second time is listed as "flaky" in
+the run's summary and report, to be fixed, and one that fails twice fails the run.
 
 ## Bugs the suite found, now fixed
 

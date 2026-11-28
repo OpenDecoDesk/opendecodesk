@@ -17,9 +17,10 @@ import { fetchWithTimeout } from "./http.js";
  * email is set up there; until then it sends nothing (desktopEmail_). Cloudflare sending uses the `EMAIL` send_email binding if one is configured, otherwise the REST API
  * with CF_EMAIL_API_TOKEN (encrypted; a token with Email Sending permission only) + CF_ACCOUNT_ID.
  *
- * There is no second transport: a send that fails (not configured, API error, network, or the
- * customer's address permanently bouncing) returns false and is recorded as an `email_failed`
- * system issue, which the 6 AM roll-up and the Communications page report.
+ * There is no second transport: a send that fails (API error, network, a chosen mailbox that's
+ * incomplete, or the customer's address permanently bouncing) returns false and is recorded as an
+ * `email_failed` system issue, which the 6 AM roll-up and the Communications page report. With no
+ * provider set up at all nothing is sent and nothing recorded (Setup status says email isn't set up).
  *
  * All functions return true on success, false on failure — never throw.
  * Templates say who they are from / to with placeholders (OWNER_, BUSINESS_, SITE_ below); send_ —
@@ -99,6 +100,13 @@ async function send_(env, msg) {
   // somewhere else.
   const mailbox = await webMailbox_(env);
   const via = desktopEmail_(env) === "on" ? "mailbox" : mailbox ? "smtp" : env && env.RESEND_API_KEY ? "resend" : "cloudflare";
+  // No provider set up at all (no Cloudflare binding or API token either — emailCanSend says no): nothing is
+  // sent, and it isn't recorded as a failed send — every email would be one, and the list of problems would
+  // only ever say what Setup status already does ("Email isn't set up").
+  if (via === "cloudflare" && !(env && ((env.EMAIL && typeof env.EMAIL.send === "function") || (env.CF_EMAIL_API_TOKEN && env.CF_ACCOUNT_ID)))) {
+    console.error("No email provider is set up — not sent:", msg.subject);
+    return false;
+  }
   const r = via === "mailbox" ? await sendViaMailer_(env, msg, id) : via === "smtp" ? await sendViaSmtp_(env, msg, id, null, mailbox)
     : via === "resend" ? await sendViaResend_(env, msg, id) : await sendViaCloudflare_(env, msg, id);
   if (r === true) return true;
@@ -803,7 +811,17 @@ function recurringText_(list) {
   });
 }
 
-export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit = [], awaitingPickup = [], awaitingBlanks = [], maintenanceDue = [], rushToSet = [], recurringRecorded = [], adminUrl = adminSiteUrl_(env) } = {}) {
+// Shipments the tracking check stopped looking up 90 days on (db.js getUnconfirmedShipments: {count, orders}),
+// for the roll-up and the quiet-morning email: "12345 — Pat Lee — 1Z… (shipped Jul 2, 2026)".
+function unconfirmedText_(u, tz) {
+  const day = (iso) => { const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(iso)) ? iso + "T12:00:00Z" : iso);
+    return isNaN(d.getTime()) ? String(iso) : d.toLocaleDateString("en-US", { timeZone: tz || "UTC", month: "short", day: "numeric", year: "numeric" }); };
+  return ((u && u.orders) || []).map(x => `${x.orderId} — ${x.customerName || ""} — ${x.tracking} (${x.shipped ? "shipped" : "label"} ${x.since ? day(x.since) : "date unknown"})`);
+}
+// How many orders one roll-up lists at most (db.js DIGEST_MAX_ORDERS, repeated for the email's wording).
+const DIGEST_LIST_MAX = 200;
+
+export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit = [], awaitingPickup = [], awaitingBlanks = [], maintenanceDue = [], rushToSet = [], recurringRecorded = [], unconfirmed = null, adminUrl = adminSiteUrl_(env) } = {}) {
   const tz = await timeZone_(env);   // Region setting, else TIMEZONE, else UTC
   const when = (iso) => new Date(iso).toLocaleString("en-US", { timeZone: tz, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
@@ -819,6 +837,7 @@ export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit
     watching.length ? `Still being watched: ${watching.join(", ")}.` : "",
     maintenanceDue.length ? `Machine maintenance due: ${maintenanceText_(maintenanceDue).join("; ")}.` : "",
     (recurringRecorded || []).length ? `Recurring expenses recorded: ${recurringText_(recurringRecorded).join("; ")}.` : "",
+    unconfirmed && unconfirmed.count ? `${n(unconfirmed.count, "shipment", "shipments")} not confirmed after 90 days — check ${unconfirmed.count === 1 ? "it" : "them"} by hand: ${unconfirmedText_(unconfirmed, tz).join("; ")}${unconfirmed.count > unconfirmed.orders.length ? `; and ${unconfirmed.count - unconfirmed.orders.length} more` : ""}.` : "",
     adminUrl ? `Details: ${adminUrl}/#comms` : "Details: Settings → Communications in the program.",
   ].filter(Boolean);
   const html = `<div style="font-family:system-ui,sans-serif;font-size:14px;color:#222;line-height:1.5;">` +
@@ -834,7 +853,9 @@ export async function sendDigestHeartbeatEmail(env, { lastSentAt = "", inTransit
 // sends sendDigestHeartbeatEmail instead, so a quiet morning still proves the roll-up ran).
 // pickedUp = orders the tracking check just marked shipped (carrier's first scan); awaitingPickup =
 // orders with a label the carrier hasn't scanned yet (listed for the record, never a reason to send).
-export async function sendDailyDigestEmail(env, { orders = [], notices = [], orgNames = {}, security = null, inTransit = [], pickedUp = [], awaitingPickup = [], issues = [], awaitingBlanks = [], priceReminder = null, belowTarget = [], maintenanceDue = [], rushToSet = [], recurringRecorded = [], adminUrl = adminSiteUrl_(env) }) {
+// more = real orders still waiting after these (a roll-up takes at most 200: db.js getOrdersForDigest);
+// unconfirmed = shipments the tracking check has stopped looking up (db.js getUnconfirmedShipments).
+export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices = [], orgNames = {}, security = null, inTransit = [], pickedUp = [], awaitingPickup = [], issues = [], awaitingBlanks = [], priceReminder = null, belowTarget = [], maintenanceDue = [], rushToSet = [], recurringRecorded = [], unconfirmed = null, adminUrl = adminSiteUrl_(env) }) {
   issues = issues || [];
   recurringRecorded = recurringRecorded || [];
   rushToSet = rushToSet || [];
@@ -858,6 +879,11 @@ export async function sendDailyDigestEmail(env, { orders = [], notices = [], org
   const activity = notices.filter(x => !x.urgent && x.kind !== "delivered");
   const n = orders.length;
   const plural = (k, word) => `${k} ${word}${k === 1 ? "" : "s"}`;
+  more = Math.max(0, Number(more) || 0);
+  const moreText = more ? `${plural(more, "more order")} — see Orders` : "";
+  const unconf = unconfirmed && Number(unconfirmed.count) > 0 ? { count: Number(unconfirmed.count), orders: unconfirmed.orders || [] } : null;
+  const unconfLines = unconf ? unconfirmedText_(unconf, tz) : [];
+  const unconfRest = unconf ? unconf.count - unconf.orders.length : 0;
   const kindCount = (kind, word) => { const k = notices.filter(x => x.kind === kind).length; return k ? plural(k, word) : ""; };
   const sec = security && security.count ? security : null;
   const issueCount = issues.reduce((s, x) => s + (Number(x.count) || 0), 0);
@@ -920,6 +946,8 @@ export async function sendDailyDigestEmail(env, { orders = [], notices = [], org
         <thead><tr style="background:#f5f5f5;text-align:left"><th style="padding:4px 8px">Order</th><th style="padding:4px 8px">Customer</th><th style="padding:4px 8px">Items</th><th style="padding:4px 8px">Payment</th><th style="padding:4px 8px;text-align:right">Total</th></tr></thead>
         <tbody>${g.orders.map(orderHtml).join("")}</tbody>
       </table>`).join("") : ""}
+    ${more ? `<p style="margin:10px 0 0;font-size:14px;font-weight:600">${adminUrl ? `<a href="${escHtml(adminUrl)}/#orders">${escHtml(moreText)}</a>` : escHtml(moreText)}</p>
+      <p style="margin:2px 0 0;color:#555;font-size:13px">A roll-up lists ${DIGEST_LIST_MAX} orders at most; the rest are in the next one.</p>` : ""}
     ${delivered.length ? `<h3 style="margin:22px 0 6px;font-size:17px">📦 Delivered — ${delivered.length}</h3>
       <p style="margin:0 0 6px;color:#555;font-size:13px">Tracking shows these arrived; they're marked delivered. Mark them completed on the orders screen once paid in full.</p>${noticeTable(delivered)}` : ""}
     ${pickedUp.length ? `<h3 style="margin:22px 0 6px;font-size:17px">📮 Picked up by the carrier — ${pickedUp.length}</h3>
@@ -941,6 +969,9 @@ export async function sendDailyDigestEmail(env, { orders = [], notices = [], org
     ${awaitingPickup.length ? `<h3 style="margin:22px 0 6px;font-size:17px">🏷 Label created, not shipped yet — ${awaitingPickup.length}</h3>
       <p style="margin:0 0 6px;color:#555;font-size:13px">These have a label, but the carrier hasn't scanned them yet. They'll be marked shipped automatically once tracking shows a scan.</p>
       ${shipmentTable_(awaitingPickup, orgName, (x) => `Label ${escHtml(x.labelAtLabel || "")}`)}` : ""}
+    ${unconf ? `<h3 style="margin:22px 0 6px;font-size:17px">❓ Shipments not confirmed after 90 days — ${unconf.count}</h3>
+      <p style="margin:0 0 6px;color:#555;font-size:13px">Tracking is no longer checked for these. Check them by hand with the carrier, then mark each one delivered or completed on the orders screen.</p>
+      <ul style="margin:0;padding-left:18px;font-size:14px">${unconfLines.map(x => `<li>${escHtml(x)}</li>`).join("")}${unconfRest > 0 ? `<li>…and ${unconfRest} more</li>` : ""}</ul>` : ""}
     ${awaitingBlanks.length ? `<h3 style="margin:22px 0 6px;font-size:17px">🧵 Blanks ordered, not yet received — ${awaitingBlanks.length}</h3>
       <p style="margin:0 0 6px;color:#555;font-size:13px">Ordered from a vendor but not marked received. Overdue ones (past the expected date) are flagged — chase the vendor so an order can't be lost.</p>
       <table style="width:100%;border-collapse:collapse;font-size:14px">
@@ -977,6 +1008,7 @@ export async function sendDailyDigestEmail(env, { orders = [], notices = [], org
       `${g.name} — ${plural(g.orders.length, "order")}, ${fmt$(g.total / 100)}\n` + g.orders.map(o =>
         `  ${o.orderId}  ${o.customerName} <${o.contact || ""}>  ${o.paymentMethod || ""} ${o.paid ? "(paid)" : "(unpaid)"}  ${fmt$(o.total)}${o.rushRequested ? "  " + rushTag_(o) : ""}\n` +
         (o.items || []).map(it => "    " + itemLine(it)).join("\n")).join("\n")).join("\n\n") : "",
+    more ? `${moreText}${adminUrl ? ": " + adminUrl + "/#orders" : ""} (a roll-up lists ${DIGEST_LIST_MAX} orders at most; the rest are in the next one)` : "",
     delivered.length ? `DELIVERED — ${delivered.length}\n` + delivered.map(noticeText).join("\n") : "",
     pickedUp.length ? `PICKED UP BY THE CARRIER (now marked shipped) — ${pickedUp.length}\n` + pickedUp.map(x =>
       `  ${x.orderId} (${orgName(x.orgId)})  ${x.customerName}  ${x.carrier} ${x.tracking}  shipped ${x.shippedAtLabel || ""}${x.customerEmailed === false ? "  (customer email not sent)" : ""}`).join("\n") : "",
@@ -984,6 +1016,7 @@ export async function sendDailyDigestEmail(env, { orders = [], notices = [], org
       `  ${x.orderId} (${orgName(x.orgId)})  ${x.customerName}  ${x.carrier} ${x.tracking}  label ${x.labelAtLabel || ""}`).join("\n") : "",
     inTransit.length ? `IN TRANSIT — ${inTransit.length}\n` + inTransit.map(x =>
       `  ${x.orderId} (${orgName(x.orgId)})  ${x.customerName}  ${x.carrier} ${x.tracking}  ${x.status}${x.statusDate ? " — " + x.statusDate : ""}${x.statusDetail ? " — " + x.statusDetail : ""}`).join("\n") : "",
+    unconf ? `SHIPMENTS NOT CONFIRMED AFTER 90 DAYS — CHECK THEM BY HAND — ${unconf.count}\n` + unconfLines.map(x => "  " + x).join("\n") + (unconfRest > 0 ? `\n  …and ${unconfRest} more` : "") : "",
     awaitingBlanks.length ? `BLANKS ORDERED, NOT YET RECEIVED — ${awaitingBlanks.length}\n` + awaitingBlanks.map(x =>
       ((main) => main + (x.shipments || []).map(s => `\n      📦 ${s.carrier || ""} ${s.trackingNumber}${s.status ? " — " + blankStatusText_(s) : ""} ${trackingUrl(s.carrier, s.trackingNumber)}`).join(""))(
       `  ${x.orderId} (${orgName(x.orgId)})  ${x.customerName || ""}  ${[x.blankVendor, x.blankVendorOrderId && "#" + x.blankVendorOrderId].filter(Boolean).join(" ")}  ordered ${x.orderedDate || "?"}  — ${x.statusLabel || ""}`)).join("\n") : "",

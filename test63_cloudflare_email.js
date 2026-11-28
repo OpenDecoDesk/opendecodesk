@@ -73,7 +73,7 @@ const isCf = (c) => c.url.startsWith("https://api.cloudflare.com/");
     global.__issues.filter(x => x.kind === "email_failed").length === 3 && global.__issues[0].sample === "Order received");
   calls = [];
   ok = await send_({}, msg);
-  console.log("not configured at all → false, no network call, recorded:", ok === false && calls.length === 0 && global.__issues.length === 4);
+  console.log("not configured at all → false, no network call, and not recorded as a failed send (Setup status says email isn't set up):", ok === false && calls.length === 0 && global.__issues.length === 3);
 
   cfReply = () => ({ status: 200, body: { success: true, result: { delivered: [], permanent_bounces: ["c@example.com"], queued: [] } } });
   calls = [];

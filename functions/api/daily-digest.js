@@ -5,7 +5,9 @@
 // {key} and checks it against CRON_SECRET. Lists new orders and every queued owner notice (owner_notices: Stripe
 // payments/refunds/disputes, design responses). Sends nothing when no new orders were placed since
 // the last roll-up. Progress is only saved after the email goes out, so a failed send is retried by
-// the next run.
+// the next run. With no email service set up at all there is nothing to retry: the run does its checks,
+// sends nothing, and counts as done for the day (progress isn't saved, so the first roll-up after email
+// is set up reports everything since).
 
 import { jsonResponse } from "../_lib/http.js";
 import { timingSafeEqual } from "../_lib/adminAuth.js";
@@ -13,8 +15,8 @@ import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { getDigestState, setDigestState, setDigestRun, getOrdersForDigest, getAllOrgs, getUnsentOwnerNotices, markOwnerNoticesSent,
   getFailedAdminLogins, clearFailedAdminLogins, getSystemIssues, clearSystemIssues, getOrdersAwaitingBlanks, localToday,
   getBlankPriceReminder, setBlankPriceReminderSent, getNewPricingAlerts, listMaintenanceTasks, getFeatures, getRushFeesToSet,
-  recordDueRecurringExpenses, getRecurringExpensesRecorded, recordSystemIssue, insertAuditLog } from "../_lib/db.js";
-import { sendDailyDigestEmail, sendDigestHeartbeatEmail } from "../_lib/email.js";
+  recordDueRecurringExpenses, getRecurringExpensesRecorded, recordSystemIssue, insertAuditLog, getUnconfirmedShipments } from "../_lib/db.js";
+import { sendDailyDigestEmail, sendDigestHeartbeatEmail, emailCanSend } from "../_lib/email.js";
 import { checkShippedDeliveries, checkBlankShipments } from "../_lib/deliveryCheck.js";
 import { checkSupplierShipments } from "../_lib/supplierOrders.js";
 
@@ -53,9 +55,9 @@ export async function runDailyDigest(env, trigger = "manual", { onSent } = {}) {
   try { res = await runDailyDigestInner_(env, trigger, sentHook); }
   catch (e) { await record({ ok: false, sent: false, message: String((e && e.message) || e).slice(0, 300) }); throw e; }
   const body = await res.clone().json().catch(() => ({}));
-  await record({ ok: res.ok, sent: !!body.sent, heartbeat: body.heartbeat || "", orders: Number(body.orders) || 0, notices: Number(body.notices) || 0,
+  await record({ ok: res.ok, sent: !!body.sent, heartbeat: body.heartbeat || "", reason: res.ok ? String(body.reason || "") : "", orders: Number(body.orders) || 0, notices: Number(body.notices) || 0,
     delivered: Number(body.delivered) || 0, pickedUp: Number(body.pickedUp) || 0, message: res.ok ? "" : String(body.message || "HTTP " + res.status).slice(0, 300) });
-  console.log("Daily roll-up", trigger, res.ok ? (body.sent ? "sent" : "nothing new" + (body.heartbeat ? " — heartbeat email " + body.heartbeat : " — no email")) : "FAILED", JSON.stringify(body).slice(0, 200));
+  console.log("Daily roll-up", trigger, res.ok ? (body.sent ? "sent" : body.reason ? "not sent — " + body.reason : "nothing new" + (body.heartbeat ? " — heartbeat email " + body.heartbeat : " — no email")) : "FAILED", JSON.stringify(body).slice(0, 200));
   return res;
 }
 
@@ -73,7 +75,8 @@ async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
   // roll-up email itself is kept back (`DIGEST_EMAIL_RESERVE`), so a busy morning can't use it up and
   // leave the roll-up unsent. Stripe fees and the clean-ups don't run here: they have their own tick,
   // an hour earlier (src/worker.js). Customer deliveries go first; supplier calls and then blanks get
-  // whatever is left. All are oldest-first and idempotent, so anything skipped today is picked up tomorrow.
+  // whatever is left. All are idempotent, and deliveries and blanks take the ones looked up longest ago first,
+  // so anything skipped today is picked up on a later run.
   //
   // Features (Global settings → Features): with Shipping switched off both checks return at once
   // without a single lookup (deliveryCheck.js), so the picked-up / in-transit / awaiting-pickup
@@ -115,8 +118,16 @@ async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
     for (const x of rec.skipped) await recordSystemIssue(env.DB, "recurring_expense_skipped", `${x.description} — ${x.reason}`);
   } catch (e) { console.error("Recording recurring expenses failed (continuing with the roll-up):", e); }
 
+  // No email service set up (the desktop program before its mailbox is added, or a site with no provider): the
+  // checks above have run, and there is no one to send the roll-up to. Done for the day — not a failure to
+  // retry 3 times a day and report as a problem every morning. Nothing is marked sent and progress isn't saved:
+  // the first roll-up once email is set up reports it all. (Setup status says email isn't set up.)
+  if (!(await emailCanSend(env).catch(() => false))) {
+    return jsonResponse({ status: "ok", sent: false, reason: "email not set up", orders: 0, notices: 0, delivered: deliveries.delivered.length, inTransit: 0 });
+  }
+
   const state = await getDigestState(env.DB);
-  const { orders, cursor } = await getOrdersForDigest(env.DB, state);
+  const { orders, cursor, more = 0 } = await getOrdersForDigest(env.DB, state);
   // Recurring expenses recorded since the last roll-up email: listed, never a reason to send on their own.
   const recurringRecorded = await getRecurringExpensesRecorded(env.DB, state && state.sentAt ? state.sentAt : new Date(Date.now() - 86400000).toISOString()).catch(() => []);
   const notices = await getUnsentOwnerNotices(env.DB);
@@ -156,6 +167,9 @@ async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
     ? (await listMaintenanceTasks(env.DB).catch(() => [])).filter(t => t.status === "due") : [];
   // Rush orders with the fee still to follow (migrations/0082): listed, never a reason to send on their own.
   const rushToSet = await getRushFeesToSet(env.DB).catch(() => []);
+  // Shipments the tracking check has stopped looking up (90 days on, still not delivered): listed for a person
+  // to check, the oldest 20 and how many in all; never a reason to send on their own.
+  const unconfirmed = await getUnconfirmedShipments(env.DB).catch((e) => { console.error("getUnconfirmedShipments failed:", e); return { count: 0, orders: [] }; });
   const inTransit = deliveries.inTransit || [];
   // Picked up by the carrier (marked shipped this run) is news; a label still waiting for a scan is
   // listed in the email for the record but never a reason to send one on its own.
@@ -172,14 +186,14 @@ async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
     // email problem by send_ and turns up in the next roll-up.
     let heartbeat = "";
     if (trigger === "scheduled") {
-      const ok = await sendDigestHeartbeatEmail(env, { lastSentAt: state ? state.sentAt || "" : "", inTransit, awaitingPickup, awaitingBlanks, maintenanceDue, rushToSet, recurringRecorded });
+      const ok = await sendDigestHeartbeatEmail(env, { lastSentAt: state ? state.sentAt || "" : "", inTransit, awaitingPickup, awaitingBlanks, maintenanceDue, rushToSet, recurringRecorded, unconfirmed });
       heartbeat = ok ? "sent" : "failed";
       if (ok) await onSent();
     }
     return jsonResponse({ status: "ok", sent: false, heartbeat, orders: 0, notices: 0, delivered: deliveries.delivered.length, inTransit: 0 });
   }
   const orgNames = Object.fromEntries((await getAllOrgs(env.DB)).map(o => [o.orgId, o.name]));
-  const sent = await sendDailyDigestEmail(env, { orders, notices, orgNames, security, inTransit, pickedUp, awaitingPickup, issues, awaitingBlanks, priceReminder, belowTarget, maintenanceDue, rushToSet, recurringRecorded });
+  const sent = await sendDailyDigestEmail(env, { orders, more, notices, orgNames, security, inTransit, pickedUp, awaitingPickup, issues, awaitingBlanks, priceReminder, belowTarget, maintenanceDue, rushToSet, recurringRecorded, unconfirmed });
   if (!sent) return jsonResponse({ status: "error", message: "Email could not be sent — will retry next run" }, 502);
   await onSent();
   if (priceReminder) await setBlankPriceReminderSent(env.DB).catch((e) => console.error("setBlankPriceReminderSent failed:", e));
@@ -188,7 +202,7 @@ async function runDailyDigestInner_(env, trigger, onSent = async () => {}) {
   await markOwnerNoticesSent(env.DB, notices.map(x => x.id));
   if (security) await clearFailedAdminLogins(env.DB, security);   // only what this email reported
   if (issues.length) await clearSystemIssues(env.DB, issues);
-  return jsonResponse({ status: "ok", sent: true, orders: orders.length, notices: notices.length, delivered: deliveries.delivered.length, inTransit: inTransit.length, pickedUp: pickedUp.length });
+  return jsonResponse({ status: "ok", sent: true, orders: orders.length, more, notices: notices.length, delivered: deliveries.delivered.length, inTransit: inTransit.length, pickedUp: pickedUp.length });
 }
 
 export async function onRequestGet() {

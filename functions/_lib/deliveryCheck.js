@@ -19,12 +19,16 @@
  *
  * Bounded: at most `limit` outside requests per run (Cloudflare caps subrequests per
  * invocation) — each tracking lookup is one, and each "your order has shipped" email a pickup sends
- * is another — oldest shipments first. `requests` in the result says how many it used. Anything
- * not delivered yet, unknown to the carrier, or that errors is simply checked again tomorrow — a
+ * is another. `requests` in the result says how many it used. Each step takes the shipments looked up
+ * longest ago first and stamps every lookup (orders.trackingCheckedAt, migrations/0108), so with more
+ * waiting than one run can look up, each gets its turn on a later run; the pickup step gets at most half
+ * of the run's lookups, so deliveries are always looked up too. Shipments TRACKING_CHECK_DAYS old
+ * are no longer looked up: the roll-up lists them for a person (db.js getUnconfirmedShipments). Anything
+ * not delivered yet, unknown to the carrier, or that errors is simply checked again on a later run — a
  * failure here never stops the roll-up (the caller wraps it).
  */
 
-import { getShippedAwaitingDelivery, getLabeledAwaitingShipment, markOrderShippedByCarrier, markOrderDelivered,
+import { getShippedAwaitingDelivery, getLabeledAwaitingShipment, markOrderShippedByCarrier, markOrderDelivered, markTrackingChecked,
   addOwnerNotice, insertAuditLog, getOrderById,
   listActiveBlankShipments, recordBlankTrackingEvents, setBlankShipmentStatus, resolveTimeZone, getFeatures } from "./db.js";
 import { sendShippedEmail } from "./email.js";
@@ -99,17 +103,26 @@ export async function checkShippedDeliveries(env, { limit = 40 } = {}) {
   // Tracking lookups belong to the Shipping feature (Global settings → Features): off = nothing is looked up.
   if (!(await getFeatures(env.DB)).shipping) return { ...out, skipped: "Shipping is turned off" };
 
-  // 1) Labeled but not shipped: has the carrier scanned it yet?
-  const awaiting = await getLabeledAwaitingShipment(env.DB, limit);
+  // Each lookup is stamped on the order, found or failed, so the next run starts with the ones not looked up
+  // for longest. (A stamp that can't be written only means the order may come round again sooner.)
+  const stamp = async (orderId) => {
+    try { await markTrackingChecked(env.DB, orderId); } catch (e) { console.error("Delivery check: could not stamp", orderId, e); }
+  };
+
+  // 1) Labeled but not shipped: has the carrier scanned it yet? At most half the run's requests (rounded up), so a long
+  // list of labels the carrier hasn't scanned can't leave nothing for the deliveries in step 2.
+  const pickupLimit = Math.ceil(limit / 2);
+  const awaiting = pickupLimit >= 2 ? await getLabeledAwaitingShipment(env.DB, pickupLimit) : [];
   for (const c of awaiting) {
     // A lookup here may lead to a shipped email: room for both, or this step stops (the rest wait for the next run).
-    if (out.requests + 2 > limit) break;
+    if (out.requests + 2 > pickupLimit) break;
     out.checked++; out.requests++;
     const carrier = carrierToken(c.labelCarrier, c.shippingMethod, c.tracking);
     const label = carrier.toUpperCase().replace("_EXPRESS", "");
     let tr;
     try { tr = await lookupTracking_(env, carrier, c.tracking); }
-    catch (e) { out.errors++; console.error("Pickup check: tracking lookup failed for", c.orderId, e); continue; }
+    catch (e) { out.errors++; console.error("Pickup check: tracking lookup failed for", c.orderId, e); await stamp(c.orderId); continue; }
+    await stamp(c.orderId);
     if (!CARRIER_HAS_IT.has(tr.status)) {
       out.awaitingPickup.push({ orderId: c.orderId, orgId: c.orgId, customerName: c.customerName, tracking: c.tracking, carrier: label,
         labelAt: c.labelAt, labelAtLabel: c.labelAt ? localDate(c.labelAt) : "", status: STATUS_LABEL[tr.status] || tr.status || "Awaiting scan" });
@@ -148,8 +161,10 @@ export async function checkShippedDeliveries(env, { limit = 40 } = {}) {
     catch (e) {
       out.errors++;
       console.error("Delivery check: tracking lookup failed for", c.orderId, e);
+      await stamp(c.orderId);
       continue;
     }
+    await stamp(c.orderId);
     const { status, statusDate, statusDetail } = tr;
     const label = carrier.toUpperCase().replace("_EXPRESS", "");
 

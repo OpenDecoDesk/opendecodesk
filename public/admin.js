@@ -191,6 +191,7 @@ const ADMIN_ACTIONS_ = {
   expDelete_(){ expDelete_(this.dataset.id); },
   refreshComms_(){ refreshComms_(); },
   commsSendTest_(){ commsSendTest_(); },
+  commsClearIssues_(){ commsClearIssues_(this); },
   checkBlankShipmentsNow(){ checkBlankShipmentsNow(this); },
   refreshPriceReminderFromVendors_(){ refreshPriceReminderFromVendors_(); },
   auditReset_(){
@@ -19816,6 +19817,18 @@ async function commsSendTest_(){
   finally { btn.disabled = false; }
 }
 
+// ---- Communications → Clear the problems list -----------------------------------------------
+// The roll-up clears the problems it reports; with no email set up it never sends, so this empties the list by hand.
+async function commsClearIssues_(btn){
+  if(!await askConfirm_("Clear the list of problems?\n\nThey won't be in the next roll-up email. New problems are listed again as they happen.", { confirmLabel: "Clear" })) return;
+  btn.disabled = true;
+  try{
+    const d = await adminApi_({ action: "clearSystemIssues" });
+    showToast(d.cleared ? `Cleared ${d.cleared} problem${d.cleared === 1 ? "" : "s"}.` : "The list was already empty.", false);
+    await refreshComms_();
+  }catch(e){ showToast(e.message || "Could not clear the list.", true); btn.disabled = false; }
+}
+
 // ---- Communications: what the next 6 AM roll-up email will contain ------------
 // After an action on Communications: refill it in place (no "Loading…", the scroll stays).
 function refreshComms_(){ return keepView_(() => renderCommunications(document.getElementById("app"), { soft: true })); }
@@ -19873,6 +19886,7 @@ async function renderCommunications(app, opts){
     : run.sent ? `an email was sent${run.orders ? ` (${Number(run.orders)} order${Number(run.orders) === 1 ? "" : "s"})` : ""}.`
     : run.heartbeat === "sent" ? "nothing new — a short “nothing new” email was sent."
     : run.heartbeat === "failed" ? `nothing new, and <b style="color:#b03a2e;">the “nothing new” email could not be sent</b>.`
+    : run.reason === "email not set up" ? "no email was sent, because email isn't set up (Global settings → Setup status)."
     : "nothing new, so no email was sent."}</div>`;
 
   const noticeTable = (rows) => `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
@@ -19895,7 +19909,7 @@ async function renderCommunications(app, opts){
         <td style="${td}font-size:13px;">${o.items.map(it => escapeHtml(itemLine(it))).join("<br>")}</td>
         <td style="${td}white-space:nowrap;">${escapeHtml(o.paymentMethod || "")}<br><span style="font-size:12px;color:${o.paid ? "#15803d" : "#b45309"};">${o.paid ? "Paid" : "Unpaid"}</span></td>
         <td style="${td}text-align:right;white-space:nowrap;">${fmt(o.total)}</td>
-      </tr>`).join("")}</tbody></table></div>` : `<div style="color:#888;">No new orders.</div>`;
+      </tr>`).join("")}</tbody></table></div>${d.moreOrders ? `<div style="margin-top:6px;font-size:13px;color:#555;">…and ${Number(d.moreOrders)} more order${Number(d.moreOrders) === 1 ? "" : "s"} — see <a href="#orders">Orders</a>. A roll-up lists 200 at most; the rest are in the next one.</div>` : ""}` : `<div style="color:#888;">No new orders.</div>`;
 
   const inTransitHtml = inTransit.length ? `<div style="overflow-x:auto;border:1px solid #ddd;border-radius:6px;"><table style="width:100%;border-collapse:collapse;font-size:14px;">
       <thead><tr><th style="${th}">Order</th><th style="${th}">Shop</th><th style="${th}">Customer</th><th style="${th}">Carrier / tracking</th><th style="${th}">Shipped</th><th style="${th}">Status</th></tr></thead>
@@ -19952,8 +19966,9 @@ async function renderCommunications(app, opts){
       ${Number(d.security.code || 0) > 0 ? `<div style="font-size:13px;margin-top:4px;"><strong>A wrong 2FA code means the password was right</strong> — change it if that wasn't you.</div>` : ""}
       <div style="font-size:12px;color:#555;margin-top:4px;">Reported in the next roll-up (5 or more send one even with no orders), then cleared.</div></div>` : ""}
     ${(d.issues || []).length ? `<div style="border:2px solid #b45309;border-radius:6px;padding:10px 12px;margin-bottom:20px;background:#fffbeb;">
-      <h2 style="margin:0 0 6px;color:#92400e;font-size:16px;">⚠️ Problems since the last roll-up</h2>
-      <ul style="margin:0;padding-left:18px;font-size:14px;">${d.issues.map(x => `<li><strong>${escapeHtml(x.label)}: ${Number(x.count)}</strong>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 6px;"><h2 style="margin:0;color:#92400e;font-size:16px;">⚠️ Problems since the last roll-up</h2>
+        <button id="commsClearIssuesBtn" class="admin-btn" style="font-size:12px;padding:4px 10px;" data-need="settings.comms:edit" data-admin-action="commsClearIssues_">Clear</button></div>
+      <ul id="commsIssues" style="margin:0;padding-left:18px;font-size:14px;">${d.issues.map(x => `<li><strong>${escapeHtml(x.label)}: ${Number(x.count)}</strong>
         <span style="${sub}">(${escapeHtml(when(x.first))}${x.count > 1 ? " – " + escapeHtml(when(x.last)) : ""})</span>
         ${(x.samples || []).length ? `<br><span style="${sub}">e.g. ${x.samples.map(t => escapeHtml(t)).join(" · ")}</span>` : ""}</li>`).join("")}</ul>
       <div style="font-size:12px;color:#555;margin-top:4px;">Reported in the next roll-up (it's sent even with nothing else new), then cleared. Details are in ${adminDesktop_() ? "the program's log (Help → Open the log)" : "the Cloudflare logs"}.</div></div>` : ""}

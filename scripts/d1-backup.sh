@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Exports a D1 database (full schema + data, as SQL) and uploads it, gzipped,
-# to a PRIVATE R2 bucket as  <db>/daily/<UTC timestamp>.sql.gz  — and on the 1st of
-# each month (UTC) also as  <db>/monthly/<YYYY-MM>.sql.gz
+# to a PRIVATE R2 bucket as  <db>/daily/<UTC timestamp>.sql.gz  — and, when that month
+# (UTC) has no copy yet, also as  <db>/monthly/<YYYY-MM>.sql.gz  (so the first good run of a
+# month makes it, even when the run on the 1st failed or didn't happen)
 # The daily copies are meant to expire: a lifecycle rule on the bucket deletes them after 35 days
 # (docs/operations.md, "Backups"). The monthly ones have no rule and are kept.
 # Run nightly by .github/workflows/d1-backup.yml, or by hand: npm run db:backup:now
@@ -38,8 +39,17 @@ put() {
   echo "Backed up $DB → r2://$BUCKET/$1 ($(wc -c < "$OUT.gz" | tr -d ' ') bytes)"
 }
 put "$DB/daily/$STAMP.sql.gz"
-# On the 1st of the month (read from the daily file's own timestamp, so the two always agree),
-# the month's copy too, which no lifecycle rule touches.
-if [ "${STAMP:8:2}" = "01" ]; then
-  put "$DB/monthly/${STAMP:0:7}.sql.gz"
+# The month's copy (its month read from the daily file's own timestamp, so the two always agree), which no
+# lifecycle rule touches: written by the first run of the month that gets this far. `wrangler r2 object get`
+# succeeds when it is already there; for a missing key it fails saying "The specified key does not exist."
+# Any other failure (network, permissions) can't tell us either way, so the copy is written then too: a
+# second copy of the month replaces the first, which costs nothing, and a missing one can't be made later.
+MONTHLY="$DB/monthly/${STAMP:0:7}.sql.gz"
+if CHECK="$($WRANGLER r2 object get "$BUCKET/$MONTHLY" --remote --file "$WORK/monthly-check.sql.gz" </dev/null 2>&1)"; then
+  echo "This month's copy is already there: r2://$BUCKET/$MONTHLY"
+else
+  if ! printf '%s' "$CHECK" | grep -q "The specified key does not exist"; then
+    echo "Couldn't check for this month's copy — writing it anyway. wrangler said: $(printf '%s' "$CHECK" | tail -n 3)" >&2
+  fi
+  put "$MONTHLY"
 fi

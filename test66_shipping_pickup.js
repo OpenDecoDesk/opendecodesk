@@ -170,12 +170,13 @@ const iso = (daysAgo, h = 12) => { const d = new Date(Date.now() - daysAgo * 864
       }
       const calls = () => lookups.length + mail.length;
       const before = calls();
-      r = await L.checkShippedDeliveries(env(d1), { limit: 7 });
+      // (The pickup step gets at most half a run's requests: 6 of 12, so three pickups with their emails.)
+      r = await L.checkShippedDeliveries(env(d1), { limit: 12 });
       const used = calls() - before;
-      console.log("a run never makes more outside requests than its limit, counting each shipped email:", used <= 7 && r.requests === used && r.pickedUp.length === 3);
+      console.log("a run never makes more outside requests than its limit, counting each shipped email:", used <= 12 && r.requests === used && r.pickedUp.length === 3);
       const left = ["BUD1", "BUD2", "BUD3", "BUD4", "BUD5", "BUD6"].filter(id => shippedAt(id) === null).length;
       console.log("…the rest wait for the next run:", left === 3);
-      r = await L.checkShippedDeliveries(env(d1), { limit: 7 });
+      r = await L.checkShippedDeliveries(env(d1), { limit: 12 });
       console.log("…which picks them up:", ["BUD1", "BUD2", "BUD3", "BUD4", "BUD5", "BUD6"].every(id => shippedAt(id) !== null));
       const dg = read("functions/api/daily-digest.js");
       const budget = Number((dg.match(/const DIGEST_REQUEST_BUDGET = (\d+);/) || [])[1]), reserve = Number((dg.match(/const DIGEST_EMAIL_RESERVE = (\d+);/) || [])[1]);

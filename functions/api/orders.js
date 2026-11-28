@@ -50,7 +50,7 @@ import { rateLimited, rateLimitResponse } from "../_lib/rateLimit.js";
 import { readInvoiceWithAi } from "../_lib/invoiceAi.js";
 import { jsonResponse, featureOffResponse, signOrderToken, fetchWithTimeout } from "../_lib/http.js";
 import {
-  getAllOrgs, getOrgById, createOrg, updateOrg, cleanDeliveryOptions, setOrgDeliveryOptions, defaultDeliveryOptions, cleanShippingAddress, stagePrereqError, stageTimeError, shopTime_, ORDER_DATE_FIELDS, orderDatesError, setOrderDates, whyNotCompletable_, getSystemIssues,
+  getAllOrgs, getOrgById, createOrg, updateOrg, cleanDeliveryOptions, setOrgDeliveryOptions, defaultDeliveryOptions, cleanShippingAddress, stagePrereqError, stageTimeError, shopTime_, ORDER_DATE_FIELDS, orderDatesError, setOrderDates, whyNotCompletable_, getSystemIssues, clearSystemIssues,
   getProductsByOrg, getProductsByIds, priceLookups, productShipWeightOz, createProduct, updateProduct, setProductVisible,
   getGlobalSettings, setGlobalSettings, getMachineSettings, setMachineSettings, getPayOnDeliveryRule, setOrderPayOnDelivery,
   getShipFromAddress, setShipFromAddress, shipFromMissing, getBusinessProfile, setBusinessProfile, getLocaleSettings, setLocaleSettings, FEATURES, getFeatures, setFeatures, resolveTimeZone, setOrdersCompleted, getShippedAwaitingDelivery,
@@ -430,6 +430,7 @@ const NO_MONTH_ACTIONS = new Set([
   "updateAccountingSettings", "updateMachineSettings", "updatePricingSettings", "updateRushSettings", "updateEmailSettings",
   "sendSampleEmail", "sendTestEmail", "checkMailbox", "updateDigitalSettings", "getCloudflareSetup", "connectCloudflare", "backfillStripeFees",
   "saveVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks", "deleteVendorConnection", "deleteOrphanImages",
+  "clearSystemIssues",   // Communications: the list of problems for the next roll-up
 ]);
 
 // Costs in a reply (stripCosts_ in handleOrdersPost_): which fields are costs, by kind of answer.
@@ -2015,13 +2016,13 @@ async function handleOrdersPost_(context, listBefore = null) {
     const state = await getDigestState(env.DB);
     // Run delivery check first so newly-delivered notices are included below.
     const deliveries = await checkShippedDeliveries(env).catch(() => ({ inTransit: [], delivered: [], pickedUp: [], awaitingPickup: [] }));
-    const [{ orders }, notices, orgs, security, issues, awaitingBlanks] = await Promise.all([
+    const [{ orders, more }, notices, orgs, security, issues, awaitingBlanks] = await Promise.all([
       getOrdersForDigest(env.DB, state), getUnsentOwnerNotices(env.DB), getAllOrgs(env.DB), getFailedAdminLogins(env.DB),
       getSystemIssues(env.DB).catch(() => null), getOrdersAwaitingBlanks(env.DB).catch(() => []),
     ]);
     const priceReminder = await getBlankPriceReminder(env.DB).catch(() => null);
     const names = Object.fromEntries(orgs.map(o => [o.orgId, o.name]));
-    return jsonResponse({ status: "ok", lastSentAt: (state && state.sentAt) || "", firstRun: !state, security, issues: issues || [],
+    return jsonResponse({ status: "ok", lastSentAt: (state && state.sentAt) || "", firstRun: !state, security, issues: issues || [], moreOrders: more || 0,
       lastRun: await getDigestRun(env.DB).catch(() => null),
       priceReminder: priceReminder && { ...priceReminder, products: priceReminder.products.map(p => ({ ...p, orgName: names[p.orgId] || p.orgId })),
         blanks: priceReminder.blanks.map(b => ({ ...b, products: b.products.map(p => ({ ...p, orgName: names[p.orgId] || p.orgId })) })) },
@@ -2042,6 +2043,20 @@ async function handleOrdersPost_(context, listBefore = null) {
       rushToSet: (await getRushFeesToSet(env.DB).catch(() => [])).map(x => ({ ...x, orgName: names[x.orgId] || x.orgId })),
       // Recurring expenses recorded since the last roll-up (migrations/0085) — the roll-up lists them.
       recurringRecorded: await getRecurringExpensesRecorded(env.DB, (state && state.sentAt) || new Date(Date.now() - 86400000).toISOString()).catch(() => []) });
+  }
+
+  // ---- clearSystemIssues — empty the list of problems waiting for the roll-up (Communications page) ----
+  // The roll-up clears the problems it reports; with no email set up it reports none, so they'd stay. Clears
+  // what the page showed and anything recorded since (all of them). Audited first: no record, nothing cleared.
+  if (body.action === "clearSystemIssues") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const issues = (await getSystemIssues(env.DB).catch(() => null)) || [];
+    const auditErr = await auditStrict({ orgId: null, orderId: null, action: "system_issues.cleared",
+      detail: { problems: issues.map(x => ({ kind: x.kind, count: x.count })) } });
+    if (auditErr) return auditErr;
+    await clearSystemIssues(env.DB);
+    return jsonResponse({ status: "ok", cleared: issues.reduce((t, x) => t + (Number(x.count) || 0), 0) });
   }
 
   // ---- sendTestEmail — one test message, and what the email provider said (Communications page) ----

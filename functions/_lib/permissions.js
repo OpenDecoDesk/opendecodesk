@@ -187,7 +187,7 @@ const BY_FN = {
     read: ["vendorDirectorySearch", "vendorDirectoryEndpoints"],
     edit: ["saveVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks"],
     full: ["deleteVendorConnection"] },
-  "settings.comms": { read: ["getPendingCommunications"] },
+  "settings.comms": { read: ["getPendingCommunications"], edit: ["clearSystemIssues"] },
   "settings.orphans": { read: ["findOrphanImages"], full: ["deleteOrphanImages"] },
   "settings.users": {},
 };

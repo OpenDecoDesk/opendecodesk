@@ -11118,30 +11118,40 @@ export async function setOrdersCompleted(db, orderIds, completed, at = null) {
 }
 
 // ---- Delivery check (the 6 AM roll-up) ---------------------------------------
+// The check looks shipments up for this long after they ship (or get their label); after that it stops
+// and the roll-up lists them for a person to resolve (getUnconfirmedShipments) — a package lost or
+// delivered without a scan would otherwise take one of the morning's lookups every day for ever.
+export const TRACKING_CHECK_DAYS = 90;
+const trackingCutoff_ = (now = new Date()) => new Date(now.getTime() - TRACKING_CHECK_DAYS * 86400000).toISOString();
+
 // Shipped orders still waiting on a delivery, with a tracking number to look up
-// (the order's own, else its site-bought label's) and the carrier to ask.
-export async function getShippedAwaitingDelivery(db, limit = 40) {
+// (the order's own, else its site-bought label's) and the carrier to ask. Least recently looked up
+// first (never looked up before all), then oldest shipment: with more waiting than one morning's
+// lookups, each still gets its turn (orders.trackingCheckedAt, migrations/0108; markTrackingChecked).
+export async function getShippedAwaitingDelivery(db, limit = 40, { now = new Date() } = {}) {
   const { results } = await db.prepare(
     `SELECT * FROM (
-       SELECT o.orderId, o.orgId, o.customerName, o.shippedAt, o.shippingMethod, o.paid,
+       SELECT o.orderId, o.orgId, o.customerName, o.shippedAt, o.shippingMethod, o.paid, o.trackingCheckedAt,
          COALESCE(NULLIF(o.trackingNumber, ''),
            (SELECT l.trackingNumber FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL AND l.trackingNumber <> '' ORDER BY l.id DESC LIMIT 1), '') AS tracking,
          (SELECT l.carrier FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL ORDER BY l.id DESC LIMIT 1) AS labelCarrier
        FROM orders o
        WHERE o.shippedAt IS NOT NULL AND o.deliveredAt IS NULL AND o.completedAt IS NULL
-         AND o.voidedAt IS NULL AND o.isTest = 0
-     ) WHERE tracking <> '' ORDER BY shippedAt ASC LIMIT ?`).bind(Math.max(1, Math.min(200, Number(limit) || 40))).all();
+         AND o.voidedAt IS NULL AND o.isTest = 0 AND o.shippedAt >= ?
+     ) WHERE tracking <> '' ORDER BY (trackingCheckedAt IS NOT NULL), trackingCheckedAt, shippedAt ASC LIMIT ?`)
+    .bind(trackingCutoff_(now), Math.max(1, Math.min(200, Number(limit) || 40))).all();
   return results.map(r => ({ orderId: r.orderId, orgId: r.orgId, customerName: r.customerName, shippedAt: r.shippedAt,
     shippingMethod: r.shippingMethod || "", paid: !!r.paid, tracking: r.tracking, labelCarrier: r.labelCarrier || "" }));
 }
 
 // Orders with a label or tracking number that AREN'T marked shipped yet — a label existing doesn't
 // mean the carrier has the package. The daily check looks these up and marks one shipped only once
-// tracking shows a carrier scan (dated by that scan). Oldest label first.
-export async function getLabeledAwaitingShipment(db, limit = 40) {
+// tracking shows a carrier scan (dated by that scan). Least recently looked up first, then oldest label
+// (as getShippedAwaitingDelivery); one with no label is dated by when the order was placed.
+export async function getLabeledAwaitingShipment(db, limit = 40, { now = new Date() } = {}) {
   const { results } = await db.prepare(
     `SELECT * FROM (
-       SELECT o.orderId, o.orgId, o.customerName, o.shippingMethod, o.paid,
+       SELECT o.orderId, o.orgId, o.customerName, o.shippingMethod, o.paid, o.placedAt, o.trackingCheckedAt,
          COALESCE(NULLIF(o.trackingNumber, ''),
            (SELECT l.trackingNumber FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL AND l.trackingNumber <> '' ORDER BY l.id DESC LIMIT 1), '') AS tracking,
          (SELECT l.carrier FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL ORDER BY l.id DESC LIMIT 1) AS labelCarrier,
@@ -11149,9 +11159,36 @@ export async function getLabeledAwaitingShipment(db, limit = 40) {
        FROM orders o
        WHERE o.shippedAt IS NULL AND o.deliveredAt IS NULL AND o.completedAt IS NULL
          AND o.voidedAt IS NULL AND o.isTest = 0
-     ) WHERE tracking <> '' ORDER BY COALESCE(labelAt, '') ASC LIMIT ?`).bind(Math.max(1, Math.min(200, Number(limit) || 40))).all();
+     ) WHERE tracking <> '' AND COALESCE(NULLIF(labelAt, ''), placedAt) >= ?
+       ORDER BY (trackingCheckedAt IS NOT NULL), trackingCheckedAt, COALESCE(labelAt, '') ASC LIMIT ?`)
+    .bind(trackingCutoff_(now), Math.max(1, Math.min(200, Number(limit) || 40))).all();
   return results.map(r => ({ orderId: r.orderId, orgId: r.orgId, customerName: r.customerName, labelAt: r.labelAt || "",
     shippingMethod: r.shippingMethod || "", paid: !!r.paid, tracking: r.tracking, labelCarrier: r.labelCarrier || "" }));
+}
+
+// Stamps an order's tracking lookup (migrations/0108), whatever it found — a lookup that failed too, so
+// one tracking number that always errors can't hold the front of the queue.
+export async function markTrackingChecked(db, orderId, at = new Date().toISOString()) {
+  await db.prepare("UPDATE orders SET trackingCheckedAt = ? WHERE orderId = ?").bind(at, orderId).run();
+}
+
+// Shipments the check has stopped looking up (TRACKING_CHECK_DAYS after they shipped, or after their label
+// when the carrier never scanned it), still not marked delivered: for a person to check by hand. The oldest
+// `limit` of them, and how many there are in all. Listed in the roll-up; marking one delivered or completed
+// (or voiding it) takes it off.
+export async function getUnconfirmedShipments(db, { limit = 20, now = new Date() } = {}) {
+  const n = Math.max(1, Math.min(200, Number(limit) || 20));
+  const { results } = await db.prepare(
+    `SELECT *, COUNT(*) OVER () AS total FROM (
+       SELECT o.orderId, o.orgId, o.customerName, o.shippedAt,
+         COALESCE(o.shippedAt, NULLIF((SELECT l.purchasedAt FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL ORDER BY l.id DESC LIMIT 1), ''), o.placedAt) AS since,
+         COALESCE(NULLIF(o.trackingNumber, ''),
+           (SELECT l.trackingNumber FROM shipping_labels l WHERE l.orderId = o.orderId AND l.voidedAt IS NULL AND l.trackingNumber <> '' ORDER BY l.id DESC LIMIT 1), '') AS tracking
+       FROM orders o
+       WHERE o.deliveredAt IS NULL AND o.completedAt IS NULL AND o.voidedAt IS NULL AND o.isTest = 0
+     ) WHERE tracking <> '' AND since < ? ORDER BY since, orderId LIMIT ?`).bind(trackingCutoff_(now), n).all();
+  return { count: results.length ? Number(results[0].total) || 0 : 0, orders: results.map(r => ({ orderId: r.orderId, orgId: r.orgId, customerName: r.customerName || "",
+    tracking: r.tracking, shipped: !!r.shippedAt, since: r.since || "" })) };
 }
 
 // Marks an order shipped from a carrier scan — only if it isn't already (a person may have got
@@ -13878,7 +13915,13 @@ export async function getRushFeesToSet(db) {
 }
 
 // Real orders not yet reported (test and voided orders are skipped), full detail, plus `cursor` —
-// the fields to save as the new state once the email has gone out.
+// the fields to save as the new state once the email has gone out — and `more`, how many real orders
+// are still waiting after this batch.
+//
+// One roll-up takes at most DIGEST_MAX_ORDERS of them (counting test and voided ones it passes over),
+// the oldest first: the cursor stops at the last one taken, so the rest are the next roll-up's, and the
+// email says how many more there are. (After weeks without an email — no email set up, a broken key —
+// loading every order at once could run the Worker out of time or memory, and the roll-up never sent.)
 //
 // "Not yet reported" = written after the cursor {afterInsertedAt, afterOrderId} (migrations/0031:
 // orders.insertedAt, set by a trigger on insert). insertedAt, not placedAt: a backdated order (a local
@@ -13887,6 +13930,7 @@ export async function getRushFeesToSet(db) {
 // Switch-over: a state saved before 0031 holds {afterRowid}; that one run still uses rowid (so
 // nothing is skipped or repeated), then the cursor jumps to the newest order.
 // Before 0031 is applied (no insertedAt column), the rowid logic runs and saves {afterRowid}.
+export const DIGEST_MAX_ORDERS = 200;
 export async function getOrdersForDigest(db, state, now = new Date()) {
   const real = (r) => !Number(r.isTest) && !r.voidedAt;
   const load = async (ids) => ids.length
@@ -13905,19 +13949,23 @@ export async function getOrdersForDigest(db, state, now = new Date()) {
     const { results } = await db.prepare(
       `SELECT orderId, insertedAt, isTest, voidedAt FROM orders
         WHERE insertedAt > ? OR (insertedAt = ? AND orderId > ?)
-        ORDER BY insertedAt, orderId`).bind(state.afterInsertedAt, state.afterInsertedAt, String(state.afterOrderId || "")).all();
+        ORDER BY insertedAt, orderId LIMIT ?`).bind(state.afterInsertedAt, state.afterInsertedAt, String(state.afterOrderId || ""), DIGEST_MAX_ORDERS).all();
     const last = results[results.length - 1];
     const cursor = last ? { afterInsertedAt: last.insertedAt, afterOrderId: last.orderId }
                         : { afterInsertedAt: state.afterInsertedAt, afterOrderId: String(state.afterOrderId || "") };
-    return { orders: await load(results.filter(real).map(r => r.orderId)), cursor };
+    // A full batch: count the real orders after it (only then — usually there are none).
+    const more = results.length < DIGEST_MAX_ORDERS ? 0 : Number((await db.prepare(
+      `SELECT COUNT(*) AS n FROM orders WHERE (insertedAt > ? OR (insertedAt = ? AND orderId > ?)) AND isTest = 0 AND voidedAt IS NULL`)
+      .bind(cursor.afterInsertedAt, cursor.afterInsertedAt, cursor.afterOrderId).first() || {}).n) || 0;
+    return { orders: await load(results.filter(real).map(r => r.orderId)), cursor, more };
   }
   if (state && Number.isFinite(Number(state.afterRowid))) {
     const old = await getOrdersForDigestByRowid_(db, state, now, load, real);
-    return { orders: old.orders, cursor: atNewest };
+    return { orders: old.orders, cursor: atNewest, more: 0 };
   }
   const { results } = await db.prepare("SELECT orderId, isTest, voidedAt FROM orders WHERE placedAt >= ?")
     .bind(new Date(now.getTime() - 24 * 3600 * 1000).toISOString()).all();
-  return { orders: await load(results.filter(real).map(r => r.orderId)), cursor: atNewest };
+  return { orders: await load(results.filter(real).map(r => r.orderId)), cursor: atNewest, more: 0 };
 }
 
 // The pre-0031 cursor (implicit rowid): used before the migration, and once for the switch-over.

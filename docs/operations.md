@@ -64,9 +64,11 @@ Your orders, customers and books live in one D1 database. Back it up somewhere y
 ### The backup script
 
 `scripts/d1-backup.sh` exports the whole database as SQL, compresses it, and uploads it to a
-**private** R2 bucket as `<database>/daily/<UTC timestamp>.sql.gz`. On the 1st of each month (UTC)
-it also uploads the same file as `<database>/monthly/<YYYY-MM>.sql.gz`. It refuses to upload an
-export that has no tables or no data in it.
+**private** R2 bucket as `<database>/daily/<UTC timestamp>.sql.gz`. When the month (UTC) has no
+`<database>/monthly/<YYYY-MM>.sql.gz` yet, it also uploads the same file under that name, so the
+first run of the month that works makes the month's copy (a failed or missed run on the 1st doesn't
+leave the month without one). If it can't tell whether the month's copy is there, it uploads it
+again. It refuses to upload an export that has no tables or no data in it.
 
 One-time setup: the bucket, and a rule that deletes each daily copy after 35 days (so a nightly
 backup doesn't pile up forever). There is no rule for `monthly/`: one copy a month is kept

@@ -20,7 +20,7 @@
 // owner re-enters the lost records from. Deleting is for good (the buckets have no backup), so they get 30 days from
 // their upload first (docs/operations.md, "Restoring"). At most UNSAVED_UPLOADS_DELETE_MAX deletions a run, and listing
 // stops when the run has used its time (UNSAVED_UPLOADS_BUDGET_MS) or looked at UNSAVED_UPLOADS_MAX_PAGES pages of
-// 1,000 files (each page is one storage call and one database query, and the housekeeping tick shares Cloudflare's
+// 1,000 files (each page is one storage call and one database batch, and the housekeeping tick shares Cloudflare's
 // per-run request allowance — 50 on the Free plan — with its other jobs); where it stopped is kept (global_settings
 // 'unsavedUploadsCleanup', the last key looked at per prefix) and the next run carries on from there, starting
 // again at the top once a prefix has been gone through. A bucket that isn't bound is skipped without a word. A
@@ -61,12 +61,17 @@ export async function uploadKeyColumns(db) {
   }
 }
 
-// Which of `keys` some …Key column holds: one query for a page of keys, each column read once.
+// Which of `keys` some …Key column holds: one small query per column, all sent as one batch for a page of keys.
+// (Not one query joining every column with UNION ALL: D1 limits how many SELECTs one statement may combine, and
+// each migration that adds a …Key column would bring it closer.)
 async function referencedAmong_(db, columns, keys) {
-  if (!keys.length) return new Set();
-  const named = columns.map(([t, c]) => `SELECT "${c}" FROM "${t}" WHERE "${c}" IS NOT NULL`).join(" UNION ALL ");
-  const { results } = await db.prepare(`SELECT value AS k FROM json_each(?) WHERE value IN (${named})`).bind(JSON.stringify(keys)).all();
-  return new Set((results || []).map(r => String(r.k)));
+  if (!keys.length || !columns.length) return new Set();
+  const list = JSON.stringify(keys);
+  const res = await db.batch(columns.map(([t, c]) =>
+    db.prepare(`SELECT "${c}" AS k FROM "${t}" WHERE "${c}" <> '' AND "${c}" IN (SELECT value FROM json_each(?))`).bind(list)));
+  const found = new Set();
+  for (const r of res || []) for (const row of (r && r.results) || []) found.add(String(row.k));
+  return found;
 }
 
 async function readResume_(db) {

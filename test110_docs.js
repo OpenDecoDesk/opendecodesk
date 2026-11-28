@@ -193,9 +193,25 @@ ok("the test workflow runs the scan in strict mode", /scan-private\.sh --strict/
   const job = (name) => (desk.match(new RegExp("\\n  " + name + ":\\n((?:    .*\\n|\\s*\\n)+)")) || [])[1] || "";
   ok("a desktop release can't be published unless the test suite passes on the same run", /^on:\n(?:  .*\n)*  workflow_call:/m.test(tw) &&
     /if: inputs\.release\n/.test(job("tests")) && /uses: \.\/\.github\/workflows\/test\.yml\n/.test(job("tests")) && /needs: \[version, build, tests\]/.test(job("release")));
+
+  // The end-to-end suite runs in test.yml as a second job, so every push and pull request runs it, and a release
+  // (whose `tests` job waits for every job of test.yml) can't be published past a failing one. Both jobs have a
+  // time limit, so a hang ends the run instead of holding it for GitHub's six hours.
+  const twJob = (name) => (tw.match(new RegExp("\\n  " + name + ":\\n((?:    .*\\n|\\s*\\n)+)")) || [])[1] || "";
+  const unit = twJob("test"), e2e = twJob("e2e");
+  ok("the test job has a 20-minute limit", /^    timeout-minutes: 20\b/m.test(unit));
+  ok("an e2e job with a 30-minute limit installs Chromium with its system libraries and runs `npm run e2e` with 2 workers and CI set",
+    /^    timeout-minutes: 30\b/m.test(e2e) && /^      - run: npm ci\b/m.test(e2e) && /^      - run: npx playwright install --with-deps chromium\b/m.test(e2e) &&
+    /^      - run: npm run e2e\n        env:\n(?:          .*\n)*?          E2E_WORKERS: "2"/m.test(e2e) && /^          CI: "1"/m.test(e2e) &&
+    e2e.indexOf("npm ci") < e2e.indexOf("playwright install") && e2e.indexOf("playwright install") < e2e.indexOf("npm run e2e"));
+  ok("…on the same Node as the test job", (unit.match(/node-version: (\S+)/) || [])[1] === "22" && (e2e.match(/node-version: (\S+)/) || [])[1] === "22");
+  ok("…and when it fails it keeps the report and the traces as an artifact", /- uses: actions\/upload-artifact@[0-9a-f]{40} # v\d+\n        if: failure\(\)\n/.test(e2e) &&
+    /e2e\/\.report\n/.test(e2e) && /e2e\/\.results\n/.test(e2e) && /include-hidden-files: true/.test(e2e));
+  ok("every action the workflows use is pinned to a full commit", [tw, desk, read(".github/workflows/d1-backup.yml")]
+    .every(w => [...w.matchAll(/uses: (\S+)/g)].every(m => /^\.\//.test(m[1]) || /@[0-9a-f]{40}$/.test(m[1]))) && /actions\/upload-artifact@/.test(e2e));
 }
 const pkg = JSON.parse(read("package.json"));
-ok("every npm script the docs mention exists", [...new Set([...all.matchAll(/npm run ([a-z:]+)/g)].map(m => m[1]))].every(s => s in pkg.scripts));
+ok("every npm script the docs mention exists", [...new Set([...all.matchAll(/npm run ([a-z0-9:]+)/g)].map(m => m[1]))].every(s => s in pkg.scripts));
 ok("every script flag the docs mention is one the installer accepts", [...new Set([...all.matchAll(/(--[a-z][a-z-]+)/g)].map(m => m[1]))].filter(f => ["--dry-run", "--config", "--skip-deploy", "--new-passphrase", "--print-fresh-sql"].includes(f)).length === 5 &&
   ["--dry-run", "--skip-deploy", "--new-passphrase", "--print-fresh-sql"].every(f => read("scripts/setup.mjs").includes('a === "' + f + '"')));
 

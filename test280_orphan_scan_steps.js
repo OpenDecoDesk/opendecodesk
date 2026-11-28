@@ -107,7 +107,7 @@ async function fullScan(mod, env, db, c, now, first = {}) {
   ok("…every table's columns come from ONE query, and no table is read once per column",
     c.sql.filter(q => /pragma_table_info/.test(q)).length === 1 && c.sql.filter(q => /FROM "products" WHERE/.test(q)).length === 1 && /"imagesJson" LIKE[^;]*"name" LIKE|"name" LIKE[^;]*"imagesJson" LIKE/.test(c.sql.find(q => /FROM "products" WHERE/.test(q))));
   const tablesSeen = s.progress.filter(p => p.startsWith("tables:")).map(p => Number(p.split(":")[1].split("/")[0]));
-  ok("…each answer says how far it is (table n of m), always further along", tablesSeen.length >= 2 && tablesSeen.every((n, i) => i === 0 || n > tablesSeen[i - 1]) && /^tables:\d+\/7\d$/.test(s.progress[0]) && s.progress[s.progress.length - 1].startsWith("done:"));
+  ok("…each answer says how far it is (table n of m), always further along", tablesSeen.length >= 2 && tablesSeen.every((n, i) => i === 0 || n > tablesSeen[i - 1]) && /^tables:\d+\/\d{2,3}$/.test(s.progress[0]) && s.progress[s.progress.length - 1].startsWith("done:"));
   ok("…the scan's own scratch tables and the history tables are never searched", !c.sql.some(q => /FROM "(orphan_scans|orphan_scan_keys|audit_log|vendor_api_log|stripe_events)" WHERE/.test(q)) && c.sql.some(q => /FROM "owner_notices" WHERE .*"sentAt" IS NULL/.test(q)));
 
   console.log("\n=== History doesn't keep a file ===");

@@ -75,6 +75,8 @@ const ADMIN_ACTIONS_ = {
   ordersIncludeCancelled_(){ ordersSetInclude('cancelled', this.checked); },
   rerenderOrdersView(){ rerenderOrdersView(); },
   createLocalSale(){ createLocalSale(this.dataset.org); },
+  linkOrderCustomer_(){ linkOrderCustomer_(this.dataset.org, this.dataset.order); },
+  unlinkOrderCustomer_(){ unlinkOrderCustomer_(this.dataset.org, this.dataset.order); },
   pickOrderImportFile_(){ pickOrderImportFile_(this.dataset.org); },
   createTestTransaction(){ createTestTransaction(this.dataset.org); },
   updateBulkBar(){ updateBulkBar(this.dataset.org); },
@@ -697,6 +699,23 @@ async function adminRoute() {
   if (raw === "locations") { renderLocationsCatalog(app); return; }
   if (raw === "categories") { renderProductCategories(app); return; }
   if (raw === "abortreasons") { renderAbortReasons(app); return; }
+  // Customers (migrations/0108): the list, and #customers/<id> for one customer. The page is its own script
+  // (public/admin-customers.js), loaded the first time it is opened. An id that isn't a number is the list.
+  const customersMatch = raw.match(/^customers(?:\/([^/]*))?$/);
+  if (customersMatch) {
+    const cid = /^[1-9]\d{0,14}$/.test(customersMatch[1] || "") ? Number(customersMatch[1]) : null;
+    try { await ensureCustomersPage_(); }
+    catch (e) {
+      adminSetHash(raw);
+      document.title = adminTitle_("Customers");
+      app.innerHTML = adminPageHead_("Customers") + `<div class="admin-panel" style="--org-accent:var(--accent);"><div class="admin-empty">${escapeHtml(e.message)}. Check your connection and reload the page.</div></div>`;
+      return;
+    }
+    // Still the page asked for? (the script can take a moment, and the address may have moved on meanwhile)
+    if (location.hash.replace(/^#\/?/, "") !== raw) return;
+    await renderCustomers(app, cid);
+    return;
+  }
   if (raw === "packages")  { renderPackageSizes(app); return; }
   if (raw === "orphans")   { renderOrphanImages(app); return; }
   if (raw === "vendors")   { renderVendorIntegrations(app); return; }
@@ -2134,7 +2153,7 @@ async function renderHomeStage(app, key){
 // function call). ADMIN_NAV_TOOLS is kept (flat list of every page hash) for other code that
 // still iterates it — see below.
 const ADMIN_NAV_GROUPS = [
-  // Home, Orders, Run Order, Run Transfer Sheets and Manage catalog are the buttons before these menus.
+  // Home, Orders, Customers, Run Order, Run Transfer Sheets and Manage catalog are the buttons before these menus.
   { label: "Catalog", items: [
     ["setup", "Shop setup"], ["designs", "Designs"], ["graphics", "Graphics"], ["categories", "Product categories"], ["locations", "Decoration locations"],
     ["brandrules", "Brand rules"], ["packages", "Package sizes"],
@@ -2542,7 +2561,14 @@ function adminItemOn_(item){
   const fns = adminItemFns_(item);
   return !fns || fns.some(f => adminCan_(f, "read"));
 }
-function adminCanOpenPage_(hash){ return adminItemOn_(adminPageItem_(hash)); }
+function adminCanOpenPage_(hash){
+  // Customers is one function, asked for by name: a server whose list of menus doesn't have the page yet (a deploy
+  // half way) must not make it look open to a role that was never given it.
+  if (String(hash || "").replace(/^#\/?/, "").split("/")[0] === "customers") return adminCanCustomers_();
+  return adminItemOn_(adminPageItem_(hash));
+}
+// May this user open Customers, pick a customer on a sale and follow an order's customer link (customers.records, read)?
+function adminCanCustomers_(){ return adminCan_("customers.records", "read"); }
 // The menu without the pages of switched-off features or the role's hidden items (a group left empty disappears).
 function adminNavGroups_(){
   return ADMIN_NAV_GROUPS.map(g => ({ label: g.label, items: g.items.filter(it => !Array.isArray(it) || (adminPageOn_(it[0]) && adminCanOpenPage_(it[0]))) }))
@@ -2553,7 +2579,7 @@ function adminNavGroups_(){
 function adminCanOpen_(hash){ return adminPageOn_(hash) && adminCanOpenPage_(hash); }
 // Where someone lands when the address points at a page they can't open: the first one they can.
 function adminFirstPage_(){
-  const first = ["home", "orders", "runorder", "runtransfer", "catalog"].find(h => adminCanOpen_(h));
+  const first = ["home", "orders", "customers", "runorder", "runtransfer", "catalog"].find(h => adminCanOpen_(h));
   if (first) return first;
   const g = adminNavGroups_().map(g => g.items.find(Array.isArray)).find(Boolean);
   return g ? g[0] : "password";
@@ -2626,7 +2652,7 @@ function adminNavActive_(){
   if(raw.startsWith("catalog")) return "catalog";
   // A page with a shop or record in its address belongs to its menu entry (#designs/<shop>/3 → Designs).
   const top = raw.split("/")[0];
-  if(top === "designs" || top === "graphics" || top === "maintenance" || top === "setup") return top;
+  if(top === "designs" || top === "graphics" || top === "maintenance" || top === "setup" || top === "customers") return top;
   if(top === "wizard") return "setup";
   return raw;
 }
@@ -2729,6 +2755,9 @@ function renderAdminNav(){
   const navGroups = adminNavGroups_();   // pages of switched-off features are left out, here and in the sheet
   // The same top-level pages as the desktop row (Run Transfer Sheets was missing from the phone menu).
   const top = [["home", "Home"], ["orders", "Orders"], ["runorder", "Run Order"], ["runtransfer", "Run Transfer Sheets"], ["catalog", "Manage catalog"]].filter(it => adminCanOpen_(it[0]));
+  // Customers (migrations/0108) sits right after Orders — after Home for a role without Orders. It is put in here
+  // because test57 reads the list above as it is written.
+  if (adminCanOpen_("customers")) top.splice(Math.max(top.findIndex(it => it[0] === "orders"), top.findIndex(it => it[0] === "home")) + 1, 0, ["customers", "Customers"]);
   const current = top.concat(...ADMIN_NAV_GROUPS.map(g => g.items.filter(Array.isArray))).find(it => it[0] === active);
   const currentLabel = current ? current[1] : "";
   const sheetItem = (it) => Array.isArray(it)
@@ -4637,6 +4666,12 @@ function adminActionCell(org, o){
   const deleteBtn = !can("orders.details", "full") ? "" : `<button class="admin-btn admin-btn-danger admin-btn-danger-solid" ${dataAttrs} data-need="orders.details:full" data-admin-action="deleteTransaction" style="margin-top:6px;">Void…</button>`;
 
   const paymentsBtn = !can("orders.payments", "read") ? "" : `<button class="admin-btn" ${dataAttrs} data-admin-action="showPaymentsModal" style="margin-top:4px;">💰 Payments</button>`;
+  // Link to a customer… / Unlink customer (migrations/0108). A voided order is left on the record it was on.
+  // Written out here, not through a helper: tests lift this function out of the file on its own.
+  const customerBtn = o.voidedAt || !can("customers.records", "edit") ? ""
+    : Number.isInteger(Number(o.customerId)) && Number(o.customerId) > 0
+      ? `<button class="admin-btn" ${dataAttrs} data-need="customers.records:edit" data-admin-action="unlinkOrderCustomer_" title="Take this order off its customer's record" style="margin-top:4px;">Unlink customer</button>`
+      : `<button class="admin-btn" ${dataAttrs} data-need="customers.records:edit" data-admin-action="linkOrderCustomer_" title="Put this order on a customer's record" style="margin-top:4px;">Link to a customer…</button>`;
 
   if(o.items.every(it => it.cancelDate)){
     // Payments stays available: money recorded on a cancelled order must be voided/refunded before the order can be voided.
@@ -4671,7 +4706,7 @@ function adminActionCell(org, o){
       (adminDesktopNoEmail_() || !can("orders.invoices", "edit") ? "" : `<button class="admin-btn" ${dataAttrs} data-need="orders.invoices:edit" data-admin-action="resendEmail" style="margin-top:4px;">${resendLabel}</button>`) +
       (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") +
       (can("orders.details", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.details:edit" data-admin-action="editOrder" style="margin-top:4px;">Edit items</button>` : "") +
-      rushBtn + dlBtn + paymentsBtn + deleteBtn;
+      rushBtn + dlBtn + customerBtn + paymentsBtn + deleteBtn;
   }
 
   const eligibleAll = FULFILLMENT_STAGES.filter(s => (s.prereqMet ? s.prereqMet(o) : s.prereqCheck(o[s.prereqField])) && (!s.prereq2 || s.prereq2(o)) && !o[FULFILLMENT_FIELD[s.stage]]);
@@ -4702,7 +4737,7 @@ function adminActionCell(org, o){
       : "";
   // The rush fee still owed (the rest is paid), or a pay-on-delivery order's balance: Mark as paid settles it.
   const payRushBtn = !o.paid && Number(o.balanceDue) > 0 && can("orders.payments", "edit") ? `<button class="admin-btn" ${dataAttrs} data-need="orders.payments:edit" data-admin-action="markOrderPaid" title="${o.payOnDelivery && !o.paidForWork ? "Record the balance as paid" : "Record the rest of the balance — the rush fee — as paid"}" style="margin-top:4px;">Mark as paid</button>` : "";
-  return podTag + stageEl + completeBtn + payRushBtn + podOffBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + rushBtn + dlBtn + paymentsBtn + deleteBtn;
+  return podTag + stageEl + completeBtn + payRushBtn + podOffBtn + resendDlBtn + emailBtn + (can("orders.invoices", "read") ? invoiceCell_(org, o) : "") + shipBtn + editBtn + datesBtn + rushBtn + dlBtn + customerBtn + paymentsBtn + deleteBtn;
 }
 
 // The order row's Resend downloads (digital products, migrations/0086): a new download link, emailed with the files
@@ -5922,7 +5957,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         </td>` : ""}
         <td data-date-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${adminDate_(o.placedAt)} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" data-admin-action="editOrderDate" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Edit date">✎</button></td>
         <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" data-admin-action="editOrderDueDate" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
-        <td>${escapeHtml(o.customerName)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</td>
+        <td>${orderCustomerNameHtml_(o)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</td>
         <td>${escapeHtml(o.orderId)}</td>
         <td>${escapeHtml(it.name)}</td>
         <td>${itemHasSize_(it) ? escapeHtml(it.size) : "OSFA"}</td>
@@ -6033,7 +6068,7 @@ function orderCardHtml_(o, org, verif, showShop){
     <div class="oc-head">
       ${!showShop && active.length ? `<input type="checkbox" class="order-select" ${ids} data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" data-admin-change="updateBulkBar" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
       <div class="oc-who">
-        <div class="oc-name">${escapeHtml(o.customerName)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</div>
+        <div class="oc-name">${orderCustomerNameHtml_(o)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</div>
         <div class="oc-dim">${escapeHtml(o.orderId)} · ${adminDate_(o.placedAt)} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" data-admin-action="editOrderDate" title="Edit date" aria-label="Edit order date">✎</button></div>
         <div class="oc-dim">Due: ${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "—"} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" data-admin-action="editOrderDueDate" title="Set due date" aria-label="Set due date">✎</button></div>
         ${showShop ? `<div class="oc-dim">${escapeHtml(org.name || org.orgId)}</div>` : ""}
@@ -7244,18 +7279,220 @@ function showEditCustomerModal(orders){
   });
 }
 
+// ---- Customers (migrations/0108): what the rest of the admin needs of them ---------------------------
+// The Customers page itself is public/admin-customers.js, loaded the first time it is opened (the way the
+// stitch-file readers are): it defines renderCustomers(app, id). A failed load can be tried again.
+let _customersPagePromise = null;
+function ensureCustomersPage_(){
+  if (typeof renderCustomers === "function") return Promise.resolve();
+  if (!_customersPagePromise) _customersPagePromise = new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = "/admin-customers.js";
+    sc.onload = () => resolve();
+    sc.onerror = () => { _customersPagePromise = null; sc.remove(); reject(new Error("Couldn't load the Customers page")); };
+    document.head.appendChild(sc);
+  });
+  return _customersPagePromise;
+}
+// An order's customer record: its id, or null when the order isn't linked to one (or the server is older than the link).
+function orderCustomerId_(o){
+  const n = o && o.customerId != null && o.customerId !== "" ? Number(o.customerId) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+// The customer's name on an order's row and card: a link to the customer's page when the order has one and this
+// role may open Customers, else the name as it always was.
+function orderCustomerNameHtml_(o){
+  const id = orderCustomerId_(o);
+  if (id == null || !adminCanCustomers_()) return escapeHtml(o.customerName);
+  return `<a href="#/customers/${id}" class="order-customer-link" title="Open this customer's record" style="color:inherit;">${escapeHtml(o.customerName || "Customer")}</a>`;
+}
+// A customer as one line of text: "Pat Example · Example Club · pat@example.com".
+function customerLine_(c){
+  return [c.name, c.company, c.email, c.phone].map(x => String(x || "").trim()).filter(Boolean).join(" · ") || "Customer " + c.id;
+}
+
+// A "find a customer" field (the Local sale form, Link to a customer…): typing asks the server for the first eight
+// matches a moment after the last key, and lists them under the field as buttons. ↓ goes into the list, ↑ / ↓ move
+// in it, Escape closes it and returns to the field. Enter in the field never sends the form around it — it picks
+// the only match, when there is exactly one.
+const CUSTOMER_SEARCH_WAIT_MS_ = 250, CUSTOMER_SEARCH_MAX_ = 8;
+function customerSearchHtml_(id, inputStyle){
+  return `<input type="search" id="${id}" autocomplete="off" maxlength="200" placeholder="Search by name, company, email or phone" aria-describedby="${id}Note" style="${inputStyle || ""}">
+    <div id="${id}List" role="group" aria-label="Matching customers" style="display:none;margin:-6px 0 10px;border:1px solid var(--border,#ccc);border-radius:5px;max-height:230px;overflow-y:auto;background:var(--surface,#fff);"></div>
+    <div id="${id}Note" role="status" style="display:none;margin:-6px 0 10px;font-size:12px;color:var(--ink-soft,#888);"></div>`;
+}
+// Wires the field customerSearchHtml_ drew inside `root`; onPick(customer) gets a row of listCustomers. Returns
+// { reset() } — empties the field and its list.
+function wireCustomerSearch_(root, id, onPick){
+  const input = root.querySelector("#" + id), list = root.querySelector("#" + id + "List"), note = root.querySelector("#" + id + "Note");
+  if (!input || !list || !note) return { reset(){}, search(){} };
+  let timer = null, seq = 0, found = [];
+  const say = (t) => { note.textContent = t; note.style.display = t ? "" : "none"; };
+  const close = () => { found = []; list.innerHTML = ""; list.style.display = "none"; };
+  const reset = () => { clearTimeout(timer); timer = null; seq++; input.value = ""; close(); say(""); };
+  const pick = (c) => { reset(); onPick(c); };
+  const search = async () => {
+    timer = null;
+    const q = input.value.trim(), mine = ++seq;
+    if (!q) { close(); say(""); return; }
+    let d;
+    try { d = await adminApi_({ action: "listCustomers", q, includeArchived: false, limit: CUSTOMER_SEARCH_MAX_, offset: 0 }); }
+    catch (e) { if (mine === seq && input.isConnected) { close(); say("Couldn't search the customers: " + (e.message || "unknown error")); } return; }
+    // An answer to an older search (the person kept typing), or the window has closed: not shown.
+    if (mine !== seq || !input.isConnected) return;
+    found = (Array.isArray(d.customers) ? d.customers : []).slice(0, CUSTOMER_SEARCH_MAX_);
+    const total = Number(d.total) || found.length;
+    list.innerHTML = found.map((c, i) => `<button type="button" data-i="${i}" style="display:block;width:100%;text-align:left;padding:7px 10px;border:none;border-bottom:1px solid var(--border,#eee);background:none;color:var(--ink,#111);font-size:13px;cursor:pointer;">
+        <strong>${escapeHtml(c.name || c.company || "Customer " + c.id)}</strong>${c.taxExempt ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#dcfce7;color:#166534;">Exempt</span>` : ""}${c.archived ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#eee;color:#555;">Archived</span>` : ""}
+        <span style="display:block;font-size:12px;color:var(--ink-soft,#666);">${escapeHtml([c.name ? c.company : "", c.email, c.phone].map(x => String(x || "").trim()).filter(Boolean).join(" · "))}</span>
+      </button>`).join("");
+    list.style.display = found.length ? "" : "none";
+    say(!found.length ? "No customer matches that." : total > found.length ? `Showing the first ${found.length} of ${total} — keep typing to narrow it down.` : `${found.length} customer${found.length === 1 ? "" : "s"} found.`);
+  };
+  input.addEventListener("input", () => { clearTimeout(timer); seq++; timer = setTimeout(search, CUSTOMER_SEARCH_WAIT_MS_); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); if (!timer && found.length === 1) pick(found[0]); }
+    else if (e.key === "ArrowDown" && found.length) { e.preventDefault(); list.querySelector("button").focus(); }
+    // Escape closes the list first; the window around it only when there is no list to close.
+    else if (e.key === "Escape" && found.length) { e.stopPropagation(); e.preventDefault(); close(); say(""); }
+  });
+  list.addEventListener("click", (e) => { const b = e.target.closest("button[data-i]"); if (b && found[Number(b.dataset.i)]) pick(found[Number(b.dataset.i)]); });
+  list.addEventListener("keydown", (e) => {
+    const btns = [...list.querySelectorAll("button")], at = btns.indexOf(document.activeElement);
+    if (e.key === "ArrowDown") { e.preventDefault(); (btns[at + 1] || btns[at]).focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); (at > 0 ? btns[at - 1] : input).focus(); }
+    else if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); close(); say(""); input.focus(); }
+  });
+  return { reset, search(){ clearTimeout(timer); return search(); } };
+}
+
+// Link to a customer…: find the customer, then Link. Resolves the customer picked (a listCustomers row), or null.
+function pickCustomerModal_(opts){
+  opts = opts || {};
+  return new Promise((resolve) => {
+    const IS = "width:100%;padding:8px 10px;border:1px solid var(--border,#ccc);border-radius:5px;font-size:14px;box-sizing:border-box;background:var(--surface,#fff);color:var(--ink,#111);margin-bottom:10px;";
+    const overlay = document.createElement("div");
+    overlay.className = "admin-pass-overlay";
+    overlay.innerHTML = `
+      <form class="admin-pass-box" id="pickCustomerForm" style="max-width:440px;">
+        <div data-dialog-title style="font-weight:600;font-size:15px;margin-bottom:6px;">${escapeHtml(opts.title || "Link to a customer")}</div>
+        ${opts.text ? `<p style="font-size:13px;color:var(--ink-soft,#666);margin:0 0 12px;">${escapeHtml(opts.text)}</p>` : ""}
+        <label for="pcSearch" style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">Customer</label>
+        ${customerSearchHtml_("pcSearch", IS)}
+        <div id="pcPicked" role="status" style="display:none;font-size:13px;margin-bottom:10px;padding:8px 10px;border:1px solid #bae6fd;border-radius:5px;background:#f0f9ff;"></div>
+        <div id="pcErr" role="alert" style="color:#b03a2e;font-size:13px;margin-bottom:8px;display:none;"></div>
+        <div class="admin-pass-actions">
+          <button type="button" class="admin-pass-cancel">Cancel</button>
+          <button type="submit" class="admin-pass-submit" disabled>${escapeHtml(opts.confirmLabel || "Link")}</button>
+        </div>
+      </form>`;
+    document.body.appendChild(overlay);
+    let picked = null;
+    const finish = (result) => { document.body.removeChild(overlay); resolve(result); };
+    const submit = overlay.querySelector(".admin-pass-submit"), pickedEl = overlay.querySelector("#pcPicked"), errEl = overlay.querySelector("#pcErr");
+    const box = wireCustomerSearch_(overlay, "pcSearch", (c) => {
+      picked = c;
+      pickedEl.textContent = "Picked: " + customerLine_(c);
+      pickedEl.style.display = "";
+      errEl.style.display = "none";
+      submit.disabled = false;
+      submit.focus();
+    });
+    overlay.querySelector("#pickCustomerForm").addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (!picked) { errEl.textContent = "Search for the customer and pick them from the list first."; errEl.style.display = ""; overlay.querySelector("#pcSearch").focus(); return; }
+      finish(picked);
+    });
+    overlay.querySelector(".admin-pass-cancel").addEventListener("click", () => finish(null));
+    // click outside does not close — use Cancel or Link. Escape closes it while it is the window on top.
+    dialogize_(overlay, { onEscape: () => { finish(null); } });
+    const input = overlay.querySelector("#pcSearch");
+    input.focus();
+    // Starts on the name the order already has, which is usually who is being looked for.
+    if (opts.q) { input.value = String(opts.q).slice(0, 200); box.search(); }
+  });
+}
+// Puts an order on a customer's record, or takes it off (customerId null), and redraws its row from what the page
+// already knows — nothing else on the order changes.
+async function setOrderCustomer_(orgId, orderId, customerId, done){
+  try {
+    await adminApi_({ action: "setOrderCustomer", org: orgId, orderId, customerId });
+  } catch (e) { showToast((customerId == null ? "Couldn't unlink the order: " : "Couldn't link the order: ") + (e.message || "unknown error"), true); return false; }
+  showToast(done);
+  await patchKnownOrders_(orgId, [orderId], o => { o.customerId = customerId; });
+  return true;
+}
+async function linkOrderCustomer_(orgId, orderId){
+  const o = ((window._ordersCache || {})[orgId] || []).find(x => x.orderId === orderId);
+  const name = o && o.customerName && o.customerName !== "Local Sale" ? o.customerName : "";
+  const c = await pickCustomerModal_({ title: "Link order " + orderId + " to a customer",
+    text: "The order joins that customer's history and totals. The name and contact on the order itself stay as they are.", q: name || (o && o.contact) || "" });
+  if (!c) return;
+  await setOrderCustomer_(orgId, orderId, Number(c.id), "Order " + orderId + " linked to " + (c.name || c.company || "the customer") + ".");
+}
+async function unlinkOrderCustomer_(orgId, orderId){
+  if (!(await askConfirm_("Take order " + orderId + " off its customer's record?\n\nThe order itself doesn't change — it just no longer counts in that customer's history and totals. You can link it again at any time.", { confirmLabel: "Unlink", danger: false }))) return;
+  await setOrderCustomer_(orgId, orderId, null, "Order " + orderId + " is no longer linked to a customer.");
+}
+
+// Which shop a new sale is for, asked when there is more than one (a sale belongs to a shop): a Shop list, starting
+// on the shop last worked in. Resolves the shop's id, or null when cancelled or there is no shop.
+function askSaleShop_(text){
+  const shops = adminOrgs || [];
+  if (shops.length <= 1) return Promise.resolve(shops[0] ? shops[0].orgId : null);
+  return new Promise((resolve) => {
+    const last = adminLastShop_();
+    const overlay = document.createElement("div");
+    overlay.className = "admin-pass-overlay";
+    overlay.innerHTML = `
+      <form class="admin-pass-box" id="saleShopForm" style="max-width:400px;">
+        <div data-dialog-title style="font-weight:600;font-size:15px;margin-bottom:6px;">Which shop is the sale in?</div>
+        ${text ? `<p style="font-size:13px;color:var(--ink-soft,#666);margin:0 0 12px;">${escapeHtml(text)}</p>` : ""}
+        <label for="saleShopPick" style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">Shop</label>
+        <select id="saleShopPick" style="width:100%;padding:8px 10px;border:1px solid var(--border,#ccc);border-radius:5px;font-size:14px;box-sizing:border-box;background:var(--surface,#fff);color:var(--ink,#111);margin-bottom:14px;">
+          ${shops.map(s => `<option value="${escapeHtml(s.orgId)}"${s.orgId === last ? " selected" : ""}>${escapeHtml(s.name || s.orgId)}</option>`).join("")}
+        </select>
+        <div class="admin-pass-actions">
+          <button type="button" class="admin-pass-cancel">Cancel</button>
+          <button type="submit" class="admin-pass-submit">Continue</button>
+        </div>
+      </form>`;
+    document.body.appendChild(overlay);
+    const finish = (result) => { document.body.removeChild(overlay); resolve(result); };
+    overlay.querySelector("#saleShopForm").addEventListener("submit", (e) => { e.preventDefault(); finish(overlay.querySelector("#saleShopPick").value || null); });
+    overlay.querySelector(".admin-pass-cancel").addEventListener("click", () => finish(null));
+    dialogize_(overlay, { onEscape: () => { finish(null); } });
+    overlay.querySelector("#saleShopPick").focus();
+  });
+}
+// The Customers page's "New sale for this customer": the Local sale form with that customer already picked.
+// `customer` is the page's own record ({ id, name, company, email, phone, … }). Afterwards the customer's page is
+// drawn again, so the new order is in its history.
+async function adminNewSaleForCustomer_(customer){
+  if (!customer || orderCustomerId_({ customerId: customer.id }) == null) return;
+  if (!adminCan_("orders.details", "edit")) { showToast("Your role can't record a sale.", true); return; }
+  if (!(adminOrgs || []).length) { showToast("Add a shop first — a sale is recorded in a shop.", true); return; }
+  const orgId = await askSaleShop_("For " + (customer.name || customer.company || "this customer") + ".");
+  if (!orgId) return;
+  adminNoteShop_(orgId);
+  await createLocalSale(orgId, { customer, onRecorded: () => { if (/^#\/?customers(\/|$)/.test(location.hash)) adminRoute(); } });
+}
+
 // ---- Local sale (admin-recorded in-person / cash transaction) ---------------
 
 
 // One Local sale window per shop at a time (review #33): a double click on "+ Local sale" opened two, and each
 // could record the same sale.
 const _localSaleOpen = new Set();
-async function createLocalSale(orgId){
+// opts (the Customers page's "New sale for this customer"): customer — picked when the form opens; onRecorded(data) —
+// called once the sale is recorded, in place of redrawing the Orders list.
+async function createLocalSale(orgId, opts){
   if (_localSaleOpen.has(orgId)) return;
   _localSaleOpen.add(orgId);
-  try { await createLocalSaleOnce_(orgId); } finally { _localSaleOpen.delete(orgId); }
+  try { await createLocalSaleOnce_(orgId, opts); } finally { _localSaleOpen.delete(orgId); }
 }
-async function createLocalSaleOnce_(orgId){
+async function createLocalSaleOnce_(orgId, opts){
+  opts = opts || {};
   // Fetch all products (including hidden) and blanks
   let products, blanks;
   try{
@@ -7294,7 +7531,7 @@ async function createLocalSaleOnce_(orgId){
   // The window stays open, with everything typed in it, until the server has answered: a session that ended asks
   // to sign in and sends the same sale again, and any other problem is shown in the window.
   let data = null;
-  const result = await showLocalSaleModal(products, blanks, { payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"), graphics, tiersCents, submit: async (typed) => {
+  const result = await showLocalSaleModal(products, blanks, { customer: opts.customer, payOnDelivery: pod.allowed && adminCan_("orders.payOnDelivery", "edit"), graphics, tiersCents, submit: async (typed) => {
     const { sendInvoice: _later, ...sale } = typed;
     const send = () => adminSave_({action:"createLocalSale", org:orgId, requestId, ...sale});
     let r;
@@ -7319,7 +7556,8 @@ async function createLocalSaleOnce_(orgId){
     }
     showToast((data.repeated ? "Local sale already recorded — " : "Local sale recorded — ") + (data.orderId || "") + invoiceNote, /but the invoice/.test(invoiceNote));
     // Only the new order is asked for, and put into the list where it sorts.
-    refreshOrderRows_(orgId, [data.orderId]);
+    if (typeof opts.onRecorded === "function") opts.onRecorded(data);
+    else refreshOrderRows_(orgId, [data.orderId]);
   }catch(e){
     showToast("Could not reach the server.", true);
   }
@@ -7456,7 +7694,16 @@ function showLocalSaleModal(products, blanks, opts = {}){
           <option value="Other">Other</option>
         </select>
 
-        <details style="margin-bottom:10px;">
+        ${adminCanCustomers_() ? `<div id="lsCustomerWrap" style="margin-bottom:10px;">
+          ${LS("Customer", true, "lsCustomer")}
+          <div id="lsCustomerFind">${customerSearchHtml_("lsCustomer", IS())}</div>
+          <div id="lsCustomerPicked" style="display:none;align-items:center;justify-content:space-between;gap:10px;font-size:13px;padding:8px 10px;border:1px solid #bae6fd;border-radius:5px;background:#f0f9ff;">
+            <span id="lsCustomerPickedText" role="status"></span>
+            <button type="button" id="lsCustomerClear" style="font-size:12px;padding:3px 10px;border:1px solid var(--border,#ccc);border-radius:4px;cursor:pointer;background:var(--surface,#fff);color:var(--ink,#111);">Clear</button>
+          </div>
+        </div>` : ""}
+
+        <details id="lsCustomerInfo" style="margin-bottom:10px;">
           <summary style="font-size:13px;font-weight:600;cursor:pointer;user-select:none;padding:4px 0;">Customer info <span style="font-weight:400;color:var(--ink-soft,#888)">(all optional)</span></summary>
           <div style="margin-top:10px;">
             ${LS("Name", true)}
@@ -7817,6 +8064,47 @@ function showLocalSaleModal(products, blanks, opts = {}){
     renumber();
 
     let sending = false;
+    // The customer picked from the records (migrations/0108): the sale is put on their record by its id, whatever
+    // is typed under Customer info afterwards — except the email. A different email is a different person, so
+    // changing it forgets the pick (the server then goes by the email), as Clear does.
+    let pickedCustomer = null;
+    const lsField = (id) => overlay.querySelector(id);
+    const showPicked = () => {
+      if (!lsField("#lsCustomerWrap")) return;
+      lsField("#lsCustomerFind").style.display = pickedCustomer ? "none" : "";
+      lsField("#lsCustomerPicked").style.display = pickedCustomer ? "flex" : "none";
+      lsField("#lsCustomerPickedText").textContent = pickedCustomer ? "Picked: " + customerLine_(pickedCustomer) + (pickedCustomer.taxExempt ? " — tax exempt" : "") : "";
+    };
+    const pickCustomer = (c) => {
+      const id = orderCustomerId_({ customerId: c && c.id });
+      if (id == null) return;
+      const email = String(c.email || "").trim().toLowerCase();
+      pickedCustomer = { id, name: String(c.name || "").trim(), company: String(c.company || "").trim(), email, phone: String(c.phone || "").trim(), taxExempt: !!c.taxExempt };
+      // What the pick wrote, so Clear takes back only that (not something typed over it since).
+      pickedCustomer.filled = { name: (pickedCustomer.name || pickedCustomer.company).slice(0, 200), phone: pickedCustomer.phone.slice(0, 50) };
+      lsField("#lsName").value = pickedCustomer.filled.name;
+      lsField("#lsEmail").value = email;
+      if (pickedCustomer.phone) lsField("#lsPhone").value = pickedCustomer.filled.phone;
+      lsField("#lsCustomerInfo").open = true;   // so what was filled in can be seen (and changed)
+      showPicked();
+    };
+    const forgetCustomer = () => { pickedCustomer = null; showPicked(); };
+    if (lsField("#lsCustomerWrap")) {
+      wireCustomerSearch_(overlay, "lsCustomer", (c) => { pickCustomer(c); if (pickedCustomer) lsField("#lsCustomerClear").focus(); });
+      lsField("#lsCustomerClear").addEventListener("click", () => {
+        const was = pickedCustomer;
+        forgetCustomer();
+        if (was) {
+          if (lsField("#lsName").value === was.filled.name) lsField("#lsName").value = "";
+          if (lsField("#lsEmail").value.trim().toLowerCase() === was.email) lsField("#lsEmail").value = "";
+          if (was.phone && lsField("#lsPhone").value === was.filled.phone) lsField("#lsPhone").value = "";
+        }
+        lsField("#lsCustomer").focus();
+      });
+      lsField("#lsEmail").addEventListener("input", () => { if (pickedCustomer && lsField("#lsEmail").value.trim().toLowerCase() !== pickedCustomer.email) forgetCustomer(); });
+      if (opts.customer) pickCustomer(opts.customer);
+    }
+
     const finish = (result) => { if(sending && !result) return; document.body.removeChild(overlay); resolve(result); };
 
     // One item read from its block: { item } or { error, focus }.
@@ -7945,6 +8233,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
         customerName: overlay.querySelector("#lsName").value.trim() || "",
         contact,
         phone,
+        ...(pickedCustomer ? { customerId: pickedCustomer.id } : {}),
         shippingAddress: shipping ? shipping.address : null,
         ...(shipping ? { shippingCost: shipping.cost, shippingMethod: shipping.method } : {}),
         paid:      overlay.querySelector("#lsPaid").checked,

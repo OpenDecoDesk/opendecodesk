@@ -104,7 +104,7 @@ function bucket() {
   ok("every named file is kept, in every column", [...oldNamed].every(k => R.objects.has(k) || D.objects.has(k)) && out.referenced >= oldNamed.size);
   ok("finished in three runs (1,000 deletions each at most), no errors", out.finished === true && out.runs === 3 && out.errors.length === 0);
   const src = read("functions/_lib/unsavedUploads.js");
-  ok("(no index is made for it)", !/CREATE INDEX/i.test(src) && !fs.readdirSync(__dirname + "/migrations").some(f => f >= "0108" && /CREATE INDEX/.test(read("migrations/" + f)) && /Key/.test(read("migrations/" + f))));
+  ok("(no index is made for it)", !/CREATE INDEX/i.test(src) && !fs.readdirSync(__dirname + "/migrations").some(f => f >= "0109" && /CREATE INDEX/.test(read("migrations/" + f)) && /Key/.test(read("migrations/" + f))));
 
   console.log(`\n${pass} passed, ${fail} failed`);
   if (fail) process.exit(1);

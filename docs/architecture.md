@@ -59,6 +59,7 @@ Orders are **not** priced from the cache's prices as shown in a browser: `priceI
 public/index.html         the storefront page, and the shell the admin loads into
 public/storefront.js      the storefront page's script
 public/admin.js           the admin panel (loaded only on the admin host)
+public/admin-customers.js the admin's Customers page (loaded by admin.js the first time it is opened)
 public/admin.css          the admin panel's styles (loaded with admin.js)
 public/_headers           security headers and cache rules for every response
 public/vendor/pdfjs-5.6.205/  Mozilla's pdf.js, vendored, for reading vendor invoices
@@ -120,6 +121,9 @@ About fifty tables (`schema.sql`). The main groups:
   to blanks and designs.
 - **Orders** — `orders`, `order_items` (each line keeps the name, price and tax it was sold at),
   `order_payments` (the payments ledger), `shipping_labels`, `design_verifications`.
+- **Customers** — `customers` (name, company, email, phone, address, notes, a tax exemption). An
+  order points at its customer with `orders.customerId`, which is empty for an order that has none;
+  the order still keeps the name and contact it was placed with.
 - **Inventory** — `blanks`, `blank_colors`, `blank_sizes`, `inventory_movements`; `transfers`,
   `transfer_movements`.
 - **Production** — `threads`, `hoops`, `designs`, `design_versions`, `machines`, `production_runs`.
@@ -142,6 +146,11 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
   alter that month's numbers.
 - **Stock changes are movements.** The quantity on hand is the sum of a blank's movements; the
   count stored on the blank is a cache of that sum.
+- **One customer per email.** Placing an order (`insertOrder` in `db.js`) links it to the customer
+  with the order's email, lower-cased and trimmed, and makes that customer if there isn't one. An
+  order whose contact is a phone number, or empty, is left unlinked. A customer is never deleted:
+  it is archived, or merged into another — its orders move, and the merged record stays behind,
+  archived, pointing at the one that took its place (`mergedIntoId`).
 
 ## The security model
 
@@ -264,7 +273,8 @@ also carry the ids of the user who did it and the user it was done to, and are w
 the change happens. Routine changes are logged
 alongside the change. **Destructive or money-changing actions are logged first** — with the values
 being replaced — **and refused if the log can't be written** (voiding an order or payment, a
-refund, a discount, changing dates, voiding or restoring a stock movement, switching a feature).
+refund, a discount, changing dates, voiding or restoring a stock movement, switching a feature,
+changing a customer's tax exemption, merging two customers).
 
 ### In the browser
 

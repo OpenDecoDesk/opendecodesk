@@ -7551,7 +7551,7 @@ export async function setDesignStitchCount(db, table, id, value) {
 // per design / machine / issues noted (the same answer as adding up every run) — and the log is paged: the newest
 // RUN_LOG_PAGE runs, `detailMore` saying older ones are in range too. `before` ({startedAt, id} of the last run shown,
 // the audit log's keyset) asks for the page after it, and then only `{ detail, detailMore }` comes back.
-// All of them read the range on idx_runs_started (migrations/0109); the "+status" keeps the planner off the status index,
+// All of them read the range on idx_runs_started (migrations/0110); the "+status" keeps the planner off the status index,
 // which holds nearly every run.
 const RUN_LOG_PAGE = 500;
 export async function getRunReportByDesign(db, { from, to, before = null } = {}) {
@@ -10643,12 +10643,292 @@ export async function getOrderById(db, orderId) {
   return order;
 }
 
+// ---- Customers (migrations/0108) ---------------------------------------------------------------
+// A customer record that orders belong to (orders.customerId): who they are, how to reach them, and a tax
+// exemption of their own. An order finds its customer by its contact when that is an email
+// (findOrCreateCustomerForOrder_); one whose contact is a phone number or nothing has none. A customer is never
+// deleted: archivedAt hides one, and a duplicate is folded into another (mergeCustomers, mergedIntoId) and
+// keeps its row for the record. "Live" below means not merged away — an archived customer is still live.
+
+// The email a customer is known by: trimmed and lower case, or "" when `s` isn't an email. The same shape
+// migrations/0108's backfill accepts (one @, a dot after it, no white space, at most 200 characters), and only
+// A–Z are lowered, as SQLite's lower() does, so the two can't disagree about which customer an email is.
+const CUSTOMER_EMAIL_RE_ = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export function normalizeCustomerEmail_(s) {
+  const e = String(s == null ? "" : s).trim().replace(/[A-Z]/g, (c) => c.toLowerCase());
+  return e.length <= 200 && CUSTOMER_EMAIL_RE_.test(e) ? e : "";
+}
+// The error of a database that hasn't had migrations/0108 yet (deploys and migrations aren't atomic, and
+// tests pin older schemas): there are no customers there, which is not a failure.
+const noCustomersYet_ = (e) => /no such table: customers|no such column: (\w+\.)?customerId|no column named customerId/i.test(String(e && e.message));
+const customerId_ = (v) => { const n = Number(v); return v != null && v !== "" && Number.isInteger(n) && n > 0 ? n : null; };
+const CUSTOMER_DATE_RE_ = /^\d{4}-\d{2}-\d{2}$/;
+
+// A customer's address in the shape of orders.shippingAddress, as stored: its text fields, trimmed and capped,
+// the empty ones left out. "" when nothing is left.
+const CUSTOMER_ADDRESS_FIELDS_ = ["name", "line1", "line2", "city", "state", "zip", "country", "phone"];
+function customerAddressJson_(address) {
+  if (!address || typeof address !== "object" || Array.isArray(address)) return "";
+  const out = {};
+  for (const k of CUSTOMER_ADDRESS_FIELDS_) {
+    const v = address[k] == null || typeof address[k] === "object" ? "" : String(address[k]).trim().slice(0, 200);
+    if (v) out[k] = v;
+  }
+  return Object.keys(out).length ? JSON.stringify(out) : "";
+}
+// A customers row as the admin reads it.
+function parseCustomer_(row) {
+  const address = row.addressJson ? tryParse_(row.addressJson, null) : null;
+  return {
+    id: Number(row.id), name: row.name || "", company: row.company || "", email: row.email || "", phone: row.phone || "",
+    address: address && typeof address === "object" ? address : null,
+    notes: row.notes || "",
+    taxExempt: !!row.taxExempt, taxExemptCertificate: row.taxExemptCertificate || "", taxExemptExpires: row.taxExemptExpires || "",
+    archived: !!row.archivedAt, createdAt: row.createdAt || "", updatedAt: row.updatedAt || "",
+  };
+}
+const liveCustomerRow_ = (db, id) => db.prepare("SELECT * FROM customers WHERE id = ? AND mergedIntoId IS NULL").bind(id).first();
+
+// The customer a new order belongs to: the live one with the order's email (an archived one still receives
+// its orders, and stays archived), else the one a duplicate with that email was merged into, else one made
+// now — with the order's name, phone and address.
+// null when the contact isn't an email, and on a database without migrations/0108. `findOnly`: never make
+// one (a test order joins its customer but doesn't create a customer nobody really is).
+export async function findOrCreateCustomerForOrder_(db, { name, contact, phone, address, findOnly } = {}) {
+  const email = normalizeCustomerEmail_(contact);
+  if (!email) return null;
+  try {
+    // Written so idx_customers_email (email <> '' AND mergedIntoId IS NULL) answers it. With no live customer,
+    // a duplicate that had this email and was merged away sends the order to the customer it was merged into —
+    // otherwise that person's next order would bring the duplicate straight back.
+    const find = async () => await db.prepare("SELECT id FROM customers WHERE email = ? AND email <> '' AND mergedIntoId IS NULL").bind(email).first()
+      || await db.prepare(`SELECT t.id FROM customers m JOIN customers t ON t.id = m.mergedIntoId
+          WHERE m.email = ? AND m.mergedIntoId IS NOT NULL AND t.mergedIntoId IS NULL ORDER BY m.id DESC LIMIT 1`).bind(email).first();
+    let row = await find();
+    if (!row && !findOnly) {
+      const now = new Date().toISOString();
+      // OR IGNORE: two orders placed at once with a new email make one customer, and both find it.
+      await db.prepare("INSERT OR IGNORE INTO customers (name, email, phone, addressJson, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(String(name == null ? "" : name).trim().slice(0, 200), email, String(phone == null ? "" : phone).trim().slice(0, 50),
+          customerAddressJson_(address), now, now).run();
+      row = await find();
+    }
+    return row && customerId_(row.id);
+  } catch (e) { if (noCustomersYet_(e)) return null; throw e; }
+}
+
+// A new order's customer and whether that customer's own exemption covers it (insertOrder): the one picked
+// (opts.customerId, when it is a live customer), else the one with the order's email. The exemption counts
+// only for a PICKED customer — someone signed in chose them — never for one found by the email a shopper
+// typed, or anyone who knows an exempt customer's address could order untaxed. It counts on the order's date
+// — the business's calendar day it was placed — when the box is ticked and the certificate's expiry date is
+// empty or hasn't passed. { id: null, exempt: false } without a customer or before migrations/0108.
+async function orderCustomer_(db, order, opts) {
+  const none = { id: null, exempt: false };
+  try {
+    let id = null;
+    const picked = customerId_(opts.customerId);
+    if (picked) { const row = await db.prepare("SELECT id FROM customers WHERE id = ? AND mergedIntoId IS NULL").bind(picked).first(); id = row ? customerId_(row.id) : null; }
+    const byEmail = !id;
+    if (byEmail) {
+      const a = order.shippingAddress && typeof order.shippingAddress === "object" ? order.shippingAddress : null;
+      id = await findOrCreateCustomerForOrder_(db, { name: order.customerName, contact: order.contact, phone: order.phone || (a && a.phone) || "", address: a, findOnly: !!order.isTest });
+    }
+    if (!id) return none;
+    if (byEmail) return { id, exempt: false };
+    const row = await db.prepare("SELECT taxExempt, taxExemptExpires FROM customers WHERE id = ?").bind(id).first();
+    let exempt = !!(row && row.taxExempt);
+    if (exempt && row.taxExemptExpires) {
+      const placed = new Date(order.placedAt || Date.now());
+      const zone = (await getLocaleSettings(db)).timeZone || _shopTimeZone_;
+      exempt = String(row.taxExemptExpires) >= dateInTimeZone(isNaN(placed) ? new Date() : placed, zone);
+    }
+    return { id, exempt };
+  } catch (e) { if (noCustomersYet_(e)) return none; throw e; }
+}
+
+// The Customers page's list, a page at a time: live customers (archived ones only when asked for) whose name,
+// company, email or phone contains `q`, by name (then id). orderCount / lastOrderAt leave out test and voided orders.
+// `total` is how many match in all. Empty on a database without migrations/0108.
+export async function listCustomers(db, { q = "", includeArchived = false, limit = 50, offset = 0 } = {}) {
+  const where = ["c.mergedIntoId IS NULL"], binds = [];
+  if (!includeArchived) where.push("c.archivedAt IS NULL");
+  const needle = String(q == null ? "" : q).trim().slice(0, 200).trim();
+  if (needle) {
+    // instr on lowered text: what was typed is never a LIKE pattern, so % and _ mean themselves.
+    where.push("(" + ["c.name", "c.company", "c.email", "c.phone"].map(col => `instr(lower(${col}), lower(?)) > 0`).join(" OR ") + ")");
+    binds.push(needle, needle, needle, needle);
+  }
+  const lim = Math.min(200, Math.max(1, Math.floor(Number(limit)) || 50)), off = Math.max(0, Math.floor(Number(offset)) || 0);
+  const counted = "o.customerId = c.id AND o.isTest = 0 AND o.voidedAt IS NULL";
+  const byName = "CASE WHEN c.name <> '' THEN c.name ELSE c.company END";   // a company with no contact name sorts by the company
+  try {
+    // The page is picked first, so the orders are only counted for the customers shown.
+    const [{ results }, totalRow] = await Promise.all([
+      db.prepare(
+        `SELECT c.*, (SELECT count(*) FROM orders o WHERE ${counted}) AS orderCount,
+                (SELECT MAX(o.placedAt) FROM orders o WHERE ${counted}) AS lastOrderAt
+           FROM (SELECT * FROM customers c WHERE ${where.join(" AND ")} ORDER BY ${byName} COLLATE NOCASE, c.id LIMIT ? OFFSET ?) c
+          ORDER BY ${byName} COLLATE NOCASE, c.id`).bind(...binds, lim, off).all(),
+      db.prepare(`SELECT count(*) AS n FROM customers c WHERE ${where.join(" AND ")}`).bind(...binds).first(),
+    ]);
+    return {
+      customers: results.map(r => ({ id: Number(r.id), name: r.name || "", company: r.company || "", email: r.email || "", phone: r.phone || "",
+        taxExempt: !!r.taxExempt, taxExemptExpires: r.taxExemptExpires || "", archived: !!r.archivedAt,
+        orderCount: Number(r.orderCount) || 0, lastOrderAt: r.lastOrderAt || "" })),
+      total: Number(totalRow && totalRow.n) || 0,
+    };
+  } catch (e) { if (noCustomersYet_(e)) return { customers: [], total: 0 }; throw e; }
+}
+
+// One customer with its orders (newest first, at most 500) and what they add up to. An id that was merged
+// away answers with the customer it was merged into. Each order's total is what it comes to (orderAmounts),
+// paidAmount the payments received and balanceDue what is still owed — as the order itself reports them
+// (parseOrder_). The totals count every order that isn't a test or voided, not only the 500 listed.
+// null when there is no such customer.
+const CUSTOMER_ORDERS_MAX_ = 500;
+export async function getCustomer(db, id) {
+  let row = null;
+  try {
+    // Follows mergedIntoId to the customer that is left (a merge re-points older merges, so one step is usual).
+    for (let cid = customerId_(id), hops = 0; cid && hops < 20; hops++) {
+      row = await db.prepare("SELECT * FROM customers WHERE id = ?").bind(cid).first();
+      if (!row || row.mergedIntoId == null) break;
+      cid = customerId_(row.mergedIntoId); row = null;
+    }
+  } catch (e) { if (noCustomersYet_(e)) return null; throw e; }
+  if (!row) return null;
+  const { results } = await db.prepare(
+    `SELECT o.orderId, o.orgId, o.placedAt, o.voidedAt, o.isTest, o.completedAt, ${ORDER_AMOUNT_COLS_},
+            COALESCE((SELECT SUM(amountCents) FROM order_payments WHERE orderId = o.orderId AND kind = 'payment' AND voidedAt IS NULL), 0) AS receivedCents
+       FROM orders o WHERE o.customerId = ? ORDER BY o.placedAt DESC, o.orderId DESC`).bind(row.id).all();
+  let orderCount = 0, spentCents = 0, dueCents = 0;
+  const orders = [];
+  for (const r of results) {
+    const owed = orderAmountsOfRow_(r).owedCents, received = Number(r.receivedCents) || 0, due = Math.max(0, owed - received);
+    if (!r.isTest && !r.voidedAt) { orderCount++; spentCents += owed; dueCents += due; }
+    if (orders.length < CUSTOMER_ORDERS_MAX_) orders.push({ orderId: r.orderId, orgId: r.orgId, placedAt: r.placedAt, total: fromCents(owed),
+      paidAmount: fromCents(received), balanceDue: fromCents(due), voided: !!r.voidedAt, isTest: !!r.isTest, completed: !!r.completedAt });
+  }
+  return { customer: parseCustomer_(row), orders, totals: { orderCount, totalSpent: fromCents(spentCents), balanceDue: fromCents(dueCents) } };
+}
+
+// Adds a customer, or changes one (`id`). A field left undefined keeps what it has, so a caller that doesn't
+// send the tax-exemption fields can't clear an exemption (as setOrgTaxExemption is kept apart from updateOrg).
+// Needs a name or a company; an email must be one, and no other live customer's. { id, created, before, after }:
+// the customer as it was (null when new) and as it is now, for the audit log — or { error } with nothing changed.
+export async function saveCustomer(db, c = {}) {
+  const id = c.id == null || c.id === "" ? null : customerId_(c.id);
+  if (c.id != null && c.id !== "" && !id) return { error: "That customer wasn't found." };
+  const old = id ? await liveCustomerRow_(db, id) : null;
+  if (id && !old) return { error: "That customer wasn't found." };
+  const before = old ? parseCustomer_(old) : null;
+  const text = (v, was, max) => v === undefined ? was : String(v == null ? "" : v).trim().slice(0, max);
+  const name = text(c.name, old ? old.name : "", 200), company = text(c.company, old ? old.company : "", 200);
+  if (!name && !company) return { error: "Enter a name or a company." };
+  let email = old ? old.email : "";
+  if (c.email !== undefined) {
+    const typed = String(c.email == null ? "" : c.email).trim();
+    email = normalizeCustomerEmail_(typed);
+    if (typed && !email) return { error: "That doesn't look like an email address." };
+  }
+  if (email) {
+    const taken = await db.prepare("SELECT id FROM customers WHERE email = ? AND email <> '' AND mergedIntoId IS NULL AND id <> ?").bind(email, id || 0).first();
+    if (taken) return { error: "Another customer already has that email." };
+  }
+  let expires = old ? old.taxExemptExpires || null : null;
+  if (c.taxExemptExpires !== undefined) {
+    const d = String(c.taxExemptExpires == null ? "" : c.taxExemptExpires).trim();
+    // Round-trip the day: Date.parse takes 2027-02-31 and rolls it into March.
+    if (d && !(CUSTOMER_DATE_RE_.test(d) && !isNaN(Date.parse(d + "T00:00:00Z")) && new Date(d + "T00:00:00Z").toISOString().slice(0, 10) === d)) return { error: "The exemption's expiry date isn't a date." };
+    expires = d || null;   // an unset date is NULL
+  }
+  const phone = text(c.phone, old ? old.phone : "", 50), notes = text(c.notes, old ? old.notes : "", 2000);
+  const certificate = text(c.taxExemptCertificate, old ? old.taxExemptCertificate : "", 200);
+  const exempt = c.taxExempt === undefined ? (old && old.taxExempt ? 1 : 0) : (c.taxExempt ? 1 : 0);
+  const addressJson = c.address === undefined ? (old ? old.addressJson || "" : "") : customerAddressJson_(c.address);
+  const now = new Date().toISOString();
+  const values = [name, company, email, phone, addressJson, notes, exempt, certificate, expires];
+  let savedId = id;
+  try {
+    if (id) {
+      await db.prepare(`UPDATE customers SET name = ?, company = ?, email = ?, phone = ?, addressJson = ?, notes = ?, taxExempt = ?,
+          taxExemptCertificate = ?, taxExemptExpires = ?, updatedAt = ? WHERE id = ? AND mergedIntoId IS NULL`).bind(...values, now, id).run();
+    } else {
+      const r = await db.prepare(`INSERT INTO customers (name, company, email, phone, addressJson, notes, taxExempt, taxExemptCertificate,
+          taxExemptExpires, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(...values, now, now).run();
+      savedId = customerId_(r && r.meta && r.meta.last_row_id);
+    }
+  } catch (e) {
+    // Someone else took the email between the check and the write (idx_customers_email).
+    if (/UNIQUE constraint failed/i.test(String(e && e.message))) return { error: "Another customer already has that email." };
+    throw e;
+  }
+  const saved = savedId ? await db.prepare("SELECT * FROM customers WHERE id = ?").bind(savedId).first() : null;
+  return { id: savedId, created: !id, before, after: saved ? parseCustomer_(saved) : null };
+}
+
+// Archives a customer (left off the list and the pickers, its orders and history untouched) or brings it back.
+// A customer already archived keeps the date it was archived on.
+export async function setCustomerArchived(db, id, archived) {
+  const row = customerId_(id) ? await liveCustomerRow_(db, customerId_(id)) : null;
+  if (!row) return { error: "That customer wasn't found." };
+  const now = new Date().toISOString();
+  await db.prepare("UPDATE customers SET archivedAt = ?, updatedAt = ? WHERE id = ?").bind(archived ? row.archivedAt || now : null, now, row.id).run();
+  return { ok: true };
+}
+
+// Folds a duplicate (`fromId`) into the customer that is kept (`intoId`), in one batch: every order of the
+// duplicate moves, the duplicate is archived and marked as merged, and what the kept customer has blank
+// (email, phone, company, address, notes) is filled from it — nothing it already has is overwritten. A tax
+// exemption is NOT carried over: a certificate is one customer's, and merging must never make someone exempt.
+// { moved } (how many orders moved) or { error } with nothing changed.
+export async function mergeCustomers(db, { fromId, intoId } = {}) {
+  const fromN = customerId_(fromId), intoN = customerId_(intoId);
+  if (!fromN || !intoN) return { error: "That customer wasn't found." };
+  if (fromN === intoN) return { error: "A customer can't be merged into itself." };
+  const [from, into] = await Promise.all([
+    db.prepare("SELECT * FROM customers WHERE id = ?").bind(fromN).first(),
+    db.prepare("SELECT * FROM customers WHERE id = ?").bind(intoN).first(),
+  ]);
+  if (!from || !into) return { error: "That customer wasn't found." };
+  if (from.mergedIntoId != null) return { error: "That customer has already been merged into another." };
+  if (into.mergedIntoId != null) return { error: "The customer to keep has itself been merged into another. Pick that one instead." };
+  const counted = await db.prepare("SELECT count(*) AS n FROM orders WHERE customerId = ?").bind(fromN).first();
+  const now = new Date().toISOString();
+  await db.batch([
+    db.prepare("UPDATE orders SET customerId = ? WHERE customerId = ?").bind(intoN, fromN),
+    // Marked as merged before the kept customer takes its email: only live customers share idx_customers_email.
+    db.prepare("UPDATE customers SET mergedIntoId = ?, archivedAt = COALESCE(archivedAt, ?), updatedAt = ? WHERE id = ?").bind(intoN, now, now, fromN),
+    // Customers merged into the duplicate earlier now point at the one that is left.
+    db.prepare("UPDATE customers SET mergedIntoId = ? WHERE mergedIntoId = ?").bind(intoN, fromN),
+    db.prepare("UPDATE customers SET email = ?, phone = ?, company = ?, addressJson = ?, notes = ?, updatedAt = ? WHERE id = ?")
+      .bind(into.email || from.email || "", into.phone || from.phone || "", into.company || from.company || "",
+        into.addressJson || from.addressJson || "", into.notes || from.notes || "", now, intoN),
+  ]);
+  return { moved: Number(counted && counted.n) || 0 };
+}
+
+// Links an order to a customer, or (null) to none. { ok, before } — the customer it had (null for none) — or
+// { error } with nothing changed. The order itself (its name, contact, tax) is left as it was placed.
+export async function setOrderCustomer(db, orderId, customerId) {
+  const order = await db.prepare("SELECT customerId FROM orders WHERE orderId = ?").bind(String(orderId == null ? "" : orderId)).first();
+  if (!order) return { error: "That order wasn't found." };
+  const unlink = customerId == null || customerId === "";
+  const id = unlink ? null : customerId_(customerId);
+  if (!unlink && !(id && await liveCustomerRow_(db, id))) return { error: "That customer wasn't found." };
+  await db.prepare("UPDATE orders SET customerId = ? WHERE orderId = ?").bind(id, String(orderId)).run();
+  return { ok: true, before: customerId_(order.customerId) };
+}
+
 // Atomic insert: order header + all items in one batch.
 // opts.fillFromStock (the storefront and local sales, migrations/0060): a line for a stocked product +
 // size is filled from the shop's finished stock when enough is AVAILABLE (on hand less set aside) — a
 // guarded UPDATE right after the line's INSERT, in the same batch, so two orders can't both get the last
 // piece. Only plain catalog lines qualify: not personalized, no color/graphic choices, no uploaded design,
 // and never on a test order.
+// The order's customer (migrations/0108): opts.customerId when it is a live customer (the one picked on a local
+// sale), else the customer with the order's email, made now if there is none. Nothing on an older database.
 export async function insertOrder(db, order, pricedItems, opts = {}) {
   const stmts = [];
   // configJson is additive (migrations/0036); tolerate a pre-0036 schema (tests pin older subsets).
@@ -10667,14 +10947,15 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   const subtotalCents = lines.reduce((sum, l) => sum + l.lineCents, 0);
   const shippingCents = Math.max(0, toCents(order.shippingCost || 0));
 
-  // Sales tax: today's rate unless the org is tax-exempt; both are snapshotted
+  // Sales tax: today's rate unless the org or the order's customer is tax-exempt; both are snapshotted
   // on the order so later rate/exemption changes never rewrite history.
-  const [taxSettings, orgRow] = await Promise.all([
+  const [taxSettings, orgRow, customer] = await Promise.all([
     getSalesTaxSettings(db),
     db.prepare("SELECT taxExempt FROM orgs WHERE orgId=?").bind(order.orgId).first(),
+    orderCustomer_(db, order, opts),
   ]);
   // opts.taxExempt: an order from another store (importOrdersCsv), whose sales tax that store charged — none is added here.
-  const taxExempt = opts.taxExempt || (orgRow && orgRow.taxExempt) ? 1 : 0;
+  const taxExempt = opts.taxExempt || (orgRow && orgRow.taxExempt) || customer.exempt ? 1 : 0;
   const orderRateBps = Number(taxSettings.rateBps) || 0;
   // Tax in the listed prices, or added to them: today's setting, kept on the order (migrations/0057).
   const mode = taxMode_(order.taxMode || taxSettings.taxMode);
@@ -10715,6 +10996,8 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
   if (order.rushRequested && order.rushPayBy && /^\d{4}-\d{2}-\d{2}$/.test(order.rushPayBy)) { extraCols.push("rushPayBy"); extraBinds.push(order.rushPayBy); }
   // An imported order (migrations/0087): the store it came from and that store's order number.
   if (order.source) { extraCols.push("source", "externalOrderId"); extraBinds.push(order.source, order.externalOrderId || null); }
+  // Its customer (migrations/0108), named only when there is one, so an older database still takes the order.
+  if (customer.id) { extraCols.push("customerId"); extraBinds.push(customer.id); }
   // What the customer owes: goods, shipping and the rush fee, plus the tax on the goods and on the fee when tax is
   // added on top. Stored on the order and answered below — one figure, so the two can't differ.
   const totalCents = subtotalCents + shippingCents + rushCents + taxAddedCents + (mode === "exclusive" ? rushTaxCents : 0);
@@ -11127,7 +11410,7 @@ const trackingCutoff_ = (now = new Date()) => new Date(now.getTime() - TRACKING_
 // Shipped orders still waiting on a delivery, with a tracking number to look up
 // (the order's own, else its site-bought label's) and the carrier to ask. Least recently looked up
 // first (never looked up before all), then oldest shipment: with more waiting than one morning's
-// lookups, each still gets its turn (orders.trackingCheckedAt, migrations/0108; markTrackingChecked).
+// lookups, each still gets its turn (orders.trackingCheckedAt, migrations/0109; markTrackingChecked).
 export async function getShippedAwaitingDelivery(db, limit = 40, { now = new Date() } = {}) {
   const { results } = await db.prepare(
     `SELECT * FROM (
@@ -11166,7 +11449,7 @@ export async function getLabeledAwaitingShipment(db, limit = 40, { now = new Dat
     shippingMethod: r.shippingMethod || "", paid: !!r.paid, tracking: r.tracking, labelCarrier: r.labelCarrier || "" }));
 }
 
-// Stamps an order's tracking lookup (migrations/0108), whatever it found — a lookup that failed too, so
+// Stamps an order's tracking lookup (migrations/0109), whatever it found — a lookup that failed too, so
 // one tracking number that always errors can't hold the front of the queue.
 export async function markTrackingChecked(db, orderId, at = new Date().toISOString()) {
   await db.prepare("UPDATE orders SET trackingCheckedAt = ? WHERE orderId = ?").bind(at, orderId).run();
@@ -14139,6 +14422,7 @@ function parseOrder_(row, items, payments, labels) {
     orgId: row.orgId,
     customerName: row.customerName,
     contact: row.contact,
+    customerId: customerId_(row.customerId),   // its customer record (migrations/0108); null = none, or an older database
     paymentMethod: row.paymentMethod || "",
     paid: !!row.paid,
     paidAt: row.paidAt || "",

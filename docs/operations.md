@@ -278,6 +278,14 @@ People sign in with their own email and password. An admin manages them under
 
 What a role can't use isn't shown: no menu entry, link or button for it.
 
+**Customers** is a permission of its own, "Customer records". Each role starts with the same level
+there as it has for order details, so Back office can open, add and edit customers and archive
+them, and Production can look at them. Changing a customer's tax exemption and merging two
+customers need the full level, which Manager and Admin have. A role without the permission sees
+no Customers button, no customer search on a local sale, and no link from an order to its
+customer. A role you made yourself, or a built-in one whose permissions you have changed, starts
+without it: set it under Settings → Users → Roles and permissions.
+
 - **Adding someone:** name, email, role. You are shown a temporary password once; give it to
   them. They must choose their own the first time they sign in.
 - **Someone leaves:** disable them. They are signed out at once and can't sign in. Users are

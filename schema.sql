@@ -202,6 +202,29 @@ INSERT OR IGNORE INTO accounts (id, name, type, createdAt, updatedAt) VALUES
   (5, 'Stripe balance',    'stripe',      strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 
+-- Customer records (migrations/0108). An order belongs to one through orders.customerId (NULL when its contact is a
+-- phone number or nothing). email is trimmed and lower case, '' when there is none; addressJson is '' or the same JSON
+-- as orders.shippingAddress. Never deleted: archivedAt hides one, mergedIntoId says which customer a duplicate was
+-- folded into. A customer's tax exemption makes its orders exempt, like a shop's (db.js insertOrder).
+CREATE TABLE IF NOT EXISTS customers (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  name                 TEXT NOT NULL DEFAULT '',
+  company              TEXT NOT NULL DEFAULT '',
+  email                TEXT NOT NULL DEFAULT '',
+  phone                TEXT NOT NULL DEFAULT '',
+  addressJson          TEXT NOT NULL DEFAULT '',
+  notes                TEXT NOT NULL DEFAULT '',
+  taxExempt            INTEGER NOT NULL DEFAULT 0 CHECK (taxExempt IN (0, 1)),
+  taxExemptCertificate TEXT NOT NULL DEFAULT '',
+  taxExemptExpires     TEXT,
+  createdAt            TEXT NOT NULL,
+  updatedAt            TEXT NOT NULL,
+  archivedAt           TEXT,
+  mergedIntoId         INTEGER REFERENCES customers(id)
+);
+-- One customer per email, leaving out the ones merged away.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_email ON customers(email) WHERE email <> '' AND mergedIntoId IS NULL;
+
 CREATE TABLE IF NOT EXISTS orders (
   orderId             TEXT PRIMARY KEY,
   orgId               TEXT NOT NULL REFERENCES orgs(orgId),
@@ -276,7 +299,8 @@ CREATE TABLE IF NOT EXISTS orders (
   source              TEXT NOT NULL DEFAULT '',   -- migrations/0087: '' = made here; 'etsy' / 'shopify' / 'csv' = imported
   externalOrderId     TEXT,                       -- migrations/0087: the store's own order number
   payOnDelivery       INTEGER NOT NULL DEFAULT 0 CHECK (payOnDelivery IN (0, 1)),  -- migrations/0105: steps go on before it's paid
-  trackingCheckedAt   TEXT                        -- migrations/0108: the delivery check's last tracking lookup (least recent first)
+  customerId          INTEGER REFERENCES customers(id),  -- migrations/0108: the customer it belongs to; NULL = none
+  trackingCheckedAt   TEXT                        -- migrations/0109: the delivery check's last tracking lookup (least recent first)
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -798,7 +822,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_running_per_piece
   ON production_runs(itemId, pieceNo) WHERE status = 'running' AND pieceNo IS NOT NULL;
 -- migrations/0104: the finished runs by when they finished (the pricing analysis' last 12 months).
 CREATE INDEX IF NOT EXISTS idx_runs_done_finished ON production_runs(finishedAt) WHERE status = 'done';
--- migrations/0109: runs by when they started (the Run times report's range and its run log's pages).
+-- migrations/0110: runs by when they started (the Run times report's range and its run log's pages).
 CREATE INDEX IF NOT EXISTS idx_runs_started ON production_runs(startedAt);
 
 -- migrations/0032: a design's hoops (on its own / with a typed-in name), a product's designs in
@@ -989,7 +1013,7 @@ CREATE INDEX IF NOT EXISTS idx_blank_colors          ON blank_colors(blankId);
 CREATE INDEX IF NOT EXISTS idx_inventory_type  ON inventory(productType, size);
 CREATE INDEX IF NOT EXISTS idx_blanks_type     ON blanks(productType);
 CREATE INDEX IF NOT EXISTS idx_prod_blank_link ON product_blank_links(orgId, productId);
-CREATE INDEX IF NOT EXISTS idx_prod_blank_link_blank ON product_blank_links(blankId, blankColor, blankSize);   -- migrations/0109: which products use a blank
+CREATE INDEX IF NOT EXISTS idx_prod_blank_link_blank ON product_blank_links(blankId, blankColor, blankSize);   -- migrations/0110: which products use a blank
 CREATE INDEX IF NOT EXISTS idx_rts_org         ON ready_to_ship(orgId, productId);
 CREATE INDEX IF NOT EXISTS idx_items_from_stock ON order_items (orgId, productId, size, stockVariant) WHERE fromStock = 1;
 
@@ -1093,7 +1117,7 @@ CREATE INDEX IF NOT EXISTS idx_movements_blank    ON inventory_movements(blankId
 CREATE INDEX IF NOT EXISTS idx_movements_blank_color ON inventory_movements(blankId, color, size, occurredAt);
 CREATE INDEX IF NOT EXISTS idx_movements_occurred ON inventory_movements(occurredAt);
 CREATE INDEX IF NOT EXISTS idx_movements_order    ON inventory_movements(orderId);
--- migrations/0109: purchases still in force by when they were recorded (has restock on order arrived?).
+-- migrations/0110: purchases still in force by when they were recorded (has restock on order arrived?).
 CREATE INDEX IF NOT EXISTS idx_movements_purchase_created ON inventory_movements(createdAt) WHERE kind = 'purchase' AND voidedAt IS NULL;
 
 -- Months already filed: changes that would alter them are refused (migrations/0010).
@@ -1684,6 +1708,7 @@ CREATE INDEX IF NOT EXISTS idx_download_log_grant ON download_log(grantId, at);
 
 -- Orders imported from another store (migrations/0087): the same store order is only imported once per shop.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_external ON orders(orgId, source, externalOrderId) WHERE externalOrderId IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customerId);   -- migrations/0108
 
 -- Versioned list cache (migrations/0102): one version per admin reference list, raised by the triggers below on
 -- every change to a table behind it. '_ns' is a random number per database (Cache API keys).

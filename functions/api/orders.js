@@ -90,6 +90,7 @@ import {
   updateOrderItem, addOrderItem, recalcOrderTotals,
   getOrderTotal, getOrderForShipping,
   updateOrderCustomerInfo,
+  listCustomers, getCustomer, saveCustomer, setCustomerArchived, mergeCustomers, setOrderCustomer,
   priceItem, CUSTOM_DESIGN_KINDS, CUSTOM_PLAIN_LOCATION, customFromConfig,
   createDesignVerification, approvePendingDesignVerifications,
   getLatestVerificationsByOrg,
@@ -145,6 +146,31 @@ import { verifyTurnstile } from "../_lib/turnstile.js";
 import { expireCheckoutSession, createCheckoutSession, CHECKOUT_LINK_SECONDS, listCacheVersions_, readCachedList_, refreshCachedLists_, peekCachedList_, blankListDelta_ } from "../_lib/db.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9\-]{1,64}$/;
+// Customer records (migrations/0108). A customer id as sent: null when none was sent, the id, or false when what
+// was sent isn't one (a whole number above zero).
+function customerIdOf_(v) {
+  if (v === undefined || v === null || v === "") return null;
+  const n = typeof v === "number" || typeof v === "string" ? Number(v) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : false;
+}
+// A customer's fields by kind: plain text and its longest length, and the tax exemption (Full's, audited first).
+const CUSTOMER_TEXT_FIELDS_ = [["name", 200], ["company", 200], ["email", 200], ["phone", 50], ["notes", 2000]];
+const CUSTOMER_PLAIN_FIELDS_ = ["name", "company", "email", "phone", "address", "notes"];
+const CUSTOMER_EXEMPTION_FIELDS_ = ["taxExempt", "taxExemptCertificate", "taxExemptExpires"];
+// A customers row as the audit log records it (and as a save starts from): no row gives a new customer's blanks.
+function customerAuditView_(row) {
+  const r = row || {};
+  let address = null;
+  if (r.addressJson) { try { address = JSON.parse(r.addressJson); } catch (e) { address = null; } }
+  return { name: r.name || "", company: r.company || "", email: r.email || "", phone: r.phone || "", address, notes: r.notes || "",
+    taxExempt: r.taxExempt === true || Number(r.taxExempt) === 1, taxExemptCertificate: r.taxExemptCertificate || "", taxExemptExpires: r.taxExemptExpires || null };
+}
+// { field: { from, to } } for each of `fields` that differs between two of those.
+function customerChanges_(before, after, fields) {
+  const out = {};
+  for (const f of fields) if (JSON.stringify(before[f] ?? null) !== JSON.stringify(after[f] ?? null)) out[f] = { from: before[f] ?? null, to: after[f] ?? null };
+  return out;
+}
 // Whether an order counts as paid, for a money action's reply: the Payments window redraws the row from it (Mark as
 // paid, the steps), so a payment that settles the order shows it at once, not after a reload.
 const paidState_ = (o) => o ? { paid: !!o.paid, paidForWork: !!o.paidForWork, paidAt: o.paidAt || null, payOnDelivery: !!o.payOnDelivery } : {};
@@ -400,6 +426,9 @@ const NO_MONTH_ACTIONS = new Set([
   "deleteBlankShipment", "setOrderCompleted", "checkDeliveries", "recordTracking", "bulkRecordTracking", "createShippingPaymentLink", "sendInvoice",
   "resendEmail", "resendDownloads", "resetDownloads", "revokeDownloads", "importOrders",
   "setPayOnDelivery",   // pay on delivery (migrations/0105): no money moves, only whether the steps wait for it
+  // Customer records (migrations/0108): who an order belongs to and who is tax-exempt from now on. An order's own
+  // tax was settled when it was placed, so linking, merging or exempting a customer changes no month's numbers.
+  "saveCustomer", "setCustomerArchived", "mergeCustomers", "setOrderCustomer",
   // Run Order and transfer sheets
   "startRun", "completeRun", "abortRun", "markManufacturedOnMachine", "setTransferReceived", "setTransfersApplied",
   // Catalog and shops
@@ -2710,6 +2739,11 @@ async function handleOrdersPost_(context, listBefore = null) {
     // even when it's limited to local sales).
     if (body.payOnDelivery && !can_("orders.payOnDelivery", "edit")) return forbidden_("Your role can't set orders to pay on delivery. Ask an admin.");
     if (body.payOnDelivery && body.paid) return jsonResponse({ status: "error", message: "Choose Paid or Pay on delivery, not both." }, 400);
+    // The customer picked on the form (migrations/0108). Picking one can make the sale tax-exempt, so it needs
+    // the Customers page's own permission, not only the sale's.
+    const saleCustomerId = customerIdOf_(body.customerId);
+    if (saleCustomerId === false) return jsonResponse({ status: "error", message: "That customer isn't valid. Pick one from the list." }, 400);
+    if (saleCustomerId && !can_("customers.records", "read")) return forbidden_("Your role can't pick a customer for a sale. Ask an admin.");
     { const locked = await periodGuard(body); if (locked) return locked; }
 
     const org = body.org;
@@ -2800,6 +2834,8 @@ async function handleOrdersPost_(context, listBefore = null) {
       orgId: org,
       customerName: String(body.customerName || "Local Sale").slice(0, 200),
       contact:       String(body.contact       || "").slice(0, 200),
+      // Not stored on the order (it has no phone column unless shipped): a customer made from this sale keeps it.
+      phone:         String(body.phone         || "").trim().slice(0, 50),
       paymentMethod: String(body.paymentMethod || "").slice(0, 50),
       subtotal, shippingCost: 0, total: subtotal,
       shippingMethod: "", shippingAddress: null, totalWeightOz: 0,
@@ -2829,7 +2865,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     // Lines for stocked products come out of the shop's finished stock (migrations/0060) — handed over
     // now, so they're pulled at once.
     try {
-      await insertOrder(env.DB, order, pricedItems, { fillFromStock: true });
+      await insertOrder(env.DB, order, pricedItems, { fillFromStock: true, ...(saleCustomerId ? { customerId: saleCustomerId } : {}) });
     } catch (e) {
       // Two requests with the same key at the same moment: the order and its lines go in as one batch, so the
       // second fails whole on the order number and the first one's order is the sale.
@@ -2844,8 +2880,183 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (body.delivered) await setFulfillmentStage(env.DB, orderId, "delivered", { at: placedAt });
 
     audit({ orgId: org, orderId, action: "order.created_local_sale",
-      detail: { customerName: order.customerName, total: subtotal, paid: !!body.paid, payOnDelivery: !!body.payOnDelivery, items: pricedItems.length } });
+      detail: { customerName: order.customerName, total: subtotal, paid: !!body.paid, payOnDelivery: !!body.payOnDelivery, items: pricedItems.length, ...(saleCustomerId ? { customerId: saleCustomerId } : {}) } });
     return jsonResponse({ status: "ok", orderId });
+  }
+
+  // ---- Customer records (migrations/0108): the Customers page, the Local sale picker, an order's customer ----
+  // Orders link to a customer record (orders.customerId). db.js does the work; here are the checks, who may, and
+  // the audit log. A customer's row as stored, for those checks and the log's before / after.
+  const customerRow_ = (id) => env.DB.prepare("SELECT * FROM customers WHERE id = ?").bind(id).first();
+  // Deploys and migrations aren't atomic: until 0108 has run there is no customers table, and these actions say so
+  // instead of failing with a database error.
+  const customersReady_ = async (run) => {
+    try { return await run(); }
+    catch (e) {
+      if (!/no such table: customers|no such column: (\w+\.)?customerId/i.test(String(e && e.message))) throw e;
+      return jsonResponse({ status: "error", message: "Customers aren't ready yet: the database is still being updated. Try again in a minute." }, 503);
+    }
+  };
+  const customerNotFound_ = () => jsonResponse({ status: "error", message: "Customer not found" }, 404);
+  const customerMergedAway_ = () => jsonResponse({ status: "error", message: "That customer was merged into another one. Open that one instead." }, 400);
+
+  // ---- listCustomers — the Customers list, and the search behind every customer picker ----
+  if (body.action === "listCustomers") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const whole = (v, min, dflt) => Number.isInteger(Number(v)) && Number(v) >= min && v !== "" && v != null && typeof v !== "boolean" ? Number(v) : dflt;
+    return customersReady_(async () => {
+      const got = await listCustomers(env.DB, { q: typeof body.q === "string" ? body.q.trim().slice(0, 200) : "", includeArchived: body.includeArchived === true,
+        limit: Math.min(200, whole(body.limit, 1, 50)), offset: whole(body.offset, 0, 0) });
+      return jsonResponse({ status: "ok", customers: got.customers, total: got.total });
+    });
+  }
+
+  // ---- getCustomer — one customer, their orders (every shop's) and what they come to ----
+  // The orders' totals, payments and balances go to every role that may open Customers, as the Orders page shows
+  // them to every role that may open it (orderCostsFor_ leaves out only cost of goods and processor fees, and
+  // neither is in this answer).
+  if (body.action === "getCustomer") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const id = customerIdOf_(body.id);
+    if (!id) return jsonResponse({ status: "error", message: "That customer isn't valid." }, 400);
+    return customersReady_(async () => {
+      const got = await getCustomer(env.DB, id);
+      if (!got) return customerNotFound_();
+      return jsonResponse({ status: "ok", customer: got.customer, orders: got.orders, totals: got.totals });
+    });
+  }
+
+  // ---- saveCustomer — add a customer, or change one (body.id) ----
+  // A field left out of a change keeps what it had. The tax exemption (exempt, certificate, expiry) decides whether
+  // sales tax is charged on the customer's next orders, so changing any of it needs Full and is written to the audit
+  // log before it is saved; if that row can't be written, nothing is saved.
+  if (body.action === "saveCustomer") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const id = customerIdOf_(body.id);
+    if (id === false) return jsonResponse({ status: "error", message: "That customer isn't valid." }, 400);
+    return customersReady_(async () => {
+      // A new customer reads the table too, so a database without migrations/0108 answers 503 before the
+      // exemption's audit row is written, not after.
+      const beforeRow = id ? await customerRow_(id) : (await env.DB.prepare("SELECT id FROM customers LIMIT 1").first(), null);
+      if (id && !beforeRow) return customerNotFound_();
+      if (beforeRow && beforeRow.mergedIntoId != null) return customerMergedAway_();
+      const before = customerAuditView_(beforeRow);   // a new customer starts from blanks
+      const input = id ? { id } : {};
+      for (const [k, max] of CUSTOMER_TEXT_FIELDS_) input[k] = body[k] === undefined ? before[k] : String(body[k] == null ? "" : body[k]).slice(0, max);
+      if (body.address !== undefined && body.address !== null && (typeof body.address !== "object" || Array.isArray(body.address))) {
+        return jsonResponse({ status: "error", message: "That address isn't valid." }, 400);
+      }
+      input.address = body.address === undefined ? before.address : body.address;
+      if (!input.name.trim() && !input.company.trim()) return jsonResponse({ status: "error", message: "Enter a name or a company." }, 400);
+      input.taxExempt = body.taxExempt === undefined ? before.taxExempt : body.taxExempt === true || body.taxExempt === 1;
+      input.taxExemptCertificate = body.taxExemptCertificate === undefined ? before.taxExemptCertificate : String(body.taxExemptCertificate == null ? "" : body.taxExemptCertificate).trim().slice(0, 200);
+      const expires = body.taxExemptExpires === undefined ? (before.taxExemptExpires || "") : String(body.taxExemptExpires == null ? "" : body.taxExemptExpires).trim();
+      if (expires && !(/^\d{4}-\d{2}-\d{2}$/.test(expires) && !isNaN(new Date(expires + "T12:00:00.000Z")) && new Date(expires + "T12:00:00.000Z").toISOString().slice(0, 10) === expires)) {
+        return jsonResponse({ status: "error", message: "The exemption's expiry date isn't a valid date." }, 400);
+      }
+      input.taxExemptExpires = expires;
+      const exemption = customerChanges_(before, { ...input, taxExemptExpires: expires || null }, CUSTOMER_EXEMPTION_FIELDS_);
+      const exemptionChanged = Object.keys(exemption).length > 0;
+      if (exemptionChanged) {
+        if (!can_("customers.records", "full")) return forbidden_("Your role can't change a customer's tax exemption. Ask an admin.");
+        const auditErr = await auditStrict({ orgId: null, orderId: null, action: "customer.exemption_changed",
+          detail: { customerId: id || null, name: input.name, company: input.company, changes: exemption } });
+        if (auditErr) return auditErr;       // 503 — nothing was changed
+      }
+      const r = await saveCustomer(env.DB, input);
+      if (!r || r.error) {
+        // The log already says the exemption changed; it didn't, so the log says that too.
+        if (exemptionChanged) audit({ orgId: null, orderId: null, action: "customer.exemption_not_changed", detail: { customerId: id || null, name: input.name, company: input.company, reason: (r && r.error) || "" } });
+        return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't save the customer. Try again." }, 400);
+      }
+      const after = customerAuditView_(await customerRow_(r.id).catch(() => null) || { ...input, addressJson: input.address ? JSON.stringify(input.address) : "" });
+      if (r.created) {
+        audit({ orgId: null, orderId: null, action: "customer.created",
+          detail: { customerId: r.id, name: after.name, company: after.company, email: after.email, phone: after.phone, ...(after.taxExempt ? { taxExempt: true } : {}) } });
+      } else {
+        // The exemption's change has its own row, written first (above).
+        const changes = customerChanges_(before, after, CUSTOMER_PLAIN_FIELDS_);
+        if (Object.keys(changes).length) audit({ orgId: null, orderId: null, action: "customer.updated", detail: { customerId: r.id, name: after.name, changes } });
+      }
+      return jsonResponse({ status: "ok", id: r.id, created: !!r.created });
+    });
+  }
+
+  // ---- setCustomerArchived — archive a customer (off the list and the pickers; their orders stay), or restore ----
+  if (body.action === "setCustomerArchived") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const id = customerIdOf_(body.id);
+    if (!id) return jsonResponse({ status: "error", message: "That customer isn't valid." }, 400);
+    if (typeof body.archived !== "boolean") return jsonResponse({ status: "error", message: "Say whether to archive the customer or restore them." }, 400);
+    return customersReady_(async () => {
+      const row = await customerRow_(id);
+      if (!row) return customerNotFound_();
+      if (row.mergedIntoId != null) return customerMergedAway_();
+      const r = await setCustomerArchived(env.DB, id, body.archived);
+      if (!r || r.error) return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't change the customer. Try again." }, 400);
+      // Only a real change is logged: archiving an archived customer does nothing.
+      if (!!row.archivedAt !== body.archived) audit({ orgId: null, orderId: null, action: body.archived ? "customer.archived" : "customer.restored",
+        detail: { customerId: id, name: row.name || "", company: row.company || "" } });
+      return jsonResponse({ status: "ok" });
+    });
+  }
+
+  // ---- mergeCustomers — one customer's orders move to another, and the first record is retired ----
+  // It can't be taken back from the page, so it is Full's, and audited first with the record being retired. Every
+  // reason db.js would refuse it is checked before that row is written, so the log never names a merge that didn't
+  // happen. A tax exemption is not carried over (db.js mergeCustomers).
+  if (body.action === "mergeCustomers") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    const fromId = customerIdOf_(body.fromId), intoId = customerIdOf_(body.intoId);
+    if (!fromId || !intoId) return jsonResponse({ status: "error", message: "Pick the customer to merge and the customer to merge them into." }, 400);
+    if (fromId === intoId) return jsonResponse({ status: "error", message: "A customer can't be merged into themselves." }, 400);
+    return customersReady_(async () => {
+      const [from, into] = await Promise.all([customerRow_(fromId), customerRow_(intoId)]);
+      if (!from || !into) return customerNotFound_();
+      if (from.mergedIntoId != null || into.mergedIntoId != null) return jsonResponse({ status: "error", message: "One of these customers was already merged into another one." }, 400);
+      const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM orders WHERE customerId = ?").bind(fromId).first();
+      const auditErr = await auditStrict({ orgId: null, orderId: null, action: "customer.merged",
+        detail: { fromId, intoId, from: customerAuditView_(from), into: { name: into.name || "", company: into.company || "", email: into.email || "" }, orders: Number(count && count.n) || 0 } });
+      if (auditErr) return auditErr;       // 503 — nothing was changed
+      const r = await mergeCustomers(env.DB, { fromId, intoId });
+      if (!r || r.error) {
+        audit({ orgId: null, orderId: null, action: "customer.merge_not_done", detail: { fromId, intoId, reason: (r && r.error) || "" } });
+        return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't merge the customers. Try again." }, 400);
+      }
+      return jsonResponse({ status: "ok", moved: Number(r.moved) || 0 });
+    });
+  }
+
+  // ---- setOrderCustomer — link an order to a customer, or unlink it (customerId null) ----
+  // Only whose order it is changes: the order's own name, contact and sales tax stay as they were placed.
+  if (body.action === "setOrderCustomer") {
+    const denied = await requireAdmin(env, host, body.key, request, "Admin access is only available from the admin subdomain.", ACTION_PERM_[body.action]);
+    if (denied) return denied;
+    // It is an order that changes hands: a role that can't see orders can't move one by its number.
+    if (!can_("orders.details", "read")) return forbidden_("Your role can't change an order's customer. Ask an admin.");
+    const orderId = typeof body.orderId === "string" ? body.orderId : "";
+    if (!orderId || !ORDER_ID_RE.test(orderId)) return jsonResponse({ status: "error", message: "Invalid order ID" }, 400);
+    const customerId = customerIdOf_(body.customerId);
+    if (customerId === false) return jsonResponse({ status: "error", message: "That customer isn't valid. Pick one from the list." }, 400);
+    return customersReady_(async () => {
+      const order = await env.DB.prepare("SELECT orgId, customerId FROM orders WHERE orderId = ?").bind(orderId).first();
+      if (!order) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+      if (customerId) {
+        const row = await customerRow_(customerId);
+        if (!row) return customerNotFound_();
+        if (row.mergedIntoId != null) return customerMergedAway_();
+      }
+      const r = await setOrderCustomer(env.DB, orderId, customerId);
+      if (!r || r.error) return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't change the order's customer. Try again." }, 400);
+      const was = order.customerId == null ? null : Number(order.customerId);
+      if (was !== customerId) audit({ orgId: order.orgId, orderId, action: "order.customer_linked", detail: { customerId: { from: was, to: customerId } } });
+      return jsonResponse({ status: "ok" });
+    });
   }
 
   // ---- importOrders — Orders → Import orders (migrations/0087) ----------------

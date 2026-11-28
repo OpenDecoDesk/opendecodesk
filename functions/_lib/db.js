@@ -10383,14 +10383,27 @@ export async function importOrdersCsv(db, orgId, units, opts = {}) {
       throw e;
     }
     res.orderId = orderId;
-    if (discount > 0) await setOrderDiscount(db, orderId, discount, ORDER_IMPORT_SOURCES[format] + " discount");
-    if (res.paid) await settleOrderBalance(db, orderId, "Paid on " + (ORDER_IMPORT_SOURCES[format] === "CSV" ? "the store" : ORDER_IMPORT_SOURCES[format]), paidAt);
-    // Shipped by the store already: its stock lines are handed over and the order is marked shipped.
-    if (res.shipped) {
-      await pullStockLines(db, orderId, shippedAt || placedAt);
-      await setFulfillmentStage(db, orderId, "shipped", { at: shippedAt || placedAt });
-    }
+    // The caller's list of every order made (opts.createdIds), so it can audit them even if a later order throws.
+    if (Array.isArray(opts.createdIds)) opts.createdIds.push(orderId);
     created++;
+    // The order exists now, so a later step that fails doesn't undo it or stop the import (a re-run would skip it as
+    // already imported): the order is kept, the result names it and the step, and the rest of the file goes on.
+    let step = "";
+    try {
+      step = "discount";
+      if (discount > 0) await setOrderDiscount(db, orderId, discount, ORDER_IMPORT_SOURCES[format] + " discount");
+      step = "payment";
+      if (res.paid) await settleOrderBalance(db, orderId, "Paid on " + (ORDER_IMPORT_SOURCES[format] === "CSV" ? "the store" : ORDER_IMPORT_SOURCES[format]), paidAt);
+      // Shipped by the store already: its stock lines are handed over and the order is marked shipped.
+      step = "stock hand-over";
+      if (res.shipped) await pullStockLines(db, orderId, shippedAt || placedAt);
+      step = "shipped stage";
+      if (res.shipped) await setFulfillmentStage(db, orderId, "shipped", { at: shippedAt || placedAt });
+    } catch (e) {
+      console.error("Order import: a step failed after the order was made", orderId, step, e);
+      res.unfinished = step;
+      res.problems.push(`Order ${orderNo} was imported as ${orderId}, but it stopped at the ${step} step (${String((e && e.message) || e).slice(0, 200)}) — finish it on the order.`);
+    }
   }
   return { dryRun, results: out, created, updated: 0, skipped };
 }
@@ -10977,18 +10990,17 @@ export async function setFulfillmentStage(db, orderId, stage, extras = {}) {
   if (stage === "blankOrdered") {
     // Stamp the chosen line items (default all active) with the vendor order, then roll up to orders.
     const ids = await blankTargetItemIds_(db, orderId, extras);
-    for (const id of ids) {
-      await db.prepare(`UPDATE order_items SET blankOrderedAt=COALESCE(blankOrderedAt, ?), blankVendor=?, blankVendorOrderId=?, blankEstDelivery=? WHERE id=? AND orderId=? AND cancelDate IS NULL`)
-        .bind(now, extras.vendor || "", extras.vendorOrderId || "", extras.estimatedDelivery || null, id, orderId).run();
-    }
+    // One batch for all the lines (as markItemsBlankOrdered does): one round trip, and all of them or none.
+    const stmts = ids.map(id => db.prepare(`UPDATE order_items SET blankOrderedAt=COALESCE(blankOrderedAt, ?), blankVendor=?, blankVendorOrderId=?, blankEstDelivery=? WHERE id=? AND orderId=? AND cancelDate IS NULL`)
+      .bind(now, extras.vendor || "", extras.vendorOrderId || "", extras.estimatedDelivery || null, id, orderId));
+    if (stmts.length) await db.batch(stmts);
     await recomputeOrderBlankStatus_(db, orderId);
   } else if (stage === "blankShipped") {
     // Mark the chosen items shipped (tracking numbers are added separately via addBlankShipment).
     const ids = await blankTargetItemIds_(db, orderId, extras);
-    for (const id of ids) {
-      await db.prepare(`UPDATE order_items SET blankShippedAt=COALESCE(blankShippedAt, ?) WHERE id=? AND orderId=? AND cancelDate IS NULL`)
-        .bind(extras.shippedAt || now, id, orderId).run();
-    }
+    const stmts = ids.map(id => db.prepare(`UPDATE order_items SET blankShippedAt=COALESCE(blankShippedAt, ?) WHERE id=? AND orderId=? AND cancelDate IS NULL`)
+      .bind(extras.shippedAt || now, id, orderId));
+    if (stmts.length) await db.batch(stmts);
     await recomputeOrderBlankStatus_(db, orderId);
   } else if (stage === "blankReceived") {
     const ids = await blankTargetItemIds_(db, orderId, extras);
@@ -10997,11 +11009,12 @@ export async function setFulfillmentStage(db, orderId, stage, extras = {}) {
       const itemId = ic.itemId != null ? ic.itemId : ic.sheetRow;
       if (itemId != null) condByItem[Number(itemId)] = { condition: ic.condition || "Good", note: ic.note || "" };
     }
-    for (const id of ids) {
+    const stmts = ids.map(id => {
       const c = condByItem[id] || { condition: extras.blankCondition || "Good", note: "" };
-      await db.prepare(`UPDATE order_items SET blankReceivedAt=COALESCE(blankReceivedAt, ?), blankCondition=?, blankConditionNote=? WHERE id=? AND orderId=? AND cancelDate IS NULL`)
-        .bind(now, c.condition, c.note, id, orderId).run();
-    }
+      return db.prepare(`UPDATE order_items SET blankReceivedAt=COALESCE(blankReceivedAt, ?), blankCondition=?, blankConditionNote=? WHERE id=? AND orderId=? AND cancelDate IS NULL`)
+        .bind(now, c.condition, c.note, id, orderId);
+    });
+    if (stmts.length) await db.batch(stmts);
     await recomputeOrderBlankStatus_(db, orderId);
   } else if (stage === "shipped") {
     const before = await db.prepare("SELECT shippedAt FROM orders WHERE orderId=?").bind(orderId).first();
@@ -12394,20 +12407,34 @@ export async function getExpense(db, id) {
 // Fields already validated by the caller (orders.js saveExpense).
 export async function saveExpense(db, id, x) {
   const now = new Date().toISOString();
-  const vals = [x.date, String(x.description).trim(), Number(x.categoryId), toCents(x.amount), x.vendor || "",
-    Number(x.businessUsePct), x.receiptKey || "", x.receiptName || "", x.placedInService || null, x.depMethod || null,
-    x.vendorChargedTax === false ? 0 : 1, x.paidPersonally ? null : (x.accountId ? Number(x.accountId) : null), x.paidPersonally ? 1 : 0,
-    x.refundOfId ? Number(x.refundOfId) : null];
   if (id) {
     await db.prepare(`UPDATE expenses SET expenseDate = ?, description = ?, categoryId = ?, amountCents = ?, vendor = ?,
       businessUsePct = ?, receiptKey = ?, receiptName = ?, placedInService = ?, depMethod = ?, vendorChargedTax = ?, accountId = ?, paidPersonally = ?, refundOfId = ?, updatedAt = ?
-      WHERE id = ? AND deletedAt IS NULL`).bind(...vals, now, Number(id)).run();
+      WHERE id = ? AND deletedAt IS NULL`).bind(...expenseVals_(x), now, Number(id)).run();
     return Number(id);
   }
-  const r = await db.prepare(`INSERT INTO expenses (expenseDate, description, categoryId, amountCents, vendor, businessUsePct,
-    receiptKey, receiptName, placedInService, depMethod, vendorChargedTax, accountId, paidPersonally, refundOfId, createdAt, updatedAt, receiptGroup) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`)
-    .bind(...vals, now, now, x.receiptGroup ? String(x.receiptGroup).slice(0, 64) : null).first();
+  const r = await insertExpenseStmt_(db, x, now).first();
   return Number(r.id);
+}
+// One expense's column values, in the order saveExpense's UPDATE and the INSERT below list them.
+function expenseVals_(x) {
+  return [x.date, String(x.description).trim(), Number(x.categoryId), toCents(x.amount), x.vendor || "",
+    Number(x.businessUsePct), x.receiptKey || "", x.receiptName || "", x.placedInService || null, x.depMethod || null,
+    x.vendorChargedTax === false ? 0 : 1, x.paidPersonally ? null : (x.accountId ? Number(x.accountId) : null), x.paidPersonally ? 1 : 0,
+    x.refundOfId ? Number(x.refundOfId) : null];
+}
+function insertExpenseStmt_(db, x, now) {
+  return db.prepare(`INSERT INTO expenses (expenseDate, description, categoryId, amountCents, vendor, businessUsePct,
+    receiptKey, receiptName, placedInService, depMethod, vendorChargedTax, accountId, paidPersonally, refundOfId, createdAt, updatedAt, receiptGroup) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`)
+    .bind(...expenseVals_(x), now, now, x.receiptGroup ? String(x.receiptGroup).slice(0, 64) : null);
+}
+// Several new expenses (the CSV import) as one batch: one round trip, and all of them or none — a row that fails
+// leaves nothing behind, so importing the file again can't make duplicates. Returns their ids in the list's order.
+export async function insertExpenses(db, list) {
+  if (!list || !list.length) return [];
+  const now = new Date().toISOString();
+  const res = await db.batch(list.map(x => insertExpenseStmt_(db, x, now)));
+  return res.map(r => Number(r.results[0].id));
 }
 // How much of a purchase has already been refunded (positive cents), counting the live refund
 // expenses linked to it (optionally leaving one out — the one being edited).

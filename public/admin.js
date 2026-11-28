@@ -3278,28 +3278,22 @@ async function bulkSendDesignVerification(orgId){
   const modal = await showDesignVerifModal();
   if(!modal) return;
 
-  const errEl = document.createElement("div");
   try{
-    const res = await fetch("/api/orders", {
-      method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({
-        action: "sendDesignVerification",
-        key: adminKey,
-        org: orgId,
-        orderIds,
-        message: modal.message,
-        imageUrls: modal.imageUrls,
-      })
-    });
-    const data = await res.json();
-    if(!res.ok || data.status === "error"){
-      showToast("Error: " + ((data && data.message) || "Unknown error"), true);
+    // In groups of BULK_STAGE_GROUP_ (the server sends at most that many proofs a request). A group that fails stops
+    // the rest, and the toast says how many were already sent, so they aren't sent twice.
+    const r = await postOrdersInGroups_({ action: "sendDesignVerification", org: orgId, message: modal.message, imageUrls: modal.imageUrls },
+      orderIds, BULK_STAGE_GROUP_);
+    if(!r.done){
+      showToast(r.unreachable ? "Network error — could not send verification emails." : "Error: " + r.error, true);
       return;
     }
-    const reasons = (data.skippedReasons || []).join("; ");
+    const data = { sent: 0, skipped: 0, skippedReasons: [] };
+    r.replies.forEach(d => { data.sent += Number(d.sent) || 0; data.skipped += Number(d.skipped) || 0; data.skippedReasons.push(...(d.skippedReasons || [])); });
+    const reasons = data.skippedReasons.join("; ");
     const skippedNote = data.skipped ? ` (${data.skipped} skipped — ${reasons || "no email address on file"})` : "";
-    showToast(`✓ Verification email sent to ${data.sent} order${data.sent===1?"":"s"}${skippedNote}.`, !!data.skipped && !data.sent);
-    clearBulkSelection();
+    const stopped = r.error ? ` It stopped after ${r.done} of ${orderIds.length} orders (${r.error}) — the other ${orderIds.length - r.done} were not sent. Select them and try again.` : "";
+    showToast(`✓ Verification email sent to ${data.sent} order${data.sent===1?"":"s"}${skippedNote}.${stopped}`, !!r.error || (!!data.skipped && !data.sent));
+    if(!r.error) clearBulkSelection();
   }catch(e){
     showToast("Network error — could not send verification emails.", true);
   }
@@ -22890,7 +22884,10 @@ function showOrderCsvImportModal_(orgId, file, onDone){
     intro: () => `<div style="font-size:12px;color:#555;margin-bottom:8px;">Reading this as ${ORDER_IMPORT_SOURCE_[format] ? `<b>${ORDER_IMPORT_SOURCE_[format]}</b>` : "an orders file"}.</div>`,
     detail: (r) => [r.lines && r.lines.length ? r.lines.map(escapeHtml).join("<br>") : "", [r.total, r.paid ? "paid" : r.action !== "skip" ? "unpaid" : "", r.shipped ? "shipped" : ""].filter(Boolean).join(" · ")]
       .filter(Boolean).join("<br>"),
-    done: (r) => `Orders imported: ${r.created}${r.skipped ? `, ${r.skipped} skipped` : ""}.`,
+    // An order made whose later step (discount, payment, stock, shipped) failed is kept; the toast names it to finish by hand.
+    done: (r) => { const part = (r.results || []).filter(x => x.orderId && x.unfinished);
+      return `Orders imported: ${r.created}${r.skipped ? `, ${r.skipped} skipped` : ""}.` +
+        (part.length ? ` ⚠ ${part.length} not finished — open ${part.length === 1 ? "it" : "them"} and finish by hand: ${part.map(x => `${x.orderNo} (${x.unfinished})`).join(", ")}.` : ""); },
   });
 }
 function pickOrderImportFile_(orgId){

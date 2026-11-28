@@ -3,7 +3,7 @@
 // invoice PDF, void, the no-Shippo state — and what the Production and Read only roles may do there.
 // Every test makes its own shop (makeShop) and its own orders on that shop's page (placeOrder), and only
 // ever looks at that shop's orders: other specs place orders on the same install at the same time.
-import { test, expect, openAdmin, toast, uniq, user, ADMIN, apiContext, callApi } from "../fixtures.mjs";
+import { test, expect, openAdmin, toast, uniq, user, ADMIN, apiContext, callApi, pngBytes } from "../fixtures.mjs";
 import { makeShop, placeOrder } from "../lib/data.mjs";
 
 // ---- helpers ---------------------------------------------------------------------------------------------
@@ -420,6 +420,37 @@ test("bulk: select orders, set their due date and move them to Digitizing comple
   await page.getByRole("checkbox", { name: "Select all orders" }).check();
   await bar.getByRole("button", { name: "Clear" }).click();
   await expect(page.locator(".order-select:checked")).toHaveCount(0);
+});
+
+// ✉ Send verification takes at most 20 orders a request on the server (orders.js sendDesignVerification); the page
+// sends a bigger selection in groups of 20 (admin.js postOrdersInGroups_) and adds up what each group answered.
+test("bulk: ✉ Send verification for 22 orders goes as two requests, and the toast counts all 22", async ({ page, api }) => {
+  const shop = await makeShop(api, { prefix: "dvb", products: [{ name: "Sample Tee", price: 20 }] });
+  for (let i = 0; i < 22; i++) {
+    await api("createLocalSale", { org: shop.orgId, customerName: uniq("Dana Proof"), contact: "proof" + i + "@example.test", paymentMethod: "Cash",
+      items: [{ productId: shop.products[0].productId, qty: 1 }] });
+  }
+  expect(await api("sendDesignVerification", { org: shop.orgId, orderIds: Array.from({ length: 21 }, (_, i) => "NOPE-" + i), message: "x" },
+    { allowError: true, withStatus: true })).toMatchObject({ status: 400, data: { message: "Too many orders at once (max 20)" } });
+  const sent = [];
+  page.on("request", (req) => {
+    if (req.method() !== "POST" || !/\/api\/orders(\?|$)/.test(req.url())) return;
+    try { const b = JSON.parse(req.postData() || "{}"); if (b.action === "sendDesignVerification") sent.push(b); } catch (e) { /* not JSON */ }
+  });
+  await ordersPage(page, shop);
+  await page.getByRole("checkbox", { name: "Select all orders" }).check();
+  await expect(page.locator("#bulkBarCount")).toHaveText("22 orders selected");
+  await page.getByRole("button", { name: "✉ Send verification" }).click();
+  const modal = page.locator(".admin-modal");
+  await modal.locator("#dvMessage").fill("Here is the stitched logo. Please approve or ask for changes.");
+  await modal.locator("input[type=file][data-target=dvImg1]").setInputFiles({ name: "proof.png", mimeType: "image/png", buffer: pngBytes(48, 48, [40, 120, 200]) });
+  await expect(modal.locator("#dvImg1Status")).toHaveText("✓");
+  await modal.locator("#dvSend").click();
+  // No email provider here: every proof is recorded and its email reported as failed — across both groups.
+  await expect(toast(page)).toContainText("Verification email sent to 0 orders (22 skipped");
+  expect(sent.map(b => b.orderIds.length)).toEqual([20, 2]);
+  expect(new Set(sent.flatMap(b => b.orderIds)).size).toBe(22);
+  expect((await api("listDesignVerifications", { org: shop.orgId })).verifications).toHaveLength(22);
 });
 
 test("filters: the date range, Include cancelled and All shops decide which orders show", async ({ page, api }) => {

@@ -108,7 +108,7 @@ import {
   importStatementLines, autoMatchStatement, getStatementLine, matchStatementLine, unmatchStatementLine, setStatementLineIgnored,
   getReconciliationData, setReconciled, clearReconciled, isReconciled, saveCsvMapping, previewExpenseRows, landedCostLines, spreadCents,
   SCHEDULE_C_LINES, DEDUCTION_TYPES, DEPRECIATION_METHODS, listExpenseCategories, getExpenseCategory, findExpenseCategoryByName,
-  saveExpenseCategory, deleteExpenseCategory, listExpenses, getExpense, saveExpense, deleteExpense, expenseMonth, getExpenseSummary,
+  saveExpenseCategory, deleteExpenseCategory, listExpenses, getExpense, saveExpense, insertExpenses, deleteExpense, expenseMonth, getExpenseSummary,
   RECURRING_FREQUENCIES, recurringDueDates, recurringIndexAfter, listRecurringExpenses, getRecurringExpense, saveRecurringExpense, stopRecurringExpense,
   deleteRecurringExpense, recordDueRecurringExpenses, getRecurringExpensesRecorded,
   getRefundedCents, getDepositPayments, linkPaymentsToCashout, cashoutNetCents_,
@@ -1908,12 +1908,19 @@ async function handleOrdersPost_(context, listBefore = null) {
         if (!r.description) return bad(`Row ${i + 1}: description is required`);
         if (!cats.has(r.categoryId)) return bad(`Row ${i + 1}: choose a category`);
       }
-      const ids = [];
-      for (const r of rows) {
-        const cat = cats.get(r.categoryId);
-        ids.push(await saveExpense(env.DB, 0, { date: r.date, description: r.description, categoryId: cat.id, amount: r.amount, vendor: r.vendor,
-          businessUsePct: 100, receiptKey: "", receiptName: "", placedInService: cat.deductionType === "depreciation" ? r.date : null,
-          depMethod: cat.deductionType === "depreciation" ? "ask_cpa" : null, vendorChargedTax: true, accountId, paidPersonally }));
+      // One batch for the whole file (db.js insertExpenses): all the rows go in or none do, so a failure part-way
+      // can't leave half a file behind to be duplicated when it's imported again.
+      let ids;
+      try {
+        ids = await insertExpenses(env.DB, rows.map(r => {
+          const cat = cats.get(r.categoryId);
+          return { date: r.date, description: r.description, categoryId: cat.id, amount: r.amount, vendor: r.vendor,
+            businessUsePct: 100, receiptKey: "", receiptName: "", placedInService: cat.deductionType === "depreciation" ? r.date : null,
+            depMethod: cat.deductionType === "depreciation" ? "ask_cpa" : null, vendorChargedTax: true, accountId, paidPersonally };
+        }));
+      } catch (e) {
+        console.error("Expense import failed:", e);
+        return jsonResponse({ status: "error", message: "The import failed, so none of its rows were saved. Try again." }, 500);
       }
       audit({ orgId: null, orderId: null, action: "expense.imported", detail: { count: ids.length, total: Math.round(rows.reduce((a, r) => a + r.amountCents, 0)) / 100,
         paidFrom: paidPersonally ? "personal" : accountId, ids: ids.slice(0, 100) } });
@@ -2302,6 +2309,15 @@ async function handleOrdersPost_(context, listBefore = null) {
     const shipping = body.shippingAmount == null || body.shippingAmount === "" ? 0 : Number(body.shippingAmount);
     if (!Number.isFinite(shipping) || shipping < 0) return jsonResponse({ status: "error", message: "The shipping part must be $0 or more" }, 400);
     if (Math.round(shipping * 100) > Math.round(amount * 100)) return jsonResponse({ status: "error", message: "The shipping part can't be more than the refund" }, 400);
+    // The date and the account are checked before the audit entry, so a refused refund leaves no audit row.
+    const when = paymentDate(body);
+    if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
+    let accountId;
+    if (body.accountId) {
+      const acct = await getAccount(env.DB, body.accountId);
+      if (!acct || !acct.active) return jsonResponse({ status: "error", message: "Choose an active account" }, 400);
+      accountId = acct.id;
+    }
     // Recorded once per Save (requestKeyOf): the same request again — a double click, a retry — changes nothing,
     // and isn't audited a second time.
     const requestKey = requestKeyOf(body, "refund");
@@ -2313,14 +2329,6 @@ async function handleOrdersPost_(context, listBefore = null) {
     const auditErr = await auditStrict({ orgId: order.orgId, orderId, action: "payment.refunded",
       detail: { amount, method, reference, note, shipping } });
     if (auditErr) return auditErr;
-    const when = paymentDate(body);
-    if (when && when.error) return jsonResponse({ status: "error", message: when.error }, 400);
-    let accountId;
-    if (body.accountId) {
-      const acct = await getAccount(env.DB, body.accountId);
-      if (!acct || !acct.active) return jsonResponse({ status: "error", message: "Choose an active account" }, 400);
-      accountId = acct.id;
-    }
     await addOrderPayment(env.DB, orderId, -amount, note, "", { method, reference, kind: "refund", receivedAt: when ? when.receivedAt : undefined, accountId,
       shippingCents: Math.round(shipping * 100), ...(requestKey ? { requestKey } : {}) });
     const updated = await getOrderById(env.DB, orderId);
@@ -2836,10 +2844,21 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (!rows.length) return jsonResponse({ status: "error", message: "No orders to import" }, 400);
     if (rows.length > IMPORT_MAX_ROWS) return jsonResponse({ status: "error", message: `Too many orders in one request (${rows.length}) — send up to ${IMPORT_MAX_ROWS} at a time` }, 400);
     const dryRun = !!body.dryRun;
-    const result = await importOrdersCsv(env.DB, body.org, rows,
-      { dryRun, rowOffset: Number(body.rowOffset) || 0, seen: Array.isArray(body.seen) ? body.seen.slice(0, 5000).map(String) : [] });
-    if (!dryRun && result.created) audit({ orgId: body.org, orderId: null, action: "orders.imported",
-      detail: { created: result.created, skipped: result.skipped, orderIds: result.results.filter(x => x.orderId).map(x => x.orderId).slice(0, 200) } });
+    // Every order made is audited (awaited, not left to run after the reply), also when the import throws part-way:
+    // importOrdersCsv adds each order to createdIds as it's made, and the audit is written in `finally`.
+    const createdIds = [];
+    let result;
+    try {
+      result = await importOrdersCsv(env.DB, body.org, rows,
+        { dryRun, rowOffset: Number(body.rowOffset) || 0, seen: Array.isArray(body.seen) ? body.seen.slice(0, 5000).map(String) : [], createdIds });
+    } finally {
+      // The orders already exist, so an audit write that fails can't refuse them: auditStrict logs it, and the reply
+      // still says what was imported.
+      if (!dryRun && createdIds.length) await auditStrict({ orgId: body.org, orderId: null, action: "orders.imported",
+        detail: { created: createdIds.length, orderIds: createdIds,
+          ...(result ? { skipped: result.skipped, unfinished: result.results.filter(x => x.orderId && x.unfinished).map(x => ({ orderId: x.orderId, step: x.unfinished })) }
+            : { stoppedPartWay: true }) } });
+    }
     return jsonResponse({ status: "ok", ...result });
   }
 
@@ -6650,6 +6669,10 @@ async function handleOrdersPost_(context, listBefore = null) {
 
     const orderIds = Array.isArray(body.orderIds) ? body.orderIds.filter(id => ORDER_ID_RE.test(id)) : [];
     if (!orderIds.length) return jsonResponse({ status: "error", message: "No valid order IDs provided" }, 400);
+    // One request sends at most BULK_STAGE_MAX proofs (an email each); the admin sends a bigger selection in groups.
+    if (body.orderIds.length > BULK_STAGE_MAX) {
+      return jsonResponse({ status: "error", message: `Too many orders at once (max ${BULK_STAGE_MAX})` }, 400);
+    }
 
     const message = String(body.message || "").trim().slice(0, 5000);
     if (!message) return jsonResponse({ status: "error", message: "Message is required" }, 400);
@@ -6666,8 +6689,16 @@ async function handleOrdersPost_(context, listBefore = null) {
     let sent = 0, skipped = 0;
     const skippedReasons = [];
 
+    // The orders in one read, and each of their shops once — not a full read of the order and its shop per email.
+    const loaded = new Map((await getOrdersByIds(env.DB, orderIds)).map(o => [o.orderId, o]));
+    const subdomains = new Map();
+    await Promise.all([...new Set([...loaded.values()].map(o => o.orgId))].map(async (orgId) => {
+      try { const org = await getOrgById(env.DB, orgId); subdomains.set(orgId, (org && org.subdomain) || ""); }
+      catch (_) { subdomains.set(orgId, ""); }
+    }));
+
     for (const orderId of orderIds) {
-      const order = await getOrderById(env.DB, orderId);
+      const order = loaded.get(orderId);
       if (!order) { skipped++; skippedReasons.push(orderId + ": not found"); continue; }
       if (!order.contact || !order.contact.includes("@")) {
         skipped++; skippedReasons.push(orderId + ": no email"); continue;
@@ -6678,11 +6709,7 @@ async function handleOrdersPost_(context, listBefore = null) {
         skipped++; skippedReasons.push(orderId + ": order design not uploaded yet"); continue;
       }
 
-      let orgSubdomain = "";
-      try {
-        const org = await getOrgById(env.DB, order.orgId);
-        if (org) orgSubdomain = org.subdomain;
-      } catch (_) {}
+      const orgSubdomain = subdomains.get(order.orgId) || "";
 
       const token = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2))
         .replace(/[^a-z0-9]/gi, "").slice(0, 32).toLowerCase();

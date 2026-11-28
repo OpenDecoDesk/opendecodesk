@@ -59,7 +59,8 @@ function makeD1(SQL, raw){
       raw.run("SAVEPOINT d1_batch");
       try{
         const out = [];
-        for(const s of stmts){ const before = totalChanges(); execute(s._sql, s._params); out.push({ success: true, meta: meta(before) }); }
+        // Each statement's rows too (an INSERT … RETURNING's ids), as D1's batch returns them.
+        for(const s of stmts){ const before = totalChanges(); const results = execute(s._sql, s._params); out.push({ results, success: true, meta: meta(before) }); }
         raw.run("RELEASE d1_batch");
         return out;
       }catch(e){ raw.run("ROLLBACK TO d1_batch"); raw.run("RELEASE d1_batch"); throw e; }

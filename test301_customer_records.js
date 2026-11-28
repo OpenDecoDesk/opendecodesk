@@ -287,10 +287,10 @@ const NOT_FOUND = "That customer wasn't found.";
   ok("they are in name order whatever the capitals (pat before Quinn)", ids(l).indexOf(pat) < ids(l).indexOf(quinn));
   ok("a customer with only a company sorts by the company (Example Club between alex and pat)", ids(l).indexOf(club) === 2);
   ok("two with the same name come in the order they were added", ids(l).indexOf(alexA) + 1 === ids(l).indexOf(alexB));
-  ok("each row carries exactly: id, name, company, email, phone, taxExempt, taxExemptExpires, archived, orderCount, lastOrderAt",
-    l.customers.every(c => keys(c) === "archived,company,email,id,lastOrderAt,name,orderCount,phone,taxExempt,taxExemptExpires"));
+  ok("each row carries exactly: id, name, company, email, phone, taxExempt, taxExemptExpires, archived, Net 30 (allowNet30, termsDays), orderCount, lastOrderAt",
+    l.customers.every(c => keys(c) === "allowNet30,archived,company,email,id,lastOrderAt,name,orderCount,phone,taxExempt,taxExemptExpires,termsDays"));
   const rowOf = (res, id) => res.customers.find(c => c.id === id);
-  ok("a row has the customer's own details", same(rowOf(l, alexA), { id: alexA, name: "Alex Sample", company: "Zed Works", email: "", phone: "555-0102", taxExempt: false, taxExemptExpires: "", archived: false, orderCount: 0, lastOrderAt: "" }));
+  ok("a row has the customer's own details", same(rowOf(l, alexA), { id: alexA, name: "Alex Sample", company: "Zed Works", email: "", phone: "555-0102", taxExempt: false, taxExemptExpires: "", archived: false, allowNet30: false, termsDays: null, orderCount: 0, lastOrderAt: "" }));
   ok("an exempt customer is marked, with no expiry date as empty text", rowOf(l, quinn).taxExempt === true && rowOf(l, quinn).taxExemptExpires === "");
   ok("called with no options at all it answers the same", same(await lib.listCustomers(db, undefined), l) && same(await lib.listCustomers(db, {}), l));
 

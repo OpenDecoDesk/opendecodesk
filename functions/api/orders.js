@@ -189,6 +189,11 @@ function customerAuditView_(row) {
   return { name: r.name || "", company: r.company || "", email: r.email || "", phone: r.phone || "", address, notes: r.notes || "",
     taxExempt: r.taxExempt === true || Number(r.taxExempt) === 1, taxExemptCertificate: r.taxExemptCertificate || "", taxExemptExpires: r.taxExemptExpires || null };
 }
+// A customer's Net 30 terms (migrations/0121) as customer.updated compares them: Allow Net 30, and their own days (null
+// = the default). Kept apart from customerAuditView_, whose shape the merge's audit row also uses.
+const CUSTOMER_TERMS_FIELDS_ = ["allowNet30", "termsDays"];
+const customerTermsView_ = (row) => ({ allowNet30: !!(row && Number(row.allowNet30)),
+  termsDays: row && row.termsDays != null && Number(row.termsDays) >= 1 ? Number(row.termsDays) : null });
 // { field: { from, to } } for each of `fields` that differs between two of those.
 function customerChanges_(before, after, fields) {
   const out = {};
@@ -3819,7 +3824,10 @@ async function handleOrdersPost_(context, listBefore = null) {
     return customersReady_(async () => {
       const got = await listCustomers(env.DB, { q: typeof body.q === "string" ? body.q.trim().slice(0, 200) : "", includeArchived: body.includeArchived === true,
         limit: Math.min(200, whole(body.limit, 1, 50)), offset: whole(body.offset, 0, 0) });
-      return jsonResponse({ status: "ok", customers: got.customers, total: got.total });
+      // The Net 30 terms' default days (Global settings → Net 30 terms), for the "Net N" tag of a customer with none of their own.
+      let defaultDays = 30;
+      try { defaultDays = (await getTerms(env.DB)).defaultDays; } catch (_) { /* the usual 30 */ }
+      return jsonResponse({ status: "ok", customers: got.customers, total: got.total, defaultDays });
     });
   }
 
@@ -3839,7 +3847,9 @@ async function handleOrdersPost_(context, listBefore = null) {
       let marketing = { optedOut: false };
       try { if (got.customer && got.customer.email && typeof getMarketingChoice === "function") marketing = await getMarketingChoice(env.DB, got.customer.email); }
       catch (e) { marketing = { optedOut: false }; }
-      return jsonResponse({ status: "ok", customer: got.customer, orders: got.orders, totals: got.totals, marketing });
+      let defaultDays = 30;   // as listCustomers: the "Net N" tag's days for a customer with none of their own
+      try { defaultDays = (await getTerms(env.DB)).defaultDays; } catch (_) { /* the usual 30 */ }
+      return jsonResponse({ status: "ok", customer: got.customer, orders: got.orders, totals: got.totals, marketing, defaultDays });
     });
   }
 
@@ -3907,13 +3917,16 @@ async function handleOrdersPost_(context, listBefore = null) {
         if (exemptionChanged) audit({ orgId: null, orderId: null, action: "customer.exemption_not_changed", detail: { customerId: id || null, name: input.name, company: input.company, reason: (r && r.error) || "" } });
         return jsonResponse({ status: "error", message: (r && r.error) || "Couldn't save the customer. Try again." }, 400);
       }
-      const after = customerAuditView_(await customerRow_(r.id).catch(() => null) || { ...input, addressJson: input.address ? JSON.stringify(input.address) : "" });
+      const afterRow = await customerRow_(r.id).catch(() => null);
+      const after = customerAuditView_(afterRow || { ...input, addressJson: input.address ? JSON.stringify(input.address) : "" });
       if (r.created) {
         audit({ orgId: null, orderId: null, action: "customer.created",
           detail: { customerId: r.id, name: after.name, company: after.company, email: after.email, phone: after.phone, ...(after.taxExempt ? { taxExempt: true } : {}) } });
       } else {
         // The exemption's change has its own row, written first (above).
         const changes = customerChanges_(before, after, CUSTOMER_PLAIN_FIELDS_);
+        // …and Allow Net 30 / Terms (days), as stored before and after (a row that can't be read back says nothing here).
+        if (afterRow) Object.assign(changes, customerChanges_(customerTermsView_(beforeRow), customerTermsView_(afterRow), CUSTOMER_TERMS_FIELDS_));
         if (Object.keys(changes).length) audit({ orgId: null, orderId: null, action: "customer.updated", detail: { customerId: r.id, name: after.name, changes } });
       }
       return jsonResponse({ status: "ok", id: r.id, created: !!r.created });
@@ -5070,6 +5083,11 @@ async function handleOrdersPost_(context, listBefore = null) {
     if (line.reply) return line.reply;
     if (line.order.voidedAt) return jsonResponse({ status: "error", message: "This order is voided." }, 409);
     if (!line.item.customerOwned) return jsonResponse({ status: "error", message: "That line isn't marked as the customer's own garments." }, 409);
+    // db.js undoGarmentCheckin's own refusals, asked before the audit row so a refused Undo leaves none.
+    if (line.order.completedAt) return jsonResponse({ status: "error", message: "This order is completed." }, 409);
+    if (line.item.cancelDate) return jsonResponse({ status: "error", message: "That line is cancelled." }, 409);
+    if (!(Array.isArray(line.item.checkins) && line.item.checkins.length) && !line.item.ownReceivedAt)
+      return jsonResponse({ status: "error", message: "Nothing has been checked in for that line." }, 409);
     // Audited first, with what is being taken back: the line goes back to waiting on the customer's garments.
     const auditErr = await auditStrict({ orgId: line.order.orgId, orderId: line.orderId, action: "order.garments_checkin_undone",
       detail: { itemId: line.itemId, name: line.item.name || "", before: { ownReceivedAt: line.item.ownReceivedAt || null,

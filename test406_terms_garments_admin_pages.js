@@ -326,6 +326,11 @@ const noon = (ymd) => ymd + "T12:00:00.000Z";
   ok("a paid order past its date isn't red, and says no due date", text(tagOf(Object.assign({}, get(oPaid), { termsDueDate: "2026-01-01" }))) === "PO 1008 · due Jan 1" && !tagOf(Object.assign({}, get(oPaid), { termsDueDate: "2026-01-01" })).classList.contains("n30-tag-late"));
   ok("no due date yet while money is owed (terms that start when it's completed): “PO 7 · due date to come”", text(tagOf({ net30: true, poNumber: "7", poAcceptedAt: "x", termsDueDate: "", balanceDue: 5 })) === "PO 7 · due date to come");
   ok("…and with nothing owed, just the PO", text(tagOf({ net30: true, poNumber: "7", poAcceptedAt: "x", termsDueDate: "", balanceDue: 0, termsDays: 45 })) === "PO 7" && tagOf({ net30: true, poNumber: "7", poAcceptedAt: "x", termsDays: 45 }).title === "Net 45");
+  { const keep = w._ordersNet30.club;
+    w._ordersNet30.club = Object.assign({}, keep, { defaultDays: 45 });
+    const t = tagOf({ orgId: "club", net30: true, poNumber: "7", poAcceptedAt: "x", termsDueDate: "", balanceDue: 0, termsDays: null });
+    ok("an accepted PO with no days of its own: its title names the shop's default days (getOrders' net30.defaultDays, here Net 45), not 30", !!t && t.title === "Net 45");
+    w._ordersNet30.club = keep; }
   ok("an order not on terms has no tag", w.net30Tag_(get(oPlain)) === "" && w.net30Status_(get(oPlain)) === "" && w.net30Status_(null) === "");
   ok("a status the server didn't send is worked out from the fields", w.net30Status_({ net30: true }) === "PO needed" && w.net30Status_({ net30: true, poNumber: "1" }) === "PO to check" && w.net30Status_({ net30: true, poNumber: "1", poAcceptedAt: "t" }) === "accepted");
   ok("the row's Payment cell shows the method and the tag", /^Net 30\s*Net 30 — PO to check$/.test(text(rowOf(oCheck).querySelector("td[rowspan] + td[data-paid-td]") ? rowOf(oCheck).querySelector("td[data-paid-td]").previousElementSibling : null)));
@@ -513,6 +518,10 @@ const noon = (ymd) => ymd + "T12:00:00.000Z";
     form().querySelector("#lsTermsDays").placeholder === "Default" && /With a PO the work goes ahead now and the money stays owed \(Reports → Unpaid POs\)/.test(text(form().querySelector("#lsNet30Wrap"))));
   choose(form().querySelector("#lsPayment"), "Cash");
   ok("…another method hides them again", form().querySelector("#lsNet30Wrap").style.display === "none");
+  ok("…hidden, its boxes are switched off (so they take no part in the form's checks); shown, on again",
+    form().querySelector("#lsTermsDays").disabled && form().querySelector("#lsPo").disabled &&
+    (choose(form().querySelector("#lsPayment"), "Net 30"), !form().querySelector("#lsTermsDays").disabled && !form().querySelector("#lsPo").disabled) &&
+    (choose(form().querySelector("#lsPayment"), "Cash"), form().querySelector("#lsTermsDays").disabled));
   ok("with Customer-supplied garments on, each line has “Customer's own garment”", !!fld(lines()[0], "customerOwned") && /Customer's own garment — no blank; check the garments in on the order/.test(text(fld(lines()[0], "ownWrap"))));
   choose(form().querySelector("#lsPayment"), "Net 30");
   pickMug(2);
@@ -555,8 +564,11 @@ const noon = (ymd) => ymd + "T12:00:00.000Z";
     ok("Net 30 with no PO and blank days sends just Net 30, and a line not ticked isn't the customer's own", b.net30 === true && !("termsDays" in b) && !("poNumber" in b) && !("customerOwned" in b.items[0])); }
   ls = await openSale({ customer: { id: 1, name: "Pat Example", email: "pat@example.com" } });
   ok("a customer without days of their own: “Default”", form().querySelector("#lsTermsDays").placeholder === "Default");
-  choose(form().querySelector("#lsPayment"), "Cash"); pickMug(1); form().querySelector("#lsTermsDays").value = "0";
-  reset(); fire(form(), "submit"); await ls.p; await idle();
+  choose(form().querySelector("#lsPayment"), "Net 30"); form().querySelector("#lsTermsDays").value = "0";
+  choose(form().querySelector("#lsPayment"), "Cash"); pickMug(1);
+  ok("days of 0 left in the hidden Net 30 box don't make the form invalid", form().checkValidity() === true);
+  // Record sale clicked as a person would: the browser's own checks run first (a hidden box out of range used to stop it).
+  reset(); form().querySelector(".admin-pass-submit").click(); await ls.p; await idle();
   { const b = of("createLocalSale")[0] || {};
     ok("another method: Net 30's boxes aren't read or sent", b.paymentMethod === "Cash" && !("net30" in b) && !("termsDays" in b) && !("poNumber" in b)); }
   w._ordersNet30 = { club: { allowed: false } };
@@ -1129,17 +1141,21 @@ const noon = (ymd) => ymd + "T12:00:00.000Z";
   const openList = async () => { const old = custPage(); reset(); w.location.hash = "#customers"; await wait(() => custPage() && custPage() !== old && !!q("#custPage tr.cust-row")); await idle(); };
   const custSave = async () => { const old = custPage(); reset(); fire(q("#custForm"), "submit"); await idle(); await wait(() => (custPage() !== old && !!q("#custForm")) || text(q("#custErr")) !== "", 100); await idle(); return of("saveCustomer")[0] || null; };
   const subTags = () => qa(".cust-sub .cust-tag").map(text);
-  // (The list action doesn't send allowNet30 / termsDays today — reported, not fixed here: other tests pin its row shape —
-  // so the list's tag is checked with an answer that carries them.)
+  // The real list action: it sends allowNet30 / termsDays and the terms' default days.
+  const sam = await must({ action: "saveCustomer", name: "Sam Example", email: "sam@example.com", allowNet30: true, termsDays: null });
   { const real = await must({ action: "listCustomers" });
-    const withTerms = Object.assign({}, real, { customers: real.customers.map(c => Object.assign({}, c, c.id === 2 ? { allowNet30: true, termsDays: 45 } : { allowNet30: false }))
-      .concat([{ id: 50, name: "Sam Example", company: "", email: "sam@example.com", phone: "", taxExempt: false, archived: false, orderCount: 0, lastOrderAt: "", allowNet30: true, termsDays: null }]) });
-    scripted = [{ action: "listCustomers", body: withTerms }]; }
+    const samRow = real.customers.find(c => c.id === sam.id), c2 = real.customers.find(c => c.id === 2);
+    ok("listCustomers sends each row's Allow Net 30 and own days (null = the default), and the default days", !!samRow && samRow.allowNet30 === true && samRow.termsDays === null &&
+      !!c2 && c2.allowNet30 === true && c2.termsDays === 45 && real.defaultDays === 30 && real.customers.find(c => c.id === 1).allowNet30 === false); }
+  await must({ action: "updateTermsSettings", terms: { defaultDays: 60, startsAt: "invoice" } });
   await openList();
   { const rowOfC = (cid) => q(`#custPage tr.cust-row[data-cust-id="${cid}"]`);
-    ok("the Customers list marks a customer allowed Net 30 with their days: “Net 45”; without days of their own, “Net 30”", !!rowOfC(2) && text(rowOfC(2).querySelector(".cust-tag-net30")) === "Net 45" &&
-      !!rowOfC(50) && text(rowOfC(50).querySelector(".cust-tag-net30")) === "Net 30");
+    ok("the Customers list marks a customer allowed Net 30 with their days: “Net 45”; without days of their own, the default (Global settings → Net 30 terms, here “Net 60”)",
+      !!rowOfC(2) && text(rowOfC(2).querySelector(".cust-tag-net30")) === "Net 45" && !!rowOfC(sam.id) && text(rowOfC(sam.id).querySelector(".cust-tag-net30")) === "Net 60");
     ok("…and none on a customer not allowed it", !!rowOfC(1) && !rowOfC(1).querySelector(".cust-tag-net30")); }
+  await openCust(sam.id);
+  ok("…and the customer's own page says “Net 60” too", subTags().includes("Net 60"));
+  await must({ action: "updateTermsSettings", terms: { defaultDays: 30, startsAt: "invoice" } });
   await openCust(2);
   ok("a customer allowed Net 30: “Net 45” under the name", subTags().includes("Net 45"));
   ok("a “Net 30 terms” box: Allow Net 30 ticked, Terms (days) 45", text(q("fieldset.cust-terms legend")) === "Net 30 terms" && q("#custNet30").checked && q("#custTermsDays").value === "45" &&
@@ -1155,6 +1171,25 @@ const noon = (ymd) => ymd + "T12:00:00.000Z";
     fire(q("#custForm"), "submit"); await idle();
     ok(`days of ${v}: “Terms: a whole number of days from 1 to 365, or blank for the default.”, nothing sent`, text(q("#custErr")) === "Terms: a whole number of days from 1 to 365, or blank for the default." && of("saveCustomer").length === 0);
   }
+  { // What isn't a number at all: a number box's value is then "" (badInput) — refused, not saved as the default.
+    const box = q("#custTermsDays"); box.value = "";
+    Object.defineProperty(box, "validity", { configurable: true, get: () => ({ badInput: true, valid: false }) });
+    reset(); fire(q("#custForm"), "submit"); await idle();
+    ok("days that aren't a number (the box holds nothing it can read): the Terms refusal, nothing sent", text(q("#custErr")) === "Terms: a whole number of days from 1 to 365, or blank for the default." && of("saveCustomer").length === 0);
+    delete box.validity; }
+  { const au0 = d1.q("SELECT count(*) AS n FROM audit_log WHERE action = 'customer.updated'")[0].n;
+    const r = await call({ action: "saveCustomer", id: 2, name: "", company: "Example School District", email: "ap@example.org", allowNet30: true, termsDays: 50 });
+    const rows = d1.q("SELECT detail FROM audit_log WHERE action = 'customer.updated' ORDER BY id").map(a => JSON.parse(a.detail || "{}"));
+    ok("a change to Terms (days) alone is audited: customer.updated with termsDays {from 60, to 50}", r.status === 200 && rows.length === au0 + 1 &&
+      same(rows[rows.length - 1].changes, { termsDays: { from: 60, to: 50 } }));
+    await call({ action: "saveCustomer", id: 2, name: "", company: "Example School District", email: "ap@example.org", allowNet30: false, termsDays: 60 });
+    const last = d1.q("SELECT detail FROM audit_log WHERE action = 'customer.updated' ORDER BY id DESC LIMIT 1").map(a => JSON.parse(a.detail || "{}"))[0];
+    ok("…and Allow Net 30 with it: allowNet30 {from true, to false}, termsDays {from 50, to 60}", !!last && same(last.changes, { allowNet30: { from: true, to: false }, termsDays: { from: 50, to: 60 } }));
+    await call({ action: "saveCustomer", id: 2, name: "", company: "Example School District", email: "ap@example.org", allowNet30: true, termsDays: 60 });
+    const n = d1.q("SELECT count(*) AS n FROM audit_log WHERE action = 'customer.updated'")[0].n;
+    await call({ action: "saveCustomer", id: 2, name: "", company: "Example School District", email: "ap@example.org", allowNet30: true, termsDays: 60 });
+    ok("…a save that changes nothing writes no row", d1.q("SELECT count(*) AS n FROM audit_log WHERE action = 'customer.updated'")[0].n === n); }
+  await openCust(2);
   q("#custTermsDays").value = "";
   cs = await custSave();
   ok("blank days: sent as none (the default), and the page says “Net 30”", !!cs && cs.termsDays === null && cs.allowNet30 === true && d1.q("SELECT termsDays FROM customers WHERE id = 2")[0].termsDays === null && subTags().includes("Net 30"));

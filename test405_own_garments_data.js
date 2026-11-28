@@ -482,12 +482,21 @@ const T = (d) => `2026-10-${String(d).padStart(2, "0")}T15:00:00.000Z`;
     r.body.order.ownGarments.waiting === 1 && lineRow("AC").ownReceivedAt === null);
   ok("…audited as order.garments_checkin_undone with what was taken back", !!au && au.d.itemId === acOwn && au.d.before.ownReceivedAt === receivedBefore &&
     same(au.d.before.counts.map(c => [c.size, c.expected, c.received]), liveBefore.map(c => [c.size, c.expectedQty, c.receivedQty])));
+  const u1 = audits("order.garments_checkin_undone", "AC").length;
   r = await undo();
-  ok("Undo again: 409 “Nothing has been checked in for that line.” (written to the audit first, nothing else changes)", r.status === 409 && r.body.message === "Nothing has been checked in for that line.");
+  ok("Undo again: 409 “Nothing has been checked in for that line.”, and no “undone” row is written for it", r.status === 409 && r.body.message === "Nothing has been checked in for that line." &&
+    audits("order.garments_checkin_undone", "AC").length === u1);
   await lib.checkInGarments(d1, { orderId: "AC", itemId: acOwn, counts: counts3, at: T(19) });
   q("UPDATE orders SET completedAt = ? WHERE orderId = 'AC'", T(20));
   r = await undo();
-  ok("…Undo on a completed order: 409 “This order is completed.” from db.js, and the check-in stays", r.status === 409 && r.body.message === "This order is completed." && lineRow("AC").ownReceivedAt === T(19));
+  ok("…Undo on a completed order: 409 “This order is completed.”, the check-in stays and no “undone” row is written", r.status === 409 && r.body.message === "This order is completed." && lineRow("AC").ownReceivedAt === T(19) &&
+    audits("order.garments_checkin_undone", "AC").length === u1);
+  q("UPDATE order_items SET cancelDate = '2026-11-20' WHERE id = ?", acOwn);
+  q("UPDATE orders SET completedAt = NULL WHERE orderId = 'AC'");
+  r = await undo();
+  ok("…Undo on a cancelled line: 409 “That line is cancelled.”, and no “undone” row is written", r.status === 409 && r.body.message === "That line is cancelled." && lineRow("AC").ownReceivedAt === T(19) &&
+    audits("order.garments_checkin_undone", "AC").length === u1);
+  q("UPDATE order_items SET cancelDate = NULL WHERE id = ?", acOwn);
   q("UPDATE orders SET completedAt = NULL WHERE orderId = 'AC'");
 
   console.log("\n=== Local sale, Edit items and quotes: a line marked as the customer's own ===");

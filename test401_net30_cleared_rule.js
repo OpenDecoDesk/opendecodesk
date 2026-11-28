@@ -75,6 +75,8 @@ const ACC = "2026-10-02T15:00:00.000Z";
     ["T-BLANK", { net30: 1, poNumber: "", poAcceptedAt: ACC }, "Net 30, acceptance stamped but the PO blank"],
     ["T-SPACES", { net30: 1, poNumber: "   ", poTypedAt: ACC }, "Net 30 with a PO of spaces, not accepted"],
     ["T-TYPEDPAID", { net30: 1, poNumber: "PO-1005", poTypedAt: ACC, paid: 1 }, "Net 30 with a PO to check, paid in full"],
+    ["T-SPACESACC", { net30: 1, poNumber: "   ", poAcceptedAt: ACC }, "Net 30, acceptance stamped but the PO only spaces"],
+    ["T-PADDED", { net30: 1, poNumber: "  PO-1006 ", poAcceptedAt: ACC }, "Net 30 with an accepted PO with spaces around it"],
   ];
   for (const [id, cols] of TABLE) {
     q("INSERT INTO orders (orderId, orgId, customerName, contact, placedAt) VALUES (?, 'club', 'Pat Example', 'pat@example.com', '2026-10-01T15:00:00.000Z')", id);
@@ -86,7 +88,8 @@ const ACC = "2026-10-02T15:00:00.000Z";
   const byId = Object.fromEntries(rows.map(r => [r.orderId, r]));
   const expect = { // [net30Cleared, workCleared, paid-or-net30]
     "T-PAID": [0, 1, 1], "T-PFW": [0, 1, 0], "T-POD": [0, 1, 0], "T-NONE": [0, 0, 0], "T-N30": [0, 0, 0], "T-TYPED": [0, 0, 0],
-    "T-ACC": [1, 1, 1], "T-ACCPAID": [1, 1, 1], "T-OFF": [0, 0, 0], "T-BLANK": [0, 0, 0], "T-SPACES": [0, 0, 0], "T-TYPEDPAID": [0, 1, 1] };
+    "T-ACC": [1, 1, 1], "T-ACCPAID": [1, 1, 1], "T-OFF": [0, 0, 0], "T-BLANK": [0, 0, 0], "T-SPACES": [0, 0, 0], "T-TYPEDPAID": [0, 1, 1],
+    "T-SPACESACC": [0, 0, 0], "T-PADDED": [1, 1, 1] };
   for (const [id, , words] of TABLE) {
     const r = byId[id], [n, w, p] = expect[id];
     ok(`${words}: the JS says ${n ? "Net 30 cleared" : "not Net 30 cleared"}, ${w ? "work cleared" : "work not cleared"}, ${p ? "counts as paid" : "doesn't count as paid"}`,
@@ -98,6 +101,25 @@ const ACC = "2026-10-02T15:00:00.000Z";
     const r = q(`SELECT ${lib.NET30_CLEARED_SQL_("x")} AS a, ${wSql("x")} AS b, ${pSql("x")} AS c FROM orders x WHERE x.orderId = 'T-ACC'`)[0];
     return r.a === 1 && r.b === 1 && r.c === 1;
   })());
+  console.log("\n=== A PO of only spaces is never written as a PO ===");
+  {
+    const poOf = (id) => q("SELECT poNumber, poAcceptedAt, poTypedAt FROM orders WHERE orderId = ?", id)[0];
+    let r = await lib.setOrderTerms(d1, "T-N30", { poNumber: "   ", by: "pat@example.com" });
+    ok("setOrderTerms with a PO of spaces from staff: stored as no PO, nothing accepted", r.ok === true && same(poOf("T-N30"), { poNumber: "", poAcceptedAt: null, poTypedAt: null }));
+    r = await lib.setOrderTerms(d1, "T-N30", { poNumber: " \t ", typedByCustomer: true });
+    ok("…typed by the customer: no PO, nothing noted as typed", r.ok === true && same(poOf("T-N30"), { poNumber: "", poAcceptedAt: null, poTypedAt: null }));
+    r = await lib.setOrderTerms(d1, "T-SPACES", { accept: true, by: "pat@example.com" });
+    ok("Accept on an order whose stored PO is only spaces: “There's no PO number to accept yet.”, and it stays unaccepted",
+      r.error === "There's no PO number to accept yet." && poOf("T-SPACES").poAcceptedAt === null);
+    r = await lib.acceptOrderPo(d1, "T-SPACES", "pat@example.com");
+    ok("…and acceptOrderPo says the same", r.error === "There's no PO number to accept yet." && poOf("T-SPACES").poAcceptedAt === null);
+    const fresh = await freshDb();
+    await lib.createProduct(fresh, "club", { productId: "cap", type: "cap", name: "Example Cap", pricingMode: "flat", flatPrice: 20, visible: true, noDesignNeeded: true, noBlankNeeded: true });
+    await lib.insertOrder(fresh, { orderId: "N-SP", orgId: "club", customerName: "Pat Example", contact: "pat@example.com", placedAt: "2026-10-01T15:00:00.000Z", net30: true, poNumber: "    " },
+      [{ productId: "cap", name: "Example Cap", type: "cap", size: "", qty: 1, unitPrice: 20 }]);
+    ok("insertOrder on Net 30 with a PO of spaces: no PO, not accepted, not cleared", same(fresh.q("SELECT net30, poNumber, poAcceptedAt FROM orders WHERE orderId = 'N-SP'")[0], { net30: 1, poNumber: "", poAcceptedAt: null }) &&
+      lib.net30Cleared(await lib.getOrderById(fresh, "N-SP")) === false);
+  }
   ok("workClearedSql_ names Net 30 only through NET30_CLEARED_SQL_ (the one rule)", wSql("a").includes(lib.NET30_CLEARED_SQL_("a")) && pSql("a").includes(lib.NET30_CLEARED_SQL_("a")));
 
   console.log("\n=== Before migrations/0121 ===");

@@ -3511,7 +3511,9 @@ function renderTicket(org, orgId){
     const newSelect = document.getElementById("custPaymentMethod");
     if(newSelect){
       newSelect.value = savedPayment;
-      updatePaymentHint(savedPayment, true); // skipTicketRender=true to avoid recursion
+      // What the select really holds: a method no longer offered (Net 30 after the email changed) leaves it blank, and
+      // the hint follows it rather than describing the method that went.
+      updatePaymentHint(newSelect.value, true); // skipTicketRender=true to avoid recursion
     }
   }
   restoreFocus();

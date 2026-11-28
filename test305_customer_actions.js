@@ -250,17 +250,17 @@ const ordersJs = read("functions/api/orders.js");
   console.log("\n=== listCustomers ===");
   {
     let r = await call({ action: "listCustomers" }, staff);
-    ok("answers { status, customers, total }", r.status === 200 && keys(r.body) === "customers,status,total" && r.body.status === "ok" && Array.isArray(r.body.customers) && r.body.total === r.body.customers.length);
+    ok("answers { status, customers, total, defaultDays } (defaultDays: Global settings → Net 30 terms)", r.status === 200 && keys(r.body) === "customers,defaultDays,status,total" && r.body.defaultDays === 30 && r.body.status === "ok" && Array.isArray(r.body.customers) && r.body.total === r.body.customers.length);
     const pat = r.body.customers.find(c => c.id === patId);
-    ok("a row is id, name, company, email, phone, taxExempt, taxExemptExpires, archived, orderCount and lastOrderAt",
-      keys(pat) === "archived,company,email,id,lastOrderAt,name,orderCount,phone,taxExempt,taxExemptExpires" &&
-      same(pat, { id: patId, name: "Pat Example", company: "", email: "pat@example.com", phone: "", taxExempt: false, taxExemptExpires: "", archived: false, orderCount: 1, lastOrderAt: "2026-03-10T15:00:00.000Z" }));
+    ok("a row is id, name, company, email, phone, taxExempt, taxExemptExpires, archived, Net 30 (allowNet30, termsDays), orderCount and lastOrderAt",
+      keys(pat) === "allowNet30,archived,company,email,id,lastOrderAt,name,orderCount,phone,taxExempt,taxExemptExpires,termsDays" &&
+      same(pat, { id: patId, name: "Pat Example", company: "", email: "pat@example.com", phone: "", taxExempt: false, taxExemptExpires: "", archived: false, allowNet30: false, termsDays: null, orderCount: 1, lastOrderAt: "2026-03-10T15:00:00.000Z" }));
     ok("customers merged into another are never listed", !r.body.customers.some(c => /Refused/.test(c.name)) && q("SELECT count(*) n FROM customers WHERE mergedIntoId IS NOT NULL")[0].n === 2);
     ok("sorted by name", same(r.body.customers.map(c => c.name), r.body.customers.map(c => c.name).slice().sort((a, b) => a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0)));
     r = await call({ action: "listCustomers", q: "  PAT@EXAMPLE  " }, staff);
     ok("q searches (trimmed, any case): one match, total 1", r.status === 200 && r.body.total === 1 && r.body.customers.length === 1 && r.body.customers[0].id === patId);
     r = await call({ action: "listCustomers", q: "nobody-by-this-name" }, staff);
-    ok("no match is an empty list and total 0, not an error", r.status === 200 && same(r.body, { status: "ok", customers: [], total: 0 }));
+    ok("no match is an empty list and total 0, not an error", r.status === 200 && same(r.body, { status: "ok", customers: [], total: 0, defaultDays: 30 }));
     const all = (await call({ action: "listCustomers" }, staff)).body.total;
     const junk = [];
     for (const v of [42, ["Pat"], { a: 1 }, null, true]) junk.push(await call({ action: "listCustomers", q: v }, staff));
@@ -295,7 +295,7 @@ const ordersJs = read("functions/api/orders.js");
   console.log("\n=== getCustomer ===");
   {
     let r = await call({ action: "getCustomer", id: patId }, staff);
-    ok("answers { status, customer, orders, totals, marketing } (marketing: migrations/0117)", r.status === 200 && keys(r.body) === "customer,marketing,orders,status,totals" && r.body.status === "ok" && r.body.marketing.optedOut === false);
+    ok("answers { status, customer, orders, totals, marketing, defaultDays } (marketing: migrations/0117; defaultDays: Global settings → Net 30 terms)", r.status === 200 && keys(r.body) === "customer,defaultDays,marketing,orders,status,totals" && r.body.defaultDays === 30 && r.body.status === "ok" && r.body.marketing.optedOut === false);
     ok("the customer is id, name, company, email, phone, address, notes, the three exemption fields, Net 30 (allowNet30, termsDays), archived, createdAt and updatedAt",
       keys(r.body.customer) === "address,allowNet30,archived,company,createdAt,email,id,name,notes,phone,taxExempt,taxExemptCertificate,taxExemptExpires,termsDays,updatedAt" &&
       r.body.customer.id === patId && r.body.customer.name === "Pat Example" && r.body.customer.email === "pat@example.com" && r.body.customer.address === null &&

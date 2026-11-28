@@ -19272,9 +19272,12 @@ export async function getSalesReport(db, { dateFrom, dateTo, by = "customer", or
     group === "product" || group === "decoration" ? p8Products_(db, allItems) : new Map()]);
   const rows = new Map();
   const row = (key, label, extra) => rows.get(key) || rows.set(key, { key, label, ...(extra || {}), orders: new Set(), qty: 0, grossCents: 0, discountCents: 0, refundCents: 0, netCents: 0 }).get(key);
-  const totals = { orders: orders.length, qty: 0, grossCents: 0, discountCents: 0, refundCents: 0, netCents: 0, shippingCents: 0, rushCents: 0, taxCents: 0 };
+  const totals = { orders: 0, qty: 0, grossCents: 0, discountCents: 0, refundCents: 0, netCents: 0, shippingCents: 0, rushCents: 0, taxCents: 0 };
   for (const o of orders) {
     const lines = (itemsBy.get(o.orderId) || []).filter(p8Live_);
+    // An order with no live sales line (every line cancelled, or only gift cards left) is in no row, so not in the totals.
+    if (!lines.length) continue;
+    totals.orders++;
     const money = p8LineMoney_(o, lines), a = p8Amounts_(o, lines);
     totals.shippingCents += a.shippingCents; totals.rushCents += a.rushNetCents; totals.taxCents += a.taxCents;
     lines.forEach((l, i) => {
@@ -19578,7 +19581,7 @@ export async function buildQuickBooksSettings(db, v) {
     for (const x of list) {
       const id = String(x.id), dflt = qbFallbackName_(x.name) || (label + " " + x.id);
       let n = saved && qbNameOk_(saved[id]) ? saved[id].trim() : "";
-      if (given && given[id] !== undefined) n = name(given[id], x.name || label);
+      if (given && given[id] !== undefined) n = name(given[id], dflt);
       if (n && n !== dflt) out[id] = n;
     }
     return out;

@@ -136,6 +136,20 @@ process.on("exit", () => { if (!finished) { console.log("the test ran to its end
     ok("…an order placed at the first moment of March counts though it hasn't shipped, and one placed at the last moment though it ships in April; those placed in February don't, whenever they shipped",
       r.totals.netCents === 128 + 256 + 4096 + 8192 + 16384 && r.totals.orders === 5);
   }
+  {
+    // Orders with no live sales line: every ordinary line cancelled, or gift cards plus a cancelled ordinary line (not
+    // gift-card-only, as the cancelled line still counts there). No row lists them, so the totals leave them out too.
+    const d1 = await fresh();
+    seed(d1, { id: "LIVE", shipping: 250, rush: 100, items: [{ cents: 1000, tax: 80 }] });
+    seed(d1, { id: "ALL-CANCELLED", shipping: 700, rush: 300, rushTax: 24, items: [{ cents: 2000, tax: 160, cancelled: true }, { cents: 500, cancelled: true }] });
+    seed(d1, { id: "GIFT-PLUS-CANCELLED", shipping: 400, items: [{ product: "__giftcard__", name: "Gift card", cents: 2500 }, { cents: 900, cancelled: true }] });
+    for (const by of ["customer", "product", "shop", "decoration"]) {
+      const r = await L.getSalesReport(d1, { ...MARCH, by });
+      ok(`by ${by}: an order with no live sales line is in no row and not in the order count`,
+        r.totals.orders === 1 && sumOf(r.rows, x => x.orders) === 1 && r.totals.qty === 1 && r.totals.netCents === 1000);
+      ok(`by ${by}: …nor in the shipping, rush or tax totals`, r.totals.shippingCents === 250 && r.totals.rushCents === 100 && r.totals.taxCents === 80);
+    }
+  }
 
   console.log("=== The money of a line: discounts, refunds, shipping, rush and tax ===");
   let customerReport;

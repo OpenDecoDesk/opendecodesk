@@ -84,6 +84,7 @@ const httpSrc = strip(read("functions/_lib/http.js"));
     "\nconst rateLimited = async () => ({ blocked: false }); const rateLimitResponse = () => null;" +
     "\nconst rateLimitCheck = async () => ({ blocked: false }); const rateLimitHit = async () => {};\n" +
     "const rateLimitCheckGlobal = async () => ({ blocked: false }); const rateLimitHitGlobal = async () => {}; const rateLimitMark = async () => {}, rateLimitMarked = async () => false;\n" +
+    "const rateLimitReserve = async () => ({ blocked: false }), rateLimitRelease = async () => {};\n" +
     accessSrc + "\n" + authSrc + "\n" + strip(read("functions/_lib/totp.js")) + "\n" + dbSrc + "\n" + strip(read("functions/api/admin-session.js")) + "\nreturn onRequestPost;")();
   const login = (body, ip = "198.51.100.7") => session({ env, request: { url: "https://admin.example.com/api/admin-session",
     headers: { get: (h) => ({ origin: "https://admin.example.com", "cf-connecting-ip": ip })[h.toLowerCase()] || null }, json: async () => body } });

@@ -49,7 +49,7 @@ import {
   sessionCookieHeader, clearSessionCookieHeader, SESSION_COOKIE, SESSION_TTL_SEC, readSessionCookie,
   bootstrapState, rememberSecret, verifyUserPassword, pendingFor, revokeAllSessions, weakSetupPassword,
   looksLikeRecoveryCode, spendRecoveryCode, revokeUserSessionsFor, sessionUserId,
-  signInBudgetBlocked, countSignInFailure, noteSignInAddress,
+  signInBudgetBlocked, releaseSignInSlots, noteSignInAddress,
 } from "../_lib/adminAuth.js";
 import { accessEnabled, verifyAccess } from "../_lib/access.js";
 import { verifyTOTP, sealTotp, openTotp, totpIsSealed } from "../_lib/totp.js";
@@ -92,9 +92,19 @@ export async function onRequestPost(context){
 
   // …this address's share of the install-wide budget of FAILED sign-ins, that budget and this account's
   // (adminAuth.js): past them, a Turnstile check. An address that signed in here lately skips the install-wide
-  // budget, never the account's.
-  const spent = await signInBudgetBlocked(env, request, { email: body.email, turnstileToken: body.turnstileToken });
+  // budget, never the account's. A slot of each is taken now, before anything is checked, so requests sent at the
+  // same moment can't all get past; only a wrong password or code keeps them (refuse() below). Every other answer —
+  // signed in, a code still needed, Access refused, the service unavailable — gives back exactly the slots taken.
+  const held = { slots: [], kept: false };
+  const spent = await signInBudgetBlocked(env, request, { email: body.email, turnstileToken: body.turnstileToken, slots: held.slots });
   if(spent) return spent;
+  try{ return await checkAndSignIn_(context, body, held); }
+  finally{ if(!held.kept) await releaseSignInSlots(env, held.slots); }
+}
+
+// The rest of a sign-in, once the budgets have a slot for it. `held.kept` is set by a wrong password or code.
+async function checkAndSignIn_(context, body, held){
+  const { request, env } = context;
   if(accessEnabled(env)){
     const acc = await verifyAccess(env, request);
     if(!acc.ok) return jsonResponse({status:"error", message:acc.reason}, 403);
@@ -109,8 +119,8 @@ export async function onRequestPost(context){
     return jsonResponse({status:"error", message:"Sign-in service temporarily unavailable — try again shortly."}, 503);
   };
   const refuse = async (reason, message) => {
+    held.kept = true;   // a wrong credential: the slots taken in every budget stay counted
     await noteFailure(env, reason, request);
-    await countSignInFailure(env, request, email);
     return jsonResponse({status:"error", message: message || "Unauthorized"}, 401);
   };
 

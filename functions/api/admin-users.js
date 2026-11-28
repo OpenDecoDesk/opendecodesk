@@ -14,7 +14,7 @@
  *   { action: "saveRole", key?, name, rank, permissions }   a new role (no key) or a change to one
  *   { action: "deleteRole", key }          a custom role nobody holds (full)
  *   { action: "create", name, email, role }→ { user, temporaryPassword }   (shown once)
- *   { action: "update", id, name, email }
+ *   { action: "update", id, name, email, current? }   current: your own password, needed to change your own email
  *   { action: "setRole", id, role }        role: a roles.key
  *   { action: "setStatus", id, status }    status: "active" | "disabled"
  *   { action: "resetPassword", id }        → { temporaryPassword }          (shown once)
@@ -32,7 +32,8 @@
  *   - There is always at least one active admin: the statement that changes a role or a status
  *     refuses to remove the last one (functions/_lib/db.js setUserRoleAndStatus).
  *   - You can't change your own role or status, or reset your own password or two-step here
- *     (that is Settings → Change password, and Security (2FA), which ask for proof it is you).
+ *     (that is Settings → Change password, and Security (2FA), which ask for proof it is you). You may change
+ *     your own name here, and your own sign-in email with your current password (the same proof).
  *   - Changing someone's role or status, or resetting their password or two-step, signs them out
  *     everywhere. A disabled user can't sign in and their sessions are gone at once.
  *   - A temporary password is made here, returned once, never logged; whoever gets it must
@@ -45,7 +46,7 @@ import { getCatalogData } from "../_lib/catalogCache.js";
 import { jsonResponse }   from "../_lib/http.js";
 import {
   requireAdmin, adminActor, adminUser, userHasUsablePassword, setUserPassword, generateTempPassword,
-  require2fa, setRequire2fa, recoveryCodesLeft,
+  require2fa, setRequire2fa, recoveryCodesLeft, checkCurrentPassword,
 } from "../_lib/adminAuth.js";
 import { insertAuditLog, listUsers, getUserById, getUserByEmail, insertUser, updateUser, setUserRoleAndStatus, deleteUserSessions,
   listRoles, getRoleRow, insertRole, updateRole, deleteRole, roleInUse, getUserPrefs, saveUserPrefs, resolveTimeZone } from "../_lib/db.js";
@@ -248,6 +249,15 @@ export async function onRequestPost(context){
       const name = typeof body.name === "string" ? body.name.trim() : "", email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
       if(!name || name.length > 80) return bad("Give the person's name (up to 80 characters).");
       if(email.length > 200 || !EMAIL_RE.test(email)) return bad("Give the email address they will sign in with.");
+      // Your own sign-in email is how you sign in: a new one needs your current password, checked within the same
+      // budgets as Change password (adminAuth.js checkCurrentPassword), so a borrowed session can't take the account
+      // over by changing it. A new name needs nothing.
+      if(isMe && email !== String(target.email || "").trim().toLowerCase()){
+        const current = typeof body.current === "string" ? body.current : "";
+        if(!current) return jsonResponse({status:"error", code:"current_password_needed", message:"Type your current password to change your own sign-in email."}, 403);
+        const refused = await checkCurrentPassword(env, request, target, current);
+        if(refused) return refused;
+      }
       const taken = await getUserByEmail(env.DB, email);
       if(taken && taken.id !== target.id) return bad("Another user already has that email.", 409);
       const auditErr = await audit("security.user_updated", target, { before: who(target), after: { email, name } });

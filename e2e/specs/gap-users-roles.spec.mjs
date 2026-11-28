@@ -286,6 +286,66 @@ test.describe("no role beyond your own", () => {
   });
 });
 
+test.describe("your own sign-in email", () => {
+  // Users → Edit on your own row changes the email you sign in with: a session someone else is holding (an unlocked
+  // browser) could move the account to an address of theirs. So it needs your current password, as Change password
+  // does. A new name needs nothing.
+  test("changing your own email needs your current password; a new name doesn't", async ({ api, as }) => {
+    const { desk, junior, D } = await makeDesk(api);
+    let d = null;
+    try {
+      d = await signedIn(D);
+      const newEmail = slug("dnew") + "@example.test";
+      // On the server: without the password refused, nothing changed and still signed in.
+      let r = await d.call("update", { id: D.id, name: D.name, email: newEmail });
+      expect(r.status).toBe(403);
+      expect(r.data.code).toBe("current_password_needed");
+      expect(r.data.message).toBe("Type your current password to change your own sign-in email.");
+      expect((await userByEmail(api, D.email)).id).toBe(D.id);
+      expect((await d.call("me")).status).toBe(200);
+      // A new name on its own is saved with nothing asked.
+      r = await d.call("update", { id: D.id, name: D.name + " B", email: D.email });
+      expect(r.status).toBe(200);
+      expect((await userByEmail(api, D.email)).name).toBe(D.name + " B");
+
+      // In the page: the password field shows only once the email is changed.
+      const page = await deskPage(as, D);
+      const mine = page.locator("#usersTable tr", { hasText: D.email });
+      await mine.getByRole("button", { name: "Edit" }).click();
+      const current = page.locator("#userCurrent");
+      await expect(current).toBeHidden();
+      await page.locator("#userEmail").fill(newEmail);
+      await expect(current).toBeVisible();
+      await expect(page.getByLabel("Your current password (needed to change the email you sign in with)")).toBeVisible();
+      // Saved without it: said by the field, and nothing is sent.
+      let sent = 0;
+      page.on("request", (q) => { if (q.url().endsWith("/api/admin-users") && (q.postDataJSON() || {}).action === "update") sent++; });
+      await page.locator("#userSubmit").click();
+      await expect(page.locator("#userCurrentError")).toHaveText("Type your current password to change the email you sign in with.");
+      expect(sent).toBe(0);
+      // A wrong one: the server's answer by the field, still signed in, nothing changed.
+      await current.fill("not my password at all");
+      await page.locator("#userSubmit").click();
+      await expect(page.locator("#userCurrentError")).toHaveText("The current password is not right.");
+      await expect(menu(page)).toBeVisible();
+      expect((await userByEmail(api, D.email)).id).toBe(D.id);
+      // The right one: saved.
+      await current.fill(D.password);
+      await page.locator("#userSubmit").click();
+      await expect(toast(page)).toContainText("Saved. Sign in with the new email from now on.");
+      await expect(page.locator("#usersTable tr", { hasText: newEmail })).toContainText("(you)");
+      expect(await userByEmail(api, D.email)).toBeNull();
+      expect((await userByEmail(api, newEmail)).id).toBe(D.id);
+      // …and D signs in with it.
+      const again = await signedIn({ ...D, email: newEmail });
+      await again.ctx.dispose();
+    } finally {
+      if (d) await d.ctx.dispose();
+      await cleanUp(api, [D.id], [desk.key, junior.key]);
+    }
+  });
+});
+
 test.describe("roles in the page", () => {
   test("the owner adds a role, changes its rank and deletes it on Roles and permissions", async ({ page, api }) => {
     const roleName = "Rank role " + slug("r").slice(-5);

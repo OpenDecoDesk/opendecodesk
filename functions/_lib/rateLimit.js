@@ -16,6 +16,9 @@
  * - rateLimitCheck() + rateLimitHit(): check without writing, and count
  *   only FAILURES. requireAdmin() uses this, so normal admin-panel clicks
  *   with a valid session write nothing at all; only wrong guesses count.
+ * - rateLimitReserve() + rateLimitRelease(): count first, give back after
+ *   anything that wasn't a wrong guess. Sign-in uses this, so requests sent
+ *   at the same moment can't all get past a check before any is counted.
  *
  * ---- RESILIENCE ----
  * A D1 error (table not migrated yet, outage) never takes the storefront or
@@ -145,6 +148,37 @@ export async function rateLimitHit(env, bucket, request, windowSeconds){
   const w = windowInfo(bucket, request, windowSeconds);
   try{ return await increment(env.DB, w); }
   catch(err){ console.error("Rate limiter hit error (bucket=" + bucket + "), counting in memory:", err); return memIncrement(w); }
+}
+
+// Reserve-first, for budgets of FAILED credentials (adminAuth.js sign-in and "confirm it's you"): takes one slot in
+// the window with the same atomic +1 as rateLimited, BEFORE the credential is checked, and reports whether that
+// went past `limit`. Checking first and counting after let a burst of requests sent at the same moment all read
+// the count before any of them added to it, and so all get a guess (review #73). The caller gives the slot back
+// with rateLimitRelease when the attempt turns out not to be a wrong credential. `who`: a request (its address),
+// a string (an account's key) or null (the whole install). The answer carries the exact key and where it was
+// counted, so the give-back hits the same window even if the clock has moved on to the next one. It neither reads
+// nor fills the per-isolate "already blocked" cache: a slot given back can bring the count under the limit again.
+export async function rateLimitReserve(env, bucket, who, limit, windowSeconds){
+  if(!hasDb(env)) return { blocked: false, retryAfter: 0, key: null, where: "none" };
+  const w = windowInfo(bucket, who, windowSeconds);
+  let count, where = "db";
+  try{ count = await increment(env.DB, w); }
+  catch(err){
+    console.error("Rate limiter reserve error (bucket=" + bucket + "), counting in memory:", err);
+    count = memIncrement(w); where = "memory";
+  }
+  return { blocked: count > limit, retryAfter: w.retryAfter, key: w.key, where };
+}
+export async function rateLimitRelease(env, slot){
+  if(!slot || !slot.key) return;
+  if(slot.where === "memory"){
+    const cur = _memCount.get(slot.key);
+    if(cur && cur.count > 0) cur.count--;
+    return;
+  }
+  if(slot.where !== "db" || !hasDb(env)) return;
+  try{ await env.DB.prepare("UPDATE rate_limits SET count = count - 1 WHERE key = ? AND count > 0").bind(slot.key).run(); }
+  catch(err){ console.error("Rate limiter release error (" + slot.key + "):", err); }
 }
 
 // One budget for the WHOLE install over a longer window, whoever is asking — for counting failed

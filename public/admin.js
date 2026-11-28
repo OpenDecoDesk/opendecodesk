@@ -147,6 +147,7 @@ const ADMIN_ACTIONS_ = {
   usersShowRoles_(event){ event.preventDefault(); usersShowTab_("roles"); },
   usersSave_(event){ usersSave_(event); },
   usersAdd_(){ usersEdit_(null); },
+  usersEmailInput_(){ usersShowCurrent_(); },
   usersSetRequire2fa_(){ usersSetRequire2fa_(this); },
   roleSelect_(){ roleSelect_(this.dataset.key); },
   roleSetLevel_(){ roleSetLevel_(this.dataset.fn, this.value); },
@@ -11803,7 +11804,10 @@ async function loadUsers_(){
       <label for="userName">Name</label>
       <input type="text" id="userName" maxlength="80" required style="width:100%;margin:4px 0 12px;" />
       <label for="userEmail">Email (they sign in with it)</label>
-      <input type="email" id="userEmail" maxlength="200" required style="width:100%;margin:4px 0 12px;" />
+      <input type="email" id="userEmail" maxlength="200" required style="width:100%;margin:4px 0 12px;" data-admin-input="usersEmailInput_" />
+      <div id="userCurrentWrap" style="display:none;"><label for="userCurrent">Your current password (needed to change the email you sign in with)</label>
+        <input type="password" id="userCurrent" autocomplete="current-password" style="width:100%;margin:4px 0 4px;" />
+        <div id="userCurrentError" class="admin-error" style="margin-bottom:8px;"></div></div>
       <div id="userRoleWrap"><label for="userRole">Role</label>
         <select id="userRole" style="display:block;margin:4px 0 12px;">${roleOptions(givable.some(r => r.key === "production") ? "production" : (givable[givable.length - 1] || {}).key)}</select></div>
       <div class="admin-note" id="userFormNote">They get a temporary password, shown to you once, and must choose their own at their first sign-in.</div>
@@ -11959,13 +11963,47 @@ function usersEdit_(id){
   const title = document.getElementById("userFormTitle"), btn = document.getElementById("userSubmit");
   if(title) title.textContent = u ? "Edit " + (u.name || u.email || "user") : "Add a user";
   if(btn) btn.textContent = u ? "Save" : "Add user";
+  set("userCurrent", ""); usersShowCurrent_();
   const first = document.getElementById("userName");
   if(u && first) first.focus();
+}
+// Your own row: a new sign-in email needs your current password (the server checks it as Change password does).
+// The field shows only while the email typed differs from the one you sign in with now.
+function usersOwnEmailChange_(){
+  const id = Number((document.getElementById("userId") || {}).value || 0);
+  const u = id && id === _usersMe ? _usersList.find(x => x.id === id) : null;
+  const typed = String((document.getElementById("userEmail") || {}).value || "").trim().toLowerCase();
+  return !!u && typed !== String(u.email || "").trim().toLowerCase();
+}
+function usersShowCurrent_(){
+  const wrap = document.getElementById("userCurrentWrap"), err = document.getElementById("userCurrentError");
+  if(wrap) wrap.style.display = usersOwnEmailChange_() ? "" : "none";
+  if(err) err.textContent = "";
 }
 async function usersSave_(ev){
   if(ev) ev.preventDefault();
   const val = (id) => { const e = document.getElementById(id); return e ? e.value.trim() : ""; };
   const id = val("userId"), name = val("userName"), email = val("userEmail");
+  if(id && usersOwnEmailChange_()){
+    // Sent here rather than through usersCall_: a wrong password is answered 401, which there means "signed out".
+    const err = document.getElementById("userCurrentError"), cur = document.getElementById("userCurrent");
+    const say = (m) => { if(err) err.textContent = m; if(cur) cur.focus(); };
+    const current = cur ? cur.value : "";
+    if(!current) return say("Type your current password to change the email you sign in with.");
+    let res, data;
+    try{
+      res = await fetch("/api/admin-users", { method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({key: adminKey, action: "update", id: Number(id), name, email, current}) });
+      data = await res.json();
+    }catch(e){ return say("Could not reach the server."); }
+    if(!res.ok || !data || data.status !== "ok"){
+      if(res.status === 401 && !(data && data.code === "wrong_password")){ adminSignOut(); return; }
+      return say((data && data.message) || "Could not save.");
+    }
+    showToast("Saved. Sign in with the new email from now on.");
+    await loadUsers_();
+    return;
+  }
   if(id){
     if(await usersCall_({action: "update", id: Number(id), name, email})){ showToast("Saved."); await loadUsers_(); }
     return;
@@ -15833,6 +15871,8 @@ const AUDIT_ACTION_LABELS = {
   "security.account_set_up":       "Account set up",
   "security.first_signin":         "First sign-in (installer passphrase)",
   "security.recovery_signin":      "Recovery sign-in (passphrase replaced)",
+  "security.desktop_signin_reset": "Sign-in reset in the desktop program",
+  "security.desktop_restore":      "Backup restored in the desktop program",
   "security.require_2fa_changed":  "Require two-step changed",
   "security.user_created":         "User added",
   "security.user_updated":         "User edited",

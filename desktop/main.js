@@ -7,7 +7,7 @@
 // Support/OpenDecoDesk, on Windows %APPDATA%\OpenDecoDesk) — never next to the program, which
 // can be read-only or moved. `--data-dir=<folder>` uses another one.
 
-const { app, BrowserWindow, Menu, dialog, shell, ipcMain, safeStorage, session, net } = require("electron");
+const { app, BrowserWindow, Menu, dialog, shell, ipcMain, safeStorage, session, net, systemPreferences } = require("electron");
 const fs = require("fs");
 // A downloaded program refuses Chromium's remote-debugging switches: with them, anything else on this computer could
 // drive the window (and the signed-in session) over a local port. Electron has no fuse for these, so the check is
@@ -19,7 +19,8 @@ if (app.isPackaged && DEBUG_SWITCHES.some((s) => app.commandLine.hasSwitch(s))) 
   app.exit(1);
 }
 const path = require("path");
-const { startServer, copyState, restoreState, resetSignIn, setShippoKey, setSupplierConnections, setSmtp, setEmailOn, savedSmtpPassword, recordBackup, stamp, IMAGES_HOST, desktopCsp } = require("./server.js");
+const { menuGateDecision, confirmWithTouchId } = require("./menu-gate.js");
+const { startServer, copyState, restoreState, resetSignIn, noteRestored, setShippoKey, setSupplierConnections, setSmtp, setEmailOn, savedSmtpPassword, recordBackup, stamp, IMAGES_HOST, desktopCsp } = require("./server.js");
 const { Mailer, cleanSmtpSettings, cleanPdf } = require("./mailer.js");
 const { createLog } = require("./log.js");
 const { displayVersion } = require("./version.js");
@@ -214,21 +215,43 @@ async function backUp() {
   dialog.showMessageBox(win, { message: "Backed up.", detail: "Everything — orders, books, stock, pictures and files — is in\n" + made + "\n\nKeep a copy somewhere other than this computer." });
 }
 
+// Restore and Reset sign-in each hand the program to whoever uses them (menu-gate.js): only with nobody or an
+// Admin signed in in the window. Says why when not. True to go on.
+async function menuActionMayRun() {
+  let answer;
+  try { answer = await askWhoIsSignedIn(); }
+  catch (err) { log("Couldn't check who is signed in: " + ((err && err.message) || err)); answer = { error: true }; }
+  const d = menuGateDecision(answer);
+  if (!d.ok) {
+    log("Refused from the menu: " + d.message);
+    await dialog.showMessageBox(win, { type: "warning", message: d.message, detail: d.detail });
+  }
+  return d.ok;
+}
+
 async function restore() {
+  if (!(await menuActionMayRun())) return;
   const r = await dialog.showOpenDialog(win, { title: "Restore which backup?", buttonLabel: "Restore", properties: ["openDirectory"] });
   if (r.canceled || !r.filePaths[0]) return;
   const ok = await dialog.showMessageBox(win, { type: "warning", buttons: ["Restore", "Cancel"], defaultId: 1, cancelId: 1,
     message: "Replace everything with this backup?",
     detail: "What is here now is not deleted: it is moved to the backups folder inside the data folder first.\n\nYou sign in with the password that was in use when the backup was made." });
   if (ok.response !== 0) return;
-  await whileStopped(async () => { restoreState(dataDir, r.filePaths[0]); });
+  if (!(await confirmWithTouchId({ platform: process.platform, systemPreferences }, "restore a backup"))) return;
+  await whileStopped(async () => {
+    restoreState(dataDir, r.filePaths[0]);
+    // Written in the restored database's audit log at the start just after this (server.js recordDesktopEvents).
+    noteRestored(dataDir, crypt());
+  });
 }
 
 async function resetSignInMenu() {
+  if (!(await menuActionMayRun())) return;
   const ok = await dialog.showMessageBox(win, { type: "warning", buttons: ["Reset sign-in", "Cancel"], defaultId: 1, cancelId: 1,
     message: "Locked out?",
-    detail: "This clears every password and two-step sign-in. You then set up your account again (name, email, password); other users get a new password from you under Settings → Users.\n\nNo orders, books or settings are changed." });
+    detail: "This clears every password and two-step sign-in. You then set up your account again (name, email, password); other users get a new password from you under Settings → Users.\n\nNo orders, books or settings are changed. The reset is written in the audit log." });
   if (ok.response !== 0) return;
+  if (!(await confirmWithTouchId({ platform: process.platform, systemPreferences }, "reset sign-in"))) return;
   await whileStopped(async () => {
     resetSignIn(dataDir, crypt());
     await session.defaultSession.clearStorageData({ storages: ["cookies", "localstorage"] });
@@ -280,30 +303,37 @@ const NOT_YOURS = { ok: false, message: "Your role can't change Global settings.
 async function signedInMayEditSettings() {
   if (!server) return false;
   try {
-    // By domain, not URL: the session cookie is a Secure one, and the page's address is plain http on localhost.
-    const cookies = await session.defaultSession.cookies.get({ domain: "localhost" });
-    if (!cookies.length) return false;
-    const origin = new URL(server.url).origin, body = JSON.stringify({ action: "me" });
-    const answer = await new Promise((resolve, reject) => {
-      // To 127.0.0.1, where the server listens (server.js), under the page's own name and origin.
-      const req = require("http").request({ host: "127.0.0.1", port: server.port, path: "/api/admin-users", method: "POST", headers: {
-        Host: "localhost:" + server.port, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), Origin: origin,
-        Cookie: cookies.map(c => c.name + "=" + c.value).join("; ") } }, (res) => {
-        let text = "";
-        res.setEncoding("utf8");
-        res.on("data", (d) => { text += d; if (text.length > 1e6) req.destroy(new Error("too long")); });
-        res.on("end", () => { try { resolve({ status: res.statusCode, body: JSON.parse(text) }); } catch (err) { reject(err); } });
-      });
-      req.on("error", reject);
-      req.setTimeout(10000, () => req.destroy(new Error("timed out")));
-      req.end(body);
-    });
+    const answer = await askWhoIsSignedIn();
+    if (!answer) return false;
     const level = answer.body && answer.body.permissions && answer.body.permissions["settings.global"];
     return answer.status === 200 && answer.body.status === "ok" && !answer.body.pending && (level === "edit" || level === "full");
   } catch (err) {
     log("Couldn't check who is signed in: " + ((err && err.message) || err));
     return false;
   }
+}
+// The server's answer to { action: "me" } for the window's session cookie ({ status, body }), or null when the
+// window has none. Throws when the server can't be asked.
+async function askWhoIsSignedIn() {
+  if (!server) throw new Error("the server isn't running");
+  // By domain, not URL: the session cookie is a Secure one, and the page's address is plain http on localhost.
+  const cookies = await session.defaultSession.cookies.get({ domain: "localhost" });
+  if (!cookies.length) return null;
+  const origin = new URL(server.url).origin, body = JSON.stringify({ action: "me" });
+  return await new Promise((resolve, reject) => {
+    // To 127.0.0.1, where the server listens (server.js), under the page's own name and origin.
+    const req = require("http").request({ host: "127.0.0.1", port: server.port, path: "/api/admin-users", method: "POST", headers: {
+      Host: "localhost:" + server.port, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), Origin: origin,
+      Cookie: cookies.map(c => c.name + "=" + c.value).join("; ") } }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (d) => { text += d; if (text.length > 1e6) req.destroy(new Error("too long")); });
+      res.on("end", () => { try { resolve({ status: res.statusCode, body: JSON.parse(text) }); } catch (err) { reject(err); } });
+    });
+    req.on("error", reject);
+    req.setTimeout(10000, () => req.destroy(new Error("timed out")));
+    req.end(body);
+  });
 }
 
 // A mailbox's settings, tried before Global settings saves anything: signs in to the server, sends

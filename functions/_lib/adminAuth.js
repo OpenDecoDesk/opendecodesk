@@ -32,12 +32,12 @@
  * is one any XSS could copy out and replay.
  *
  * Every storage-dependent check FAILS CLOSED (503) — unlike the rate limiter, which may fail
- * open. Sign-in (/api/admin-session) checks its failure budget BEFORE the password, and only a
- * FAILED CREDENTIAL counts against it: being told "your role can't do that" or "finish setting up
- * first" does not, or one person clicking around would lock the whole office out.
+ * open. Sign-in (/api/admin-session) takes a slot in its failure budget BEFORE the password, and only a
+ * FAILED CREDENTIAL keeps it: being told "your role can't do that" or "finish setting up first" gives
+ * it back, or one person clicking around would lock the whole office out.
  */
 
-import { rateLimitCheck, rateLimitHit, rateLimitResponse, rateLimitCheckGlobal, rateLimitHitGlobal, rateLimitMark, rateLimitMarked } from "./rateLimit.js";
+import { rateLimitCheck, rateLimitHit, rateLimitResponse, rateLimitReserve, rateLimitRelease, rateLimitMark, rateLimitMarked } from "./rateLimit.js";
 import { verifyTurnstile } from "./turnstile.js";
 import { jsonResponse } from "./http.js";
 import { accessEnabled, verifyAccess } from "./access.js";
@@ -103,30 +103,45 @@ const askForCheck_ = (env, message) => jsonResponse({ status: "error", code: "tu
 // it), then the whole budget — unless the address signed in here lately — and, from every address, this account's.
 // Past either, a Turnstile check (`turnstileToken`) is needed instead; a site without Turnstile keys refuses as before.
 // Returns null, or the answer to send back.
-export async function signInBudgetBlocked(env, request, { email = "", turnstileToken = "" } = {}){
+// Each budget is spent FIRST, one slot each, in one atomic step per counter (rateLimitReserve): checking first and
+// counting after a wrong password let a burst of requests sent at the same moment all get past the check before any
+// of them was counted. The slots taken are pushed onto `slots`; the caller keeps them for a wrong password or code
+// and gives every one back (releaseSignInSlots) on any other answer. When this refuses, it has given them back
+// itself: a refusal here isn't a guess. Past its share an address takes no slot of the whole budget, as before.
+export async function signInBudgetBlocked(env, request, { email = "", turnstileToken = "", slots = [] } = {}){
   const share = adminAuthIpShare(env);
   if(!(share > 0)) return null;
-  const mine = await rateLimitCheck(env, ADMIN_AUTH_IP_SHARE_BUCKET, request, share, ADMIN_AUTH_GLOBAL_WINDOW);
-  if(mine.blocked) return rateLimitResponse(mine.retryAfter);
-  const known = await rateLimitMarked(env, ADMIN_KNOWN_BUCKET, request);
-  const all = known ? { blocked: false } : await rateLimitCheckGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, adminAuthGlobalLimit(env), ADMIN_AUTH_GLOBAL_WINDOW);
-  const account = await accountKey_(email);
-  const acct = account ? await rateLimitCheck(env, ADMIN_AUTH_ACCOUNT_BUCKET, "acct:" + account, adminAuthAccountLimit(env), ADMIN_AUTH_GLOBAL_WINDOW) : { blocked: false };
-  if(!all.blocked && !acct.blocked) return null;
-  if(!turnstileReady_(env)) return rateLimitResponse(Math.max(all.retryAfter || 0, acct.retryAfter || 0, 1));
-  if(!turnstileToken) return askForCheck_(env);
-  const check = await verifyTurnstile(env, String(turnstileToken), request);
-  return check.ok ? null : askForCheck_(env, check.message);
+  const mine = await rateLimitReserve(env, ADMIN_AUTH_IP_SHARE_BUCKET, request, share, ADMIN_AUTH_GLOBAL_WINDOW);
+  if(mine.blocked){ await rateLimitRelease(env, mine); return rateLimitResponse(mine.retryAfter); }
+  const taken = [mine];
+  try{
+    const known = await rateLimitMarked(env, ADMIN_KNOWN_BUCKET, request);
+    // A known address takes its slot of the whole budget too (its wrong passwords count, as before); it is only not
+    // held up by it.
+    const everyone = await rateLimitReserve(env, ADMIN_AUTH_GLOBAL_BUCKET, null, adminAuthGlobalLimit(env), ADMIN_AUTH_GLOBAL_WINDOW);
+    taken.push(everyone);
+    const all = known ? { blocked: false } : everyone;
+    const account = await accountKey_(email);
+    const acct = account ? await rateLimitReserve(env, ADMIN_AUTH_ACCOUNT_BUCKET, "acct:" + account, adminAuthAccountLimit(env), ADMIN_AUTH_GLOBAL_WINDOW) : { blocked: false };
+    if(account) taken.push(acct);
+    let refused = null;
+    if(all.blocked || acct.blocked){
+      if(!turnstileReady_(env)) refused = rateLimitResponse(Math.max(all.retryAfter || 0, acct.retryAfter || 0, 1));
+      else if(!turnstileToken) refused = askForCheck_(env);
+      else{
+        const check = await verifyTurnstile(env, String(turnstileToken), request);
+        if(!check.ok) refused = askForCheck_(env, check.message);
+      }
+    }
+    if(refused){ await releaseSignInSlots(env, taken); return refused; }
+  }catch(e){ await releaseSignInSlots(env, taken); throw e; }
+  slots.push(...taken);
+  return null;
 }
-// After a refused credential sent without a session: counts against this address's share, the account typed
-// and, while the address is still within its share, against the whole budget.
-export async function countSignInFailure(env, request, email = ""){
-  const share = adminAuthIpShare(env);
-  if(!(share > 0)) return;
-  const mine = await rateLimitHit(env, ADMIN_AUTH_IP_SHARE_BUCKET, request, ADMIN_AUTH_GLOBAL_WINDOW);
-  const account = await accountKey_(email);
-  if(account) await rateLimitHit(env, ADMIN_AUTH_ACCOUNT_BUCKET, "acct:" + account, ADMIN_AUTH_GLOBAL_WINDOW);
-  if(mine <= share) await rateLimitHitGlobal(env, ADMIN_AUTH_GLOBAL_BUCKET, ADMIN_AUTH_GLOBAL_WINDOW);
+// Gives back the slots signInBudgetBlocked or checkCurrentPassword took: the exact windows they were taken in, never
+// keys made again now (the clock may have moved on to the next window).
+export async function releaseSignInSlots(env, slots){
+  for(const slot of slots || []) await rateLimitRelease(env, slot);
 }
 
 const SESSION_PREFIX  = "sess_";
@@ -393,18 +408,22 @@ export async function verifyUserPassword(env, user, key){
 // can't guess it.
 const CURRENT_PW_USER_BUCKET = "admin_pw_user", CURRENT_PW_USER_LIMIT = 10, CURRENT_PW_USER_WINDOW = 15 * 60;
 export async function checkCurrentPassword(env, request, user, current){
-  const fromHere = await rateLimitCheck(env, ADMIN_AUTH_BUCKET, request, ADMIN_AUTH_LIMIT);
-  const forUser = await rateLimitCheck(env, CURRENT_PW_USER_BUCKET, "user:" + user.id, CURRENT_PW_USER_LIMIT, CURRENT_PW_USER_WINDOW);
-  if(fromHere.blocked || forUser.blocked) return rateLimitResponse(Math.max(fromHere.retryAfter || 0, forUser.retryAfter || 0, 1));
-  let good;
-  try{ good = await verifyUserPassword(env, user, current); }
-  catch(e){
-    console.error("could not check the current password:", e);
-    return jsonResponse({status:"error", message:"Sign-in service temporarily unavailable — try again shortly."}, 503);
-  }
-  if(good) return null;
-  await rateLimitHit(env, ADMIN_AUTH_BUCKET, request);
-  await rateLimitHit(env, CURRENT_PW_USER_BUCKET, "user:" + user.id, CURRENT_PW_USER_WINDOW);
+  // Both budgets are spent first, and given back unless the password is wrong (as at sign-in, signInBudgetBlocked):
+  // checks sent at the same moment can't all get a guess in.
+  const fromHere = await rateLimitReserve(env, ADMIN_AUTH_BUCKET, request, ADMIN_AUTH_LIMIT);
+  const forUser = await rateLimitReserve(env, CURRENT_PW_USER_BUCKET, "user:" + user.id, CURRENT_PW_USER_LIMIT, CURRENT_PW_USER_WINDOW);
+  let wrong = false;
+  try{
+    if(fromHere.blocked || forUser.blocked) return rateLimitResponse(Math.max(fromHere.retryAfter || 0, forUser.retryAfter || 0, 1));
+    let good;
+    try{ good = await verifyUserPassword(env, user, current); }
+    catch(e){
+      console.error("could not check the current password:", e);
+      return jsonResponse({status:"error", message:"Sign-in service temporarily unavailable — try again shortly."}, 503);
+    }
+    if(good) return null;
+    wrong = true;
+  }finally{ if(!wrong) await releaseSignInSlots(env, [fromHere, forUser]); }
   try{ await recordFailedAdminLogin(env.DB, "current-password", request.headers.get("CF-Connecting-IP") || ""); }
   catch(e){ console.error("could not record the failed attempt:", e); }
   return jsonResponse({status:"error", code:"wrong_password", message:"The current password is not right."}, 401);

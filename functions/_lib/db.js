@@ -19681,7 +19681,7 @@ export async function getQuickBooksData(db, { dateFrom, dateTo } = {}) {
   const allocBy = new Map();
   for (const c of allocs) (allocBy.get(Number(c.transferId)) || allocBy.set(Number(c.transferId), []).get(Number(c.transferId))).push(c);
   const deposits = [];
-  for (const t of transfers || []) {
+  for (const t of transfers) {
     const from = typeOf.get(Number(t.fromAccountId)), to = typeOf.get(Number(t.toAccountId)), links = allocBy.get(Number(t.id)) || [];
     let kind = null, accountId = Number(t.toAccountId), amount = Number(t.amountCents) || 0;
     if (from === "stripe" && !holding(to)) kind = "stripe_payout";

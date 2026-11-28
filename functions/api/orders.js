@@ -3884,8 +3884,9 @@ async function handleOrdersPost_(context, listBefore = null) {
       }
       input.taxExemptExpires = expires;
       // Net 30 (migrations/0121): Allow Net 30 and Terms (days), saved with the customer (db.js saveCustomer checks the
-      // days). Left out, they stay as stored; changing them needs Full on Customers, as the page says.
-      if (body.allowNet30 !== undefined) input.allowNet30 = body.allowNet30 === true;
+      // days). Left out, they stay as stored; changing them needs Full on Customers, as the page says (checked once, here,
+      // before the exemption's audit row). 1 counts as true, so a role without Full resending it as stored is no change.
+      if (body.allowNet30 !== undefined) input.allowNet30 = body.allowNet30 === true || body.allowNet30 === 1;
       if (body.termsDays !== undefined) input.termsDays = body.termsDays;
       {
         const wasAllow = !!(beforeRow && Number(beforeRow.allowNet30)), wasDays = beforeRow && beforeRow.termsDays != null ? Number(beforeRow.termsDays) : null;
@@ -3901,15 +3902,6 @@ async function handleOrdersPost_(context, listBefore = null) {
         const auditErr = await auditStrict({ orgId: null, orderId: null, action: "customer.exemption_changed",
           detail: { customerId: id || null, name: input.name, company: input.company, changes: exemption } });
         if (auditErr) return auditErr;       // 503 — nothing was changed
-      }
-      // Net 30 terms (migrations/0121): allowNet30 and termsDays go to db.js saveCustomer (left out = kept). Changing them
-      // needs Customers full, like the exemption; the page sends them back as stored for a role without it.
-      if (body.allowNet30 !== undefined) input.allowNet30 = body.allowNet30 === true || body.allowNet30 === 1;
-      if (body.termsDays !== undefined) input.termsDays = body.termsDays;
-      const oldAllow = !!(beforeRow && Number(beforeRow.allowNet30)), oldDays = beforeRow && beforeRow.termsDays != null ? Number(beforeRow.termsDays) : null;
-      const newDays = input.termsDays === undefined ? oldDays : (input.termsDays === null || String(input.termsDays).trim() === "" ? null : Number(String(input.termsDays).trim()));
-      if (((input.allowNet30 !== undefined && input.allowNet30 !== oldAllow) || newDays !== oldDays) && !can_("customers.records", "full")) {
-        return forbidden_("Your role can't change a customer's Net 30 terms. Ask an admin.");
       }
       const r = await saveCustomer(env.DB, input);
       if (!r || r.error) {

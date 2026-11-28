@@ -5130,11 +5130,14 @@ async function showOrderTerms_(orgId, orderId){
   if(!o){ showToast("Order not found — refresh the list.", true); return; }
   const canEdit = adminCan_("orders.terms", "edit");
   const status = net30Status_(o);
+  // Blank days are the customer's own (filled in when the order went on terms), else the default under Global settings
+  // (getOrders' net30.defaultDays), not a fixed 30: the due date is worked out with that default.
+  const defaultDays = Number(net30Rule_(orgId).defaultDays) || 30;
   const facts = o.net30 ? [
     `<div><strong>${status === "PO needed" ? "No PO yet" : status === "PO to check" ? "PO typed by the customer, not accepted yet" : "PO accepted"}</strong>${o.poNumber ? " — " + escapeHtml(net30PoText_(o.poNumber)) : ""}</div>`,
     o.poTypedAt ? `<div>Typed by the customer ${escapeHtml(adminDateTime_(o.poTypedAt))}</div>` : "",
     o.poAcceptedAt ? `<div>Accepted ${escapeHtml(adminDateTime_(o.poAcceptedAt))}${o.poAcceptedBy ? " by " + escapeHtml(o.poAcceptedBy) : ""}</div>` : "",
-    `<div>${o.termsDueDate ? `Due <strong>${escapeHtml(adminDate_(o.termsDueDate, { month: "short", day: "numeric", year: "numeric" }))}</strong>` : "Due date: not known yet"} · Net ${Number(o.termsDays) || 30}${o.invoicedAt ? " · invoice first sent " + escapeHtml(adminDate_(o.invoicedAt)) : " · no invoice sent yet"}</div>`,
+    `<div>${o.termsDueDate ? `Due <strong>${escapeHtml(adminDate_(o.termsDueDate, { month: "short", day: "numeric", year: "numeric" }))}</strong>` : "Due date: not known yet"} · Net ${Number(o.termsDays) || defaultDays}${o.invoicedAt ? " · invoice first sent " + escapeHtml(adminDate_(o.invoicedAt)) : " · no invoice sent yet"}</div>`,
     Number(o.balanceDue) > 0 ? `<div>Still owed: <strong>${adminMoney_(o.balanceDue)}</strong></div>` : `<div>Paid in full.</div>`,
   ].join("") : `<div>Not on Net 30: the work waits for payment as usual${o.payOnDelivery ? " (it is set to pay on delivery)" : ""}.</div>`;
   const { ov, close } = inventoryModal_("Net 30 — " + escapeHtml(orderId), `
@@ -5142,7 +5145,7 @@ async function showOrderTerms_(orgId, orderId){
       <div class="n30-facts" id="n30Facts">${facts}</div>
       ${canEdit ? `<label class="cust-check"><input type="checkbox" id="n30On" ${o.net30 ? "checked" : ""}> Net 30: the customer pays by invoice, within the days below</label>
       <div class="n30-row" id="n30Fields"${o.net30 ? "" : " hidden"}>
-        <label class="cust-field"><span>Days to pay</span><input type="number" id="n30Days" min="1" max="365" step="1" value="${o.termsDays != null ? Number(o.termsDays) : ""}" placeholder="Default (30)"></label>
+        <label class="cust-field"><span>Days to pay</span><input type="number" id="n30Days" min="1" max="365" step="1" value="${o.termsDays != null ? Number(o.termsDays) : ""}" placeholder="Default (${defaultDays})"></label>
         <label class="cust-field"><span>PO number</span><input type="text" id="n30Po" maxlength="60" autocomplete="off" spellcheck="false" value="${escapeHtml(o.poNumber || "")}" placeholder="e.g. PO-1001"></label>
       </div>
       <div class="cust-note">A PO typed here counts at once: the order is cleared for work — blanks, the run, delivery and completing it — while the money stays owed, on Reports → Unpaid POs until it is paid. Blank days use the customer's own terms, else the default under Global settings.</div>

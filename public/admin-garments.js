@@ -14,7 +14,8 @@
 (function () {
   "use strict";
 
-  // Checking garments in is a step of the order, like marking a blank received (setFulfillmentStage): the same permission.
+  // Checking garments in is a step of the order, like marking a blank received (setFulfillmentStage): the same permission
+  // (edit); undoing a check-in needs Full, as the server asks.
   const STEP_FN = "orders.stepsEarly";
   const NOTE_MAX = 300, QTY_MAX = 5000, ROWS_MAX = 30;
   const DEFAULT_WAIVER = "Customer's garments are decorated at the customer's risk; we're not responsible for garments damaged in normal production.";
@@ -73,7 +74,7 @@
         ${waiver ? `<div class="og-waiver">“${escapeHtml(waiver)}”</div>` : `<div class="cust-note">No waiver line is set (Global settings → Features → Customer-supplied garments).</div>`}
         <div class="cust-err" id="ogErr" role="alert"></div>
         <div class="cust-dialog-actions og-actions">
-          ${canEdit && live && live.length ? `<button type="button" class="admin-btn admin-btn-secondary" id="ogUndo" style="margin-right:auto;">Undo check-in</button>` : ""}
+          ${adminCan_(STEP_FN, "full") && live && live.length ? `<button type="button" class="admin-btn admin-btn-secondary" id="ogUndo" style="margin-right:auto;">Undo check-in</button>` : ""}
           <button type="button" class="admin-btn admin-btn-secondary" id="ogPrint" data-perm-keep>Print slip</button>
           <button type="button" class="admin-btn admin-btn-secondary" id="ogCancel" data-perm-keep>${canEdit ? "Cancel" : "Close"}</button>
           ${canEdit ? `<button type="submit" class="admin-btn" id="ogSave">Save check-in</button>` : ""}

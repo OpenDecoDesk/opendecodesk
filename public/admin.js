@@ -27448,7 +27448,7 @@ const runEmbNote_ = (c) => c.hasEmbroidery ? `<div class="rt-emb" style="font-si
 // A DTF card (the old Run Transfer Sheets card): ready = blank in hand and transfers in stock or marked received.
 function runDtfCardHtml_(c, ready, off){
   const ids = `data-item="${c.itemId}" data-order="${escapeHtml(c.orderId)}" data-org="${escapeHtml(c.orgId)}"`;
-  const waits = ready ? [] : [!c.blankReceived ? "blank" : "", (c.transferShort || []).length || !c.transferReceived ? "transfers" : ""].filter(Boolean);
+  const waits = ready ? [] : [!c.blankReceived ? (c.customerOwned ? "the customer's garments" : "blank") : "", (c.transferShort || []).length || !c.transferReceived ? "transfers" : ""].filter(Boolean);
   return `<div class="ro-card ro-card-dtf ${ready ? "ro-card-ready" : "ro-card-waiting"}" data-type="dtf" style="border:1px solid ${ready ? "#2c6b2f" : "#ddd"};border-radius:10px;padding:14px;margin-bottom:12px;background:${ready ? "#f3f9f4" : "#fff"};">
       ${runCardHead_(c, "dtf", off)}
       ${runLocsHtml_(c.transfers)}
@@ -27471,7 +27471,7 @@ function runOtherCardHtml_(c, ready, off){
       ${runLocsHtml_(c.locations)}
       ${runEmbNote_(c)}
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        ${!ready ? `<span style="font-size:12px;color:#b26a00;">Waiting on blank</span>` : ""}
+        ${!ready ? `<span style="font-size:12px;color:#b26a00;">Waiting on ${c.customerOwned ? "the customer's garments" : "blank"}</span>` : ""}
         ${c.started ? `<span class="ro-started" style="font-size:13px;font-weight:700;color:#2c6b2f;">● Started</span><button type="button" class="admin-btn roDecUndo" data-need="run.markMade:edit" ${ids} style="padding:4px 12px;">Undo</button>`
           : ready ? `<button type="button" class="admin-btn roDecStart" data-need="run.markMade:edit" ${ids} style="padding:6px 16px;">Start</button>` : ""}
         ${ready ? `<button type="button" class="admin-btn roDecMake" data-need="run.markMade:edit" ${ids} style="padding:6px 16px;font-weight:700;background:var(--org-accent,#2c6b2f);color:#fff;">${doneWord}</button>` : ""}
@@ -29548,15 +29548,17 @@ function paidUnrunHtml_(orders){
   const typesOf = (o) => (o.types || []).map(k => runTypeChip_(k)).join(" ");
   const rows = orders.map(o => {
     const items = o.items.map(it => `${it.qty} × ${escapeHtml(it.name)}${it.size && it.size !== "OSFA" ? " · " + escapeHtml(it.size) : ""}`).join(", ");
+    // The customer's own garments (migrations/0121): "Waiting on the customer's garments" / "Garments in" (the server's words).
+    const garments = o.garmentsStatus ? `<span class="ro-garments" style="color:${o.ownGarments && o.ownGarments.waiting ? "#b03a2e" : "#166534"};">${escapeHtml(o.garmentsStatus)}</span>` : "";
     return `<tr style="border-bottom:1px solid #eee;">
       <td style="padding:5px 8px;white-space:nowrap;">${o.dueDate ? dueBadge_(o.dueDate) : `<span style="color:#999;">—</span>`}</td>
       <td style="padding:5px 8px;white-space:nowrap;color:#777;">${escapeHtml(adminDate_(o.placedAt))}</td>
       <td style="padding:5px 8px;"><b>${escapeHtml(o.customerName)}</b> <a href="#orders/${encodeURIComponent(o.orgId)}" style="color:inherit;font-size:12px;">${escapeHtml(o.orderId)}</a><div style="font-size:12px;color:#777;">${escapeHtml(o.orgName)}</div></td>
       <td style="padding:5px 8px;font-size:13px;">${items}</td>
       <td class="ro-paid-types" style="padding:5px 8px;">${typesOf(o)}</td>
-      <td style="padding:5px 8px;white-space:nowrap;font-size:12px;">${o.needsBlanks === false ? (o.allFromStock ? `<span style="color:#166534;">From stock</span>` : `<span style="color:#666;">No blank needed</span>`) : o.blankReceived ? `<span style="color:#166534;">Blanks in</span>` : o.blankOrdered ? `<span style="color:#b45309;">Blanks ordered</span>`
+      <td style="padding:5px 8px;white-space:nowrap;font-size:12px;">${o.needsBlanks === false && garments ? garments : o.needsBlanks === false ? (o.allFromStock ? `<span style="color:#166534;">From stock</span>` : `<span style="color:#666;">No blank needed</span>`) : o.blankReceived ? `<span style="color:#166534;">Blanks in</span>` : o.blankOrdered ? `<span style="color:#b45309;">Blanks ordered</span>`
         : o.blanksInStock ? `<span style="color:#166534;">In stock</span> <button type="button" class="admin-btn ro-use-stock" data-need="orders.stepsEarly:edit" data-org="${escapeHtml(o.orgId)}" data-order="${escapeHtml(o.orderId)}" data-admin-action="paidUnrunUseStock_" title="Take this order's blanks from stock on hand" style="padding:2px 8px;font-size:11px;margin-left:4px;">Use from stock</button>`
-        : `<span style="color:#b03a2e;">Blanks not ordered yet</span>`}</td>
+        : `<span style="color:#b03a2e;">Blanks not ordered yet</span>`}${o.needsBlanks !== false && garments ? "<br>" + garments : ""}</td>
     </tr>`;
   }).join("");
   return `<details open style="margin:4px 0 16px;"><summary style="cursor:pointer;font-size:15px;font-weight:700;color:#1a1a1a;">Paid, not yet run — by due date (${orders.length})</summary>

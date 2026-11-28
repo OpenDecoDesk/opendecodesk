@@ -68,8 +68,10 @@ function people(api, workerIndex) {
 // What the account list holds for a role kept from the business's money: these four, nothing else.
 const NAME_FIELDS = ["active", "id", "name", "type"];
 const MONEY_FIELDS = ["balance", "openingBalance", "openingDate", "moves", "csvMapping"];
+// Every account the full list had (other specs running alongside may have added more since), by name only.
 const expectNamesOnly = (reply, full) => {
-  expect(reply.accounts.map(a => a.name)).toEqual(full.accounts.map(a => a.name));
+  const names = reply.accounts.map(a => a.name);
+  for (const a of full.accounts) expect(names).toContain(a.name);
   for (const a of reply.accounts) expect(Object.keys(a).sort()).toEqual(NAME_FIELDS);
   for (const f of MONEY_FIELDS) expect(JSON.stringify(reply), "no " + f + " in the reply").not.toContain('"' + f + '"');
   expect(reply.defaults).toEqual({});

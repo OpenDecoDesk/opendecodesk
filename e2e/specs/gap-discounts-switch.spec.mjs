@@ -173,7 +173,7 @@ test("Discount codes switched off in Global settings: no menu item or page, the 
     switchedOff = false;
     await expect(navBtn(page)).toBeVisible();
     await navBtn(page).click();
-    await expect(page).toHaveTitle(/ — Discount codes \(Admin\)$/);
+    await expect(page).toHaveTitle(/ — Marketing \(Admin\)$/);
     await page.locator("#dcQ").fill(c.code);
     const row = page.locator("#dcBody tr[data-dc-row]", { hasText: c.code });
     await expect(row).toHaveCount(1);

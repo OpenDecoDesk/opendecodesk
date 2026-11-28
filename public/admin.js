@@ -5104,6 +5104,9 @@ function paidLabel_(o){ return o.paid ? "Paid" : o.payOnDelivery ? "Unpaid · on
 // ({ allowed }) comes with its getOrders, like pay on delivery; a server that doesn't say offers it only on orders that
 // are on Net 30 already.
 function net30Rule_(orgId){ return ((window._ordersNet30 || {})[orgId]) || { allowed: false }; }
+// Whether a shop's orders may go on Net 30, when the page knows (its getOrders said); true when it doesn't, and the server
+// decides (admin-quotes.js's Convert window).
+function net30Allowed_(orgId){ const r = (window._ordersNet30 || {})[orgId]; return r && typeof r === "object" ? !!r.allowed : true; }
 // "" | "PO needed" | "PO to check" | "accepted" — the server's poStatus, or the same rule worked out from the fields.
 function net30Status_(o){
   if(!o || !o.net30) return "";

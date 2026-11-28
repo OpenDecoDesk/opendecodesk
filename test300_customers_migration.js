@@ -286,7 +286,10 @@ function checkRules(d1, built) {
   const customerCol = (db) => JSON.stringify(columns(db, "orders").filter(c => c.name === "customerId").map(c => [c.type, c.notnull, c.dflt_value, c.pk]));
   ok("orders.customerId is a whole number that may be empty, with no default, in both", customerCol(empty) === '[["INTEGER",0,null,0]]' && customerCol(fresh) === customerCol(empty));
   ok("and points at a customer in both", fks(empty, "orders", "customerId") === '[["customers","id"]]' && fks(fresh, "orders", "customerId") === fks(empty, "orders", "customerId"));
-  ok("orders have the same columns in the same order either way", JSON.stringify(columns(fresh, "orders").map(c => c.name)) === JSON.stringify(columns(empty, "orders").map(c => c.name)));
+  // Against every migration, not only up to this one: a later migration may add an orders column of its own.
+  const latest = await databaseBefore0108();
+  for (const f of migrationFiles.filter(f => f >= MIGRATION)) latest.execFile(read("migrations/" + f));
+  ok("orders have the same columns in the same order either way", JSON.stringify(columns(fresh, "orders").map(c => c.name)) === JSON.stringify(columns(latest, "orders").map(c => c.name)));
   const EMAIL_INDEX = "CREATE UNIQUE INDEX idx_customers_email ON customers(email) WHERE email <> '' AND mergedIntoId IS NULL";
   ok("the email index is unique and leaves out blank emails and merged-away customers, in both", indexSql(empty, "idx_customers_email") === EMAIL_INDEX && indexSql(fresh, "idx_customers_email") === EMAIL_INDEX);
   ok("the orders' customer index is on customerId alone, and not unique, in both",

@@ -1716,6 +1716,7 @@ async function handleOrdersPost_(context, listBefore = null) {
     let blocks = Array.isArray(body.blocks) ? body.blocks.filter(b => typeof b === "string") : undefined;
     const posCounts = !seesPricing_() && can_("orders.details", "read") && (!blocks || blocks.includes("unpaidpos"));
     if (!seesPricing_()) blocks = (!blocks || blocks.includes("orders") ? ["orders"] : []).concat(posCounts ? ["unpaidpos"] : []);
+    if (!blocks || blocks.includes("unpaidpos")) await resolveTimeZone(env);   // the Unpaid POs part's due dates: the business's calendar
     const d = await getDashboard(env.DB, { today, fresh: body.fresh === true, blocks });
     if (!seesPricing_()) return jsonResponse({ status: "ok", stages: d.stages, open: d.open, onTheWay: d.onTheWay, blocks: d.blocks, cachedAt: d.cachedAt, cached: d.cached,
       ...(posCounts && d.unpaidPos ? { unpaidPos: { count: Number(d.unpaidPos.count) || 0, toCheck: Number(d.unpaidPos.toCheck) || 0 } } : {}) });
@@ -2820,7 +2821,9 @@ async function handleOrdersPost_(context, listBefore = null) {
       customerId = customerIdOf_(body.customerId);
       if (!customerId) return jsonResponse({ status: "error", message: "That customer isn't valid. Pick one from the list." }, 400);
     }
-    const got = await termsCall_(() => getUnpaidPoReport(env.DB, { asOf, ...(org ? { orgId: org.orgId } : {}), ...(customerId ? { customerId } : {}) }));
+    // Due dates are days on the business's calendar: its time zone, resolved now (not whatever a request before left).
+    const tz = await resolveTimeZone(env);
+    const got = await termsCall_(() => getUnpaidPoReport(env.DB, { asOf, tz, ...(org ? { orgId: org.orgId } : {}), ...(customerId ? { customerId } : {}) }));
     if (got.reply) return got.reply;
     let net30On = false;
     try { net30On = ((await getGlobalSettings(env.DB)) || {}).enabledPayments?.net30 === true; } catch (_) { net30On = false; }

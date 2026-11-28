@@ -848,6 +848,7 @@
 .n30-box{display:flex; flex-direction:column; gap:10px;}
 .n30-facts{font-size:13px; line-height:1.5; padding:8px 10px; border:1px solid var(--line,#e2e2e2); border-radius:6px; background:#fafafa;}
 .n30-row{display:flex; flex-wrap:wrap; gap:10px;}
+.n30-row[hidden]{display:none;}   /* the Net 30… window's days and PO, hidden while Net 30 is unticked */
 .n30-row .cust-field{flex:1 1 160px;}
 .home-po{display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:10px;}
 .home-po-card{display:flex; flex-direction:column; gap:2px; background:#fff; border:1px solid var(--card-line); border-radius:8px; padding:12px 14px; color:var(--ink);}

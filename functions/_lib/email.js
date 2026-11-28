@@ -990,10 +990,11 @@ const DIGEST_LIST_MAX = 200;
 // ---- Net 30 in the roll-up (migrations/0121) -----------------------------------------------------------------
 // A new order's Payment cell: "Net 30 · PO 1001" / "Net 30 · PO needed" on Net 30, else the method as chosen; the
 // tag under it says "PO to check" while a PO the customer typed waits for staff to accept it.
-function digestPayment_(o) {
+// `defaultDays`: Global settings → Net 30 terms' days, for an order without days of its own.
+function digestPayment_(o, defaultDays = 30) {
   if (!o || !Number(o.net30)) return String((o && o.paymentMethod) || "");
   const po = String(o.poNumber || "").trim();
-  return `Net ${Number(o.termsDays) || 30} · ${po ? poLabel_(po) : "PO needed"}`;
+  return `Net ${Number(o.termsDays) || Number(defaultDays) || 30} · ${po ? poLabel_(po) : "PO needed"}`;
 }
 function digestPoTag_(o) {
   if (!o || !Number(o.net30)) return "";
@@ -1086,6 +1087,8 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
   awaitingBlanks = awaitingBlanks || [];
   const blanksOverdue = awaitingBlanks.filter(x => x.overdue);
   if (!orders.length && !notices.length && !(security && security.count) && !issues.length && !blanksOverdue.length && !pr && !belowTarget.length) return false;
+  // A new Net 30 order without days of its own reads with Global settings' days (migrations/0121).
+  const termsDays = orders.some(o => o && Number(o.net30)) ? Number((await termsSettings_(env)).defaultDays) || 30 : 30;
   const orgName = (id) => orgNames[id] || id || "";
   const tz = await timeZone_(env);   // Region setting, else TIMEZONE, else UTC
   const when = (iso) => new Date(iso).toLocaleString("en-US", { timeZone: tz, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -1138,7 +1141,7 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
       <td style="padding:6px 8px;vertical-align:top;white-space:nowrap">${escHtml(o.orderId)}<br><span style="color:#666;font-size:12px">${escHtml(when(o.placedAt))}</span></td>
       <td style="padding:6px 8px;vertical-align:top">${escHtml(o.customerName)}<br><span style="color:#666;font-size:12px">${escHtml(o.contact || "")}</span>${o.rushRequested ? `<br><span style="color:#b45309;font-size:12px;font-weight:600">${escHtml(rushTag_(o))}</span>` : ""}</td>
       <td style="padding:6px 8px;vertical-align:top;font-size:13px">${(o.items || []).map(it => escHtml(itemLine(it))).join("<br>")}</td>
-      <td style="padding:6px 8px;vertical-align:top;white-space:nowrap">${escHtml(digestPayment_(o))}<br><span style="font-size:12px;color:${o.paid ? "#15803d" : "#b45309"}">${o.paid ? "Paid" : digestPoTag_(o) || "Unpaid"}</span></td>
+      <td style="padding:6px 8px;vertical-align:top;white-space:nowrap">${escHtml(digestPayment_(o, termsDays))}<br><span style="font-size:12px;color:${o.paid ? "#15803d" : "#b45309"}">${o.paid ? "Paid" : digestPoTag_(o) || "Unpaid"}</span></td>
       <td style="padding:6px 8px;vertical-align:top;text-align:right;white-space:nowrap">${fmt$(o.total)}</td>
     </tr>`;
   const KIND = { payment: "Payment", refund: "Refund", dispute: "Dispute", design: "Design", delivered: "Delivered", invoice: "Invoice", picked_up: "Picked up", quote: "Quote", gift_card: "Gift card", po: "PO" };
@@ -1234,7 +1237,7 @@ export async function sendDailyDigestEmail(env, { orders = [], more = 0, notices
     urgent.length ? "NEEDS ATTENTION\n" + urgent.map(noticeText).join("\n") : "",
     n ? `${plural(n, "new order")} — ${fmt$(total)}\n\n` + groups.map(g =>
       `${g.name} — ${plural(g.orders.length, "order")}, ${fmt$(g.total / 100)}\n` + g.orders.map(o =>
-        `  ${o.orderId}  ${o.customerName} <${o.contact || ""}>  ${digestPayment_(o)} ${o.paid ? "(paid)" : digestPoTag_(o) ? "(" + digestPoTag_(o).toLowerCase() + ")" : "(unpaid)"}  ${fmt$(o.total)}${o.rushRequested ? "  " + rushTag_(o) : ""}\n` +
+        `  ${o.orderId}  ${o.customerName} <${o.contact || ""}>  ${digestPayment_(o, termsDays)} ${o.paid ? "(paid)" : digestPoTag_(o) ? "(" + digestPoTag_(o).toLowerCase() + ")" : "(unpaid)"}  ${fmt$(o.total)}${o.rushRequested ? "  " + rushTag_(o) : ""}\n` +
         (o.items || []).map(it => "    " + itemLine(it)).join("\n")).join("\n")).join("\n\n") : "",
     more ? `${moreText}${adminUrl ? ": " + adminUrl + "/#orders" : ""} (a roll-up lists ${DIGEST_LIST_MAX} orders at most; the rest are in the next one)` : "",
     delivered.length ? `DELIVERED — ${delivered.length}\n` + delivered.map(noticeText).join("\n") : "",

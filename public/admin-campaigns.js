@@ -46,7 +46,7 @@
     return "None";
   }
   function head(sub) {
-    return adminPageHead_("Discount codes", { crumbs: sub ? [{ label: "Discount codes", hash: "discounts" }, { label: "Email campaigns", hash: "discounts/campaigns" }, { label: sub }] : undefined })
+    return adminPageHead_("Marketing", { crumbs: sub ? [{ label: "Marketing", hash: "discounts" }, { label: "Email campaigns", hash: "discounts/campaigns" }, { label: sub }] : undefined })
       + (typeof dcTabsHtml_ === "function" ? dcTabsHtml_("campaigns") : "");
   }
 

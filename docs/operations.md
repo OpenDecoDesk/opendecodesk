@@ -309,7 +309,7 @@ with Customers, a role you made yourself, or a built-in one you have changed, st
 **Discount codes** is a permission of its own, "Discount codes". Manager and Admin can make, change,
 switch off and delete codes; Back office can look at them and the orders that used them; Production
 can't open the page. As with Customers, a role you made yourself, or a built-in one you have changed,
-starts without it ([Discount codes](#discount-codes) below).
+starts without it ([Discount codes](#discount-codes) below). On the Roles screen it is listed under **Marketing**.
 
 **Gift cards** is a permission of its own, "Gift cards": Admin and Manager in full (including adjusting and
 voiding), Back office can look, issue and resend, Production can't open the page. As with Customers, a
@@ -519,7 +519,7 @@ you what is owed, and you pay it the way you always have.
 
 ## Discount codes
 
-Codes a customer types at checkout on a shop's page, made on the **Discount codes** page (in the menu
+Codes a customer types at checkout on a shop's page, made on the **Discount codes** tab of the **Marketing** page (in the menu
 after Quotes). Each code is either:
 
 - **For one person** — tied to one email address. It works once, and only on an order placed with that
@@ -731,7 +731,7 @@ reorder of.
 
 ## Email campaigns
 
-Marketing emails to your customers, on the **Discount codes** page's **Email campaigns** tab. The tab
+Marketing emails to your customers, on the **Marketing** page's **Email campaigns** tab. The tab
 shows once email is set up (Global settings → Email on the website; the mailbox in the desktop
 program), for a role with the **Email campaigns** permission (Admin and Manager by default: read sees
 campaigns, edit writes them and sends tests, full sends, schedules, cancels and deletes). The feature

@@ -258,13 +258,13 @@ change is written to the audit log.
 - **Quotes** — building quotes for customers, emailing them, and the page where a customer accepts one
   or asks for changes (see docs/shops-and-domains.md). Off: the Quotes page is hidden, and a quote link
   already emailed says "Quotes aren't available." Orders made from quotes stay as they are.
-- **Discount codes** — codes customers type at checkout, and the Discount codes page where you make
+- **Discount codes** — codes customers type at checkout, and the Discount codes tab of the Marketing page where you make
   them (see docs/operations.md). Off: the page is hidden, the checkout shows no code box, and an order
   sent with a code is refused ("Discount codes aren't available right now."). Orders that already used
   a code keep their discount.
 - **Gift cards** — the Gift cards page, selling cards online and paying with one. Off: the page is hidden
   and cards can't be bought, issued or spent (see docs/operations.md). Cards that exist keep their balance.
-- **Email campaigns** — marketing emails to your customers, on the Discount codes page's Email campaigns
+- **Email campaigns** — marketing emails to your customers, on the Marketing page's Email campaigns
   tab (shown once email is set up), and the box at checkout and on a Local sale where customers say yes
   to shop news and discounts (see docs/operations.md). Off: the tab and the box are hidden, and nothing
   scheduled is sent.

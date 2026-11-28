@@ -777,7 +777,7 @@ async function adminRoute() {
     catch (e) {
       adminSetHash(raw);
       document.title = adminTitle_("Email campaigns");
-      app.innerHTML = adminPageHead_("Discount codes") + `<div class="admin-panel" style="--org-accent:var(--accent);"><div class="admin-empty">${escapeHtml(e.message)}. Check your connection and reload the page.</div></div>`;
+      app.innerHTML = adminPageHead_("Marketing") + `<div class="admin-panel" style="--org-accent:var(--accent);"><div class="admin-empty">${escapeHtml(e.message)}. Check your connection and reload the page.</div></div>`;
       return;
     }
     if (location.hash.replace(/^#\/?/, "") !== raw) return;
@@ -3218,8 +3218,8 @@ function renderAdminNav(){
   // Quotes (migrations/0109) right after Customers — or where Customers would be, for a role without it.
   if (adminCanOpen_("quotes")) top.splice(Math.max(top.findIndex(it => it[0] === "customers"), top.findIndex(it => it[0] === "orders"), top.findIndex(it => it[0] === "home")) + 1, 0, ["quotes", "Quotes"]);
   // Discount codes (migrations/0115) right after Quotes — or where Quotes would be, for a role without it.
-  if (adminCanOpen_("discounts")) top.splice(Math.max(...["quotes", "customers", "orders", "home"].map(h => top.findIndex(it => it[0] === h))) + 1, 0, ["discounts", "Discount codes"]);
-  // Gift cards (migrations/0120) right after Discount codes — or where they would be, for a role without it.
+  if (adminCanOpen_("discounts")) top.splice(Math.max(...["quotes", "customers", "orders", "home"].map(h => top.findIndex(it => it[0] === h))) + 1, 0, ["discounts", "Marketing"]);
+  // Gift cards (migrations/0120) right after Marketing (Discount codes) — or where they would be, for a role without it.
   if (adminCanOpen_("giftcards")) top.splice(Math.max(...["discounts", "quotes", "customers", "orders", "home"].map(h => top.findIndex(it => it[0] === h))) + 1, 0, ["giftcards", "Gift cards"]);
   const current = top.concat(...ADMIN_NAV_GROUPS.map(g => g.items.filter(Array.isArray))).find(it => it[0] === active);
   const currentLabel = current ? current[1] : "";
@@ -8062,11 +8062,11 @@ const dcLooksLikeEmail_ = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 async function renderDiscountCodes(app){
   const hash = "discounts";
   adminSetHash(hash);
-  document.title = adminTitle_("Discount codes");
+  document.title = adminTitle_("Marketing");
   const shops = (adminOrgs || []).slice().sort((a, b) => String(a.name || a.orgId).localeCompare(String(b.name || b.orgId)));
   if (_dcView.org && !shops.some(o => o.orgId === _dcView.org)) _dcView.org = "";
   app.innerHTML = `
-    ${adminPageHead_("Discount codes")}
+    ${adminPageHead_("Marketing")}
     ${dcTabsHtml_("codes")}
     <div class="admin-panel cust-page dc-page" id="dcPage" style="--org-accent:var(--accent);">
       <div class="cust-bar">
@@ -8636,10 +8636,10 @@ async function dcCampaignsOn_(){
   if (!_campaignsStatus) _campaignsStatus = adminApi_({ action: "getCampaignStatus" }).catch(() => { _campaignsStatus = null; return { emailReady: false }; });
   return !!(await _campaignsStatus).emailReady;
 }
-// The Discount codes page's two tabs. The campaigns one starts hidden until dcCampaignsOn_ says yes.
+// The Marketing page's two tabs (Discount codes, Email campaigns). The campaigns one starts hidden until dcCampaignsOn_ says yes.
 function dcTabsHtml_(active){
   return `<div class="dc-tabs" role="tablist">
-    <a role="tab" href="#discounts" class="dc-tab${active === "codes" ? " on" : ""}" aria-selected="${active === "codes"}">Codes</a>
+    <a role="tab" href="#discounts" class="dc-tab${active === "codes" ? " on" : ""}" aria-selected="${active === "codes"}">Discount codes</a>
     <a role="tab" href="#discounts/campaigns" class="dc-tab${active === "campaigns" ? " on" : ""}" id="dcTabCampaigns" aria-selected="${active === "campaigns"}"${active === "campaigns" ? "" : " hidden"}>Email campaigns</a>
   </div>`;
 }

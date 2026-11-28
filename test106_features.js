@@ -68,14 +68,16 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
 
   console.log("=== The setting: everything on unless saved off ===");
   const KEYS = ["production", "bookkeeping", "shipping", "designVerification", "digital", "quotes", "discounts", "giftCards", "emailCampaigns"];   // the nine with admin pages / actions
-  const ALL = ["storefront", ...KEYS];
-  ok("ten features, each with a name and a plain sentence", lib.FEATURES.map(f => f.key).join() === ALL.join() && lib.FEATURES.every(f => f.label && f.description.length > 40));
+  const ALL = ["storefront", ...KEYS, "ownGarments"];   // ownGarments (phase 7): the one switch that starts off
+  ok("eleven features, each with a name and a plain sentence", lib.FEATURES.map(f => f.key).join() === ALL.join() && lib.FEATURES.every(f => f.label && f.description.length > 40));
   ok("there is no inventory switch", !lib.FEATURES.some(f => /inventor|blank|stock/i.test(f.key)));
-  ok("a new install has all ten on", JSON.stringify(await lib.getFeatures(d1)) === JSON.stringify({ storefront: true, production: true, bookkeeping: true, shipping: true, designVerification: true, digital: true, quotes: true, discounts: true, giftCards: true, emailCampaigns: true }));
+  const WAIVER = "Customer's garments are decorated at the customer's risk; we're not responsible for garments damaged in normal production.";
+  ok("a new install has the ten on and Customer-supplied garments off (with the slip's waiver line)", JSON.stringify(await lib.getFeatures(d1)) === JSON.stringify({ storefront: true, production: true, bookkeeping: true, shipping: true, designVerification: true, digital: true, quotes: true, discounts: true, giftCards: true, emailCampaigns: true, ownGarments: false, ownGarmentsWaiver: WAIVER }));
   ok("no database, or one without the settings table, is all on too", (await lib.getFeatures(null)).shipping === true && (await lib.getFeatures({ prepare(){ throw new Error("no such table: global_settings"); } })).production === true);
-  ok("only an explicit false is off (junk and missing keys are on)", JSON.stringify(lib.normalizeFeatures({ production: 0, shipping: "no", bookkeeping: false, other: false })) === JSON.stringify({ storefront: true, production: true, bookkeeping: false, shipping: true, designVerification: true, digital: true, quotes: true, discounts: true, giftCards: true, emailCampaigns: true }));
+  ok("only an explicit false is off (junk and missing keys are on) — but Customer-supplied garments only an explicit true turns on", JSON.stringify(lib.normalizeFeatures({ production: 0, shipping: "no", bookkeeping: false, other: false })) === JSON.stringify({ storefront: true, production: true, bookkeeping: false, shipping: true, designVerification: true, digital: true, quotes: true, discounts: true, giftCards: true, emailCampaigns: true, ownGarments: false, ownGarmentsWaiver: WAIVER })
+    && lib.normalizeFeatures({ ownGarments: 1 }).ownGarments === false && lib.normalizeFeatures({ ownGarments: true }).ownGarments === true);
   r = await admin({ action: "getFeatures" });
-  ok("the admin gets the switches and the list to draw them from", r.status === 200 && r.body.features.production === true && r.body.list.length === 10 && r.body.list[0].label === "Storefront" && r.body.list[4].label === "Design approval" && r.body.list[5].label === "Digital products" && r.body.list[6].label === "Quotes" && r.body.list[7].label === "Discount codes" && r.body.list[8].label === "Gift cards" && r.body.list[9].label === "Email campaigns");
+  ok("the admin gets the switches and the list to draw them from", r.status === 200 && r.body.features.production === true && r.body.list.length === 11 && r.body.list[0].label === "Storefront" && r.body.list[4].label === "Design approval" && r.body.list[5].label === "Digital products" && r.body.list[6].label === "Quotes" && r.body.list[7].label === "Discount codes" && r.body.list[8].label === "Gift cards" && r.body.list[9].label === "Email campaigns" && r.body.list[10].label === "Customer-supplied garments");
   r = await admin({ action: "updateFeatures", features: { inventory: false } });
   ok("a feature that doesn't exist is refused (no inventory switch can be invented)", r.status === 400 && /isn't a feature/.test(r.body.message));
   r = await admin({ action: "updateFeatures", features: { shipping: "off" } });
@@ -426,6 +428,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     giftCards: ["listGiftCards", "getGiftCard", "revealGiftCardCode", "issueGiftCard", "adjustGiftCard", "voidGiftCard", "resendGiftCard", "giftCardTotals", "redeemGiftCard", "refundToGiftCard"],   // Gift cards
     emailCampaigns: ["getCampaignStatus", "listCampaigns", "getCampaign", "previewAudience", "saveCampaign", "copyCampaign", "deleteCampaign",   // Discount codes → Email campaigns
       "sendCampaignTest", "scheduleCampaign", "cancelCampaign", "runCampaignQueue", "setMarketingOptOut"],
+    ownGarments: ["checkInGarments", "undoGarmentCheckin", "listGarmentCheckins"],   // an order line's Check in garments…
   };
   // The features that own admin actions: the seven with pages.
   const ACTION_KEYS = Object.keys(EXPECTED);
@@ -458,6 +461,8 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     "getDecorationSettings", "updateDecorationSettings", "priceDecoration", "listDigitizingJobs", "saveDigitizingJob", "deleteDigitizingJob",
     // Discount code rules and Gift cards settings (Global settings) and a past order's lines for Reorder: with any feature set
     "getDiscountRules", "updateDiscountRules", "getGiftCardSettings", "updateGiftCardSettings", "getOrderForReorder",
+    // Net 30 terms with a PO (phase 7): a payment way, not a feature — it follows Global settings → Payment methods
+    "getTermsSettings", "updateTermsSettings", "setOrderTerms", "acceptOrderPo", "getUnpaidPoReport",
   ];
   const names = (text) => [...text.matchAll(/"(\w+)"/g)].map(m => m[1]);
   const mapSrc = ordersJs.match(/const FEATURE_ACTIONS = \{([\s\S]*?)\n\};/)[1];
@@ -589,7 +594,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
   console.log("--- Global settings → Features ---");
   await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 8);
   const boxes = () => [...doc.querySelectorAll("#gFeatures .gFeature")];
-  ok("one checkbox per feature, all ticked, each with its name and sentence", boxes().length === 10 && boxes().every(b => b.checked) && boxes().map(b => b.dataset.feature).join() === ALL.join() &&
+  ok("one checkbox per feature, all ticked but Customer-supplied garments (off until ticked), each with its name and sentence", boxes().length === 11 && boxes().every(b => b.checked === (b.dataset.feature !== "ownGarments")) && boxes().map(b => b.dataset.feature).join() === ALL.join() &&
     lib.FEATURES.every(f => doc.getElementById("gFeatures").textContent.includes(f.label) && doc.getElementById("gFeatures").textContent.includes(f.description)));
   ok("it says inventory is always on", /Stock of blanks and transfers, and cost of goods, are always on/.test(doc.getElementById("adminPanel").textContent));
   ok("all on: Shipping's and Production's panels are open (ship-from address, Machine Files)", !doc.getElementById("gPanel-shipping").hidden && !!doc.getElementById("gShipFromSection") &&
@@ -609,7 +614,7 @@ const tick = (ms) => new Promise(res => setTimeout(res, ms || 40));
     allReq.features && allReq.features.shipping === false && !allReq.shipFrom && allReq.machine && allReq.machine.showDeleteButton === false);
   sent.length = 0;
   await go("settings"); await settle(() => doc.querySelectorAll("#gFeatures .gFeature").length === 8);
-  ok("the form comes back showing what's saved, without the switched-off feature's section", boxes().filter(b => !b.checked).map(b => b.dataset.feature).join() === "bookkeeping,shipping" &&
+  ok("the form comes back showing what's saved, without the switched-off feature's section", boxes().filter(b => !b.checked).map(b => b.dataset.feature).join() === "bookkeeping,shipping,ownGarments" &&
     doc.getElementById("gPanel-shipping").hidden && !doc.getElementById("gPanel-production").hidden);
   boxes().forEach(b => { b.checked = true; });
   await w.submitGlobalSettings(); await tick(80);

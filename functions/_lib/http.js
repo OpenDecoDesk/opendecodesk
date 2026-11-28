@@ -147,7 +147,9 @@ export function featureIsOff(env, key){
   return (async () => {
     try{
       const row = await env.DB.prepare("SELECT value FROM global_settings WHERE key='features'").first();
+      // Customer-supplied garments (migrations/0121) is the one switch that is off until ticked (db.js normalizeFeatures).
+      if (key === "ownGarments") return !row || JSON.parse(row.value)[key] !== true;
       return !!row && JSON.parse(row.value)[key] === false;
-    }catch(e){ return false; }
+    }catch(e){ return key === "ownGarments"; }
   })();
 }

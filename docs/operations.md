@@ -37,7 +37,10 @@ Free plan). A clean-up that fails is recorded and reported in the roll-up an hou
    and disputes, gift cards sold online, customers' answers to design proofs, deliveries and pickups, failed admin sign-ins,
    and problems (an email that couldn't be sent, a Stripe webhook that failed, a roll-up that
    failed). A customer's answer to a quote shows as **Quote** (not Invoice). With the Production feature on, it also lists machine maintenance that's due (never a
-   reason to send on its own).
+   reason to send on its own). An **Unpaid POs** section lists POs waiting to be accepted and Net 30
+   orders that have become late, with totals, or a line saying it is watching when there are none
+   (never a reason to send on its own either; see [Net 30 terms and POs](#net-30-terms-and-pos)). In the
+   new-orders table a Net 30 order's Payment reads "Net 30 · PO needed" or "Net 30 · PO 1001".
 3. Sends one email. If there is **nothing new**, the scheduled run sends a short "nothing new"
    email instead, so a quiet morning can't be mistaken for "it didn't run".
 
@@ -312,6 +315,11 @@ starts without it ([Discount codes](#discount-codes) below).
 voiding), Back office can look, issue and resend, Production can't open the page. As with Customers, a
 role you made yourself, or a built-in one you have changed, starts without it ([Gift
 cards](#gift-cards) below).
+
+**Net 30 terms** — putting an order on Net 30 and accepting its PO — is a permission of its own in the
+Orders area: Admin and Manager in full, Back office edit, Production none. The **Unpaid POs** report is
+one of its own under Reports: Admin and Manager in full, Back office can read it, Production can't open
+it ([Net 30 terms and POs](#net-30-terms-and-pos) below).
 
 - **Adding someone:** name, email, role. You are shown a temporary password once; give it to
   them. They must choose their own the first time they sign in.
@@ -650,6 +658,67 @@ issue or resend, Production has no access ([Users and roles](#users-and-roles)).
 on an order needs the same permission as any payment; refunding to a card needs the refund permission.
 Issuing, showing a code, adjusting, voiding and resending are in the audit log. The morning roll-up has a
 **Gift cards sold** line for each card bought online ("Gift card $50 for Pat — order X").
+
+## Net 30 terms and POs
+
+Net 30 lets a customer — a school district, a club — have the order now and pay by invoice within a set
+number of days, against their purchase order (PO). It is a payment method, not a feature switch: tick
+**Net 30 (with a PO)** in Global settings → Payment methods (off to start). Each shop can turn it off in
+its own payment methods.
+
+**The terms.** Global settings → **Net 30 terms**: the default days (30 to start, 1 to 365) and **Terms
+start** — when the invoice is sent (the default; an order whose invoice was never sent counts from its
+order date), the order date, or when the order is completed (shipped or picked up; until then it isn't
+due yet). Only the **first** invoice sent counts: sending it again doesn't move the date. A customer can
+have days of their own (**Terms (days)** on their page, for Net 45; blank uses the default), and putting
+one of their orders on Net 30 copies them to the order, which can also be given its own. The due date is
+worked out whenever it is read, from today's setting; it is never stored.
+
+**Who can use it.** Staff can put any order on Net 30: the order window's Terms area (a **Net 30** tick,
+the days, the PO box and the due date), or the Local sale window's Payment choice, with a PO box and the
+days. A customer can pick it at checkout only when their record has **Allow Net 30** ticked
+([shops-and-domains.md](shops-and-domains.md#net-30-at-checkout)).
+
+**A PO typed by staff or by the customer.** A PO you type counts at once. A PO the customer types — at
+checkout or on their invoice page — shows as **PO to check** until someone presses **Accept PO** (in the
+order window, or on the report below). Without one the order shows **PO needed**. Clearing the PO clears
+its acceptance. A PO is up to 60 characters. A voided order's terms can't be changed.
+
+**An accepted PO clears the work, not the money.** A Net 30 order with an accepted PO counts as paid for
+the **work**: it goes ahead through blanks, the run, packing and delivery, its digital downloads are
+released, it counts in the Fundraising report, and it can be completed while money is still owed — a
+Local sale on Net 30 with a PO goes ahead at once. Until its PO is accepted it waits like any unpaid
+order, and Home shows it under **New**. The money is unchanged: revenue and the books count only payments
+that arrive, and the order stays on the Unpaid POs report until its balance is nothing. Record the payment
+when it comes, as any other.
+
+**On the Orders page** the payment tag says "Net 30 — PO needed", "PO to check" or "PO 1001 · due Dec 31".
+
+**Invoices and emails.** The invoice email and its PDF say "Terms: Net 30 · PO 1001 · Due Dec 31, 2026".
+Their how-to-pay part says "Payment is due within N days of the invoice (PO 1001)", or asks for the PO
+number while there is none, and the order-received email for a Net 30 order says no payment is needed
+now. The customer's invoice page shows the terms and, while there is no PO, a box to type it in
+([shops-and-domains.md](shops-and-domains.md#net-30-at-checkout)).
+
+**The Unpaid POs report** (Reports → Unpaid POs) lists every Net 30 order that still owes money — not
+voided, not a test order — as of a date (today to start), for one shop or all and one customer or all.
+What is owed is worked out as on the order, gift card lines included. A strip at the top groups the
+orders — **No PO yet**, **PO to check**, **Not yet due** (with completion as the start, that includes
+orders not yet completed), then **1–30**, **31–60**, **61–90** and **90+** days late — with each group's
+count and what it owes; an order due today isn't late. Below are a table per customer and the orders
+themselves: order, customer, PO, status, invoiced, due, days late and owed. A "PO to check" row has
+**Accept PO** (for a role that can set terms). **Export CSV** downloads the rows. With Net 30 off and no
+Net 30 orders, the page says so.
+
+**On Home**, the **Unpaid POs** block (after the totals) shows how many orders are owed, what they owe,
+what is late and how many POs are waiting to be checked, with a link to the report; the money figures
+only for roles that see revenue. The **New** tile counts POs to check too.
+
+**In the morning roll-up**, see [The morning roll-up](#the-morning-roll-up).
+
+**Who can.** See [Users and roles](#users-and-roles). No money moves when terms are set or a PO is
+accepted, so a closed month doesn't stop either. Both are in the audit log (`order.terms_set`, with what
+changed, and `order.po_accepted`).
 
 ## Reorder
 

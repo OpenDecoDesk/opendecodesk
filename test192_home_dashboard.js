@@ -269,7 +269,10 @@ const at = (day) => day + "T12:00:00.000Z";
   await route("#home");
   await wait(() => tile("new") && tile("new").querySelector(".home-num").textContent !== "…");
   const navText = (w.document.querySelector(".admin-nav-row") || {}).textContent || "";
-  console.log("staff see the step tiles but no business totals or product sales:", tile("new").querySelector(".home-num").textContent === "3" && !w.document.getElementById("homeMoney") && !w.document.querySelector(".home-card"));
+  // Phase 7: Back office may open Reports → Unpaid POs, so Home shows that block's counts (no money: the server leaves it out).
+  const staffMoney = w.document.getElementById("homeMoney");
+  console.log("staff see the step tiles but no business totals or product sales:", tile("new").querySelector(".home-num").textContent === "3" && !w.document.querySelector(".home-card") &&
+    (!staffMoney || ([...staffMoney.querySelectorAll("[data-home-block]")].map(b => b.dataset.homeBlock).join() === "unpaidpos" && !/\$/.test(staffMoney.textContent))));
   console.log("…and no Revenue, Sales tax, Inventory & COGS or Expenses in the menus:", !/Revenue report|Sales tax report|Inventory & COGS|Expenses/.test(w.document.body.innerHTML.match(/admin-nav[\s\S]*?<\/nav>|$/)[0] + navText));
   await route("#revenue");
   console.log("…and opening the Revenue report says it isn't in their role instead of loading it:", !w.document.getElementById("revFrom") && /Not available to you/.test(w.document.getElementById("app").textContent) && /Back office/.test(w.document.getElementById("app").textContent));

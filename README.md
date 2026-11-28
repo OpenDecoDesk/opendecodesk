@@ -38,7 +38,7 @@ and the tax and shipping features are built around a US business (see [Region](#
 - Customers can upload their own design for a product, printed as a transfer or digitized for
   embroidery, with an optional add-on price.
 - Checkout by card (Stripe), Venmo, Zelle or check; local pickup, flat-fee delivery options, or carrier
-  rates by ZIP (Shippo).
+  rates by ZIP (Shippo). Customers you allow can pick Net 30 and pay by invoice, with their PO number.
 - Product categories you manage (the shop's sections and what each packs like), and products made
   with no blank.
 - Versions of a product — short and long sleeve on one card with a toggle, each with its own sizes,
@@ -75,6 +75,9 @@ and the tax and shipping features are built around a US business (see [Region](#
   ink colour, on a quote or in the product form's price helper.
 - Outside digitizing: record a design sent to a digitizing vendor, when it went and came back, and what it
   cost, on an order or a quote, and the cost can be filed as an expense.
+- Customer-supplied garments (contract work): a line on a local sale, a quote or an order can be the
+  customer's own garment. It never orders or uses a blank and has no blank cost; its garments are checked
+  in by size, with their count and condition, on a printable slip, and the Run order waits for them.
 - A morning email to the owner with new orders, payments, deliveries and anything that went wrong.
 
 **Inventory and money**
@@ -122,6 +125,10 @@ and the tax and shipping features are built around a US business (see [Region](#
   to the recipient once paid), and a balance is spent across orders at checkout, on a Local sale, on an
   order or on an invoice. They never expire, can't be cashed out, count as a liability rather than
   revenue, and a refund goes back onto the card.
+- Net 30 terms with a PO: staff can put any order on terms, and customers whose record allows it can
+  pick it at checkout. Once a PO is accepted the order goes ahead and can be completed while still owed;
+  the due date counts from the invoice, the order or its completion (a Global setting), and an Unpaid POs
+  report, a Home block and the morning roll-up show what is still owed and what is late.
 - Reorder: a button that copies a past order into a new Local sale at today's prices.
 
 **Running it**
@@ -210,8 +217,8 @@ without it.
 
 ## Feature switches
 
-Ten parts of the site are optional. Each has a switch in the admin under Settings → Global settings →
-Features. **All ten are on by default.** Turning one off hides its pages in the admin menu (opening one
+Eleven parts of the site are optional. Each has a switch in the admin under Settings → Global settings →
+Features. **All are on by default except Customer-supplied garments**, which starts off. Turning one off hides its pages in the admin menu (opening one
 of them directly shows a "this feature is turned off" page), and the server refuses its actions. Nothing
 is deleted — every table and row stays — so turning it back on brings everything back as it was. Each
 change is written to the audit log.
@@ -261,6 +268,10 @@ change is written to the audit log.
   tab (shown once email is set up), and the box at checkout and on a Local sale where customers say yes
   to shop news and discounts (see docs/operations.md). Off: the tab and the box are hidden, and nothing
   scheduled is sent.
+- **Customer-supplied garments** — contract work: a line on a local sale, a quote or an order marked as
+  the customer's own garment, with no blank and no blank cost, and its garments checked in before it is
+  run (see docs/shops-and-domains.md). **Off to start.** Off: no line can be marked ("Customer-supplied
+  garments are switched off in Global settings"); lines already marked stay as they are.
 
 **Inventory is always on.** Stock of blanks and transfers, and cost of goods, are part of making an order
 (marking it manufactured uses the blanks), so there is no switch for them in this release.

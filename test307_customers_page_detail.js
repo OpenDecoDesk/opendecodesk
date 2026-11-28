@@ -166,9 +166,9 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   ok("…the notes", q("#custNotes").value === "Likes navy thread.");
   ok("…and the tax exemption: not exempt, no certificate, no expiry", q("#custExempt").checked === false && q("#custCert").value === "" && q("#custExpires").value === "");
   ok("the exemption sits in a box titled “Tax exemption”", q("fieldset.cust-exempt legend").textContent === "Tax exemption" && q("fieldset.cust-exempt").contains(q("#custExempt")) && q("fieldset.cust-exempt").contains(q("#custCert")) && q("fieldset.cust-exempt").contains(q("#custExpires")));
-  ok("every field of the form has its own label", qa("#custForm input, #custForm textarea").length === 13 && qa("#custForm input, #custForm textarea").every(f => { const l = f.closest("label"); return l && l.textContent.trim().length > 0; }));
-  ok("…named Name, Company, Email, Phone, Address, Address line 2, City, State, ZIP, Notes, Certificate number, Expires",
-    same(qa("#custForm label.cust-field > span").map(s => s.textContent), ["Name", "Company", "Email", "Phone", "Address", "Address line 2", "City", "State", "ZIP", "Notes", "Certificate number", "Expires (blank = never)"]));
+  ok("every field of the form has its own label", qa("#custForm input, #custForm textarea").length === 15 && qa("#custForm input, #custForm textarea").every(f => { const l = f.closest("label"); return l && l.textContent.trim().length > 0; }));
+  ok("…named Name, Company, Email, Phone, Address, Address line 2, City, State, ZIP, Notes, Certificate number, Expires, Terms (days) (phase 7: Net 30)",
+    same(qa("#custForm label.cust-field > span").map(s => s.textContent), ["Name", "Company", "Email", "Phone", "Address", "Address line 2", "City", "State", "ZIP", "Notes", "Certificate number", "Expires (blank = never)", "Terms (days)"]));
   ok("the address stays #customers/<id>", hashNow() === "customers/" + A);
 
   ok("a customer with only a company is headed by the company", await open(C) && q(".cust-name").textContent === "Example Supply Co" && q("#custName").value === "" && q("#custCompany").value === "Example Supply Co");
@@ -218,7 +218,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   ok("Save sends the customer and draws the page again", await redrawnAfter(save));
   ok("…one saveCustomer with every field, trimmed, and the exemption as it was", of("saveCustomer").length === 1 && same(of("saveCustomer")[0], { action: "saveCustomer", id: A, name: "Pat Q. Example", company: "Example Rowing Club", email: "PAT@Example.com", phone: "555-0111",
     address: { name: "Pat Example", line1: "2 Example Avenue", line2: "", city: "Sampleton", state: "SM", zip: "00001", country: "US" }, notes: "Prefers pickup.\nCall first.",
-    taxExempt: false, taxExemptCertificate: "", taxExemptExpires: "", key: "cookie" }));
+    taxExempt: false, taxExemptCertificate: "", taxExemptExpires: "", allowNet30: false, termsDays: null, key: "cookie" }));
   ok("…the parts of the address the form has no field for (the recipient, the country) are sent back unchanged", of("saveCustomer")[0].address.name === "Pat Example" && of("saveCustomer")[0].address.country === "US");
   ok("…the page says “Customer saved.”", toasts.length === 1 && toasts[0].m === "Customer saved." && !toasts[0].err);
   ok("…and it is stored", row(A).name === "Pat Q. Example" && row(A).company === "Example Rowing Club" && row(A).phone === "555-0111" && row(A).notes === "Prefers pickup.\nCall first." &&
@@ -335,7 +335,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   asRoles("production");
   await open(A);
   ok("Production (Read) still sees the customer, the totals and the orders", q(".cust-name").textContent === "Pat Example" && tiles().length === 3 && orderRows().length === 5);
-  ok("…every field is read-only, the exemption included", qa("#custForm input, #custForm textarea").length === 13 && qa("#custForm input, #custForm textarea").every(f => f.disabled));
+  ok("…every field is read-only, the exemption (and Net 30 terms) included", qa("#custForm input, #custForm textarea").length === 15 && qa("#custForm input, #custForm textarea").every(f => f.disabled));
   ok("…and it is offered neither Save, Archive nor Merge", off("#custSave") && off("#custArchive") && off("#custMerge"));
   ok("…New sale only if the role may record one (Production may not)", lvl("production", "orders.details") === "read" ? off("#custNewSale") : shown("#custNewSale"));
   ok("…the exemption box tells it who can change an exemption", /Only a role with full access to Customers/.test(q("fieldset.cust-exempt .cust-note").textContent));
@@ -652,7 +652,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   ok("a name, company, notes, address, phone and certificate full of markup are saved", await redrawnAfter(save) && toasts[0].m === "Customer saved." && row(X).name === evil.name && row(X).taxExemptCertificate === evil.cert && row(X).notes === evil.notes);
   ok("…and shown again exactly as typed, each in its own field", q("#custName").value === evil.name && q("#custCompany").value === evil.company && q("#custNotes").value === evil.notes && q("#custCert").value === evil.cert && q("#custLine1").value === evil.line1 && q("#custPhone").value === evil.phone);
   ok("…the heading, the line under it and the breadcrumb show them as text", q(".cust-name").textContent === evil.name && q("h1.org-name").textContent === evil.name && q(".bc-current").textContent === evil.name && q(".cust-sub").textContent.trim().startsWith(evil.company + " · Customer since"));
-  ok("…no element came of any of it, on the page or in its heading", !q("#app img, #app script, #app u, #app i, #app s") && !q(".cust-name *") && !q(".cust-sub b") && qa("#custForm textarea").length === 1 && qa("#custForm input").length === 12);
+  ok("…no element came of any of it, on the page or in its heading", !q("#app img, #app script, #app u, #app i, #app s") && !q(".cust-name *") && !q(".cust-sub b") && qa("#custForm textarea").length === 1 && qa("#custForm input").length === 14);
   ok("…and none of its script ran", w.__x281 === undefined);
   q("#custArchive").click();
   { await wait(() => confirmBox());

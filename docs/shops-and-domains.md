@@ -168,7 +168,7 @@ Manage catalog → the shop → **Edit**:
 - **Delivery & pickup** — the list customers choose from: local pickup, carrier shipping (US, with
   the Shipping feature), and any number of your own options with a flat fee.
 - **Payment methods** — a shop can turn off methods that are on site-wide; it can't turn on one
-  that is off site-wide.
+  that is off site-wide. That includes Net 30 (see "Net 30 at checkout" below).
 - **Payment on delivery** — follows Global settings: a shop can turn it off, or limit it to the
   Local sale window on Orders, but can't turn it on when it's off site-wide.
 - **Order deadline** — a date, a message for afterwards, and whether orders are still accepted
@@ -312,6 +312,39 @@ A product that is made with **no blank at all** — a patch cut from twill on ha
 needed** on the product form. Its order lines then skip Blank ordered / received, go to Run Order once
 paid (and the design is ready), stay off Blanks to Order, and the catalog check stops asking for a
 blank link. Record its materials under Expenses as supplies.
+
+## Customer-supplied garments
+
+For contract work — the customer brings their own shirts and you decorate them — switch on **Customer-supplied
+garments** in Global settings → Features. It is the one feature that **starts off**. Off, no line can be
+marked as the customer's own ("Customer-supplied garments are switched off in Global settings"); lines
+already marked stay as they are.
+
+**Marking a line.** It is for staff only: the Local sale window, a quote's product and custom lines, and
+an order's **Edit items** have a **Customer's own garment** tick on each line. The shop page never offers
+it. The line is priced like any other — the price is the decoration — and is never filled from finished
+stock. The customer's quote shows it as "(your garments)", and a quote's marked lines stay marked when it
+becomes an order.
+
+**No blanks, no blank cost.** A customer's own line never goes on Blanks to Order, never takes blanks out of
+stock (Mark manufactured, Use blanks from stock) and has no blank cost in cost of goods.
+
+**Checking the garments in.** Instead of its blank, the line waits for the customer's garments. In the
+order window each such line has **Check in garments…**: the line's size, how many were expected (the
+line's quantity), how many came, their condition (Good, Damaged or Other) and a note. A count that isn't
+what was expected, or a condition other than Good, needs the note ("Say what's different (a note) when the
+count or condition isn't as expected."). **Save** records it; checking in again replaces the earlier count,
+and **Undo** takes it back. Once a line has garments in, it counts as having its blank: when every line on
+the order has its blank or its garments, the order moves on as it does when blanks are received. It needs
+the same permission as moving an order through its steps, and each check-in is in the audit log.
+
+**The check-in slip.** The window prints a slip — the order, the customer, the counts and condition — to
+give the customer or keep with the garments. It can end with a waiver line, set in Global settings →
+Features → Customer-supplied garments; to start: "Customer's garments are decorated at the customer's
+risk; we're not responsible for garments damaged in normal production."
+
+**On the Run order.** The line's card waits, like one waiting on its blank, until the garments are
+checked in, and **Paid, not yet run** shows "Waiting on the customer's garments" or "Garments in".
 
 ## Blanks from stock
 
@@ -693,7 +726,8 @@ comes from the shop's list or a signed carrier rate, never from the page, and th
 address. "Shipping — cost to follow" is only offered when no box fits the order. The choice can't be
 changed once the order is paid, shipped or in a closed month, or when the invoice was sent with the
 delivery fixed. Sending again keeps the same link and renews it for 60 days; the customer's choice is
-in the morning roll-up.
+in the morning roll-up. On a Net 30 order the page shows the terms and takes the customer's PO number
+(see "Net 30 at checkout" below).
 
 ## Customers
 
@@ -707,6 +741,9 @@ number opens that order.
   don't matter. An order whose contact is a phone number, or empty, has no customer. Orders you
   already had were linked the same way when this was added. A test order joins a customer that
   exists but never makes one.
+- **Net 30.** **Allow Net 30** on a customer's page lets them pick Net 30 at checkout, and **Terms
+  (days)** gives them their own number of days (blank: the Global settings default). See "Net 30 at
+  checkout" below.
 - **The list** searches name, company, email and phone as you type. Archived customers are hidden
   until you tick **Show archived**.
 - **+ New customer** needs a name or a company. Two customers can't have the same email.
@@ -852,6 +889,23 @@ a **Gift cards** button: pick $25, $50, $100 or a custom amount, say who it's fo
 pay by card; the card is emailed to the recipient once the payment goes through
 ([operations.md](operations.md#gift-cards)). The customer's invoice page also takes a discount code and a
 gift card before they pay the balance.
+
+## Net 30 at checkout
+
+With **Net 30 (with a PO)** ticked in Global settings → Payment methods (and not turned off in the shop's
+own), a customer whose record has **Allow Net 30** ticked can pay by invoice. Once the email is typed
+(and again when it changes) the checkout asks the server; only for such a customer does **Net 30 (pay by
+invoice)** appear among the payment choices, with an optional **PO number** box ("Your PO number, if you
+have it — you can add it later from your invoice"). Everyone else sees the usual choices: the answer
+never says whether an email belongs to a customer, and the checks are rate-limited. Net 30 skips the card
+step, and the thank-you page says "We'll send an invoice; payment is due within N days." The server checks
+again when the order is placed and, if it no longer applies, refuses it: "Net 30 isn't available for this
+order."
+
+A PO typed at checkout waits for staff to accept it ([operations.md](operations.md#net-30-terms-and-pos)).
+The customer's invoice page shows "Net 30 — PO 1001 — due Dec 31, 2026", or, with no PO yet, "PO needed:
+add your PO number below" and a box for it; afterwards it says "Thanks — we'll confirm your PO." Once a PO
+is accepted it can't be changed there.
 
 ## Rush orders
 

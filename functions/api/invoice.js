@@ -12,6 +12,7 @@
  *                                          the order (fee, method, ship-to address, sales tax)
  *   POST /api/invoice {token, action:"applyCode", code}     → a discount code on this order (migrations/0120)
  *   POST /api/invoice {token, action:"applyGiftCard", code} → a gift card pays what is still owed on this order
+ *   POST /api/invoice {token, action:"setInvoicePo", poNumber} → the customer's PO number on a Net 30 order (migrations/0121)
  *
  * Paying by card goes through the existing /api/checkout (it charges the order's balance due and
  * takes `invoiceToken` only to bring the customer back to this page afterwards).
@@ -32,6 +33,13 @@
  * a gift card pays up to its balance, never more than is owed. Each is rate limited per address (a number or code can't be
  * guessed here), and a wrong one is answered the same whatever it was — never anything about whose it is.
  *
+ * ---- NET 30 AND THE PO NUMBER (migrations/0121) ----
+ * A Net 30 order shows its terms: the PO and the day payment is due (worked out when read, by db.js, from Global
+ * settings → Net 30 terms), or "PO needed". While the order has no accepted PO the customer can type one here. It is
+ * saved as the customer's (poTypedAt) and is NOT accepted: the order only counts as cleared for work once staff click
+ * Accept PO (db.js net30Cleared). Once a PO is accepted it can't be changed from here. Rate limited per address, and only
+ * ever this invoice's order.
+ *
  * ---- WHAT IT SHOWS ----
  * One order: its lines, totals, what's been paid, and the ship-to address the customer entered.
  * Never anything about another order or another shop. The token is 122 random bits and stops
@@ -41,7 +49,7 @@
 import { getOrderInvoice, invoiceExpired, markInvoiceViewed, markInvoiceDeliveryChosen, getOrderById, getOrgById,
   getGlobalSettings, getProductsByOrg, productShipWeightOz, cleanShippingAddress, updateOrderShipping, isMonthClosed, insertAuditLog,
   getLocaleSettings, getFeatures, getSalesTaxSettings, getBoxPresets, getCategoryPackMap, rushPayByMissed, localToday,
-  getDiscountRules, applyOrderDiscountCode, redeemGiftCard } from "../_lib/db.js";
+  getDiscountRules, applyOrderDiscountCode, redeemGiftCard, getTerms, setOrderTerms } from "../_lib/db.js";
 import { selectBox } from "../_lib/boxSize.js";
 import { sendInvoiceDeliveryNotification, lineDetailText } from "../_lib/email.js";
 import { verifyQuote, canonicalItems } from "../_lib/quoteToken.js";
@@ -87,6 +95,26 @@ async function addOns_(env, order, org, globalSettings) {
     code = !!(await Promise.resolve().then(() => env.DB.prepare(INVOICE_CODE_BOX_SQL_).bind(order.orgId, since).first()).catch(() => null));
   }
   return { code, giftCard, multiple };
+}
+
+// The Net 30 terms the page shows (null for an order without them). The due date is db.js's (termsDueDate, worked out
+// when the order is read); when it isn't known yet — terms that start when the order ships or is picked up — the page
+// says when the days start instead. The box for a PO shows while there is none and none has been accepted.
+const INVOICE_PO_MAX_ = 60;
+async function termsView_(env, order){
+  if (!order || !order.net30) return null;
+  const terms = await Promise.resolve().then(() => getTerms(env.DB)).catch(() => null);
+  const days = Number(order.termsDays) > 0 ? Number(order.termsDays) : (terms && Number(terms.defaultDays) > 0 ? Number(terms.defaultDays) : 30);
+  const poNumber = String(order.poNumber || "").trim();
+  const dueDate = /^\d{4}-\d{2}-\d{2}$/.test(String(order.termsDueDate || "")) ? String(order.termsDueDate) : "";
+  const dueText = dueDate ? "" : (terms && terms.startsAt === "completed" ? "due " + days + " days after your order ships or is picked up"
+    : "due within " + days + " days of the invoice");
+  const paidUp = !!order.paid && Number(order.balanceDue) <= 0;
+  return {
+    net30: true, termsDays: days, poNumber, dueDate, dueText,
+    poStatus: String(order.poStatus || (poNumber ? (order.poAcceptedAt ? "accepted" : "PO to check") : "PO needed")),
+    canSetPo: !poNumber && !order.poAcceptedAt && !order.voidedAt && !paidUp,
+  };
 }
 
 // What the shop offers: its saved list, or — for a shop that never saved one — local pickup, plus
@@ -167,6 +195,7 @@ async function invoiceView_(env, inv, order, org) {
     giftCardPaid: (order.payments || []).filter(p => !p.voidedAt && /^Gift card/i.test(String(p.reference || "")) && Number(p.amount) > 0)
       .map(p => ({ label: String(p.reference).slice(0, 40), amount: Number(p.amount) })),
     addOns: await addOns_(env, order, org, settings),
+    terms: await termsView_(env, order),
   };
 }
 
@@ -261,6 +290,34 @@ async function applyGiftCard_(context, body, got, token) {
   return freshInvoice_(env, token, order.orderId, org);
 }
 
+// A PO number typed on the invoice of a Net 30 order: saved as the customer's (not accepted — staff confirm it), for
+// this order only. Refused once the shop has accepted a PO, and on an order without Net 30 terms.
+async function setInvoicePo_(context, body, got, token) {
+  const { request, env } = context;
+  const { order, org } = got;
+  const rl = await rateLimited(env, "invoice_po", request, 10);
+  if (rl.blocked) return rateLimitResponse(rl.retryAfter);
+  const poNumber = typeof body.poNumber === "string" ? body.poNumber.trim() : "";
+  if (!poNumber) return jsonResponse({ status: "error", message: "Enter your PO number." }, 400);
+  if (poNumber.length > INVOICE_PO_MAX_) return jsonResponse({ status: "error", message: "A PO number can be up to 60 characters." }, 400);
+  if (!order.net30) return jsonResponse({ status: "error", message: "This order doesn't take a PO number — contact us if you need one on it." }, 409);
+  if (order.poAcceptedAt) return jsonResponse({ status: "error", message: "Your PO is already on this order — contact us to change it." }, 409);
+  if (order.paid && Number(order.balanceDue) <= 0) return jsonResponse({ status: "error", message: "This order is already paid — contact us if you need your PO number on it." }, 409);
+  const before = String(order.poNumber || "");
+  let r;
+  try {
+    r = await setOrderTerms(env.DB, order.orderId, { net30: true, termsDays: Number(order.termsDays) > 0 ? Number(order.termsDays) : null,
+      poNumber, typedByCustomer: true, by: "customer-invoice" });
+  } catch (e) { console.error("A PO number on an invoice failed:", order.orderId, e); return jsonResponse({ status: "error", message: "We couldn't save your PO number just now. Please try again." }, 500); }
+  // A refusal from the rules (accepted meanwhile, say) is the db's sentence; it is written for the customer.
+  if (r && (r.ok === false || r.error)) return jsonResponse({ status: "error", message: String(r.error || r.reason || r.message || "We couldn't save your PO number.") }, 409);
+  const record = insertAuditLog(env.DB, { orgId: order.orgId, orderId: order.orderId, action: "order.invoice_po_typed",
+    detail: { poNumber: { from: before, to: poNumber } }, actor: "customer-invoice", ip: request.headers.get("CF-Connecting-IP") || null })
+    .catch((e) => console.error("Invoice PO number saved, but recording it failed:", order.orderId, e));
+  if (typeof context.waitUntil === "function") context.waitUntil(record); else await record;
+  return freshInvoice_(env, token, order.orderId, org);
+}
+
 export async function onRequestPost(context) {
   const { request, env } = context;
   if (!env.DB) return jsonResponse({ status: "error", message: "Server misconfigured" }, 500);
@@ -275,6 +332,7 @@ export async function onRequestPost(context) {
   const { inv, order, org } = got;
   if (body.action === "applyCode") return applyCode_(context, body, got, token);
   if (body.action === "applyGiftCard") return applyGiftCard_(context, body, got, token);
+  if (body.action === "setInvoicePo") return setInvoicePo_(context, body, got, token);
   if (body.action !== "setDelivery") return jsonResponse({ status: "error", message: "Unknown action" }, 400);
 
   const lock = await deliveryLock_(env.DB, inv, order);

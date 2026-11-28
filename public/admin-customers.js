@@ -66,7 +66,7 @@
       body.innerHTML = `<div class="admin-table-wrap"><table class="stack-mobile cust-table">
         <thead><tr><th>Name</th><th>Company</th><th>Email</th><th>Phone</th><th class="cust-num">Orders</th><th>Last order</th></tr></thead>
         <tbody>${customers.map(c => `<tr class="cust-row${c.archived ? " cust-row-archived" : ""}" data-cust-id="${escapeHtml(c.id)}">
-          <td class="stack-title"><a class="cust-link" href="#customers/${encodeURIComponent(c.id)}">${escapeHtml(custLabel(c))}</a>${c.taxExempt ? (c.taxExemptExpires && c.taxExemptExpires < localToday_() ? ` <span class="cust-tag cust-tag-warn">Exemption expired</span>` : ` <span class="cust-tag cust-tag-exempt">Exempt</span>`) : ""}${c.archived ? ` <span class="cust-tag">Archived</span>` : ""}</td>
+          <td class="stack-title"><a class="cust-link" href="#customers/${encodeURIComponent(c.id)}">${escapeHtml(custLabel(c))}</a>${c.taxExempt ? (c.taxExemptExpires && c.taxExemptExpires < localToday_() ? ` <span class="cust-tag cust-tag-warn">Exemption expired</span>` : ` <span class="cust-tag cust-tag-exempt">Exempt</span>`) : ""}${c.allowNet30 ? ` <span class="cust-tag cust-tag-net30">Net ${Number(c.termsDays) > 0 ? Number(c.termsDays) : 30}</span>` : ""}${c.archived ? ` <span class="cust-tag">Archived</span>` : ""}</td>
           <td>${escapeHtml(c.company || "")}</td>
           <td>${escapeHtml(c.email || "")}</td>
           <td>${escapeHtml(c.phone || "")}</td>
@@ -200,6 +200,9 @@
     const linkOrders = typeof openOrderFromDashboard_ === "function" && (typeof adminCanOpen_ !== "function" || adminCanOpen_("orders"));
     const a = c.address || {};
     const expired = !!(c.taxExempt && c.taxExemptExpires && c.taxExemptExpires < localToday_());
+    // Net 30 terms (migrations/0121): shown once the server sends them with the customer (an older one leaves them out,
+    // and is then never sent them).
+    const termsKnown = c.allowNet30 !== undefined && c.allowNet30 !== null;
     const shopName = (orgId) => { const o = (adminOrgs || []).find(x => x.orgId === orgId); return (o && o.name) || orgId || ""; };
     const field = (label, fid, value, attrs) => `<label class="cust-field"><span>${label}</span><input id="${fid}" value="${escapeHtml(value == null ? "" : value)}" ${attrs || 'type="text"'}></label>`;
 
@@ -211,7 +214,8 @@
             <h2 class="cust-name">${escapeHtml(custLabel(c))}</h2>
             <div class="cust-sub">${c.name && c.company ? escapeHtml(c.company) + " · " : ""}Customer since ${escapeHtml(adminDate_(c.createdAt))}
               ${c.archived ? ` <span class="cust-tag">Archived</span>` : ""}
-              ${c.taxExempt ? ` <span class="cust-tag ${expired ? "cust-tag-warn" : "cust-tag-exempt"}">${expired ? "Exemption expired" : "Tax exempt"}</span>` : ""}</div>
+              ${c.taxExempt ? ` <span class="cust-tag ${expired ? "cust-tag-warn" : "cust-tag-exempt"}">${expired ? "Exemption expired" : "Tax exempt"}</span>` : ""}
+              ${termsKnown && c.allowNet30 ? ` <span class="cust-tag cust-tag-net30">Net ${Number(c.termsDays) > 0 ? Number(c.termsDays) : 30}</span>` : ""}</div>
           </div>
           <div class="cust-actions">
             ${c.archived ? "" : `<button type="button" class="admin-btn" id="custNewSale" data-need="orders.details:edit">New sale for this customer</button>`}
@@ -259,6 +263,16 @@
             <div class="cust-note">${canFull ? "Applies to orders placed from now on, until the day it expires. Orders already placed keep the tax they were charged."
               : "Only a role with full access to Customers can change a tax exemption."}</div>
           </fieldset>
+
+          ${termsKnown ? `<fieldset class="cust-terms" data-need-form="${CUST_FN}:full">
+            <legend>Net 30 terms</legend>
+            <label class="cust-check"><input type="checkbox" id="custNet30" ${c.allowNet30 ? "checked" : ""}> Allow Net 30: this customer can choose to pay by invoice at checkout</label>
+            <div class="cust-grid">
+              ${field("Terms (days)", "custTermsDays", c.termsDays == null ? "" : c.termsDays, 'type="number" min="1" max="365" step="1" placeholder="Default"')}
+            </div>
+            <div class="cust-note">${canFull ? "Checkout offers Net 30 to this customer's email once it's allowed here and switched on under Global settings → Payment methods. Terms: how many days they have to pay (Net 45 = 45); blank is the default. Their days are used on new Net 30 orders, including ones staff set."
+              : "Only a role with full access to Customers can change Net 30 terms."}</div>
+          </fieldset>` : ""}
 
           <div class="cust-err" id="custErr" role="alert"></div>
           <div class="cust-form-actions"><button type="submit" class="admin-btn" id="custSave">Save</button></div>
@@ -319,9 +333,18 @@
       const exemption = canFull
         ? { taxExempt: root.querySelector("#custExempt").checked, taxExemptCertificate: val("custCert"), taxExemptExpires: val("custExpires") }
         : { taxExempt: !!c.taxExempt, taxExemptCertificate: c.taxExemptCertificate || "", taxExemptExpires: c.taxExemptExpires || "" };
+      // Net 30 terms (migrations/0121), the same way: sent when the server showed them, as stored for a role that can't change them.
+      let terms = {};
+      if (termsKnown) {
+        if (canFull) {
+          const raw = val("custTermsDays"), days = raw === "" ? null : Number(raw);
+          if (days !== null && !(Number.isInteger(days) && days >= 1 && days <= 365)) { err.textContent = "Terms: a whole number of days from 1 to 365, or blank for the default."; root.querySelector("#custTermsDays").focus(); return; }
+          terms = { allowNet30: root.querySelector("#custNet30").checked, termsDays: days };
+        } else terms = { allowNet30: !!c.allowNet30, termsDays: c.termsDays == null ? null : Number(c.termsDays) };
+      }
       save.disabled = true; err.textContent = "";
       try {
-        await adminApi_(Object.assign({ action: "saveCustomer", id: c.id, name, company, email, phone: val("custPhone"), address, notes: val("custNotes") }, exemption));
+        await adminApi_(Object.assign({ action: "saveCustomer", id: c.id, name, company, email, phone: val("custPhone"), address, notes: val("custNotes") }, exemption, terms));
         showToast("Customer saved.");
         reload();
       } catch (ex) { err.textContent = ex.message; save.disabled = false; }

@@ -28,6 +28,7 @@ export const PERMISSION_AREAS = [
       ["orders.shipping", "Shipping labels and tracking"],
       ["orders.payments", "Payments, discounts and refunds"],
       ["orders.payOnDelivery", "Set orders to pay on delivery"],
+      ["orders.terms", "Net 30 terms and PO numbers"],
       ["orders.invoices", "Invoices and receipts"],
       ["orders.downloads", "Digital downloads"],
       ["orders.import", "Import orders"]] } ] },
@@ -77,6 +78,7 @@ export const PERMISSION_AREAS = [
     { hash: "cogs", label: "Inventory and COGS", fns: [["reports.cogs", "Inventory and COGS"]] },
     { hash: "runreport", label: "Run times", fns: [["reports.runtimes", "Run times"]] },
     { hash: "fundraising", label: "Fundraising", fns: [["reports.fundraising", "Fundraising report"]] },
+    { hash: "unpaidpos", label: "Unpaid POs", fns: [["reports.receivables", "Unpaid POs report"]] },
     { hash: "books", label: "Periods and export", fns: [["reports.books", "Closed periods and accountant's export"]] },
     { hash: "taxpacket", label: "Tax packet", fns: [["reports.taxpacket", "Printable tax packet for the accountant"]] } ] },
   { key: "settings", label: "Settings", items: [
@@ -118,7 +120,10 @@ const BY_FN = {
       // Reorder (phase 6) reads a past order to start a new Local sale from it: reading the order AND making a sale, so Edit.
       "getOrderForReorder"],
     full: ["deleteOrderItemFile", "cancelLineItem", "bulkCancelLineItems", "deleteOrder", "voidOrder"] },
-  "orders.stepsEarly": { read: ["getBlankShipments"], edit: ["useBlanksFromStock", "addBlankShipment", "updateBlankShipment", "checkBlankShipments"], full: ["deleteBlankShipment"] },
+  // Customer-supplied garments (phase 7) are checked in where an order's blanks are received: the early steps. A re-count
+  // replaces the last one (Edit); undoing a check-in voids its rows, as deleting a blank shipment removes one (Full).
+  "orders.stepsEarly": { read: ["getBlankShipments", "listGarmentCheckins"], edit: ["useBlanksFromStock", "addBlankShipment", "updateBlankShipment", "checkBlankShipments", "checkInGarments"],
+    full: ["deleteBlankShipment", "undoGarmentCheckin"] },
   "orders.stepsLate": { edit: ["setOrderCompleted", "checkDeliveries"] },
   "orders.shipping": { read: ["getOrderForShipping"], edit: ["recordTracking", "bulkRecordTracking", "setShippingInfo"] },
   "orders.payments": {
@@ -130,6 +135,10 @@ const BY_FN = {
   // Pay on delivery (migrations/0105): the order's steps go on before it's paid. Its own function, so who may let work
   // start unpaid is chosen apart from who records payments: Manager and Admin by default (Back office and Production none).
   "orders.payOnDelivery": { edit: ["setPayOnDelivery"] },
+  // Net 30 with a PO (migrations/0121): putting an order on terms, its days and PO number, and accepting a PO the customer
+  // typed. No money moves, but an accepted PO lets the order's work go on unpaid (db.js net30Cleared), so it is its own
+  // function: Manager and Admin full, Back office edit, Production none.
+  "orders.terms": { edit: ["setOrderTerms", "acceptOrderPo"] },
   "orders.invoices": { read: ["getInvoiceDocument", "getOrderPdf"], edit: ["sendInvoice", "resendEmail"] },
   "orders.downloads": { read: ["getOrderDownloads"], edit: ["resendDownloads", "resetDownloads"], full: ["revokeDownloads"] },
   "orders.import": { edit: ["importOrders"] },
@@ -244,16 +253,20 @@ const BY_FN = {
   // Fundraising (migrations/0110): what each shop's sales raised for its group, and what was paid out to it. Recording
   // a payout is an expense, so it is Expenses' (finance.expenses Edit), not this report's.
   "reports.fundraising": { read: ["getFundraisingReport", "listFundraiserPayouts"] },
+  // Unpaid POs (migrations/0121): every Net 30 order still owed, by how late it is. What customers owe, not what anything
+  // cost, so no costs.view. Accepting a PO from it is orders.terms' (setOrderTerms, acceptOrderPo).
+  "reports.receivables": { read: ["getUnpaidPoReport"] },
   "reports.books": { read: ["listClosedPeriods", "getAccountantExport"], edit: ["closePeriod"], full: ["reopenPeriod"] },
   // The packet is drawn from the other reports, so it needs to read them too (renderTaxPacket says which are missing).
   "reports.taxpacket": { read: ["getTaxPacketExtras"] },
   "settings.global": {
     read: ["getGlobalSettings", "getFeatures", "getBusinessProfile", "getLocaleSettings", "getSalesTaxSettings", "getShipFromAddress", "getSetupStatus",
-      "getRushSettings", "getEmailSettings", "getDecorationSettings", "getDigitalSettings", "getDiscountRules", "getGiftCardSettings", "previewCustomerEmail", "samplePdf", "getAccountingSettings"],
+      "getRushSettings", "getEmailSettings", "getDecorationSettings", "getDigitalSettings", "getDiscountRules", "getGiftCardSettings", "previewCustomerEmail", "samplePdf", "getAccountingSettings",
+      "getTermsSettings"],
     edit: ["saveGlobalSettingsAll", "updateGlobalSettings", "updateFeatures", "updateBusinessProfile", "updateLocaleSettings", "updateSalesTaxSettings", "updateShipFromAddress",
       "updateAccountingSettings", "updateMachineSettings", "updatePricingSettings", "updateRushSettings", "updateEmailSettings",
       "updateDecorationSettings", "sendSampleEmail", "sendTestEmail", "checkMailbox", "updateDigitalSettings", "getCloudflareSetup", "connectCloudflare", "backfillStripeFees",
-      "updateDiscountRules", "updateGiftCardSettings"] },
+      "updateDiscountRules", "updateGiftCardSettings", "updateTermsSettings"] },
   "settings.vendors": {
     read: ["vendorDirectorySearch", "vendorDirectoryEndpoints"],
     edit: ["saveVendorConnection", "testVendorConnection", "linkVendorConnectionBlanks"],
@@ -311,6 +324,9 @@ const ALSO = {
   // and their amounts by the Gift cards page and the order's payment form (to offer the Gift card choice).
   getDiscountRules: [["orders.details", "edit"], ["orders.payments", "read"], ["quotes.estimates", "read"], ["discounts.codes", "read"]],
   getGiftCardSettings: [["giftcards.cards", "read"], ["orders.payments", "edit"]],
+  // Net 30 terms (Global settings → Net 30 terms): the usual days and when they start, which the order window's Terms
+  // area, the Unpaid POs report and a customer's "Terms (days)" box (blank = the usual) show.
+  getTermsSettings: [["orders.terms", "read"], ["reports.receivables", "read"], ["customers.records", "read"]],
 };
 
 // action → [[fn, level], ...] (any one is enough), or "*" (anyone signed in).
@@ -334,6 +350,7 @@ const MANAGER_FNS = Object.assign(all_("full"), {
 const STAFF_FNS = only_({
   "home.counts": "read",
   "orders.details": "edit", "orders.stepsEarly": "edit", "orders.stepsLate": "edit", "orders.shipping": "edit", "orders.payments": "edit", "orders.invoices": "edit",
+  "orders.terms": "edit",
   "customers.records": "edit", "quotes.estimates": "edit", "discounts.codes": "read", "giftcards.cards": "edit",
   "run.queue": "read", "run.runs": "edit", "run.markMade": "edit", "transfer.queue": "read", "transfer.mark": "edit",
   "production.digitizing": "edit",
@@ -341,7 +358,7 @@ const STAFF_FNS = only_({
   "production.machines": "edit", "production.maintenance": "edit", "production.maintenanceLog": "edit", "production.machinefiles": "edit",
   "production.hoops": "edit", "production.threads": "edit", "production.abortreasons": "edit",
   "inventory.blanks": "edit", "inventory.blankorder": "edit", "inventory.transfers": "edit",
-  "reports.runtimes": "read", "reports.fundraising": "read", "settings.comms": "read",
+  "reports.runtimes": "read", "reports.fundraising": "read", "reports.receivables": "read", "settings.comms": "read",
 });
 const PRODUCTION_FNS = only_({
   "home.counts": "read",

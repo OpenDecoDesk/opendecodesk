@@ -277,10 +277,15 @@ function checkRules(d1, built) {
   ];
   const shape = (db) => JSON.stringify(columns(db, "customers").map(c => [c.name, c.type, c.notnull, c.dflt_value, c.pk]));
   ok("the migrated customers table has the fourteen columns, with their types and defaults, in order", shape(empty) === JSON.stringify(want));
-  ok("schema.sql's customers table has exactly the same columns", shape(fresh) === JSON.stringify(want));
+  // A later migration adds customers columns of its own (0121: allowNet30, termsDays — Net 30 terms): schema.sql has every
+  // migration's, so it is compared with a database that ran all of them.
+  const allMigrated = await databaseBefore0108();
+  for (const f of migrationFiles.filter(f => f >= MIGRATION)) allMigrated.execFile(read("migrations/" + f));
+  const wantNow = [...want, ["allowNet30", "INTEGER", 1, "0", 0], ["termsDays", "INTEGER", 0, null, 0]];
+  ok("schema.sql's customers table has exactly the same columns (0108's, then 0121's)", shape(fresh) === JSON.stringify(wantNow) && shape(allMigrated) === JSON.stringify(wantNow));
   ok("a new database starts with no customers", fresh.q("SELECT COUNT(*) AS n FROM customers")[0].n === 0);
   const createSql = (db) => db.q("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'customers'")[0].sql.replace(/--[^\n]*/g, "").replace(/\s+/g, " ").replace(/ IF NOT EXISTS/i, "").trim();
-  ok("the two tables are declared the same way, word for word", createSql(fresh) === createSql(empty) && /AUTOINCREMENT/.test(createSql(fresh)) && /CHECK \(taxExempt IN \(0, 1\)\)/.test(createSql(fresh)));
+  ok("the two tables are declared the same way, word for word", createSql(fresh) === createSql(allMigrated) && /AUTOINCREMENT/.test(createSql(fresh)) && /CHECK \(taxExempt IN \(0, 1\)\)/.test(createSql(fresh)));
   const fks = (db, table, col) => JSON.stringify(db.q(`PRAGMA foreign_key_list(${table})`).filter(f => f.from === col).map(f => [f.table, f.to]));
   ok("mergedIntoId points at a customer in both", fks(empty, "customers", "mergedIntoId") === '[["customers","id"]]' && fks(fresh, "customers", "mergedIntoId") === fks(empty, "customers", "mergedIntoId"));
   const customerCol = (db) => JSON.stringify(columns(db, "orders").filter(c => c.name === "customerId").map(c => [c.type, c.notnull, c.dflt_value, c.pk]));

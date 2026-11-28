@@ -62,6 +62,8 @@ public/admin.js           the admin panel (loaded only on the admin host)
 public/admin-customers.js the admin's Customers page (loaded by admin.js the first time it is opened)
 public/admin-quotes.js    the admin's Quotes page (loaded the same way)
 public/admin-digitizing.js  the outside-digitizing records on an order and a quote (loaded the same way)
+public/admin-receivables.js the Unpaid POs report (loaded the same way)
+public/admin-garments.js  the check-in window and slip for a customer's own garments (loaded the same way)
 public/admin.css          the admin panel's styles (loaded with admin.js)
 public/_headers           security headers and cache rules for every response
 public/vendor/pdfjs-5.6.205/  Mozilla's pdf.js, vendored, for reading vendor invoices
@@ -163,6 +165,24 @@ About fifty tables (`schema.sql`). The main groups:
   is never on the deposits list or in an account's balance. The setting `giftCards` holds the online-sale
   options. A card sold online is an order line with productId `__giftcard__`, which is left out of revenue,
   tax, fundraising, cost and production.
+- **Net 30 terms** (migration 0121) — no table of its own. `customers.allowNet30` (may pick Net 30 at
+  checkout) and `customers.termsDays` (their days; NULL means the default). On `orders`: `net30`, `poNumber`
+  (empty for none), `poTypedAt` (when the customer typed it), `poAcceptedAt` / `poAcceptedBy` (staff accepted
+  it, or typed it themselves), `termsDays` (NULL means the default) and `invoicedAt` — the **first** invoice
+  send, which a resend never moves (`order_invoices.sentAt` is the last send, so the migration filled
+  `invoicedAt` only for invoices sent exactly once). The setting `terms` `{ defaultDays, startsAt }` holds the
+  default days and when they start (`invoice`, `order` or `completed`). The due date is never stored:
+  `net30DueDate_` in `db.js` works it out when an order is read. `getUnpaidPoReport` answers the Unpaid POs
+  report, its late-bucket groups and per-customer totals, from the same owed and received figures as the
+  order; Home's Unpaid POs block and the morning roll-up use its totals.
+- **Customer-supplied garments** (migration 0121) — `order_items.customerOwned` and
+  `estimate_items.customerOwned` mark a line as the customer's own garment; `order_items.ownReceivedAt` is set
+  once some of its garments are checked in. `garment_checkins` has one row per size counted: expected and
+  received, the condition (`good`, `damaged` or `other`), a note, who and when. A re-count sets the earlier
+  rows' `voidedAt` and writes new ones. `noBlankLine_` / `noBlankLineSql_` treat such a line as needing no
+  blank, so it is never in blanks to order, blank stock or blank cost, and the production queues take
+  `ownReceivedAt` as its "blank received". The switch is the feature `ownGarments` (the one feature that is
+  off when the setting is missing), and `ownGarmentsWaiver` in the same setting is the slip's waiver line.
 - **Email campaigns** (migrations/0117) — `marketing_optouts` (one row per address that asked for no
   marketing email, and why: checkout, unsubscribe, reply or admin), `email_campaigns` (subject, theme,
   the design as blocks or HTML, who it's for, its discount, and draft → scheduled → sending → sent or
@@ -247,6 +267,12 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
   Stripe confirmation makes no second card (and no second email). The full code is never in a list or a
   reading: only `revealGiftCardCode` returns it, and it is audited. Checking a card is limited to 10 a
   minute for each address, and a wrong number never says whether a card exists.
+- **Net 30 clears the work, never the money.** `net30Cleared` in `db.js` is the one rule: a Net 30 order
+  with a PO that staff accepted. `workCleared` includes it (beside paid and pay on delivery), and
+  `workClearedSql_` has the same rule in SQL (`NET30_CLEARED_SQL_`); the two forms must agree. Such an order
+  goes to production, can be completed, gets its downloads and counts in the Fundraising report while still
+  owed. `orders.paid`, revenue and the books still follow the payments ledger, and the order stays on the
+  Unpaid POs report until its balance is nothing.
 - **A built-in expense category can't be deleted.** A category with a `systemKey` (`sales_tax_paid`,
   `fundraiser_payout`) is one the code looks up; it can be renamed, never removed.
 

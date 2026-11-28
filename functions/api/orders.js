@@ -2932,7 +2932,9 @@ async function handleOrdersPost_(context, listBefore = null) {
     const got = await p8Call_(() => getOrderProfit(env.DB, orderId));
     if (got.reply) return got.reply;
     const profit = got.value;
-    if (!profit || (body.org && profit.orgId && profit.orgId !== body.org)) return jsonResponse({ status: "error", message: "Order not found" }, 404);
+    // The profit object carries no orgId: a shop given with the request is checked against the order's own.
+    const inOrg = !body.org || ((await env.DB.prepare("SELECT orgId FROM orders WHERE orderId = ?").bind(orderId).first()) || {}).orgId === body.org;
+    if (!profit || !inOrg) return jsonResponse({ status: "error", message: "Order not found" }, 404);
     return jsonResponse({ status: "ok", profit });
   }
 

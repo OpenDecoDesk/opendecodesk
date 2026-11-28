@@ -8,9 +8,11 @@
 //   - voiding a gift-card payment puts the money back on the card, once; "Back to card…" puts part of one back;
 //   - a customer spends a card at a shop's checkout together with a discount code while only one code is allowed
 //     (the second code is refused, the card is not); a card that covers everything leaves nothing to pay;
-//   - Global settings → Gift cards → selling online: saved through the page and put back. This install has no Stripe
-//     (no card payments, no webhook secret: e2e/README.md "Not covered"), so the shop shows no Gift cards button and the
-//     server refuses buyGiftCard with its reason. The buy form is then reached with the catalog's card fields stubbed
+//   - Global settings → Gift cards → selling online. This install has no Stripe (no card payments, no webhook secret:
+//     e2e/README.md "Not covered"), so card payments are not ready: the sell-online tick is disabled with its note and
+//     the server refuses selling online. With getGiftCardSettings answered cardReady true in the browser (as
+//     gap-giftcard-tile does) the page's own amount checks run and a ticked Save is refused; the amounts save with
+//     selling off. The shop shows no Gift cards button and the server refuses buyGiftCard with its reason. The buy form is then reached with the catalog's card fields stubbed
 //     in the customer's browser: its own checks, the server's real refusal, and (with buyGiftCard and /api/checkout
 //     stubbed too) the hand-off to the Checkout address and the thank-you page. The paid webhook that makes the card
 //     can't be sent here (it needs Stripe's signature), so "the card appears once" is left to test19/test135-style
@@ -499,9 +501,12 @@ test("a gift card that covers the whole order: nothing to pay, no payment method
 });
 
 // =========================================================================================================
-test("Global settings → Gift cards: selling online is saved through the page and put back; without Stripe the shop sells none and the server refuses; the buy form's checks, refusal and Checkout hand-off", async ({ page, api, as }) => {
+test("Global settings → Gift cards: without Stripe the sell-online tick is disabled and selling online is refused, the amounts still save through the page; the shop sells none and the server refuses; the buy form's checks, refusal and Checkout hand-off", async ({ page, api, as }) => {
   test.setTimeout(150_000);
+  const NOT_READY_NOTE = "Card payments must be set up and switched on to sell gift cards on a shop: add your Stripe keys (see Setup) and tick Card under Payment methods. A shop also needs Card switched on in its own payment methods.";
+  const NEEDS_CARD = "Set up card payments before selling gift cards on a shop.";
   const { giftCards: before } = await api("getGiftCardSettings");
+  expect(before.cardReady).toBe(false);
   const shop = await makeShop(api, { prefix: "gcsell", products: [{ name: "Sample Tee", price: 20 }] });
   const saveSettings = async () => {
     const saved = answerOf(page, "saveGlobalSettingsAll");
@@ -516,10 +521,28 @@ test("Global settings → Gift cards: selling online is saved through the page a
     return { status: r.status, body: await r.json() };
   }, { action: "buyGiftCard", orgId: shop.orgId, amountCents: 5000, recipientName: "Sam Example", recipientEmail: "sam@example.com", buyerName: "Pat Example", buyerEmail: "pat@example.com", requestId: requestId(), ...extra });
   try {
-    // ---- turned on through the page, with its own amounts ------------------------------------------------------
+    // ---- card payments not ready (no Stripe): the tick is disabled with its note, and the server refuses --------
     await openAdmin(page, "settings");
     await expect(page.getByRole("heading", { name: "Gift cards" })).toBeVisible();
     const sell = page.locator("#gGiftSell");
+    await expect(sell).toBeDisabled();
+    await expect(sell).not.toBeChecked();
+    await expect(page.locator("#gGiftSellNote")).toHaveText(NOT_READY_NOTE);
+    let refused = await api("updateGiftCardSettings", { sellOnline: true, amounts: [2500, 5000, 10000], minCents: 1000, maxCents: 20000 }, { allowError: true, withStatus: true });
+    expect(refused.status).toBe(400);
+    expect(refused.data).toEqual({ status: "error", message: NEEDS_CARD });
+
+    // ---- with card payments answered ready in this browser: the tick works, the page's own checks run, and the
+    // ticked Save is still refused by this Stripe-less server, storing nothing ---------------------------------------
+    await page.route("**/api/orders", async (route) => {
+      if (actionOf(route.request()) !== "getGiftCardSettings") return route.fallback();
+      const res = await route.fetch();
+      const j = await res.json();
+      j.giftCards.cardReady = true;
+      await route.fulfill({ response: res, json: j });
+    });
+    await openAdmin(page, "settings");
+    await expect(sell).toBeEnabled();
     await sell.check();
     await page.locator("#gGiftAmounts").fill("abc");
     await page.getByRole("button", { name: "Save global settings" }).click();
@@ -530,11 +553,23 @@ test("Global settings → Gift cards: selling online is saved through the page a
     await page.getByRole("button", { name: "Save global settings" }).click();
     await expect(page.locator("#globalSettingsError")).toContainText("Gift cards: the custom amount's two figures must run from at least $1 up to no more than $10,000, the second not below the first.");
     await page.locator("#gGiftMax").fill("200");
+    const tried = answerOf(page, "saveGlobalSettingsAll");
+    await page.getByRole("button", { name: "Save global settings" }).click();
+    const triedRes = await tried;
+    expect(JSON.parse(triedRes.request().postData()).settings.giftCards).toEqual({ sellOnline: true, amounts: [2500, 5000, 10000], minCents: 1000, maxCents: 20000 });
+    expect(triedRes.status()).toBe(400);
+    expect(await triedRes.json()).toMatchObject({ status: "error", section: "Gift cards", message: NEEDS_CARD });
+    await expect(page.locator("#globalSettingsError")).toContainText(NEEDS_CARD);
+    expect((await api("getGiftCardSettings")).giftCards).toEqual(before);
+    // Unticked, the same amounts save.
+    await sell.uncheck();
     const settings = await saveSettings();
-    expect(settings.giftCards).toEqual({ sellOnline: true, amounts: [2500, 5000, 10000], minCents: 1000, maxCents: 20000 });
-    expect((await api("getGiftCardSettings")).giftCards).toMatchObject({ sellOnline: true, amounts: [2500, 5000, 10000], minCents: 1000, maxCents: 20000 });
+    expect(settings.giftCards).toEqual({ sellOnline: false, amounts: [2500, 5000, 10000], minCents: 1000, maxCents: 20000 });
+    expect((await api("getGiftCardSettings")).giftCards).toEqual({ sellOnline: false, amounts: [2500, 5000, 10000], minCents: 1000, maxCents: 20000, cardReady: false });
+    await page.unroute("**/api/orders");
     await openAdmin(page, "settings");
-    await expect(page.locator("#gGiftSell")).toBeChecked();
+    await expect(page.locator("#gGiftSell")).toBeDisabled();
+    await expect(page.locator("#gGiftSell")).not.toBeChecked();
     await expect(page.locator("#gGiftAmounts")).toHaveValue("25, 50, 100");
 
     // ---- the shop: no card payments on this install, so no Gift cards button, and the server says why -----------
@@ -547,7 +582,7 @@ test("Global settings → Gift cards: selling online is saved through the page a
     expect(cat.catalog.giftCards).toEqual({ sellOnline: false, amounts: [], min: 10, max: 200 });
     let r = await buy(cp);
     expect(r.status).toBe(400);
-    expect(r.body.message).toBe("Gift cards are bought by card, and card payments aren't available right now.");
+    expect(r.body.message).toBe("Gift cards aren't sold online right now.");
 
     // ---- the buy form, with the catalog's card fields stubbed (this install has no Stripe) ------------------------
     const bp = await as(null);
@@ -595,7 +630,7 @@ test("Global settings → Gift cards: selling online is saved through the page a
     let buyRes = await buySent;
     expect(JSON.parse(buyRes.request().postData())).toMatchObject({ orgId: shop.orgId, amountCents: 5000, recipientName: "Sam Example", recipientEmail: "sam@example.com", buyerName: "Pat Example", buyerEmail: "pat@example.com", message: "Enjoy!" });
     expect(buyRes.status()).toBe(400);
-    await expect(gbMsg).toHaveText("Gift cards are bought by card, and card payments aren't available right now.");
+    await expect(gbMsg).toHaveText("Gift cards aren't sold online right now.");
     await expect(pay).toBeEnabled();
 
     // With the order and Checkout answered by stubs, the page goes to the Checkout address it is given (here the
@@ -616,16 +651,17 @@ test("Global settings → Gift cards: selling online is saved through the page a
     await bp.unroute("**/api/orders");
     await bp.unroute("**/api/checkout");
 
-    // ---- turned off again through the page: the server refuses with the other reason -----------------------------
+    // ---- saved again through the page: the tick is still disabled, selling stays off, the server still refuses -----
     await openAdmin(page, "settings");
-    await page.locator("#gGiftSell").uncheck();
-    const off = await saveSettings();
-    expect(off.giftCards.sellOnline).toBe(false);
+    await expect(page.locator("#gGiftSell")).toBeDisabled();
+    const again = await saveSettings();
+    expect(again.giftCards.sellOnline).toBe(false);
     expect((await api("getGiftCardSettings")).giftCards.sellOnline).toBe(false);
     r = await buy(cp);
     expect(r.status).toBe(400);
     expect(r.body.message).toBe("Gift cards aren't sold online right now.");
   } finally {
+    await page.unroute("**/api/orders").catch(() => {});
     await api("updateGiftCardSettings", { sellOnline: before.sellOnline, amounts: before.amounts, minCents: before.minCents, maxCents: before.maxCents });
   }
   expect((await api("getGiftCardSettings")).giftCards).toEqual(before);

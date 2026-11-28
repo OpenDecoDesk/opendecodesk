@@ -203,6 +203,11 @@ const payment = (d1, p) => d1._raw.exec(`INSERT INTO order_payments (id, orderId
       "a bank name with a tab is refused, naming the app account");
     await refusal({ expenseAccounts: { 3: "X".repeat(101) } }, "Software & subscriptions: a QuickBooks name can be at most 100 characters.",
       "a category name over 100 characters is refused, naming the category");
+    d1._raw.exec("UPDATE accounts SET name = char(9) WHERE id = 2; UPDATE accounts SET name = ' Old' || char(9) || 'card' || char(10) WHERE id = 5;");
+    await refusal({ bankAccounts: { 2: "Card\t9" } }, "Account 2: QuickBooks names can't have tabs or line breaks.",
+      "a bank name refused for an app account whose name is only a tab names it \"Account <id>\", not by the tab");
+    await refusal({ bankAccounts: { 5: "Y".repeat(101) } }, "Old card: a QuickBooks name can be at most 100 characters.",
+      "…an app account name with a tab or line break is named with spaces, trimmed");
     const ok100 = await L.setQuickBooksSettings(d1, { accounts: { sales: "  " + "S".repeat(100) + "  " } });
     ok("a name of exactly 100 characters, once trimmed, is taken", ok100.accounts.sales === "S".repeat(100));
   }

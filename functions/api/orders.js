@@ -3873,6 +3873,17 @@ async function handleOrdersPost_(context, listBefore = null) {
         return jsonResponse({ status: "error", message: "The exemption's expiry date isn't a valid date." }, 400);
       }
       input.taxExemptExpires = expires;
+      // Net 30 (migrations/0121): Allow Net 30 and Terms (days), saved with the customer (db.js saveCustomer checks the
+      // days). Left out, they stay as stored; changing them needs Full on Customers, as the page says.
+      if (body.allowNet30 !== undefined) input.allowNet30 = body.allowNet30 === true;
+      if (body.termsDays !== undefined) input.termsDays = body.termsDays;
+      {
+        const wasAllow = !!(beforeRow && Number(beforeRow.allowNet30)), wasDays = beforeRow && beforeRow.termsDays != null ? Number(beforeRow.termsDays) : null;
+        const days = body.termsDays === undefined ? wasDays : body.termsDays === null || String(body.termsDays).trim() === "" ? null : Number(String(body.termsDays).trim());
+        if (((input.allowNet30 !== undefined && input.allowNet30 !== wasAllow) || days !== wasDays) && !can_("customers.records", "full")) {
+          return forbidden_("Your role can't change a customer's Net 30 terms. Ask an admin.");
+        }
+      }
       const exemption = customerChanges_(before, { ...input, taxExemptExpires: expires || null }, CUSTOMER_EXEMPTION_FIELDS_);
       const exemptionChanged = Object.keys(exemption).length > 0;
       if (exemptionChanged) {

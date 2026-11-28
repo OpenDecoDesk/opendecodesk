@@ -6,7 +6,7 @@ const { ADMIN_ORIGIN } = require("./testlib/hosts");
 // Worker request may run — 50 on the Free plan, 1,000 on Workers Paid — and the scan ran one for every text column of
 // every table: about 700 on a new install, more with every 2,000 rows that mention an image. Now:
 //   - every table's columns are read in ONE query and each table is searched with ONE statement over all its text
-//     columns (a page of rows at a time), so a whole scan of a new install is under 100 queries;
+//     columns (a page of rows at a time), so a whole scan of a new install is under 110 queries (one more for every table added);
 //   - the scan runs in steps the page drives: a request runs at most 25 queries and answers with a scanId to carry on
 //     with; what it found waits in orphan_scan_keys (migrations/0106) between steps; the bucket is listed a page a
 //     request and each page checked against those keys;
@@ -102,7 +102,7 @@ async function fullScan(mod, env, db, c, now, first = {}) {
     keysOf(s) === "uploads/acme/gone-thumb.jpg,uploads/acme/gone.jpg,verify/abc.png" && s.scanned === 7 && s.recent === 1 && s.totalBytes === 6500 &&
     s.orphans.find(o => o.key === "uploads/acme/gone-thumb.jpg").thumbOf === "uploads/acme/gone.jpg" && s.orphans.find(o => o.key === "verify/abc.png").url === `${BASE}/verify/abc.png`);
   ok(`the schema has ${tableCount} tables and ${textCols} text columns (one query each, before: ${tableCount + textCols + 1} or more)`, tableCount > 80 && textCols > 600);
-  ok(`the whole scan takes ${s.total} queries — about one a table and a handful a request, fewer than 100`, s.total > 0 && s.total < 100 && s.total < tableCount + 12);
+  ok(`the whole scan takes ${s.total} queries — about one a table and a handful a request, fewer than 110`, s.total > 0 && s.total < 110 && s.total < tableCount + 12);
   ok(`…in ${s.steps.length} requests, none over its share of ${orphan.STEP_QUERIES} (${s.steps.join(", ")})`, s.steps.length > 1 && orphan.STEP_QUERIES === 25 && Math.max(...s.steps) <= 25);
   ok("…every table's columns come from ONE query, and no table is read once per column",
     c.sql.filter(q => /pragma_table_info/.test(q)).length === 1 && c.sql.filter(q => /FROM "products" WHERE/.test(q)).length === 1 && /"imagesJson" LIKE[^;]*"name" LIKE|"name" LIKE[^;]*"imagesJson" LIKE/.test(c.sql.find(q => /FROM "products" WHERE/.test(q))));
@@ -202,7 +202,7 @@ async function fullScan(mod, env, db, c, now, first = {}) {
     const tidy = { IMAGES: bucket([obj("uploads/acme/set1.jpg"), obj("uploads/acme/set2.jpg"), obj("uploads/acme/today.jpg", fresh)]), R2_PUBLIC_BASE: BASE };
     ({ db, c } = counting(d1));
     const t = await fullScan(orphan, tidy, db, c, now);
-    ok(`a scan that finds nothing orphaned keeps nothing of itself (and still fits: ${t.total} queries, the most a request ${Math.max(...t.steps)})`, t.orphans.length === 0 && t.scanned === 3 && t.recent === 1 && rowsOf(t.scanId) === 0 && t.total < 100 && Math.max(...t.steps) <= 25);
+    ok(`a scan that finds nothing orphaned keeps nothing of itself (and still fits: ${t.total} queries, the most a request ${Math.max(...t.steps)})`, t.orphans.length === 0 && t.scanned === 3 && t.recent === 1 && rowsOf(t.scanId) === 0 && t.total < 110 && Math.max(...t.steps) <= 25);
   }
 
   console.log("\n=== A database that won't give every table's columns at once ===");

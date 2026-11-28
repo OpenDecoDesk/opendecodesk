@@ -492,6 +492,8 @@ function render(){
   if(route.view === "design-verify"){ renderDesignVerify(app, route.token); return; }
   // The customer's invoice page — token-gated, and it works with the storefront switched off too.
   if(route.view === "invoice"){ renderInvoice(app, route.token, route.justPaid); return; }
+  // The customer's quote page (?estimate=) — token-gated like the invoice, and it works with the storefront switched off.
+  if(route.view === "estimate"){ renderEstimate(app, route.token); return; }
 
   // Storefront switched off: the same short page on every shop address and the main one.
   if(route.view === "closed"){ currentOrgId = null; renderStorefrontOff(app, route); return; }
@@ -784,6 +786,184 @@ async function invPayCard_(){
     if (data.status === "ok" && data.url) { window.location.href = data.url; return; }
     _inv.busy = ""; invDraw_(); if (err()) err().textContent = data.message || "We couldn't start the card payment — try again.";
   } catch (e) { _inv.busy = ""; invDraw_(); if (err()) err().textContent = "We couldn't reach the server — try again."; }
+}
+
+// ---- Quote page (/?estimate=<token>) ----------------------------------------------------------
+// Opened from the link in a quote email (admin → Quotes → Send). ("Quote" to people; "estimate" in the code, where
+// a quote is already the signed shipping rate.) Shows the quote as the shop sent it — the prices are the ones
+// frozen when it was sent — and lets the customer accept it (which places the order) or ask for changes. Built
+// like the invoice page above: everything comes from /api/estimate, and every answer redraws the page from what
+// the server says the quote is now; the page itself decides nothing about whether it can be accepted.
+const _est = { token: "", data: null, busy: "", err: "", confirming: false, asking: false, note: "", done: "" };
+async function renderEstimate(app, token){
+  document.title = "Quote";
+  Object.assign(_est, { token, data: null, busy: "", err: "", confirming: false, asking: false, note: "", done: "" });
+  app.innerHTML = `<div class="inv" role="status">Loading your quote…</div>`;
+  let data;
+  try { const res = await fetch("/api/estimate?token=" + encodeURIComponent(token)); data = await res.json(); }
+  catch (e) { app.innerHTML = `<div class="inv"><p class="inv-err" role="alert">We couldn't load your quote. Check your connection and try the link again.</p></div>`; return; }
+  if (!data || data.status !== "ok" || !data.estimate) {
+    app.innerHTML = `<div class="inv"><p class="inv-err" role="alert">${escapeHtml((data && data.message) || "This quote link isn't valid.")}</p></div>`;
+    return;
+  }
+  estApply_(data.estimate);
+}
+function estApply_(estimate){
+  _est.data = estimate;
+  document.title = "Quote" + (estimate.number ? " — " + estimate.number : "");
+  estDraw_();
+}
+// What the page may offer. The server's canAccept is the answer; the status rule is only for an answer without it
+// (accepting is refused once the quote is expired, cancelled, accepted or converted).
+function estCanRespond_(v){
+  if (typeof v.canAccept === "boolean") return v.canAccept;
+  return (v.status === "sent" || v.status === "changes") && !v.expired;
+}
+const estLongDay_ = (day) => { const d = new Date(String(day || "").slice(0, 10) + "T12:00:00Z"); return isNaN(d) ? String(day || "") : d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" }); };
+const EST_FEE_LABELS_ = { setup: "Setup", digitizing: "Digitizing", art: "Art", other: "" };
+function estDraw_(){
+  const app = document.getElementById("app"), v = _est.data;
+  if (!app || !v) return;
+  const restoreFocus = keepFocus_(app);
+  const acc = /^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(String(v.orgAccent || "")) ? v.orgAccent : "#1d4ed8";
+  // /api/estimate sends the product and custom lines as `lines` and the one-time charges as `fees`.
+  const all = (v.lines || v.items || []).concat(Array.isArray(v.fees) ? v.fees.map(f => Object.assign({ kind: "fee" }, f)) : []);
+  const lines = all.filter(it => it.kind !== "fee"), fees = all.filter(it => it.kind === "fee");
+  // A quantity price shows the list price it came down from ("was"), as the cart does.
+  const was = (it) => { const w = Number(it.wasPrice != null ? it.wasPrice : it.wasUnitPrice != null ? it.wasUnitPrice : it.listUnitPrice); return Number.isFinite(w) && w > Number(it.unitPrice) + 0.004 ? w : null; };
+  const lineRows = lines.map(it => { const w = was(it); return `<tr>
+      <td>${escapeHtml(it.name)}${it.size && it.size !== "OSFA" ? ` <span class="inv-detail">· ${escapeHtml(it.size)}</span>` : ""}${it.detail ? `<div class="inv-detail">${escapeHtml(it.detail)}</div>` : ""}${it.personalized && it.persName ? `<div class="inv-detail">Personalization: “${escapeHtml(it.persName)}”</div>` : ""}</td>
+      <td class="num">${Number(it.qty) || 1}</td>
+      <td class="num">${invMoney_(it.unitPrice)}${w != null ? `<div class="inv-detail">was <del>${invMoney_(w)}</del></div>` : ""}</td>
+      <td class="num">${invMoney_(it.lineTotal)}</td></tr>`; }).join("");
+  const feeRows = fees.map(f => { const kind = EST_FEE_LABELS_[f.feeKind] || "", name = String(f.name || "");
+    const label = kind && !name.toLowerCase().includes(kind.toLowerCase()) ? kind + (name ? " — " + name : " fee") : (name || "Fee");
+    return `<tr><td>${escapeHtml(label)}</td><td class="num">${invMoney_(f.lineTotal != null ? f.lineTotal : f.amount)}</td></tr>`; }).join("");
+  const taxOnTop = v.taxMode === "exclusive", tax = Number(v.tax != null ? v.tax : v.salesTax) || 0;
+  const taxWhat = "Sales tax" + (v.taxRate ? " (" + escapeHtml(String(v.taxRate)) + "%" + (v.taxJurisdiction ? " " + escapeHtml(v.taxJurisdiction) : "") + ")" : "");
+  const taxRow = taxOnTop && tax > 0 ? `<tr><td>${taxWhat}</td><td class="num">${invMoney_(tax)}</td></tr>` : "";
+  const taxNote = !taxOnTop && tax > 0 ? `<div class="inv-tax">Includes ${taxWhat.charAt(0).toLowerCase() + taxWhat.slice(1)} ${invMoney_(tax)}</div>` : "";
+
+  // Where the quote stands. Right after this customer acted, that comes first; otherwise the status the server gave.
+  const st = v.status || "";
+  const orderRef = v.orderId ? ` <b>${escapeHtml(v.orderId)}</b>` : "";
+  let stateHtml = "";
+  // Accepted here: the order is normally made at once; if it couldn't be (the shop is told), say only what is true.
+  if (_est.done === "accepted") stateHtml = v.orderId
+    ? `<div class="inv-banner inv-ok" role="status" id="estState" tabindex="-1"><b>Thank you — your order${orderRef} is placed.</b> ${v.invoiceSent === false ? "We'll be in touch about payment." : "Your invoice is on its way by email."}</div>`
+    : `<div class="inv-banner inv-ok" role="status" id="estState" tabindex="-1"><b>Thank you — you've accepted this quote.</b> We'll be in touch about your order and payment.</div>`;
+  else if (_est.done === "changes") stateHtml = `<div class="inv-banner inv-ok" role="status" id="estState" tabindex="-1"><b>Thanks — we've sent your message to ${escapeHtml(v.orgName || bizName_())}.</b> We'll get back to you with a revised quote.</div>`;
+  else if (st === "accepted" || st === "converted") stateHtml = `<div class="inv-banner inv-ok" role="status">This quote has been accepted${v.orderId ? " — it's order" + orderRef : ""}.${v.acceptedAt ? " (" + escapeHtml(estLongDay_(v.acceptedAt)) + ")" : ""}</div>`;
+  else if (st === "cancelled") stateHtml = `<div class="inv-banner inv-wait" role="status">This quote has been withdrawn, so it can't be accepted. Please contact us if you'd still like to order.</div>`;
+  else if (v.expired) stateHtml = `<div class="inv-banner inv-wait" role="status">This quote expired${v.expiresOn ? " on " + escapeHtml(estLongDay_(v.expiresOn)) : ""}, so it can't be accepted. Please contact us for an updated quote.</div>`;
+  else if (st === "changes") stateHtml = `<div class="inv-banner inv-wait" role="status">You asked for changes${v.respondedAt ? " on " + escapeHtml(estLongDay_(v.respondedAt)) : ""}. We'll send you a revised quote.${v.customerNote ? `<div class="inv-detail" style="white-space:pre-wrap;margin-top:6px;">Your message: ${escapeHtml(v.customerNote)}</div>` : ""}</div>`;
+
+  // Accept / ask for changes, while the quote can still be answered (and not just answered from this page).
+  let actHtml = "";
+  if (estCanRespond_(v) && !_est.done) {
+    const busy = !!_est.busy;
+    const acceptPart = _est.confirming
+      ? `<div class="inv-how" id="estConfirm" role="group" aria-labelledby="estConfirmText">
+          <p id="estConfirmText" style="margin:0 0 10px;"><b>Accept this quote and place the order for ${invMoney_(v.total)}?</b> We'll start on it and email you the invoice.</p>
+          <button type="button" class="inv-btn" id="estAcceptYes"${busy ? " disabled" : ""}>${_est.busy === "accept" ? "Placing your order…" : "Yes, accept and order"}</button>
+          <button type="button" class="inv-btn second" id="estAcceptNo"${busy ? " disabled" : ""}>Not yet</button>
+        </div>`
+      : `<button type="button" class="inv-btn" id="estAccept"${busy ? " disabled" : ""}>Accept quote</button>`;
+    const askPart = _est.asking
+      ? `<div class="inv-how" id="estAsk">
+          <label class="f" for="estNote" style="display:block;font-weight:600;margin-bottom:4px;">What would you like changed?</label>
+          <textarea id="estNote" rows="4" maxlength="2000" style="width:100%;box-sizing:border-box;padding:8px 9px;border:1px solid #bbb;border-radius:4px;font:inherit;font-size:16px;background:#fff;color:#111;">${escapeHtml(_est.note)}</textarea>
+          <div style="margin-top:8px;display:flex;gap:10px;flex-wrap:wrap;">
+            <button type="button" class="inv-btn" id="estAskSend"${busy ? " disabled" : ""}>${_est.busy === "changes" ? "Sending…" : "Send my request"}</button>
+            <button type="button" class="inv-btn second" id="estAskCancel"${busy ? " disabled" : ""}>Cancel</button>
+          </div>
+        </div>`
+      : (_est.confirming ? "" : `<button type="button" class="inv-btn second" id="estAskOpen"${busy ? " disabled" : ""}>Ask for changes</button>`);
+    actHtml = `<h2>Your answer</h2>
+      ${v.expiresOn ? `<p class="inv-detail" style="font-size:14px;margin:0 0 10px;">You can accept this quote until ${escapeHtml(estLongDay_(v.expiresOn))}.</p>` : ""}
+      <div class="inv-pay">${_est.asking ? "" : acceptPart}${askPart}</div>
+      <div class="inv-err" id="estErr" role="alert">${escapeHtml(_est.err)}</div>`;
+  } else if (_est.err) {
+    // Refused because the quote changed meanwhile (the server's answer redrew it): the buttons are gone, and the
+    // reason stays in view.
+    actHtml = `<div class="inv-err" id="estErr" role="alert">${escapeHtml(_est.err)}</div>`;
+  }
+
+  const sub = [v.number ? `Quote <b>${escapeHtml(v.number)}</b>` : "Quote", v.customerName ? escapeHtml(v.customerName) : "",
+    v.sentAt ? escapeHtml(estLongDay_(v.sentAt)) : ""].filter(Boolean).join(" · ");
+  app.innerHTML = `<div class="inv" style="--inv-accent:${acc};--inv-accent-ink:${typeof readableInkOn === "function" ? readableInkOn(acc) : "#fff"};">
+      <h1>${escapeHtml(v.orgName || bizName_())}</h1>
+      <div class="inv-sub">${sub}</div>
+      ${stateHtml}
+      ${v.title ? `<h2 style="border-top:none;padding-top:0;margin-top:0;">${escapeHtml(v.title)}</h2>` : ""}
+      ${v.message ? `<div class="inv-note">${escapeHtml(v.message)}</div>` : ""}
+      ${lineRows ? `<table class="inv-items"><thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Each</th><th class="num">Amount</th></tr></thead><tbody>${lineRows}</tbody></table>` : ""}
+      ${feeRows ? `<table class="inv-items" style="margin-top:14px;"><thead><tr><th>One-time charges</th><th class="num">Amount</th></tr></thead><tbody>${feeRows}</tbody></table>` : ""}
+      <table class="inv-totals"><tbody>
+        <tr><td>Subtotal</td><td class="num">${invMoney_(v.subtotal)}</td></tr>
+        ${taxRow}
+        <tr class="inv-total"><td>Total</td><td class="num">${invMoney_(v.total)}</td></tr>
+      </tbody></table>
+      ${taxNote}
+      ${!v.expired && v.expiresOn && !actHtml && st !== "accepted" && st !== "converted" && st !== "cancelled" ? `<p class="inv-detail">Valid until ${escapeHtml(estLongDay_(v.expiresOn))}.</p>` : ""}
+      ${actHtml}
+    </div>`;
+  estWire_();
+  restoreFocus();
+}
+function estWire_(){
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
+  const focus = (id) => { const el = document.getElementById(id); if (el) try { el.focus({ preventScroll: false }); } catch (_) { el.focus(); } };
+  on("estAccept", () => { _est.confirming = true; _est.err = ""; estDraw_(); focus("estAcceptYes"); });
+  on("estAcceptNo", () => { _est.confirming = false; estDraw_(); focus("estAccept"); });
+  on("estAcceptYes", () => estRespond_("accept"));
+  on("estAskOpen", () => { _est.asking = true; _est.err = ""; estDraw_(); focus("estNote"); });
+  on("estAskCancel", () => { estReadNote_(); _est.asking = false; _est.err = ""; estDraw_(); focus("estAskOpen"); });
+  on("estAskSend", () => estRespond_("changes"));
+  const note = document.getElementById("estNote");
+  if (note) note.addEventListener("input", () => { _est.note = note.value; });
+  // Escape steps back out of the confirmation or the message box, as a pop-up would close.
+  const box = document.getElementById("estConfirm") || document.getElementById("estAsk");
+  if (box) box.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || _est.busy) return;
+    e.preventDefault();
+    const was = _est.confirming ? "estAccept" : "estAskOpen";
+    estReadNote_(); _est.confirming = false; _est.asking = false; estDraw_(); focus(was);
+  });
+}
+function estReadNote_(){ const el = document.getElementById("estNote"); if (el) _est.note = el.value; }
+async function estRespond_(action){
+  estReadNote_();
+  const note = _est.note.trim();
+  if (action === "changes" && !note) { _est.err = "Tell us what you'd like changed."; estDraw_(); const el = document.getElementById("estNote"); if (el) el.focus(); return; }
+  if (note.length > 2000) { _est.err = "Please keep your message under 2,000 characters."; estDraw_(); return; }
+  _est.err = ""; _est.busy = action; estDraw_();
+  let data = null;
+  try {
+    const res = await fetch("/api/estimate", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(action === "changes" ? { token: _est.token, action, note } : { token: _est.token, action }) });
+    data = await res.json();
+  } catch (e) { data = null; }
+  _est.busy = "";
+  if (!data) {
+    // No answer: the accept may still have gone through. Look again before offering the button twice.
+    _est.err = action === "accept" ? "We couldn't confirm that reached us. Reload this page to see whether your order was placed before trying again." : "We couldn't reach the server — try again.";
+    estDraw_(); return;
+  }
+  if (data.status !== "ok") {
+    _est.err = data.message || "We couldn't do that — try again.";
+    // The quote may have changed meanwhile (expired, withdrawn, accepted): redraw from what the server says it is.
+    if (data.estimate) _est.data = data.estimate;
+    _est.confirming = false; estDraw_(); return;
+  }
+  _est.confirming = false; _est.asking = false; _est.note = "";
+  _est.done = action === "accept" ? "accepted" : "changes";
+  const next = data.estimate || Object.assign({}, _est.data, { status: action === "accept" ? "converted" : "changes" });
+  if (data.orderId && !next.orderId) next.orderId = data.orderId;
+  if (typeof data.invoiceSent === "boolean") next.invoiceSent = data.invoiceSent;
+  estApply_(next);
+  const st = document.getElementById("estState"); if (st) st.focus();
+  announceStatus(action === "accept" ? "Your order is placed." : "Your message was sent.");
 }
 
 async function renderDesignVerify(app, token){
@@ -1285,6 +1465,7 @@ function renderProductRow(p, org){
       ${decorationsHtml_(p)}
       ${imageRow}
       ${featureList}
+      ${qtyBreaksHtml_(p)}
       ${isSized ? `<div class="product-controls">${sizeOptions}</div>` : ""}
       ${personalizeRow}
       ${plainCustomDesignHtml_(p)}
@@ -1366,6 +1547,7 @@ function renderConfigurableProduct(p, org){
       ${decorationsHtml_(p)}
       ${imageRow}
       ${featureList}
+      ${qtyBreaksHtml_(p)}
       ${colors.length ? `<div class="cfg-field-label">Garment color</div>${swatches}` : swatches}
       ${(p.colorGroups || []).length ? `<div class="cfg-color-note" style="font-size:12px;color:var(--ink-soft);margin-top:4px;">Some colors are priced differently — the price follows the color you pick.</div>` : ""}
       ${(p.locations || []).length ? `<div class="cfg-field-label" style="margin-top:8px;">Designs</div>` : ""}
@@ -1644,15 +1826,71 @@ function restoreCart_(){
   if(!Array.isArray(saved)) return;
   const ids = new Set((currentOrg.products || []).map(p => p.id));
   cart = saved.filter(c => c && ids.has(c.productId) && Number.isInteger(c.qty) && c.qty >= 1 && c.qty <= 50 && Number.isFinite(Number(c.lineTotal))).slice(0, 20);
+  // The shop's breaks may have changed since: the kept lines are priced by today's.
+  cartReprice_();
 }
-// One cart line's price per piece (personalization included) — what the +/− steppers multiply.
+// One cart line's price per piece (personalization included, after any quantity break) — what the +/− steppers multiply.
 function cartUnit_(c){ return Number(c.unitPrice || 0) + Number(c.personalizationFee || 0); }
+
+// ---- Quantity breaks (migrations/0109) ----
+// A product's breaks come with the catalog as [{ minQty, off }] (dollars, fewest pieces first): from minQty pieces of
+// that product in one order, every piece of it costs `off` less — the deepest break reached. Pieces count across all of
+// the product's lines (sizes, colors, designs), never across products. The server prices the order the same way
+// (priceItem with breakQty); the cart only mirrors it, so what it shows is what the order comes to.
+function qtyBreaksOf_(p){ return (p && Array.isArray(p.qtyBreaks)) ? p.qtyBreaks.filter(b => b && Number(b.minQty) >= 2 && Number(b.off) > 0) : []; }
+function qtyBreakFor_(p, pieces){
+  let hit = null;
+  for(const b of qtyBreaksOf_(p)) if(pieces >= Number(b.minQty) && (!hit || Number(b.minQty) > Number(hit.minQty))) hit = b;
+  return hit;
+}
+function cartPiecesByProduct_(){
+  const m = new Map();
+  for(const c of cart) m.set(c.productId, (m.get(c.productId) || 0) + (Number(c.qty) || 0));
+  return m;
+}
+function cartProducts_(){ return (currentOrg && currentOrg.products) || (activeCatalog && activeCatalog.products) || []; }
+// Sets every line's unitPrice (after the break), breakOff and lineTotal from its listUnitPrice (before the break), in
+// cents so the totals add up as the server's do. The break comes off the product's base price only — never below zero,
+// and never off personalization or add-ons (a design, a graphic's tier) — so a line keeps its basePrice. A line kept
+// from before breaks existed has neither: its unitPrice is its list price.
+function cartReprice_(){
+  const pieces = cartPiecesByProduct_(), products = cartProducts_();
+  for(const c of cart){
+    if(c.listUnitPrice == null) c.listUnitPrice = Number(c.unitPrice || 0);
+    const listCents = Math.round(Number(c.listUnitPrice) * 100);
+    const baseCents = c.basePrice != null ? Math.round(Number(c.basePrice) * 100) : listCents;
+    const b = qtyBreakFor_(products.find(p => p.id === c.productId), pieces.get(c.productId) || 0);
+    const offCents = b ? Math.max(0, Math.min(Math.round(Number(b.off) * 100), baseCents, listCents)) : 0;
+    c.breakOff = offCents / 100;
+    c.breakMin = b ? Number(b.minQty) : 0;
+    c.unitPrice = (listCents - offCents) / 100;
+    c.lineTotal = ((listCents - offCents) + Math.round(Number(c.personalizationFee || 0) * 100)) * (Number(c.qty) || 0) / 100;
+  }
+}
+// The break table on a product card: "12+ pieces: $2.00 off each". Empty for a product without breaks.
+function qtyBreaksHtml_(p){
+  const list = qtyBreaksOf_(p);
+  if(!list.length) return "";
+  const rows = list.map(b => `<tr><th scope="row" style="text-align:left;font-weight:600;padding:2px 12px 2px 0;">${Number(b.minQty)}+ pieces</th><td style="padding:2px 0;">$${Number(b.off).toFixed(2)} off each</td></tr>`).join("");
+  return `<table class="qty-breaks" style="font-size:13px;margin:8px 0 2px;border-collapse:collapse;">
+      <caption style="text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);padding-bottom:2px;">Quantity pricing</caption>
+      <tbody>${rows}</tbody></table>
+    <div class="qty-breaks-note" style="font-size:12px;color:var(--ink-soft);margin-bottom:8px;">Counts every size${p.configurable ? ", color and design" : ""} of this item in your order.</div>`;
+}
+// Under a cart line: the next break this product could reach ("Add 3 more … for $2.00 off each"), on its last line only.
+function cartNextBreakHtml_(c, idx, pieces){
+  if(idx !== cart.map(x => x.productId).lastIndexOf(c.productId)) return "";
+  const have = pieces.get(c.productId) || 0;
+  const next = qtyBreaksOf_(cartProducts_().find(p => p.id === c.productId)).find(b => Number(b.minQty) > have);
+  if(!next) return "";
+  return `<small class="qty-break-next">Add ${Number(next.minQty) - have} more ${escapeHtml(c.name)} for $${Number(next.off).toFixed(2)} off each.</small>`;
+}
 function changeCartQty_(idx, delta){
   const c = cart[idx]; if(!c) return;
   const q = c.qty + delta;
   if(q < 1){ removeFromCart(idx, currentOrgId); return; }
   if(q > 50){ checkoutMsg_ = "You can order up to 50 of an item at a time. For more, please contact the shop."; renderTicket(currentOrg, currentOrgId); return; }
-  c.qty = q; c.lineTotal = Math.round(cartUnit_(c) * q * 100) / 100;
+  c.qty = q; cartReprice_();
   checkoutMsg_ = "";
   renderTicket(currentOrg, currentOrgId);
   scheduleShippingUpdate();
@@ -2173,7 +2411,7 @@ function addToCart(productId){
     if(cPersonalized && !cPersName){ cardMsg_(productId, cPersNameEl && cPersNameEl.tagName === "SELECT" ? "Choose a personalization option, or untick personalization." : "Type the name to embroider, or untick personalization."); return; }
     const cPersFee = cPersonalized ? (product.personalizationPrice || 0) : 0;
     cart.push({ productId, name: productCartName_(product), type: product.type, size: isSized ? size : "OSFA",
-      qty, unitPrice, personalized: cPersonalized, persName: cPersName, cfgText: summary, personalizationFee: cPersFee, lineTotal: (unitPrice + cPersFee) * qty, config,
+      qty, unitPrice, listUnitPrice: unitPrice, basePrice: base, personalized: cPersonalized, persName: cPersName, cfgText: summary, personalizationFee: cPersFee, lineTotal: (unitPrice + cPersFee) * qty, config,
       ...(cdPreviews.length ? { cdPreviews } : {}) });
     if(cPersEl){ cPersEl.checked = false; }
     if(cPersNameEl){ cPersNameEl.value = ""; cPersNameEl.style.display = "none"; }
@@ -2209,7 +2447,7 @@ function addToCart(productId){
   cart.push({
     productId, name: productCartName_(product), type: product.type,
     size: productIsSized_(product) ? size : "OSFA",
-    qty, unitPrice, personalized, persName,
+    qty, unitPrice, listUnitPrice: unitPrice, basePrice: priceFor(product, size), personalized, persName,
     personalizationFee: personalized ? (product.personalizationPrice || 0) : 0,
     lineTotal: total,
     ...(customOn ? { customUploadId: up.uploadId, cdPreviews } : {})
@@ -2372,6 +2610,8 @@ function keepFocus_(root){
 }
 
 function renderTicket(org, orgId){
+  // Every change to the cart comes through here: the quantity breaks follow the pieces now in it.
+  cartReprice_();
   saveCart_();
   const panel = document.getElementById("ticketPanel");
   if(!panel) return;
@@ -2384,6 +2624,7 @@ function renderTicket(org, orgId){
     document.body.classList.toggle("has-cart-bar", cart.length > 0);
   }
 
+  const piecesOf = cartPiecesByProduct_();
   const lines = cart.map((c,idx)=>`
     <div class="cart-line">
       <div class="l-desc">
@@ -2395,14 +2636,18 @@ function renderTicket(org, orgId){
           <button type="button" class="qty-step" data-action="qty" data-idx="${idx}" data-d="-1" aria-label="One fewer ${escapeHtml(c.name)}">&minus;</button>
           <span aria-label="Quantity">${c.qty}</span>
           <button type="button" class="qty-step" data-action="qty" data-idx="${idx}" data-d="1" aria-label="One more ${escapeHtml(c.name)}"${c.qty >= 50 ? " disabled" : ""}>+</button>
-          <span>&times; $${cartUnit_(c).toFixed(2)} each</span>
+          <span>&times; $${cartUnit_(c).toFixed(2)} each${c.breakOff > 0 ? ` <span class="cart-was">(was <del>$${(cartUnit_(c) + c.breakOff).toFixed(2)}</del>)</span>` : ""}</span>
         </div>
+        ${c.breakOff > 0 ? `<small class="qty-break-on">Quantity price: ${c.breakMin}+ pieces, $${Number(c.breakOff).toFixed(2)} off each</small>` : ""}
+        ${cartNextBreakHtml_(c, idx, piecesOf)}
       </div>
       <div class="l-price">$${c.lineTotal.toFixed(2)}<button class="remove-x" data-action="remove" data-idx="${idx}" data-org="${orgId}" aria-label="Remove ${escapeHtml(c.name)}">&times;</button></div>
     </div>
   `).join("");
 
   const cartSubtotal = cart.reduce((s,c) => s+c.lineTotal, 0);
+  // What the quantity breaks take off, in cents (shown under the lines; the subtotal already has it).
+  const breakSavingsCents = cart.reduce((s, c) => s + Math.round(Number(c.breakOff || 0) * 100) * (Number(c.qty) || 0), 0);
   const delivery = currentDelivery_(org);
   const shippingCost = delivery.fee;
   const rush = rushOn ? rushQuote_(org, cartSubtotal) : null;
@@ -2464,6 +2709,7 @@ function renderTicket(org, orgId){
   panel.innerHTML = `
     <h2>Your order${pieces ? ` <span class="mono" style="font-size:.7em;opacity:.7;">(${pieces} ${pieces === 1 ? "item" : "items"})</span>` : ""}</h2>
     ${cart.length===0 ? '<div class="cart-empty">Nothing added yet.</div>' : lines}
+    ${breakSavingsCents > 0 ? `<div class="cart-savings" style="font-size:13px;margin:6px 0;">Quantity savings: $${(breakSavingsCents / 100).toFixed(2)} (already taken off the prices above)</div>` : ""}
     ${renderShippingSection(org)}
     ${rushSectionHtml_(org, cartSubtotal)}
     ${breakdownHtml}
@@ -2627,6 +2873,7 @@ async function placeOrder(orgId){
   orderShippingCost = delivery.fee;
   const manualNow = delivery.kind === "manual";
 
+  cartReprice_();   // current already from the last redraw; this keeps the lines sent and the total shown in step
   const cartSubtotal = cart.reduce((s,c) => s+c.lineTotal, 0);
   // Rush: asked for here; the server prices it from the shop's rule (this is only what the page showed).
   const rush = rushOn ? rushQuote_(currentOrg, cartSubtotal) : null;
@@ -2891,6 +3138,15 @@ function showConfirmation(orgId, order){
     const justPaid = params.get("paid") === "1";
     if(justPaid) history.replaceState({}, "", window.location.pathname + "?invoice=" + encodeURIComponent(invoiceToken));
     route = {view:"invoice", token:invoiceToken, justPaid};
+    render();
+    return;
+  }
+
+  // ?estimate=TOKEN — the customer's quote page, from the link in a quote email. The token stays in the address,
+  // so a reload shows the quote as it is now (accepted, say).
+  const estimateToken = params.get("estimate");
+  if(estimateToken){
+    route = {view:"estimate", token:estimateToken};
     render();
     return;
   }

@@ -1465,6 +1465,140 @@ export async function sendInvoiceDeliveryNotification(env, { orderId, orgId, cus
       html: `<div style="font-family:sans-serif"><p>${escHtml(summary)}</p><p>Order ${escHtml(orderId)} (${escHtml(orgId)})</p>${detail ? `<p>${escHtml(detail)}</p>` : ""}</div>`, text });
 }
 
+// ---- Quotes (estimates in code: "quote" already means a signed shipping rate — quoteToken.js) ----------
+// A quote's lines as the customer sees them — the email here and the quote page (functions/api/estimate.js)
+// read them from this one place. Items are getEstimate's (db.js), in dollars, prices frozen when it was sent.
+// Catalog and custom lines are `lines`; one-time charges (setup, digitizing, art) are `fees`. A line's "was"
+// price is shown only when a quantity break took something off the list price, not when staff typed the price.
+const ESTIMATE_FEE_LABELS_ = { setup: "Setup fee", digitizing: "Digitizing fee", art: "Art fee", other: "Fee" };
+const estimateMoney_ = (v) => Number(v) || 0;   // dollars, as db.js gives them
+export function estimateLinesView(items) {
+  const lines = [], fees = [];
+  for (const it of items || []) {
+    if (!it) continue;
+    const taxable = it.taxable !== false && it.taxable !== 0;
+    if (it.kind === "fee") {
+      const label = ESTIMATE_FEE_LABELS_[it.feeKind] || "Fee";
+      const name = String(it.name || "").trim();
+      fees.push({ feeKind: it.feeKind || "other", name: name && name.toLowerCase() !== label.toLowerCase() ? label + " — " + name : label,
+        amount: estimateMoney_(it.lineTotal != null ? it.lineTotal : it.unitPrice), taxable });
+      continue;
+    }
+    // configJson as stored, or already read into `config`: either way the same picks as on a receipt.
+    let config = it.config;
+    if (!config && it.configJson) { try { config = JSON.parse(it.configJson); } catch (e) { config = null; } }
+    const unit = estimateMoney_(it.unitPrice), list = estimateMoney_(it.listUnitPrice != null ? it.listUnitPrice : it.listUnit);
+    lines.push({ kind: it.kind === "custom" ? "custom" : "product", name: String(it.name || ""),
+      size: it.size && it.size !== "OSFA" ? String(it.size) : "", qty: Math.max(1, Number(it.qty) || 1),
+      detail: lineDetail_({ config, personalized: !!it.personalized, persName: it.persName }),
+      unitPrice: unit, wasPrice: it.kind === "product" && !it.customPrice && list > unit ? list : null,
+      lineTotal: estimateMoney_(it.lineTotal), taxable });
+  }
+  return { lines, fees };
+}
+// Subtotal / tax / total as rows (totalsHtml_ / totalsText_). Tax is the snapshot taken when the quote was
+// sent: added on top it is its own line; included in the prices it is noted under the Total, as receipts do
+// when a line's tax isn't split out.
+function estimateTotalsRows_(totals) {
+  const t = totals || {};
+  const tax = Number(t.tax) || 0, rate = (Number(t.taxRateBps) || 0) / 100;
+  const label = "Sales tax" + (rate ? ` (${rate}%)` : "");
+  const rows = [{ label: "Subtotal", value: fmt$(Number(t.subtotal) || 0) }];
+  if (t.taxMode === "exclusive" && tax > 0) rows.push({ label, value: fmt$(tax) });
+  rows.push({ label: "Total", value: fmt$(Number(t.total) || 0), strong: true, rule: true });
+  if (t.taxMode !== "exclusive" && tax > 0) rows.push({ label: "Includes " + label.toLowerCase(), value: fmt$(tax), muted: true, small: true });
+  return rows;
+}
+function estimateTableHtml_(view, taxed) {
+  const td = "padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top";
+  const was = (l) => l.wasPrice != null ? `<div style="font-size:12px;color:#666"><s>${fmt$(l.wasPrice)}</s> quantity price</div>` : "";
+  const rows = view.lines.map(l => `<tr>
+      <td style="${td}">${escHtml(l.name)}${l.detail ? `<div style="font-size:12px;color:#666">${escHtml(l.detail)}</div>` : ""}</td>
+      <td style="${td};text-align:center">${escHtml(l.size || "—")}</td>
+      <td style="${td};text-align:center">${l.qty}</td>
+      <td style="${td};text-align:right">${fmt$(l.unitPrice)}${was(l)}</td>
+      <td style="${td};text-align:right">${fmt$(l.lineTotal)}</td></tr>`).join("") +
+    view.fees.map(f => `<tr>
+      <td style="${td}" colspan="4">${escHtml(f.name)}${taxed && !f.taxable ? ` <span style="font-size:12px;color:#666">(not taxed)</span>` : ""}</td>
+      <td style="${td};text-align:right">${fmt$(f.amount)}</td></tr>`).join("");
+  return `<table style="width:100%;border-collapse:collapse;font-size:14px">
+    <thead><tr style="background:#f5f5f5">
+      <th style="padding:6px 8px;text-align:left">Item</th>
+      <th style="padding:6px 8px;text-align:center">Size</th>
+      <th style="padding:6px 8px;text-align:center">Qty</th>
+      <th style="padding:6px 8px;text-align:right">Unit price</th>
+      <th style="padding:6px 8px;text-align:right">Amount</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+function estimateItemsText_(view, taxed) {
+  return view.lines.map(l => `  ${l.qty} × ${l.name}${l.size ? " (" + l.size + ")" : ""}${l.detail ? " — " + l.detail : ""}  ${fmt$(l.unitPrice)} each${l.wasPrice != null ? " (was " + fmt$(l.wasPrice) + ")" : ""}  ${fmt$(l.lineTotal)}`)
+    .concat(view.fees.map(f => `  ${f.name}${taxed && !f.taxable ? " (not taxed)" : ""}  ${fmt$(f.amount)}`)).join("\n");
+}
+
+// Sent to the customer with a link to their quote page (/?estimate=<token> on the shop's address), where they
+// accept it or ask for changes. `message` is the note typed in the Send window (else the quote's own note);
+// `to` defaults to the address the quote was sent to. No link (the desktop program: no page anyone else can
+// open): the email is the quote, and the customer replies to it.
+export async function sendEstimateEmail(env, args) {
+  return send_(env, buildEstimateEmail(args || {}));
+}
+export function buildEstimateEmail({ estimate, items, totals, orgName, link, message, to, customerName }) {
+  const e = estimate || {};
+  const number = String(e.number || "");
+  const view = estimateLinesView(items);
+  const taxed = !!(totals && (Number(totals.taxRateBps) > 0 || Number(totals.tax) > 0));
+  const total = Number(totals && totals.total) || 0;
+  const subject = `Quote ${number}${orgName ? " — " + orgName : ""} · ${fmt$(total)}`;
+  const name = String(customerName || e.customerName || "").trim();
+  const hello = name ? `Hi ${name},` : "Hello,";
+  const lead = link ? "Here is your quote. Use the button below to accept it or to ask for changes."
+    : "Here is your quote. To accept it, or to ask for changes, reply to this email.";
+  // The note from the Send window first; the quote's own note too when it says something else.
+  const cover = String(message || "").trim(), own = String(e.message || "").trim();
+  const notes = [cover, own && own !== cover ? own : ""].filter(Boolean);
+  const until = e.expiresOn ? `This quote is good through ${longDate_(e.expiresOn)}.` : "";
+  const title = String(e.title || "").trim();
+  const noteHtml = (n) => `<p style="background:#f8fafc;border-left:3px solid #1d4ed8;padding:10px 14px;white-space:pre-wrap">${escHtml(n)}</p>`;
+  const html = `<div style="font-family:sans-serif;max-width:600px;margin:auto">
+    <h2 style="color:#1d4ed8">Quote${orgName ? " — " + escHtml(orgName) : ""}</h2>
+    <p>${escHtml(hello)} ${escHtml(lead)}</p>
+    ${notes.map(noteHtml).join("")}
+    <p><strong>Quote:</strong> ${escHtml(number)}${title ? ` · ${escHtml(title)}` : ""}</p>
+    ${estimateTableHtml_(view, taxed)}
+    ${totalsHtml_(estimateTotalsRows_(totals))}
+    ${until ? `<p style="font-size:14px">${escHtml(until)}</p>` : ""}
+    ${link ? `<div style="margin:24px 0;text-align:center">
+      <a href="${escHtml(link)}" style="display:inline-block;background:#1d4ed8;color:#fff;font-size:16px;font-weight:bold;padding:14px 32px;border-radius:6px;text-decoration:none">View &amp; accept quote &rarr;</a>
+    </div>
+    <p style="font-size:13px;color:#555">If the button doesn't work, copy this link: ${escHtml(link)}</p>` : ""}
+    %%FOOTER_HTML%%
+  </div>`;
+  const text = `Quote ${number}${title ? " — " + title : ""}\n\n${hello} ${lead}\n${notes.length ? "\n" + notes.join("\n\n") + "\n" : ""}\n` +
+    `${estimateItemsText_(view, taxed)}\n\n${totalsText_(null, estimateTotalsRows_(totals))}\n` +
+    (until ? `${until}\n` : "") + (link ? `\nView and accept: ${link}\n` : "") + `\n%%FOOTER_TEXT%%`;
+  return { to: String(to || e.sentTo || "").trim(), subject, html, text };
+}
+
+// Queued for the owner's 6 AM roll-up when a customer answers a quote on its page (emailed at once only if
+// it can't be queued). Under the roll-up's Invoice heading: owner_notices.kind has no kind of its own for
+// quotes. Accepted with no `orderId` means the order couldn't be made — staff convert it on the Quotes page.
+export async function sendEstimateResponseNotification(env, { estimate, accepted, note, orderId, customerName }) {
+  const e = estimate || {};
+  const who = String(customerName || e.customerName || "").trim() || "The customer";
+  const number = String(e.number || "");
+  const summary = accepted
+    ? (orderId ? `${who} accepted quote ${number} — it is now order ${orderId}` : `${who} accepted quote ${number}, but it couldn't be made into an order — open it on the Quotes page and convert it`)
+    : `${who} asked for changes to quote ${number}`;
+  const detail = String(note || "").trim();
+  const ref = orderId || number;
+  const text = `${summary}\n${accepted && orderId ? "Order" : "Quote"}: ${ref} (${e.orgId || ""})${detail ? "\nTheir note: " + detail : ""}`;
+  return queueOwnerNotice_(env, { kind: "invoice", orderId: ref, orgId: e.orgId || "", summary, detail: detail ? "Their note: " + detail : "" },
+    { to: ORDER_NOTIFICATION_EMAIL, subject: `Quote ${accepted ? "accepted" : "changes asked for"} — ${e.orgId || ""} — ${number}`,
+      html: `<div style="font-family:sans-serif"><p>${escHtml(summary)}</p>${detail ? `<p><strong>Their note:</strong> ${escHtml(detail).replace(/\n/g, "<br>")}</p>` : ""}</div>`, text });
+}
+
 // Sent to admin when a customer responds to a design verification.
 export async function sendDesignVerificationResponseNotification(env, { orderId, orgId, customerName, action, note, imageUrls }) {
   const label = action === "approved" ? "✓ APPROVED" : "⚠ REVISION REQUESTED";

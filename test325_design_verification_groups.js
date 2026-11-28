@@ -127,4 +127,4 @@ const ok = (label, cond) => { cond ? passed++ : failed++; console.log(label + ":
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed) process.exit(1);
-})().catch((e) => { console.error(e); console.log("test315 crashed: false"); process.exit(1); });
+})().catch((e) => { console.error(e); console.log("test325 crashed: false"); process.exit(1); });

@@ -6,7 +6,7 @@ const { shopOrigin } = require("./testlib/hosts.js");
 // finished stock, which digital products have files and the blanks' free stock — about six D1 queries, two of them over
 // every open order, and one (the links of the shop's blanks) through every shop's links for want of an index. Now the
 // block is kept per shop in the isolate's memory and the Cache API for 30 seconds (catalog.js readShopStock_), and
-// migrations/0110 indexes product_blank_links by blank. Placing an order doesn't use the kept copy: a line is filled from
+// migrations/0111 indexes product_blank_links by blank. Placing an order doesn't use the kept copy: a line is filled from
 // stock only if the database still has the pieces. Runs the REAL db.js, catalogCache.js and catalog.js on SQLite; only
 // the Cache API is a stand-in.
 const read = (p) => fs.readFileSync(__dirname + "/" + p, "utf8");
@@ -127,9 +127,9 @@ function spying(d1) {
   const dbJs = read("functions/_lib/db.js");
   ok("db.js still reads them that way (getBlankReservations)", dbJs.includes(`FROM product_blank_links\${only ? " WHERE blankId IN (SELECT value FROM json_each(?))" : ""}`));
   const line = /CREATE INDEX IF NOT EXISTS idx_prod_blank_link_blank ON product_blank_links\(blankId, blankColor, blankSize\);/;
-  ok("migration 0110 and schema.sql both create the index", line.test(read("migrations/0110_growth_indexes.sql")) && line.test(read("schema.sql")));
+  ok("migration 0111 and schema.sql both create the index", line.test(read("migrations/0111_growth_indexes.sql")) && line.test(read("schema.sql")));
 
   Date.now = realNow;
   console.log(`\n${fail ? "FAIL" : "PASS"} — ${pass} passed, ${fail} failed`);
   if (fail) process.exit(1);
-})().catch(e => { console.error(e); console.log("test320 crashed: false"); process.exit(1); });
+})().catch(e => { console.error(e); console.log("test330 crashed: false"); process.exit(1); });

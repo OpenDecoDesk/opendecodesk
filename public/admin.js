@@ -716,6 +716,22 @@ async function adminRoute() {
     await renderCustomers(app, cid);
     return;
   }
+  // Quotes (migrations/0109; "estimates" in code): the list, and #quotes/<id> for one quote. Its own script too
+  // (public/admin-quotes.js), loaded the same way. An id that isn't a number is the list.
+  const quotesMatch = raw.match(/^quotes(?:\/([^/]*))?$/);
+  if (quotesMatch) {
+    const qid = /^[1-9]\d{0,14}$/.test(quotesMatch[1] || "") ? Number(quotesMatch[1]) : null;
+    try { await ensureQuotesPage_(); }
+    catch (e) {
+      adminSetHash(raw);
+      document.title = adminTitle_("Quotes");
+      app.innerHTML = adminPageHead_("Quotes") + `<div class="admin-panel" style="--org-accent:var(--accent);"><div class="admin-empty">${escapeHtml(e.message)}. Check your connection and reload the page.</div></div>`;
+      return;
+    }
+    if (location.hash.replace(/^#\/?/, "") !== raw) return;
+    await renderQuotes(app, qid);
+    return;
+  }
   if (raw === "packages")  { renderPackageSizes(app); return; }
   if (raw === "orphans")   { renderOrphanImages(app); return; }
   if (raw === "vendors")   { renderVendorIntegrations(app); return; }
@@ -2153,7 +2169,7 @@ async function renderHomeStage(app, key){
 // function call). ADMIN_NAV_TOOLS is kept (flat list of every page hash) for other code that
 // still iterates it — see below.
 const ADMIN_NAV_GROUPS = [
-  // Home, Orders, Customers, Run Order, Run Transfer Sheets and Manage catalog are the buttons before these menus.
+  // Home, Orders, Customers, Quotes, Run Order, Run Transfer Sheets and Manage catalog are the buttons before these menus.
   { label: "Catalog", items: [
     ["setup", "Shop setup"], ["designs", "Designs"], ["graphics", "Graphics"], ["categories", "Product categories"], ["locations", "Decoration locations"],
     ["brandrules", "Brand rules"], ["packages", "Package sizes"],
@@ -2183,9 +2199,10 @@ const ADMIN_PAGE_FEATURE = {
   abortreasons: "production", runreport: "production", designs: "production",
   expenses: "bookkeeping", money: "bookkeeping", reconcile: "bookkeeping", books: "bookkeeping", accountviewer: "bookkeeping", shoprate: "bookkeeping",
   packages: "shipping",
+  quotes: "quotes",
 };
 // Names for the "turned off" page; replaced by the server's own list once Global settings has loaded it.
-let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products" };
+let FEATURE_LABELS_ = { storefront: "Storefront", production: "Production", bookkeeping: "Bookkeeping", shipping: "Shipping", designVerification: "Design approval", digital: "Digital products", quotes: "Quotes" };
 function adminFeatureOn_(key){ return typeof featureOn_ !== "function" || featureOn_(key); }
 function adminPageFeature_(hash){ return ADMIN_PAGE_FEATURE[String(hash || "").replace(/^#\/?/, "").split("/")[0]] || ""; }
 function adminPageOn_(hash){ const f = adminPageFeature_(hash); return !adminDesktopHides_(hash) && (!f || adminFeatureOn_(f)); }
@@ -2564,11 +2581,15 @@ function adminItemOn_(item){
 function adminCanOpenPage_(hash){
   // Customers is one function, asked for by name: a server whose list of menus doesn't have the page yet (a deploy
   // half way) must not make it look open to a role that was never given it.
-  if (String(hash || "").replace(/^#\/?/, "").split("/")[0] === "customers") return adminCanCustomers_();
+  const page = String(hash || "").replace(/^#\/?/, "").split("/")[0];
+  if (page === "customers") return adminCanCustomers_();
+  if (page === "quotes") return adminCanQuotes_();   // the same, for Quotes (migrations/0109)
   return adminItemOn_(adminPageItem_(hash));
 }
 // May this user open Customers, pick a customer on a sale and follow an order's customer link (customers.records, read)?
 function adminCanCustomers_(){ return adminCan_("customers.records", "read"); }
+// May this user open Quotes and follow an order's "From quote" link (quotes.estimates, read)?
+function adminCanQuotes_(){ return adminCan_("quotes.estimates", "read"); }
 // The menu without the pages of switched-off features or the role's hidden items (a group left empty disappears).
 function adminNavGroups_(){
   return ADMIN_NAV_GROUPS.map(g => ({ label: g.label, items: g.items.filter(it => !Array.isArray(it) || (adminPageOn_(it[0]) && adminCanOpenPage_(it[0]))) }))
@@ -2579,7 +2600,7 @@ function adminNavGroups_(){
 function adminCanOpen_(hash){ return adminPageOn_(hash) && adminCanOpenPage_(hash); }
 // Where someone lands when the address points at a page they can't open: the first one they can.
 function adminFirstPage_(){
-  const first = ["home", "orders", "customers", "runorder", "runtransfer", "catalog"].find(h => adminCanOpen_(h));
+  const first = ["home", "orders", "customers", "quotes", "runorder", "runtransfer", "catalog"].find(h => adminCanOpen_(h));
   if (first) return first;
   const g = adminNavGroups_().map(g => g.items.find(Array.isArray)).find(Boolean);
   return g ? g[0] : "password";
@@ -2652,7 +2673,7 @@ function adminNavActive_(){
   if(raw.startsWith("catalog")) return "catalog";
   // A page with a shop or record in its address belongs to its menu entry (#designs/<shop>/3 → Designs).
   const top = raw.split("/")[0];
-  if(top === "designs" || top === "graphics" || top === "maintenance" || top === "setup" || top === "customers") return top;
+  if(top === "designs" || top === "graphics" || top === "maintenance" || top === "setup" || top === "customers" || top === "quotes") return top;
   if(top === "wizard") return "setup";
   return raw;
 }
@@ -2758,6 +2779,8 @@ function renderAdminNav(){
   // Customers (migrations/0108) sits right after Orders — after Home for a role without Orders. It is put in here
   // because test57 reads the list above as it is written.
   if (adminCanOpen_("customers")) top.splice(Math.max(top.findIndex(it => it[0] === "orders"), top.findIndex(it => it[0] === "home")) + 1, 0, ["customers", "Customers"]);
+  // Quotes (migrations/0109) right after Customers — or where Customers would be, for a role without it.
+  if (adminCanOpen_("quotes")) top.splice(Math.max(top.findIndex(it => it[0] === "customers"), top.findIndex(it => it[0] === "orders"), top.findIndex(it => it[0] === "home")) + 1, 0, ["quotes", "Quotes"]);
   const current = top.concat(...ADMIN_NAV_GROUPS.map(g => g.items.filter(Array.isArray))).find(it => it[0] === active);
   const currentLabel = current ? current[1] : "";
   const sheetItem = (it) => Array.isArray(it)
@@ -5957,7 +5980,7 @@ function orderRowsHtml_(shownOrders, getOrg, getVerif, showShop){
         </td>` : ""}
         <td data-date-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${adminDate_(o.placedAt)} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" data-admin-action="editOrderDate" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Edit date">✎</button></td>
         <td data-due-td data-order="${escapeHtml(o.orderId)}" style="white-space:nowrap;">${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "<span style='color:var(--ink-soft,#999);'>—</span>"} <button type="button" data-org="${escapeHtml(org.orgId)}" data-order="${escapeHtml(o.orderId)}" data-need="orders.details:edit" data-admin-action="editOrderDueDate" style="font-size:11px;padding:1px 5px;margin-left:2px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:var(--surface,#fff);color:var(--ink-soft,#666);" title="Set due date">✎</button></td>
-        <td>${orderCustomerNameHtml_(o)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</td>
+        <td>${orderCustomerNameHtml_(o)}${o.voidedAt ? ` <span title="${escapeHtml(o.voidReason || "")}" style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#fee2e2;color:#b03a2e;">VOID</span>` : ""}${o.isTest ? ` <span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#e0e7ff;color:#3730a3;">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}${orderEstimatePill_(o)}</td>
         <td>${escapeHtml(o.orderId)}</td>
         <td>${escapeHtml(it.name)}</td>
         <td>${itemHasSize_(it) ? escapeHtml(it.size) : "OSFA"}</td>
@@ -6068,7 +6091,7 @@ function orderCardHtml_(o, org, verif, showShop){
     <div class="oc-head">
       ${!showShop && active.length ? `<input type="checkbox" class="order-select" ${ids} data-keep-check="ord:${escapeHtml(org.orgId)}|${escapeHtml(o.orderId)}" data-admin-change="updateBulkBar" aria-label="Select order ${escapeHtml(o.orderId)}">` : ""}
       <div class="oc-who">
-        <div class="oc-name">${orderCustomerNameHtml_(o)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}</div>
+        <div class="oc-name">${orderCustomerNameHtml_(o)}${o.voidedAt ? ` <span class="oc-tag oc-tag-void">VOID</span>` : ""}${o.isTest ? ` <span class="oc-tag oc-tag-test">TEST</span>` : ""}${importedPill_(o)}${brandReviewPills_(o)}${catalogDriftPill_(o)}${rushPill_(o)}${orderEstimatePill_(o)}</div>
         <div class="oc-dim">${escapeHtml(o.orderId)} · ${adminDate_(o.placedAt)} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" data-admin-action="editOrderDate" title="Edit date" aria-label="Edit order date">✎</button></div>
         <div class="oc-dim">Due: ${o.dueDate ? escapeHtml(adminDate_(o.dueDate)) : "—"} <button type="button" class="oc-icon-btn" ${ids} data-need="orders.details:edit" data-admin-action="editOrderDueDate" title="Set due date" aria-label="Set due date">✎</button></div>
         ${showShop ? `<div class="oc-dim">${escapeHtml(org.name || org.orgId)}</div>` : ""}
@@ -7294,6 +7317,32 @@ function ensureCustomersPage_(){
   });
   return _customersPagePromise;
 }
+// The Quotes page (migrations/0109) is public/admin-quotes.js, loaded the same way: it defines renderQuotes(app, id).
+let _quotesPagePromise = null;
+function ensureQuotesPage_(){
+  if (typeof renderQuotes === "function") return Promise.resolve();
+  if (!_quotesPagePromise) _quotesPagePromise = new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = "/admin-quotes.js";
+    sc.onload = () => resolve();
+    sc.onerror = () => { _quotesPagePromise = null; sc.remove(); reject(new Error("Couldn't load the Quotes page")); };
+    document.head.appendChild(sc);
+  });
+  return _quotesPagePromise;
+}
+// "From quote Q-00012" on an order made from a quote (migrations/0109): a link to the quote for a role that may
+// open Quotes, else the number alone. Nothing for any other order, or from a server older than quotes.
+function orderEstimatePill_(o){
+  // db.js puts { id, number } on the order (getOrderById and the Orders list), null when it wasn't made from one.
+  const e = o && o.estimate && typeof o.estimate === "object" ? o.estimate : null;
+  const id = e && e.id != null && e.id !== "" ? Number(e.id) : NaN;
+  const num = e && typeof e.number === "string" ? e.number : "";
+  if (!(Number.isInteger(id) && id > 0) || !num) return "";
+  const style = "font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#ecfeff;color:#155e75;";
+  return adminCanOpen_("quotes")
+    ? ` <a href="#/quotes/${id}" class="order-estimate-link" title="Open the quote this order was made from" style="${style}text-decoration:none;">From quote ${escapeHtml(num)}</a>`
+    : ` <span class="order-estimate-link" style="${style}">From quote ${escapeHtml(num)}</span>`;
+}
 // An order's customer record: its id, or null when the order isn't linked to one (or the server is older than the link).
 function orderCustomerId_(o){
   const n = o && o.customerId != null && o.customerId !== "" ? Number(o.customerId) : NaN;
@@ -7585,11 +7634,12 @@ function showLocalSaleModal(products, blanks, opts = {}){
       }).join("");
 
     // A sale can have several items (review #106): one block per item — product, size, qty, personalization,
-    // price override or a custom item — and "+ Add another item", up to the server's 20. The customer, payment,
+    // price override or a custom item — and "+ Add another item", up to the server's 100 (migrations/0109: staff take
+    // bulk orders here; the storefront keeps its 20 lines of 50). The customer, payment,
     // shipping, Paid / Delivered and the date are the sale's, once. The first item keeps the ids it always had
     // (#lsProduct, #lsSize, #lsQty, …); each added one gets its own ("lsProduct-2"), and every field is also
     // marked data-f="<name>" so one item's code finds its own fields.
-    const MAX_LINES = 20;
+    const MAX_LINES = 100, MAX_QTY = 5000;
     let lineSeq = 0;
     const fid = (base, n) => n ? base + "-" + n : base;
     const lineHtml = (n) => `
@@ -7630,7 +7680,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
         </div>
 
         ${LS("Qty", false, fid("lsQty", n))}
-        <input type="number" id="${fid("lsQty", n)}" data-f="qty" min="1" max="50" value="1" style="${IS()}">
+        <input type="number" id="${fid("lsQty", n)}" data-f="qty" min="1" max="${MAX_QTY}" value="1" style="${IS()}">
 
         <div data-f="customDesignWrap" style="display:none;margin-bottom:10px;">
           <label style="font-size:14px;font-weight:500;display:flex;align-items:flex-start;gap:8px;">
@@ -7682,6 +7732,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
         </div>
 
         <div id="lsPricePreview" style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:5px;padding:8px 12px;font-size:14px;margin-bottom:8px;font-weight:600;"></div>
+        <div id="lsBreakNote" role="status" style="display:none;font-size:12px;color:var(--ink-soft,#666);margin:-4px 0 10px;"></div>
 
         ${LS("Payment method")}
         <select id="lsPayment" style="${IS()}">
@@ -7945,10 +7996,38 @@ function showLocalSaleModal(products, blanks, opts = {}){
       updatePricePreview();
     }
 
-    // One item's price: { text, total } — the text as the price box always showed it for one item.
-    function linePrice(line){
+    // Quantity breaks (migrations/0109), mirrored from the server so the totals here are what will be charged: the
+    // pieces of each product across every item of the sale, and the deepest break those pieces reach. It comes off the
+    // product's own price only (not personalization, graphic add-ons or the customer's-design price). The server works
+    // it out again from the published product when the sale is recorded, and that is what the order gets.
+    function piecesByProduct(){
+      const m = new Map();
+      for(const line of lines()){
+        const pid = f(line, "product").value;
+        if(pid === "__custom__" || !productMap[pid]) continue;
+        m.set(pid, (m.get(pid) || 0) + Math.max(1, Math.min(MAX_QTY, parseInt(f(line, "qty").value) || 1)));
+      }
+      return m;
+    }
+    function breakFor(p, pieces){
+      let best = null;
+      for(const b of Array.isArray(p.qtyBreaks) ? p.qtyBreaks : []){
+        if(pieces >= Number(b.minQty) && Number(b.off) > 0 && (!best || Number(b.off) > best.off)) best = { minQty: Number(b.minQty), off: Number(b.off) };
+      }
+      return best;
+    }
+    // The product's own price for this item (its size, and its color's price group), before any add-on.
+    function catalogBase_(line, p){
+      const size = isSized_(p) ? f(line, "size").value : "";
+      if(isCfg_(p)) return basePrice_(p, cfgConfig_(line, p).garmentColor, size);
+      return isSized_(p) ? Number((p.sizePricing || {})[size] || 0) : Number(p.flatPrice || 0);
+    }
+
+    // One item's price: { text, total } — the text as the price box always showed it for one item. `pieces`: the
+    // sale's pieces per product (piecesByProduct), for its quantity break.
+    function linePrice(line, pieces){
       const pid = f(line, "product").value;
-      const qty = Math.max(1, parseInt(f(line, "qty").value) || 1);
+      const qty = Math.max(1, Math.min(MAX_QTY, parseInt(f(line, "qty").value) || 1));
 
       if(pid === "__custom__"){
         const unitPrice = parseFloat(f(line, "customUnitPrice").value) || 0;
@@ -7970,11 +8049,15 @@ function showLocalSaleModal(products, blanks, opts = {}){
         if(qty > 1) text += ` × ${qty}`;
         return { total, text: text + ` = $${total.toFixed(2)}` };
       }
-      const total = (catalogUnitPrice + persFee) * qty;
-      let text = `$${catalogUnitPrice.toFixed(2)}`;
+      const brk = breakFor(p, (pieces || piecesByProduct()).get(pid) || qty);
+      const off = brk ? Math.min(brk.off, Math.max(0, catalogBase_(line, p))) : 0;
+      const unit = catalogUnitPrice - off;
+      const total = (unit + persFee) * qty;
+      let text = `$${unit.toFixed(2)}`;
+      if(off > 0) text += ` (was $${catalogUnitPrice.toFixed(2)}, ${brk.minQty}+ pieces)`;
       if(persFee) text += ` + $${persFee.toFixed(2)} personalization`;
       if(qty > 1) text += ` × ${qty}`;
-      return { total, text: text + ` = $${total.toFixed(2)}` };
+      return { total, text: text + ` = $${total.toFixed(2)}`, broke: off > 0 };
     }
 
     // The price box: one item, its price as before; several, each item's price on its own block and the running
@@ -7982,17 +8065,22 @@ function showLocalSaleModal(products, blanks, opts = {}){
     function updatePricePreview(){
       const all = lines();
       const many = all.length > 1;
-      let sum = 0;
+      const pieces = piecesByProduct();
+      let sum = 0, broke = false;
       all.forEach(line => {
-        const lp = linePrice(line);
+        const lp = linePrice(line, pieces);
         sum += lp.total;
+        if(lp.broke) broke = true;
         const el = f(line, "linePrice");
         el.textContent = many ? lp.text : "";
         el.style.display = many && lp.text ? "" : "none";
       });
-      const text = many ? `Total for ${all.length} items: $${sum.toFixed(2)}` : linePrice(all[0]).text;
+      const text = many ? `Total for ${all.length} items: $${sum.toFixed(2)}` : linePrice(all[0], pieces).text;
       const shipCost = overlay.querySelector("#lsShip").checked ? (parseFloat(overlay.querySelector("#lsShipCost").value) || 0) : 0;
       overlay.querySelector("#lsPricePreview").textContent = text && shipCost > 0 ? text + ` + $${shipCost.toFixed(2)} shipping` : text;
+      const note = overlay.querySelector("#lsBreakNote");
+      note.textContent = broke ? "Quantity breaks count every piece of a product in this sale. They're worked out again from the shop's published prices when the sale is recorded." : "";
+      note.style.display = broke ? "" : "none";
     }
 
     // Item numbers, the × buttons' names and the add button follow the list.
@@ -8110,7 +8198,7 @@ function showLocalSaleModal(products, blanks, opts = {}){
     // One item read from its block: { item } or { error, focus }.
     function readLine(line){
       const pid = f(line, "product").value;
-      const qty = Math.max(1, Math.min(50, parseInt(f(line, "qty").value) || 1));
+      const qty = Math.max(1, Math.min(MAX_QTY, parseInt(f(line, "qty").value) || 1));
       if(pid === "__custom__"){
         const desc = f(line, "customDesc").value.trim();
         if(!desc) return { error: "Enter a description for the custom item.", focus: f(line, "customDesc") };
@@ -9002,6 +9090,16 @@ function pricingTableHtml_(a, settings){
     ${a.addOns && a.addOns.length ? `<div style="font-size:12px;margin-top:6px;"><b>Graphic add-ons</b> (each location's least profitable offered graphic, after card fee, tax and the transfer):
       ${a.addOns.map(x => `<div>${escapeHtml(x.location)}: ${escapeHtml(x.graphic)} — add-on ${pricingMoney_(x.price)}${x.transfer ? ", transfer " + pricingMoney_(x.transfer) : ""} → <b style="${x.income < 0 ? "color:#b03a2e;" : ""}">${pricingMoney_(x.income)}</b></div>`).join("")}</div>` : ""}`;
 }
+// The deepest quantity break (migrations/0109; analyzePricing's deepestBreak), when the product has breaks: the price
+// a piece sells for there, and what it still leaves after costs — the least the product earns. Red when that is below
+// the income target (or nothing at all).
+function pricingBreakHtml_(a, settings){
+  const b = a && a.deepestBreak;
+  if (!b || !(Number(b.minQty) > 0)) return "";
+  const m = Number(b.margin), target = settings && settings.targetIncome != null ? Number(settings.targetIncome) : null;
+  const low = Number.isFinite(m) && (m < 0 || (target != null && m < target));
+  return `<div class="pricing-break" style="font-size:12px;margin-top:6px;">At the deepest quantity break (from ${escapeHtml(String(b.minQty))} pieces): <b>${pricingMoney_(b.unitPrice)}</b> a piece, leaving <b style="color:${low ? "#b03a2e" : "#166534"};">${low ? "⚠ " : ""}${pricingMoney_(b.margin)}</b> after costs.</div>`;
+}
 // One-line summary for the Products list: income per item (range), $/hr, and ⚠ when below a target.
 function pricingLineHtml_(a){
   if (!a || !a.rows.length) return "";
@@ -9037,7 +9135,7 @@ async function showPriceAnalysis_(params, opts){
         <a href="#catalog/orgs/${encodeURIComponent(a.orgId)}/products/${encodeURIComponent(a.productId)}/edit" class="pa-edit" style="margin-left:8px;font-size:12px;">Edit</a></summary>
       ${(a.mapProblems || []).length || a.problems.length ? `<div style="color:#b03a2e;font-size:12px;margin:4px 0;">${[...(a.mapProblems || []), ...a.problems].map(escapeHtml).join("<br>")}</div>` : ""}
       ${(a.ruleProblems || []).length ? `<div style="color:#b45309;font-size:12px;margin:4px 0;">${a.ruleProblems.map(escapeHtml).join("<br>")}</div>` : ""}
-      ${pricingTableHtml_(a, st)}</details>`).join("") || `<div class="admin-empty">No priced products.</div>`}`;
+      ${pricingTableHtml_(a, st)}${pricingBreakHtml_(a, st)}</details>`).join("") || `<div class="admin-empty">No priced products.</div>`}`;
   body.querySelectorAll(".pa-edit").forEach(link => link.addEventListener("click", () => close()));
 }
 // A toast after a blank's cost or a pricing setting changed, naming what's now below a target.
@@ -13200,6 +13298,7 @@ function renderProductForm(app, orgId, product){
           <div class="admin-note">Leave a size blank to not offer it.</div>
           <div class="size-price-grid">${sizeRows}</div>
         </div>
+        ${qtyBreaksSectionHtml_(product)}
         ${isEdit ? `<details id="priceCalc" class="price-calc"><summary>Work out the prices from the blank's cost or MAP&hellip;</summary><div id="priceCalcBody"></div></details>` : ""}
         ${isEdit ? `<div id="colorGroupsSection" style="margin:10px 0 4px;"></div>` : ""}
         <div id="pricingSection" style="margin:14px 0;padding:10px 12px;border:1px solid var(--card-line,#e5e7eb);border-radius:6px;width:min(860px, calc(100vw - 48px));box-sizing:border-box;background:var(--surface,#fff);">
@@ -13254,6 +13353,7 @@ function renderProductForm(app, orgId, product){
   `;
 
   initProductImagesField_(orgId, product && product.images ? product.images : []);
+  initQtyBreaks_(product);
   // Unsaved changes on this form (for the version switch's "leave without saving?").
   window._prodFormDirty = false;
   { const panel = app.querySelector(".admin-panel"); if (panel) { const dirty = () => { window._prodFormDirty = true; }; panel.addEventListener("input", dirty); panel.addEventListener("change", dirty); } }
@@ -13535,6 +13635,97 @@ function toggleProductPricingModeFields(){
   document.getElementById("prodFormSizePriceWrap").style.display = mode === "sized" ? "" : "none";
 }
 
+// ---- Quantity breaks (product form, migrations/0109) ----------------------------------------------
+// From N pieces of this product in one order (every size, color and version line of it together) each piece costs
+// $X less — the deepest break that applies. The server checks them again (normalizeQtyBreaks_) and refuses a deepest
+// break under a blank's MAP. A product from a server older than breaks has no qtyBreaks list: the section isn't drawn
+// and nothing is sent, so saving there can't wipe breaks the form never showed.
+const QTY_BREAKS_MAX_ = 6;
+function qtyBreaksSectionHtml_(product){
+  if (product && !Array.isArray(product.qtyBreaks)) return "";
+  return `<div id="qtyBreaksSection" style="margin:12px 0 4px;">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px;">Quantity breaks</div>
+    <div class="admin-note" style="margin:0 0 6px;">A lower price for bigger orders: from that many pieces of this product in one order (all sizes and colors together), every piece costs that much less. It comes off the product's price, not personalization or add-ons, on the shop's page, Local sales and quotes. Up to ${QTY_BREAKS_MAX_}.</div>
+    <div id="qtyBreakRows"></div>
+    <button type="button" class="admin-btn" id="qtyBreakAdd" style="padding:3px 10px;font-size:12px;">+ Add a break</button>
+  </div>`;
+}
+function qtyBreakRowHtml_(b, i){
+  const v = (x) => x == null ? "" : escapeHtml(String(x));
+  return `<div class="qty-break-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:6px;font-size:13px;">
+    <span>From</span><input type="number" class="qtyBreakMin" min="2" max="100000" step="1" value="${v(b.minQty)}" placeholder="12" aria-label="Break ${i + 1}: from how many pieces" style="width:96px;margin:0;">
+    <span>pieces, $</span><input type="number" class="qtyBreakOff" min="0.01" step="0.01" value="${v(b.off)}" placeholder="2.00" aria-label="Break ${i + 1}: dollars off each piece" style="width:96px;margin:0;">
+    <span>off each</span>
+    <button type="button" class="admin-btn admin-btn-danger qtyBreakRm" data-i="${i}" aria-label="Remove break ${i + 1}" style="padding:2px 8px;font-size:12px;">Remove</button>
+  </div>`;
+}
+// The rows as typed: [{ minQty, off }] as strings.
+function qtyBreakRowsTyped_(){
+  const box = document.getElementById("qtyBreakRows");
+  return box ? [...box.querySelectorAll(".qty-break-row")].map(r => ({ minQty: r.querySelector(".qtyBreakMin").value.trim(), off: r.querySelector(".qtyBreakOff").value.trim() })) : null;
+}
+function initQtyBreaks_(product){
+  const box = document.getElementById("qtyBreakRows"), add = document.getElementById("qtyBreakAdd");
+  if (!box || !add) return;
+  const draw = (list) => {
+    box.innerHTML = list.length ? list.map(qtyBreakRowHtml_).join("") : `<div class="admin-note" style="margin:0 0 6px;">No quantity breaks: every piece is the same price however many are ordered.</div>`;
+    add.style.display = list.length >= QTY_BREAKS_MAX_ ? "none" : "";
+  };
+  // Adding or removing a row is a change like typing: the form counts as changed and the costs below are worked out again.
+  const changed = () => box.dispatchEvent(new Event("change", { bubbles: true }));
+  draw(((product && product.qtyBreaks) || []).map(b => ({ minQty: b.minQty, off: b.off })));
+  add.onclick = () => {
+    const list = qtyBreakRowsTyped_();
+    if (list.length >= QTY_BREAKS_MAX_) return;
+    list.push({ minQty: "", off: "" });
+    draw(list); changed();
+    const mins = box.querySelectorAll(".qtyBreakMin"); mins[mins.length - 1].focus();
+  };
+  box.onclick = (e) => {
+    const b = e.target.closest(".qtyBreakRm"); if (!b) return;
+    const list = qtyBreakRowsTyped_(), i = Number(b.dataset.i);
+    list.splice(i, 1);
+    draw(list); changed();
+    (box.querySelectorAll(".qtyBreakMin")[Math.min(i, list.length - 1)] || add).focus();
+  };
+}
+// For Save: { breaks: [{ minQty, off }] } sorted by pieces, { error, focus }, or null when the form has no section.
+// The same rules as the server's, so a mistake is named here first; a row left empty on both sides is dropped.
+// `lowest`: the product's lowest price typed above (a break must leave something to pay).
+function readQtyBreaks_(lowest){
+  const box = document.getElementById("qtyBreakRows");
+  if (!box) return null;
+  const rows = [...box.querySelectorAll(".qty-break-row")];
+  const out = [];
+  for (const r of rows) {
+    const minEl = r.querySelector(".qtyBreakMin"), offEl = r.querySelector(".qtyBreakOff");
+    const minRaw = minEl.value.trim(), offRaw = offEl.value.trim();
+    if (minRaw === "" && offRaw === "") continue;
+    const minQty = Number(minRaw), off = Number(offRaw);
+    if (!Number.isInteger(minQty) || minQty < 2 || minQty > 100000) return { error: "A quantity break starts at a whole number of pieces from 2 to 100000.", focus: minEl };
+    if (offRaw === "" || !(off > 0) || Math.round(off * 100) / 100 !== off) return { error: "Enter the dollars off each piece for the break from " + minQty + " pieces (more than $0, in cents at most).", focus: offEl };
+    if (lowest != null && off >= lowest) return { error: "The break from " + minQty + " pieces takes off $" + off.toFixed(2) + " — it must be less than the product's lowest price ($" + Number(lowest).toFixed(2) + ").", focus: offEl };
+    out.push({ minQty, off, minEl, offEl });
+  }
+  if (out.length > QTY_BREAKS_MAX_) return { error: "A product can have at most " + QTY_BREAKS_MAX_ + " quantity breaks.", focus: out[QTY_BREAKS_MAX_].minEl };
+  out.sort((a, b) => a.minQty - b.minQty);
+  for (let i = 1; i < out.length; i++) {
+    if (out[i].minQty === out[i - 1].minQty) return { error: "Two quantity breaks start at " + out[i].minQty + " pieces — give each its own number.", focus: out[i].minEl };
+    if (!(out[i].off > out[i - 1].off)) return { error: "A bigger break must take more off: from " + out[i].minQty + " pieces should be more than $" + out[i - 1].off.toFixed(2) + " off.", focus: out[i].offEl };
+  }
+  return { breaks: out.map(b => ({ minQty: b.minQty, off: b.off })) };
+}
+// The breaks as typed so far, for the costs panel's draft: only rows that make sense yet, so half-typed ones don't
+// make the panel complain. undefined when the form has no section (the server then uses the saved ones).
+function qtyBreaksDraft_(){
+  const typed = qtyBreakRowsTyped_();
+  if (!typed) return undefined;
+  return typed.map(b => ({ minQty: Number(b.minQty), off: Number(b.off) }))
+    .filter(b => Number.isInteger(b.minQty) && b.minQty >= 2 && b.minQty <= 100000 && b.off > 0)
+    .sort((a, b) => a.minQty - b.minQty)
+    .filter((b, i, all) => i === 0 || b.minQty !== all[i - 1].minQty).slice(0, QTY_BREAKS_MAX_);
+}
+
 // ---- Product images (product form) ---------------------------------------------------------------
 // The product's own pictures as thumbnail tiles — same look as a blank's photos — that can be put in
 // order (drag, or the ◀ ▶ buttons) and removed; add by uploading (several at once) or pasting a URL.
@@ -13790,6 +13981,11 @@ async function submitProductForm(orgId, isEdit){
     if(!Object.keys(sizePricing).length){ errEl.textContent = "Enter a price for at least one size."; return; }
     body.sizePricing = sizePricing;
   }
+  // Quantity breaks (migrations/0109): sent whole each save ([] takes them all off); not sent when the form has none to show.
+  { const lowest = pricingMode === "flat" ? body.flatPrice : Math.min(...Object.values(body.sizePricing));
+    const qb = readQtyBreaks_(lowest);
+    if(qb && qb.error){ errEl.textContent = qb.error; if(qb.focus) qb.focus.focus(); return; }
+    if(qb) body.qtyBreaks = qb.breaks; }
   try{
     // A session that ended (24 hours, or signed out elsewhere) asks to sign in and sends this same save again;
     // the form is left exactly as it is meanwhile, and if nobody signs in.
@@ -13839,6 +14035,7 @@ function productPricingDraft_(){
   else { d.sizePricing = {}; document.querySelectorAll(".prodFormSize").forEach(inp => { if (inp.value.trim() !== "") d.sizePricing[inp.dataset.size] = Number(inp.value); }); }
   if (typeof window._colorGroupsGet === "function") { try { d.colorGroups = window._colorGroupsGet(); } catch (e) {} }
   if (typeof window._productFixedGet === "function") { try { d.fixedTransfers = window._productFixedGet().filter(f => f.graphicId); } catch (e) {} }
+  const qb = qtyBreaksDraft_(); if (qb !== undefined) d.qtyBreaks = qb;   // migrations/0109: the deepest break's line follows them
   return d;
 }
 // Draws the costs table under the prices and redraws it (half a second after typing stops) as prices change.
@@ -13856,7 +14053,7 @@ function loadPricingSection_(orgId, product){
       const probs = a ? [...(a.mapProblems || []), ...a.problems] : [];
       const soft = a ? a.ruleProblems || [] : [];
       el.innerHTML = (probs.length ? `<div class="pricing-problems" style="color:#b03a2e;font-size:12px;margin-bottom:4px;">⚠ ${probs.map(escapeHtml).join("<br>⚠ ")}</div>` : "")
-        + (soft.length ? `<div class="pricing-rule-warnings" style="color:#b45309;font-size:12px;margin-bottom:4px;">⚠ ${soft.map(escapeHtml).join("<br>⚠ ")}</div>` : "") + pricingTableHtml_(a, d.settings);
+        + (soft.length ? `<div class="pricing-rule-warnings" style="color:#b45309;font-size:12px;margin-bottom:4px;">⚠ ${soft.map(escapeHtml).join("<br>⚠ ")}</div>` : "") + pricingTableHtml_(a, d.settings) + pricingBreakHtml_(a, d.settings);
       const avg = document.getElementById("prodFormAvgRun");
       if (avg) avg.textContent = a && a.avgRunMinutes != null ? `Average of its timed runs: ${a.avgRunMinutes} min (${a.avgRunPieces} piece${a.avgRunPieces === 1 ? "" : "s"})` : "No timed runs of this product yet.";
       const sup = document.getElementById("prodFormSuppliesCost");

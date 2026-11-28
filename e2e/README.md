@@ -69,6 +69,9 @@ traces and screenshots of the failed tests, and the local server's log.
    products, an order) is made with the owner's signed-in session, through the same `/api/orders` requests the
    admin pages send (`e2e/lib/data.mjs`), never with the setup passphrase. The thing a test is about is done
    through the page.
+   A spec that changes a setting for the whole install — the sales tax rate or mode, a feature switch — is listed
+   in `ALONE` in `playwright.config.mjs` instead: each gets its own project and runs by itself, one after another,
+   once every other spec has finished, so no other test reads that setting while it is changed.
 
 ### Things the fixtures do for every test (`e2e/fixtures.mjs`)
 

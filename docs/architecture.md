@@ -60,6 +60,7 @@ public/index.html         the storefront page, and the shell the admin loads int
 public/storefront.js      the storefront page's script
 public/admin.js           the admin panel (loaded only on the admin host)
 public/admin-customers.js the admin's Customers page (loaded by admin.js the first time it is opened)
+public/admin-quotes.js    the admin's Quotes page (loaded the same way)
 public/admin.css          the admin panel's styles (loaded with admin.js)
 public/_headers           security headers and cache rules for every response
 public/vendor/pdfjs-5.6.205/  Mozilla's pdf.js, vendored, for reading vendor invoices
@@ -79,6 +80,7 @@ functions/api/            one file per endpoint
   upload.js                 picture uploads (admin)
   customer-design.js        a customer's own design, uploaded from the shop page
   invoice.js                a customer's invoice page: choosing delivery, paying (token-gated)
+  estimate.js               a customer's quote page: seeing it, accepting it or asking for changes (token-gated)
   receipt.js, design.js     private file uploads and signed download links
   verify.js, upload-verify.js   the customer's design-approval page
   image-proxy.js            fetches a stored picture for the admin's mockup editor
@@ -124,6 +126,13 @@ About fifty tables (`schema.sql`). The main groups:
 - **Customers** — `customers` (name, company, email, phone, address, notes, a tax exemption). An
   order points at its customer with `orders.customerId`, which is empty for an order that has none;
   the order still keeps the name and contact it was placed with.
+- **Quotes** — `estimates` (one quote: its customer and shop, status, message, expiry, the emailed
+  link's token, and the tax as it was when sent) and `estimate_items` (its lines: products, custom
+  lines and fees, each with the price it was quoted at). A converted quote points at its order
+  (`estimates.orderId`). In the code a quote is an **estimate** — tables, functions, actions and the
+  `?estimate=` link — because "quote" already means a signed shipping-rate quote
+  (`functions/_lib/quoteToken.js`); only the words people read say "quote". A product's quantity
+  breaks are a column of `products` (`qtyBreaksJson`).
 - **Inventory** — `blanks`, `blank_colors`, `blank_sizes`, `inventory_movements`; `transfers`,
   `transfer_movements`.
 - **Production** — `threads`, `hoops`, `designs`, `design_versions`, `machines`, `production_runs`.
@@ -151,6 +160,12 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
   order whose contact is a phone number, or empty, is left unlinked. A customer is never deleted:
   it is archived, or merged into another — its orders move, and the merged record stays behind,
   archived, pointing at the one that took its place (`mergedIntoId`).
+- **A sent quote's prices are fixed.** Sending it (`markEstimateSent` in `db.js`) keeps each line's
+  price and the tax settings as they were; nothing prices it again. Accepting it on the customer's
+  page and **Convert to order** in the admin both go through one function,
+  `convertEstimateToOrder_` in `functions/api/orders.js`, which makes the order the way a local sale
+  is made, at those prices and the quote's frozen tax rate (`insertOrder`'s `taxRateBps` option) —
+  and makes it once: a second call answers the order already made.
 
 ## The security model
 
@@ -216,8 +231,8 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
   with `SIGNING_SECRET`) together with the shop, the ZIP, the cart contents and an expiry (two
   hours), and the order must present that token. A custom delivery option's fee is looked up in
   the shop's own list.
-- **A line's quantity** is a whole number from 1 to 50, read by one rule for both the rate quote
-  and the order, so the parcel that was weighed is the cart that is ordered. Anything else is
+- **A line's quantity** on the shop page is a whole number from 1 to 50 (a local sale or a quote,
+  entered by staff, takes up to 5,000), read by one rule for both the rate quote and the order, so the parcel that was weighed is the cart that is ordered. Anything else is
   refused, never rounded. A quoted cart is rebuilt from the catalog — the product's own weight
   and type — and a line the catalog doesn't have isn't quoted at all.
 - **"Shipping — quote to follow"** is the server's decision: only a cart that fits no box may be
@@ -228,6 +243,10 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
 - **The amount charged by card** is the order's balance as the database has it.
 - **The shop** on a shop's address is the hostname's shop, whatever the request says.
 - **A US ship-to state must agree with the ZIP Code**, because the state decides sales tax.
+- **A quote's link** is a token made by the server when it is first sent, as an invoice's is. The
+  quote page (`/api/estimate`) shows only that one quote, never its internal note or costs, and the
+  customer's answer can only accept it or ask for changes. Whether it can still be accepted (sent,
+  not expired, cancelled or already an order) is decided on the server.
 - An order id must match a strict pattern, and a shop must exist, be marked ready, and not be past
   a hard deadline.
 
@@ -260,7 +279,7 @@ Rules the data keeps (see [CONTRIBUTING.md](../CONTRIBUTING.md) for how the code
 
 `functions/_lib/rateLimit.js` counts requests per IP address per minute in the database: order
 submission, card checkout and shipping quotes (20 a minute each), customers' design uploads (10),
-and sign-in attempts (10). For
+sign-in attempts (10), and a customer's invoice and quote pages (each with a limit of its own). For
 admin actions only **failed** credentials count, so a signed-in admin is never throttled. If the
 database errors, counting falls back to memory rather than switching off.
 
@@ -274,7 +293,7 @@ the change happens. Routine changes are logged
 alongside the change. **Destructive or money-changing actions are logged first** — with the values
 being replaced — **and refused if the log can't be written** (voiding an order or payment, a
 refund, a discount, changing dates, voiding or restoring a stock movement, switching a feature,
-changing a customer's tax exemption, merging two customers).
+changing a customer's tax exemption, merging two customers, cancelling a quote).
 
 ### In the browser
 

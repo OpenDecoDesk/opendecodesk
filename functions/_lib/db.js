@@ -1044,6 +1044,7 @@ export async function createProduct(db, orgId, p) {
   if (p.personalizationMode !== undefined || p.personalizationOptionDesigns !== undefined || p.personalizationHoopId !== undefined)
     await setProductPersonalization(db, orgId, p.productId, { mode: p.personalizationMode, hoopId: p.personalizationHoopId, optionDesigns: p.personalizationOptionDesigns });
   if (p.colorGroupsCents !== undefined) await setProductColorGroups_(db, orgId, p.productId, p.colorGroupsCents);
+  if (p.qtyBreaks !== undefined) await setProductQtyBreaks_(db, orgId, p.productId, p.qtyBreaks);
   await setProductCosting_(db, orgId, p);
 }
 
@@ -1473,6 +1474,7 @@ async function setProductCosting_(db, orgId, p) {
 export async function updateProduct(db, orgId, p) {
   await setProductCosting_(db, orgId, p);
   if (p.colorGroupsCents !== undefined) await setProductColorGroups_(db, orgId, p.productId, p.colorGroupsCents);
+  if (p.qtyBreaks !== undefined) await setProductQtyBreaks_(db, orgId, p.productId, p.qtyBreaks);
   if (p.noDesignNeeded !== undefined) await setProductNoDesignNeeded_(db, orgId, p.productId, !!p.noDesignNeeded);
   if (p.noBlankNeeded !== undefined) await setProductNoBlankNeeded_(db, orgId, p.productId, !!p.noBlankNeeded);
   if (p.digital !== undefined || p.digitalDelivery !== undefined) await setProductDigital_(db, orgId, p.productId, p.digital, p.digitalDelivery);
@@ -1556,6 +1558,8 @@ function parseProduct_(row) {
     runMinutes: row.runMinutes == null ? null : Number(row.runMinutes),
     transferCost: fromCentsOrNull(row.transferCostCents),
     suppliesCost: fromCentsOrNull(row.suppliesCostCents),
+    // migrations/0109 — quantity breaks, in dollars: [{minQty, off}] by minQty ([] before 0109).
+    qtyBreaks: qtyBreaksOf_(row.qtyBreaksJson).map(b => ({ minQty: b.minQty, off: fromCents(b.offCents) })),
   };
 }
 
@@ -2100,6 +2104,90 @@ export async function setProductPersonalization(db, orgId, productId, { mode, ho
       new Date().toISOString(), orgId, productId).run();
 }
 
+// ---- Quantity breaks (migrations/0109) ----------------------------------------------------------------
+// products.qtyBreaksJson = [{minQty, offCents}] sorted by minQty: from minQty pieces of that product in one order
+// (every size, color and version line of it, cancelled lines left out — orderBreakQty_), each piece costs offCents
+// less. Only the deepest break that applies counts; breaks never add up. The break comes off the product's base
+// price only — personalization and add-ons keep their price (priceItem).
+export const QTY_BREAKS_MAX = 6;
+// The lowest base price a product's form sends (dollars → cents): its flat price, else its cheapest size, and its
+// color price groups' too. null when it has none yet.
+function lowestBaseCents_(product) {
+  if (!product || typeof product !== "object") return null;
+  const flat = product.pricingMode === "flat", all = [];
+  const add = (v) => { if (v === "" || v == null) return; const n = Number(v); if (Number.isFinite(n) && n >= 0) all.push(Math.round(n * 100)); };
+  const addSized = (sp) => { if (sp && typeof sp === "object") for (const v of Object.values(sp)) add(v); };
+  if (flat) add(product.flatPrice); else addSized(product.sizePricing);
+  for (const g of Array.isArray(product.colorGroups) ? product.colorGroups : []) { if (!g) continue; if (flat) add(g.flatPrice); else addSized(g.sizePricing); }
+  return all.length ? Math.min(...all) : null;
+}
+// Checks a product's breaks as the product form sends them ([{minQty, off}], dollars) and returns them sorted
+// ({ breaks: [{minQty, off}] }), or { error } in plain words. At most QTY_BREAKS_MAX; minQty a whole number from 2 to
+// 100,000, each break's larger than the one before; off more than $0 and more than the break before (a deeper break
+// that took less off would never apply as people expect). With `product` (its form: pricingMode, flatPrice,
+// sizePricing, colorGroups — dollars), off must also be under its lowest base price, or a piece would be free.
+// An empty list (or none) is no breaks.
+export function normalizeQtyBreaks_(list, product = null) {
+  if (list == null || list === "") return { breaks: [] };
+  if (!Array.isArray(list)) return { error: "Quantity breaks must be a list." };
+  if (list.length > QTY_BREAKS_MAX) return { error: `Up to ${QTY_BREAKS_MAX} quantity breaks.` };
+  const rows = [];
+  for (const b of list) {
+    const minQty = Number(b && b.minQty), offRaw = b && b.off;
+    if (!Number.isInteger(minQty) || minQty < 2 || minQty > 100000) return { error: "A quantity break starts at a whole number of pieces from 2 to 100,000." };
+    const off = offRaw === "" || offRaw == null ? NaN : Number(offRaw);
+    const offCents = Number.isFinite(off) ? Math.round(off * 100) : NaN;
+    if (!Number.isFinite(offCents) || offCents <= 0 || offCents > 10000000) return { error: `The break from ${minQty} pieces needs an amount off each piece, more than $0.` };
+    rows.push({ minQty, offCents });
+  }
+  rows.sort((a, b) => a.minQty - b.minQty);
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i].minQty === rows[i - 1].minQty) return { error: `Two quantity breaks start at ${rows[i].minQty} pieces.` };
+    if (rows[i].offCents <= rows[i - 1].offCents) return { error: `The break from ${rows[i].minQty} pieces must take more off than the break from ${rows[i - 1].minQty}.` };
+  }
+  const lowest = lowestBaseCents_(product);
+  const deepest = rows[rows.length - 1];
+  if (deepest && lowest != null && deepest.offCents >= lowest)
+    return { error: `The break from ${deepest.minQty} pieces takes $${fromCents(deepest.offCents).toFixed(2)} off — it must be less than the lowest price, $${fromCents(lowest).toFixed(2)}.` };
+  return { breaks: rows.map(r => ({ minQty: r.minQty, off: fromCents(r.offCents) })) };
+}
+// A stored list (qtyBreaksJson, or the array itself) as [{minQty, offCents}], whatever is unreadable left out.
+function qtyBreaksOf_(breaksJson) {
+  const list = Array.isArray(breaksJson) ? breaksJson : tryParse_(breaksJson, []);
+  return (Array.isArray(list) ? list : [])
+    .map(b => ({ minQty: Number(b && b.minQty), offCents: Number(b && b.offCents) }))
+    .filter(b => Number.isInteger(b.minQty) && b.minQty > 0 && Number.isFinite(b.offCents) && b.offCents > 0)
+    .sort((a, b) => a.minQty - b.minQty);
+}
+// Cents off each piece when the order has `pieces` of the product: the deepest break that applies, 0 when none.
+export function qtyBreakOffCents(breaksJson, pieces) {
+  const n = Number(pieces) || 0;
+  let off = 0;
+  for (const b of qtyBreaksOf_(breaksJson)) if (n >= b.minQty) off = b.offCents;
+  return off;
+}
+// Pieces per product over a request's (or an order's) lines: Map(productId → pieces), for priceItem's breakQty.
+// Lines with no product (custom lines, fees) and cancelled lines don't count.
+export function orderBreakQty_(items) {
+  const m = new Map();
+  for (const it of Array.isArray(items) ? items : []) {
+    if (!it || it.productId == null || it.productId === "" || it.cancelled || it.cancelDate) continue;
+    if (it.kind && it.kind !== "product") continue;
+    const q = Math.floor(Number(it.qty) || 0);
+    if (q > 0) m.set(String(it.productId), (m.get(String(it.productId)) || 0) + q);
+  }
+  return m;
+}
+// Saves a product's breaks (dollars, as normalizeQtyBreaks_ returns them; the caller has checked them against the
+// product and MAP). Throws a userFacing error for a list that isn't one. Ignored before migrations/0109.
+async function setProductQtyBreaks_(db, orgId, productId, breaks) {
+  const n = normalizeQtyBreaks_(breaks);
+  if (n.error) throw pricingError_(n.error);
+  const json = JSON.stringify(n.breaks.map(b => ({ minQty: b.minQty, offCents: toCents(b.off) })));
+  await db.prepare("UPDATE products SET qtyBreaksJson=? WHERE orgId=? AND productId=?").bind(json, orgId, productId).run()
+    .catch((e) => { if (!/no such column/i.test(String(e && e.message))) throw e; });
+}
+
 // Server-side pricing — never trust client-supplied prices.
 // Returns {unitPrice, personalizationFee, name, type} or throws if the product
 // isn't found. name/type come from the catalog so order records can't carry
@@ -2110,6 +2198,10 @@ export async function setProductPersonalization(db, orgId, productId, { mode, ho
 // line's copy. `needsCustomUpload` comes back true when the line needs an upload it doesn't have —
 // only the storefront refuses that (a local sale or an Edit items change goes through, and the
 // admin attaches the file with Files).
+// Quantity breaks (migrations/0109): opts.breakQty is how many pieces of this product the whole order has
+// (orderBreakQty_; default this line's qty). The deepest break that applies comes off the base price only — never
+// below $0, and never off personalization or add-ons. `unitPrice` is after it, `listUnitPrice` before it, and
+// `breakOff` the dollars it took off each piece (0 when none applies).
 export async function priceItem(db, orgId, productId, size, qty, personalized, config, opts = {}) {
   // The PUBLISHED product (migrations/0076) — what the shopper saw — every column, so this keeps working on a
   // database a migration behind the code. A shop never published since then is priced live, as before.
@@ -2140,6 +2232,11 @@ export async function priceItem(db, orgId, productId, size, qty, personalized, c
     const group = colorGroupBaseCents_(row, String((config || {}).garmentColor || (config || {}).color || ""), size);
     if (group != null) unitPriceCents = group;
   }
+  // The break, off the base price alone (a snapshot published before 0109 has no breaks).
+  const breakQty = opts && opts.breakQty != null ? opts.breakQty : qty;
+  const breakOffCents = Math.min(unitPriceCents, qtyBreakOffCents(row.qtyBreaksJson, breakQty));
+  const listBaseCents = unitPriceCents;
+  unitPriceCents -= breakOffCents;
 
   // Configurable products (migrations/0036): base price + Σ tier add-ons for the chosen per-location
   // options. Validates each option server-side and returns a snapshot to store on the line.
@@ -2148,6 +2245,7 @@ export async function priceItem(db, orgId, productId, size, qty, personalized, c
     const built = await priceConfigurable_(db, orgId, row, size, config, custom, lk);
     const cfgPersCents = personalized && row.personalizationPriceCents != null ? Number(row.personalizationPriceCents) : 0;
     return { unitPrice: fromCents(unitPriceCents + built.addOnCents), personalizationFee: fromCents(cfgPersCents),
+      listUnitPrice: fromCents(listBaseCents + built.addOnCents), breakOff: fromCents(breakOffCents),
       name: productLineName(row, productId), type: row.type || "", config: built.snapshot,
       ...(built.needsCustomUpload ? { needsCustomUpload: true } : {}) };
   }
@@ -2171,6 +2269,7 @@ export async function priceItem(db, orgId, productId, size, qty, personalized, c
 
   const out = {
     unitPrice: fromCents(unitPriceCents), personalizationFee: fromCents(personalizationFeeCents),
+    listUnitPrice: fromCents(unitPriceCents + breakOffCents), breakOff: fromCents(breakOffCents),
     name: productLineName(row, productId), type: row.type || "",
     ...(needsCustomUpload ? { needsCustomUpload: true } : {}),
   };
@@ -2518,7 +2617,7 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
   let products = prows.map(parseProduct_);
   if (draft && products.length === 1) {
     const d = draft, p = products[0];
-    for (const k of ["pricingMode", "flatPrice", "sizePricing", "colorGroups", "taxable", "runMinutes", "transferCost", "suppliesCost", "reorderQr", "noBlankNeeded", "fixedTransfers"]) if (d[k] !== undefined) p[k] = d[k];
+    for (const k of ["pricingMode", "flatPrice", "sizePricing", "colorGroups", "taxable", "runMinutes", "transferCost", "suppliesCost", "reorderQr", "noBlankNeeded", "fixedTransfers", "qtyBreaks"]) if (d[k] !== undefined) p[k] = d[k];
   }
   const linkSql = (map) => `SELECT l.orgId, l.productId, l.productColor, l.productSize, l.blankColor, l.blankSize, bs.vendorPriceCents, bs.purchasePriceCents${map ? ", bs.mapPriceCents" : ""}, b.name AS blankName, b.brand AS blankBrand
     FROM product_blank_links l LEFT JOIN blank_sizes bs ON bs.blankId = l.blankId AND bs.color = l.blankColor AND bs.size = l.blankSize
@@ -2577,6 +2676,10 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
     const minutes = p.runMinutes != null && Number(p.runMinutes) > 0 ? Number(p.runMinutes) : null;
     const rows = [];
     const flat = p.pricingMode === "flat";
+    // Quantity breaks (migrations/0109): the deepest one is a price too, so every row is also worked out at it.
+    const breaks = (Array.isArray(p.qtyBreaks) ? p.qtyBreaks : []).map(b => ({ minQty: Number(b && b.minQty), offCents: toCents(b && b.off) }))
+      .filter(b => Number.isInteger(b.minQty) && b.minQty > 0 && b.offCents > 0).sort((a, b) => a.minQty - b.minQty);
+    const deepest = breaks.length ? breaks[breaks.length - 1] : null;
     for (const g of groups) {
       if (g.label && !g.colors.length) continue;
       const sizes = flat ? [""] : Object.keys(g.sizePricing || {}).filter(z => (g.sizePricing || {})[z] != null && (g.sizePricing || {})[z] !== "");
@@ -2585,17 +2688,25 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
         if (raw == null || raw === "") continue;
         const price = toCents(raw);
         const b = blankFor(g.colors, size, flat);
-        const taxIn = p.taxable === false ? 0 : taxOnTop ? addTaxExclusive(price, rateBps).taxCents : splitTaxInclusive(price, rateBps).taxCents;
-        const card = cardOf(taxOnTop ? price + taxIn : price), tax = taxOnTop ? 0 : taxIn;
         const transfer = qrCents + fixedCents + ownTransfer;
         const overhead = shop && minutes ? Math.round(minutes * Number(shop.overheadPerHourCents || 0) / 60) : 0;
-        const costs = (b.cents || 0) + card + tax + transfer + supplies + overhead;
-        const income = price - costs;
+        // What's left of a price once the card fee, the tax and the costs are paid (the full price, or a break's).
+        const at = (pr) => {
+          const taxIn = p.taxable === false ? 0 : taxOnTop ? addTaxExclusive(pr, rateBps).taxCents : splitTaxInclusive(pr, rateBps).taxCents;
+          const card = cardOf(taxOnTop ? pr + taxIn : pr), tax = taxOnTop ? 0 : taxIn;
+          const costs = (b.cents || 0) + card + tax + transfer + supplies + overhead;
+          return { card, tax, costs, income: pr - costs };
+        };
+        const { card, tax, costs, income } = at(price);
+        const breakPrice = deepest ? Math.max(0, price - deepest.offCents) : null;
+        const breakIncome = deepest ? at(breakPrice).income : null;
         const hourly = minutes ? Math.round(income * 60 / minutes) : null;
         const flags = [];
         if (b.cents == null) flags.push("noBlankCost");
         if (b.map != null && price < b.map) flags.push("map");
         else if (b.ruleMin != null && price < b.ruleMin) flags.push("mapRule");
+        // The full price meets MAP but the deepest break takes it under: whoever buys that many pays less than MAP.
+        if (deepest && b.map != null && price >= b.map && breakPrice < b.map) flags.push("breakMap");
         // The targets are an OR: a price is fine when it meets EITHER one that applies (the hourly target only applies
         // with a run time) — a $5 cap that makes $40/hr against $10 / $40/hr targets isn't flagged. It's flagged only
         // when it misses every target that applies; the flags say which.
@@ -2605,7 +2716,8 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
           if (settings.targetIncomeCents != null) flags.push("income");
           if (settings.targetHourlyCents != null && hourly != null) flags.push("hourly");
         }
-        rows.push({ group: g.label, size, price, blank: b.cents, blankSource: b.source, map: b.map, mapOf: b.mapOf, mapBlank: b.mapBlank, mapBrand: b.mapBrand, ruleMin: b.ruleMin, ruleOf: b.ruleOf, card, tax, transfer, supplies, overhead, costs, income, hourly, flags });
+        rows.push({ group: g.label, size, price, blank: b.cents, blankSource: b.source, map: b.map, mapOf: b.mapOf, mapBlank: b.mapBlank, mapBrand: b.mapBrand, ruleMin: b.ruleMin, ruleOf: b.ruleOf, card, tax, transfer, supplies, overhead, costs, income, hourly, flags,
+          ...(deepest ? { breakPrice, breakIncome } : {}) });
       }
     }
     // A configurable product's graphic add-ons: per location, the offered graphic that leaves the least.
@@ -2621,7 +2733,11 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
       }
       if (worst) addOns.push(worst);
     }
+    const $ = (c) => c == null ? null : fromCents(c);
     const incomes = rows.map(r => r.income), hours = rows.map(r => r.hourly).filter(h => h != null);
+    // The deepest break's lowest price and the least left at it (null with no breaks).
+    const deepestBreak = deepest && rows.length ? { minQty: deepest.minQty, off: $(deepest.offCents),
+      unitPrice: $(Math.min(...rows.map(r => r.breakPrice))), margin: $(Math.min(...rows.map(r => r.breakIncome))) } : null;
     const problems = [];
     const has = (r, k) => r.flags.includes(k);
     const lowBoth = rows.filter(r => has(r, "income") && has(r, "hourly")), lowIncome = rows.filter(r => has(r, "income") && !has(r, "hourly")), lowHourly = rows.filter(r => has(r, "hourly") && !has(r, "income"));
@@ -2631,16 +2747,17 @@ export async function analyzePricing(db, { orgId = null, productId = null, draft
     if (lowIncome.length) problems.push(`Income below the ${incT()} target on ${lowIncome.map(label).join(", ")}`);
     if (lowHourly.length) problems.push(`Hourly rate below the ${hrT()} target on ${lowHourly.map(label).join(", ")}`);
     // Below the blank's minimum advertised price (migrations/0070) — a hard rule, kept apart from the targets.
-    const mapProblems = rows.filter(r => r.flags.includes("map")).map(r => `${label(r) === "the price" ? "The price" : label(r)} $${fromCents(r.price).toFixed(2)} is below the MAP of $${fromCents(r.map).toFixed(2)} (${r.mapOf})`);
+    const mapProblems = rows.filter(r => r.flags.includes("map")).map(r => `${label(r) === "the price" ? "The price" : label(r)} $${fromCents(r.price).toFixed(2)} is below the MAP of $${fromCents(r.map).toFixed(2)} (${r.mapOf})`)
+      .concat(rows.filter(r => r.flags.includes("breakMap")).map(r => `${label(r) === "the price" ? "The price" : label(r)} at the ${deepest.minQty}+ pieces break, $${fromCents(r.breakPrice).toFixed(2)}, is below the MAP of $${fromCents(r.map).toFixed(2)} (${r.mapOf})`));
     // Under the price rule (Brand rules) but not under MAP — a warning, softer than MAP.
     const ruleProblems = rows.filter(r => r.flags.includes("mapRule")).map(r => `${label(r) === "the price" ? "The price" : label(r)} $${fromCents(r.price).toFixed(2)} is under the price rule of $${fromCents(r.ruleMin).toFixed(2)} (${r.ruleOf})`);
     const run = runs[p.productId] || null;
-    const $ = (c) => c == null ? null : fromCents(c);
     out.push({ orgId: p.orgId, productId: p.productId, name: p.name, visible: p.visible, runMinutes: minutes,
       avgRunMinutes: run ? run.minutes : null, avgRunPieces: run ? run.pieces : 0, reorderQr: qrName, transferOwn: $(ownTransfer), transferFixed: $(fixedCents),
       suppliesFromProduct: p.suppliesCost != null,
-      belowMap: mapProblems.length > 0, mapProblems, belowPriceRule: ruleProblems.length > 0, ruleProblems,
-      rows: rows.map(r => ({ ...r, price: $(r.price), blank: $(r.blank), map: $(r.map), ruleMin: $(r.ruleMin), card: $(r.card), tax: $(r.tax), transfer: $(r.transfer), supplies: $(r.supplies), overhead: $(r.overhead), costs: $(r.costs), income: $(r.income), hourly: $(r.hourly) })),
+      belowMap: mapProblems.length > 0, mapProblems, belowPriceRule: ruleProblems.length > 0, ruleProblems, deepestBreak,
+      rows: rows.map(r => ({ ...r, price: $(r.price), blank: $(r.blank), map: $(r.map), ruleMin: $(r.ruleMin), card: $(r.card), tax: $(r.tax), transfer: $(r.transfer), supplies: $(r.supplies), overhead: $(r.overhead), costs: $(r.costs), income: $(r.income), hourly: $(r.hourly),
+        ...(deepest ? { breakPrice: $(r.breakPrice), breakIncome: $(r.breakIncome) } : {}) })),
       addOns: addOns.map(a => ({ ...a, price: $(a.price), transfer: $(a.transfer), income: $(a.income) })),
       minIncome: incomes.length ? $(Math.min(...incomes)) : null, maxIncome: incomes.length ? $(Math.max(...incomes)) : null,
       minHourly: hours.length ? $(Math.min(...hours)) : null, belowTarget: !!(lowBoth.length || lowIncome.length || lowHourly.length), problems });
@@ -3496,6 +3613,8 @@ export const FEATURES = [
     description: "Emailing a customer a design proof to approve, and the “Design approved” stage on orders. Off: no order waits for a customer's approval, and links already sent say approval isn't available." },
   { key: "digital", label: "Digital products",
     description: "Selling files customers download — digitized designs, PDFs: once paid, a download page for the order and an email with the link and the files, within a time and download limit. Off: digital products can't be ordered and their links don't open." },
+  { key: "quotes", label: "Quotes",
+    description: "Quotes for a customer — products at their quantity-break prices, custom lines and setup or digitizing fees — emailed as a link the customer opens to accept or ask for changes; an accepted quote becomes an order. Off: the Quotes page is hidden and quote links already sent say quotes aren't available. Quantity breaks on products still apply." },
 ];
 const FEATURE_KEYS_ = FEATURES.map(f => f.key);
 // { production: true, … } from whatever was saved: only an explicit false turns a feature off.
@@ -7551,7 +7670,7 @@ export async function setDesignStitchCount(db, table, id, value) {
 // per design / machine / issues noted (the same answer as adding up every run) — and the log is paged: the newest
 // RUN_LOG_PAGE runs, `detailMore` saying older ones are in range too. `before` ({startedAt, id} of the last run shown,
 // the audit log's keyset) asks for the page after it, and then only `{ detail, detailMore }` comes back.
-// All of them read the range on idx_runs_started (migrations/0110); the "+status" keeps the planner off the status index,
+// All of them read the range on idx_runs_started (migrations/0111); the "+status" keeps the planner off the status index,
 // which holds nearly every run.
 const RUN_LOG_PAGE = 500;
 export async function getRunReportByDesign(db, { from, to, before = null } = {}) {
@@ -10570,7 +10689,7 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
   // so a page waits for one round trip to D1, not one after another. (Brand reviews and catalog changes need the
   // lines, so they follow, together too.)
   const [nb, dg] = await Promise.all([noBlankLine_(db), digitalLine_(db)]);
-  const [missing, { results: itemRows }, { results: paymentRows }, { results: labelRows }, shipmentsByOrder, invoices] = await Promise.all([
+  const [missing, { results: itemRows }, { results: paymentRows }, { results: labelRows }, shipmentsByOrder, invoices, estimates] = await Promise.all([
     orderDesignsMissingBy_(db, sub, binds),
     db.prepare(`SELECT oi.*, ${nb("oi")} AS noBlank, ${dg("oi")} AS digital FROM order_items oi WHERE oi.orderId IN (${sub}) ORDER BY oi.id`).bind(...binds).all(),
     db.prepare(`SELECT * FROM order_payments WHERE orderId IN (${sub}) ORDER BY receivedAt ASC`).bind(...binds).all(),
@@ -10580,6 +10699,7 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
     // pre-migration DB yields {} internally.
     blankShipmentsByOrder_(db, { sub, binds }),
     invoicesByOrder_(db, sub, binds),   // the invoice link emailed for it, if any (0053)
+    estimatesByOrder_(db, sub, binds),  // the quote it was made from, if any (0109)
   ]);
   for (const r of orderRows) r.orderDesignsMissing = missing[r.orderId] || 0;
 
@@ -10611,6 +10731,7 @@ async function loadOrders_(db, where, binds, orderBy, limit) {
     const o = parseOrder_(r, itemsByOrder[r.orderId] || [], paymentsByOrder[r.orderId] || [], labelsByOrder[r.orderId] || []);
     o.blankShipments = shipmentsByOrder[r.orderId] || [];
     o.invoice = invoices[r.orderId] || null;
+    o.estimate = estimates[r.orderId] || null;
     o.brandReview = reviews.get(r.orderId) || [];
     o.catalogDrift = r.manufacturedAt || r.completedAt || r.voidedAt ? [] : drift.get(r.orderId) || [];
     return o;
@@ -10635,6 +10756,8 @@ export async function getOrderById(db, orderId) {
   const order = parseOrder_(row, itemRows.map(parseItem_), paymentRows.map(parsePayment_), labelRows.map(parseLabel_));
   order.blankShipments = blankShipments;
   order.invoice = invoices[orderId] || null;
+  // The quote it was made from (migrations/0109): { id, number } or null.
+  order.estimate = await estimateOfOrder_(db, orderId).catch(() => null);
   const settled = row.manufacturedAt || row.completedAt || row.voidedAt;
   [order.brandReview, order.catalogDrift] = await Promise.all([
     Promise.resolve().then(async () => brandReviewsForLines_(await brandContext_(db, itemRows), itemRows).get(orderId) || []).catch(() => []),
@@ -10741,10 +10864,15 @@ async function orderCustomer_(db, order, opts) {
     if (exempt && row.taxExemptExpires) {
       const placed = new Date(order.placedAt || Date.now());
       const zone = (await getLocaleSettings(db)).timeZone || _shopTimeZone_;
-      exempt = String(row.taxExemptExpires) >= dateInTimeZone(isNaN(placed) ? new Date() : placed, zone);
+      exempt = customerExemptOn_(row, dateInTimeZone(isNaN(placed) ? new Date() : placed, zone));
     }
     return { id, exempt };
   } catch (e) { if (noCustomersYet_(e)) return none; throw e; }
+}
+// A customer's own exemption on a day (YYYY-MM-DD, the business's calendar): the box ticked and the certificate's
+// expiry date empty or not passed. Only for a customer someone signed in PICKED (orderCustomer_, quotes).
+function customerExemptOn_(row, day) {
+  return !!(row && Number(row.taxExempt)) && (!row.taxExemptExpires || String(row.taxExemptExpires) >= String(day));
 }
 
 // The Customers page's list, a page at a time: live customers (archived ones only when asked for) whose name,
@@ -10896,8 +11024,11 @@ export async function mergeCustomers(db, { fromId, intoId } = {}) {
   if (into.mergedIntoId != null) return { error: "The customer to keep has itself been merged into another. Pick that one instead." };
   const counted = await db.prepare("SELECT count(*) AS n FROM orders WHERE customerId = ?").bind(fromN).first();
   const now = new Date().toISOString();
+  // The duplicate's quotes (migrations/0109) move too, so none is left pointing at a customer the lists don't show.
+  const quotes = await hasEstimates_(db) ? [db.prepare("UPDATE estimates SET customerId = ? WHERE customerId = ?").bind(intoN, fromN)] : [];
   await db.batch([
     db.prepare("UPDATE orders SET customerId = ? WHERE customerId = ?").bind(intoN, fromN),
+    ...quotes,
     // Marked as merged before the kept customer takes its email: only live customers share idx_customers_email.
     db.prepare("UPDATE customers SET mergedIntoId = ?, archivedAt = COALESCE(archivedAt, ?), updatedAt = ? WHERE id = ?").bind(intoN, now, now, fromN),
     // Customers merged into the duplicate earlier now point at the one that is left.
@@ -10919,6 +11050,470 @@ export async function setOrderCustomer(db, orderId, customerId) {
   if (!unlink && !(id && await liveCustomerRow_(db, id))) return { error: "That customer wasn't found." };
   await db.prepare("UPDATE orders SET customerId = ? WHERE orderId = ?").bind(id, String(orderId)).run();
   return { ok: true, before: customerId_(order.customerId) };
+}
+
+// ---- Quotes (migrations/0109) ------------------------------------------------------------------
+// What people call a quote is an ESTIMATE in the code: "quote" already means a signed shipping-rate quote
+// (quoteToken.js). A quote is for one customer (a customers row) in one shop, and goes draft → sent → (the customer)
+// changes or accepted → converted (an order: orderId), or cancelled. Its lines keep their prices in cents as quoted —
+// a product line after its quantity break (unitPriceCents) and before it (listUnitCents) — and once it is sent
+// nothing reprices them: the customer accepts exactly what they were sent. Staff can revise a draft, or a quote the
+// customer asked to change, and send it again (the link stays the same). The tax is worked out as an order's is
+// (taxOn_ per line); a quote that is sent keeps the mode and rate it was sent with (taxMode / taxRateBps).
+// Readers answer nothing (null, an empty list) on a database without migrations/0109; writers say it needs updating.
+export const ESTIMATE_STATUSES = ["draft", "sent", "changes", "accepted", "converted", "cancelled"];
+export const ESTIMATE_FEE_KINDS = ["setup", "digitizing", "art", "other"];
+export const ESTIMATE_LINES_MAX = 100;
+export const ESTIMATE_QTY_MAX = 5000;
+const ESTIMATE_EDITABLE_ = ["draft", "changes"];
+const noEstimatesYet_ = (e) => /no such table: (estimates|estimate_items)/i.test(String(e && e.message));
+const ESTIMATES_NOT_READY_ = "Quotes need the latest database update. Apply the migrations, then try again.";
+// "Q-00012" — five digits, more once there are more quotes than that.
+const estimateNumber_ = (n) => "Q-" + String(n).padStart(5, "0");
+const ESTIMATE_LINK_RE_ = /^[A-Za-z0-9_-]{16,128}$/;
+async function hasEstimates_(db) {
+  try { await db.prepare("SELECT 1 FROM estimates LIMIT 1").first(); return true; }
+  catch (e) { if (noEstimatesYet_(e)) return false; throw e; }
+}
+const estimateZone_ = async (db) => (await getLocaleSettings(db)).timeZone || _shopTimeZone_;
+
+// Expired: the business's calendar day is after expiresOn (the last day it can be accepted). No date, no end.
+// `row` is an estimates row or a parsed estimate; `timeZone` defaults to the install's as last resolved.
+export function estimateExpired(row, now = Date.now(), timeZone = _shopTimeZone_) {
+  const d = row && row.expiresOn ? String(row.expiresOn) : "";
+  if (!CUSTOMER_DATE_RE_.test(d)) return false;
+  return dateInTimeZone(new Date(now), timeZone) > d;
+}
+
+// The next number people see: one more than the highest so far. Two quotes made at the same moment can pick the
+// same one; number is UNIQUE, and createEstimate tries again.
+export async function nextEstimateNumber_(db) {
+  const r = await db.prepare("SELECT MAX(CAST(substr(number, 3) AS INTEGER)) AS n FROM estimates WHERE number LIKE 'Q-%'").first();
+  return estimateNumber_((Number(r && r.n) || 0) + 1);
+}
+
+function parseEstimate_(r, timeZone) {
+  const status = ESTIMATE_STATUSES.includes(r.status) ? r.status : "draft";
+  return {
+    id: Number(r.id), number: r.number || "", orgId: r.orgId, customerId: customerId_(r.customerId), status,
+    title: r.title || "", message: r.message || "", internalNote: r.internalNote || "", expiresOn: r.expiresOn || "",
+    token: r.token || "", sentAt: r.sentAt || "", sentTo: r.sentTo || "", sendCount: Number(r.sendCount) || 0,
+    viewedAt: r.viewedAt || "", respondedAt: r.respondedAt || "", customerNote: r.customerNote || "", acceptedAt: r.acceptedAt || "",
+    orderId: r.orderId || "", convertedAt: r.convertedAt || "", cancelledAt: r.cancelledAt || "",
+    taxMode: taxMode_(r.taxMode), taxRateBps: Number(r.taxRateBps) || 0,
+    createdAt: r.createdAt || "", updatedAt: r.updatedAt || "", createdBy: r.createdBy || "",
+    // Only a quote that is still open can run out; an accepted or converted one stays what it is.
+    expired: ["draft", "sent", "changes"].includes(status) && estimateExpired(r, Date.now(), timeZone),
+  };
+}
+function parseEstimateItem_(r) {
+  const kind = r.kind === "fee" || r.kind === "custom" ? r.kind : "product";
+  const unit = Number(r.unitPriceCents) || 0, list = Number(r.listUnitCents) || 0;
+  return {
+    id: Number(r.id), position: Number(r.position) || 0, kind, productId: r.productId || "", name: r.name || "", type: r.type || "",
+    size: r.size || "", config: r.configJson ? tryParse_(r.configJson, null) : null,
+    personalized: !!Number(r.personalized), persName: r.persName || "", feeKind: r.feeKind || "",
+    qty: Number(r.qty) || 1, unitPrice: fromCents(unit), listUnitPrice: fromCents(list),
+    // The break each piece got (0 for a typed price, a custom line or a fee).
+    breakOff: kind === "product" && !Number(r.customPrice) && list > unit ? fromCents(list - unit) : 0,
+    personalizationFee: fromCents(r.personalizationFeeCents), customPrice: !!Number(r.customPrice), taxable: !!Number(r.taxable),
+    lineTotal: fromCents(r.lineTotalCents),
+  };
+}
+// Subtotal, tax and total of a quote's lines (rows with lineTotalCents and taxable) at a mode and rate — per line,
+// as insertOrder taxes an order's lines, so the order a quote becomes comes to the same.
+function estimateTotals_(itemRows, taxMode, taxRateBps) {
+  const mode = taxMode_(taxMode), bps = Math.max(0, Math.round(Number(taxRateBps) || 0));
+  let sub = 0, tax = 0;
+  for (const it of itemRows || []) {
+    const line = Number(it.lineTotalCents) || 0;
+    sub += line;
+    if (Number(it.taxable)) tax += taxOn_(line, bps, mode);
+  }
+  return { subtotal: fromCents(sub), tax: fromCents(tax), total: fromCents(sub + (mode === "exclusive" ? tax : 0)), taxMode: mode, taxRateBps: bps };
+}
+// The tax a quote would be sent with today: the Global settings mode and rate, none when the shop or the quote's
+// customer is exempt — the customer's exemption counts because staff picked the customer (as on a local sale).
+// A quote has no ship-to address, so out-of-state isn't known here; the order it becomes works that out itself.
+function estimateTaxFrom_(settings, orgExempt, customerRow, day) {
+  const exempt = !!Number(orgExempt) || customerExemptOn_(customerRow, day);
+  return { taxMode: taxMode_(settings.taxMode), taxRateBps: exempt ? 0 : Math.max(0, Math.round(Number(settings.rateBps) || 0)) };
+}
+async function estimateTaxNow_(db, row) {
+  const [settings, org, customer, zone] = await Promise.all([
+    getSalesTaxSettings(db),
+    db.prepare("SELECT taxExempt FROM orgs WHERE orgId = ?").bind(row.orgId).first(),
+    db.prepare("SELECT taxExempt, taxExemptExpires FROM customers WHERE id = ?").bind(row.customerId).first(),
+    estimateZone_(db),
+  ]);
+  return estimateTaxFrom_(settings, org && org.taxExempt, customer, dateInTimeZone(new Date(), zone));
+}
+// A quote still being worked on (never sent, or sent back for changes) is taxed as it would be today; one that has
+// been sent, as it was sent.
+const estimateTaxLive_ = (row) => !row.sentAt || ESTIMATE_EDITABLE_.includes(row.status);
+
+async function estimateFull_(db, row) {
+  const [{ results: itemRows }, customerRow, zone] = await Promise.all([
+    db.prepare("SELECT * FROM estimate_items WHERE estimateId = ? ORDER BY position, id").bind(row.id).all(),
+    db.prepare("SELECT * FROM customers WHERE id = ?").bind(row.customerId).first(),
+    estimateZone_(db),
+  ]);
+  const tax = estimateTaxLive_(row) ? await estimateTaxNow_(db, row) : { taxMode: row.taxMode, taxRateBps: row.taxRateBps };
+  return {
+    estimate: parseEstimate_(row, zone), items: (itemRows || []).map(parseEstimateItem_),
+    customer: customerRow ? parseCustomer_(customerRow) : null,
+    totals: estimateTotals_(itemRows, tax.taxMode, tax.taxRateBps),
+  };
+}
+
+// One quote: { estimate, items, customer, totals }, or null (no such quote, or no quotes table yet).
+export async function getEstimate(db, id) {
+  const n = customerId_(id);
+  if (!n) return null;
+  let row = null;
+  try { row = await db.prepare("SELECT * FROM estimates WHERE id = ?").bind(n).first(); }
+  catch (e) { if (noEstimatesYet_(e)) return null; throw e; }
+  return row ? estimateFull_(db, row) : null;
+}
+// The quote behind an emailed link, the same shape as getEstimate; null for a link that isn't one.
+export async function getEstimateByToken(db, token) {
+  const t = typeof token === "string" ? token.trim() : "";
+  if (!ESTIMATE_LINK_RE_.test(t)) return null;
+  let row = null;
+  try { row = await db.prepare("SELECT * FROM estimates WHERE token = ?").bind(t).first(); }
+  catch (e) { if (noEstimatesYet_(e)) return null; throw e; }
+  return row ? estimateFull_(db, row) : null;
+}
+
+// The Quotes page's list, a page at a time, most recently changed first: { estimates, total } (total = how many match
+// in all). Filters: a shop, a customer, a status, and `q` in the number, the title or the customer's name, company
+// or email. Each quote's total is worked out as getEstimate's is. Empty without migrations/0109.
+export async function listEstimates(db, { orgId = null, customerId = null, status = "", q = "", limit = 50, offset = 0 } = {}) {
+  const where = [], binds = [];
+  if (orgId) { where.push("e.orgId = ?"); binds.push(String(orgId)); }
+  if (customerId != null && customerId !== "") {
+    const cid = customerId_(customerId);
+    if (!cid) return { estimates: [], total: 0 };
+    where.push("e.customerId = ?"); binds.push(cid);
+  }
+  if (status) {
+    if (!ESTIMATE_STATUSES.includes(String(status))) return { estimates: [], total: 0 };
+    where.push("e.status = ?"); binds.push(String(status));
+  }
+  const needle = String(q == null ? "" : q).trim().slice(0, 200).trim();
+  if (needle) {
+    // instr on lowered text: what was typed is never a LIKE pattern.
+    const cols = ["e.number", "e.title", "c.name", "c.company", "c.email"];
+    where.push("(" + cols.map(col => `instr(lower(COALESCE(${col}, '')), lower(?)) > 0`).join(" OR ") + ")");
+    for (let i = 0; i < cols.length; i++) binds.push(needle);
+  }
+  const lim = Math.min(200, Math.max(1, Math.floor(Number(limit)) || 50)), off = Math.max(0, Math.floor(Number(offset)) || 0);
+  const from = `FROM estimates e LEFT JOIN customers c ON c.id = e.customerId LEFT JOIN orgs o ON o.orgId = e.orgId${where.length ? " WHERE " + where.join(" AND ") : ""}`;
+  let rows, totalRow;
+  try {
+    [{ results: rows }, totalRow] = await Promise.all([
+      db.prepare(`SELECT e.*, c.name AS customerName_, c.company AS customerCompany_, c.taxExempt AS customerTaxExempt_,
+                         c.taxExemptExpires AS customerTaxExemptExpires_, o.taxExempt AS orgTaxExempt_
+                    ${from} ORDER BY e.updatedAt DESC, e.id DESC LIMIT ? OFFSET ?`).bind(...binds, lim, off).all(),
+      db.prepare(`SELECT count(*) AS n ${from}`).bind(...binds).first(),
+    ]);
+  } catch (e) { if (noEstimatesYet_(e) || noCustomersYet_(e)) return { estimates: [], total: 0 }; throw e; }
+  rows = rows || [];
+  // The lines of just this page's quotes, in one query.
+  const linesBy = new Map();
+  if (rows.length) {
+    const { results } = await db.prepare("SELECT estimateId, lineTotalCents, taxable FROM estimate_items WHERE estimateId IN (SELECT value FROM json_each(?))")
+      .bind(JSON.stringify(rows.map(r => Number(r.id)))).all();
+    for (const it of results || []) (linesBy.get(Number(it.estimateId)) || linesBy.set(Number(it.estimateId), []).get(Number(it.estimateId))).push(it);
+  }
+  const [settings, zone] = await Promise.all([getSalesTaxSettings(db), estimateZone_(db)]);
+  const today = dateInTimeZone(new Date(), zone);
+  return {
+    estimates: rows.map(r => {
+      const tax = estimateTaxLive_(r)
+        ? estimateTaxFrom_(settings, r.orgTaxExempt_, { taxExempt: r.customerTaxExempt_, taxExemptExpires: r.customerTaxExemptExpires_ }, today)
+        : { taxMode: r.taxMode, taxRateBps: r.taxRateBps };
+      const e = parseEstimate_(r, zone);
+      return { id: e.id, number: e.number, orgId: e.orgId, customerId: e.customerId, customerName: r.customerName_ || r.customerCompany_ || "",
+        title: e.title, status: e.status, total: estimateTotals_(linesBy.get(e.id) || [], tax.taxMode, tax.taxRateBps).total,
+        expiresOn: e.expiresOn, expired: e.expired, sentAt: e.sentAt, updatedAt: e.updatedAt, orderId: e.orderId };
+    }),
+    total: Number(totalRow && totalRow.n) || 0,
+  };
+}
+
+// The fields people type, checked: { values: {title, message, internalNote, expiresOn} } or { error }. A field left
+// undefined keeps `old`'s (the row being changed; none for a new quote).
+function estimateFields_(f, old) {
+  const text = (v, was, max) => v === undefined ? (was || "") : String(v == null ? "" : v).trim().slice(0, max);
+  let expiresOn = old ? old.expiresOn || null : null;
+  if (f.expiresOn !== undefined) {
+    const d = String(f.expiresOn == null ? "" : f.expiresOn).trim();
+    // Round-trip the day: Date.parse takes 2027-02-31 and rolls it into March.
+    if (d && !(CUSTOMER_DATE_RE_.test(d) && !isNaN(Date.parse(d + "T00:00:00Z")) && new Date(d + "T00:00:00Z").toISOString().slice(0, 10) === d)) return { error: "The expiry date isn't a date." };
+    expiresOn = d || null;   // an unset date is NULL
+  }
+  return { values: { title: text(f.title, old && old.title, 200), message: text(f.message, old && old.message, 3000),
+    internalNote: text(f.internalNote, old && old.internalNote, 2000), expiresOn } };
+}
+
+// A new draft quote for a live customer in a shop: { id, number } or { error } with nothing made.
+export async function createEstimate(db, { orgId, customerId, title, message, internalNote, expiresOn, createdBy } = {}) {
+  const org = orgId ? await db.prepare("SELECT orgId FROM orgs WHERE orgId = ?").bind(String(orgId)).first() : null;
+  if (!org) return { error: "That shop wasn't found." };
+  const cid = customerId_(customerId);
+  let customer = null;
+  try { customer = cid ? await liveCustomerRow_(db, cid) : null; }
+  catch (e) { if (noCustomersYet_(e)) return { error: ESTIMATES_NOT_READY_ }; throw e; }
+  if (!customer) return { error: "Pick the customer the quote is for." };
+  const f = estimateFields_({ title, message, internalNote, expiresOn }, null);
+  if (f.error) return f;
+  const v = f.values, now = new Date().toISOString();
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const number = await nextEstimateNumber_(db);
+      try {
+        const r = await db.prepare(`INSERT INTO estimates (number, orgId, customerId, title, message, internalNote, expiresOn, createdAt, updatedAt, createdBy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .bind(number, org.orgId, customer.id, v.title, v.message, v.internalNote, v.expiresOn, now, now, String(createdBy || "").slice(0, 200)).run();
+        return { id: Number(r && r.meta && r.meta.last_row_id), number };
+      } catch (e) {
+        // Another quote took this number a moment ago: take the next one.
+        if (attempt < 4 && /UNIQUE constraint failed: estimates\.number/i.test(String(e && e.message))) continue;
+        throw e;
+      }
+    }
+  } catch (e) { if (noEstimatesYet_(e)) return { error: ESTIMATES_NOT_READY_ }; throw e; }
+}
+
+const estimateRow_ = async (db, id) => {
+  const n = customerId_(id);
+  if (!n) return null;
+  try { return await db.prepare("SELECT * FROM estimates WHERE id = ?").bind(n).first(); }
+  catch (e) { if (noEstimatesYet_(e)) return null; throw e; }
+};
+const ESTIMATE_NOT_FOUND_ = "That quote wasn't found.";
+// Why a quote in this state can't be changed by staff (null when it can).
+function estimateLocked_(row) {
+  if (ESTIMATE_EDITABLE_.includes(row.status)) return null;
+  if (row.status === "sent") return "This quote has been sent. It can be changed if the customer asks for changes.";
+  if (row.status === "cancelled") return "This quote was cancelled.";
+  return "This quote has been accepted.";
+}
+
+// Changes a quote's title, message to the customer, internal note or expiry date (a field left undefined keeps
+// its value). What the customer sees is only changed on a draft or a quote sent back for changes; the internal
+// note any time. { ok, before, after } (the parsed quote) or { error } with nothing changed.
+export async function setEstimateFields(db, id, fields = {}) {
+  const row = await estimateRow_(db, id);
+  if (!row) return { error: ESTIMATE_NOT_FOUND_ };
+  const f = estimateFields_(fields || {}, row);
+  if (f.error) return f;
+  const v = f.values;
+  const seen = v.title !== (row.title || "") || v.message !== (row.message || "") || (v.expiresOn || null) !== (row.expiresOn || null);
+  const locked = estimateLocked_(row);
+  if (seen && locked) return { error: locked };
+  const now = new Date().toISOString();
+  await db.prepare("UPDATE estimates SET title = ?, message = ?, internalNote = ?, expiresOn = ?, updatedAt = ? WHERE id = ?")
+    .bind(v.title, v.message, v.internalNote, v.expiresOn, now, row.id).run();
+  const zone = await estimateZone_(db);
+  const after = await db.prepare("SELECT * FROM estimates WHERE id = ?").bind(row.id).first();
+  return { ok: true, before: parseEstimate_(row, zone), after: parseEstimate_(after, zone) };
+}
+
+// Replaces a quote's lines (only a draft, or one the customer asked to change). `items` (dollars), in order:
+//   { kind: "product", productId, name, type, size, config, personalized, persName, qty, unitPrice, listUnitPrice,
+//     personalizationFee, customPrice }  — priced by the caller (priceItem with breakQty, or a typed unit price);
+//     whether it's taxable is the product's own flag, as insertOrder decides it
+//   { kind: "custom", name, qty, unitPrice, taxable }
+//   { kind: "fee", feeKind, name, amount (or unitPrice), taxable }  — always one
+// At most ESTIMATE_LINES_MAX lines of 1 to ESTIMATE_QTY_MAX each. { ok, lines } or { error } with nothing changed.
+// The write only happens while the quote is still editable, in one batch, so a quote sent or accepted meanwhile
+// keeps the lines it was sent with.
+export async function saveEstimateItems(db, id, items) {
+  const row = await estimateRow_(db, id);
+  if (!row) return { error: ESTIMATE_NOT_FOUND_ };
+  const locked = estimateLocked_(row);
+  if (locked) return { error: locked };
+  if (!Array.isArray(items)) return { error: "The quote's lines must be a list." };
+  if (items.length > ESTIMATE_LINES_MAX) return { error: `A quote can have up to ${ESTIMATE_LINES_MAX} lines.` };
+  const money = (v) => { if (v === "" || v == null) return NaN; const n = Number(v); return Number.isFinite(n) && n >= 0 && n < 1000000 ? Math.round(n * 100) : NaN; };
+  const productIds = [...new Set(items.filter(it => it && it.kind === "product" && it.productId).map(it => String(it.productId)))];
+  const { results: prows } = productIds.length
+    ? await db.prepare("SELECT productId, taxable FROM products WHERE orgId = ? AND productId IN (SELECT value FROM json_each(?))").bind(row.orgId, JSON.stringify(productIds)).all()
+    : { results: [] };
+  const productTaxable = new Map((prows || []).map(p => [p.productId, !!Number(p.taxable)]));
+  const lines = [];
+  for (const [i, it] of items.entries()) {
+    const n = i + 1;
+    if (!it || typeof it !== "object" || !["product", "custom", "fee"].includes(it.kind)) return { error: `Line ${n} isn't a product, a custom line or a fee.` };
+    const kind = it.kind;
+    const qty = kind === "fee" ? 1 : Number(it.qty);
+    if (!Number.isInteger(qty) || qty < 1 || qty > ESTIMATE_QTY_MAX) return { error: `Line ${n}: the quantity must be a whole number from 1 to ${ESTIMATE_QTY_MAX.toLocaleString("en-US")}.` };
+    const name = String(it.name == null ? "" : it.name).trim().slice(0, 200);
+    if (kind !== "fee" && !name) return { error: `Line ${n} needs a description.` };
+    const unitCents = money(kind === "fee" && it.amount !== undefined ? it.amount : it.unitPrice);
+    if (Number.isNaN(unitCents)) return { error: `Line ${n} needs a price of $0 or more.` };
+    const feeKind = kind === "fee" ? (ESTIMATE_FEE_KINDS.includes(it.feeKind) ? it.feeKind : "other") : "";
+    let productId = "", listCents = unitCents, persFeeCents = 0, taxable = it.taxable !== false;
+    if (kind === "product") {
+      productId = String(it.productId == null ? "" : it.productId).trim();
+      if (!productId) return { error: `Line ${n} needs a product.` };
+      const list = it.listUnitPrice == null || it.listUnitPrice === "" ? unitCents : money(it.listUnitPrice);
+      listCents = Number.isNaN(list) ? unitCents : list;
+      persFeeCents = it.personalized ? money(it.personalizationFee || 0) : 0;
+      if (Number.isNaN(persFeeCents)) return { error: `Line ${n}: the personalization price isn't a price.` };
+      if (productTaxable.has(productId)) taxable = productTaxable.get(productId);
+    }
+    lines.push({
+      kind, productId, name, type: kind === "fee" ? "" : String(it.type == null ? "" : it.type).slice(0, 80),
+      size: kind === "product" ? String(it.size == null ? "" : it.size).slice(0, 40) : "",
+      configJson: kind === "product" && it.config && typeof it.config === "object" ? JSON.stringify(it.config) : "",
+      personalized: kind === "product" && it.personalized ? 1 : 0,
+      persName: kind === "product" && it.personalized ? String(it.persName == null ? "" : it.persName).slice(0, 200) : "",
+      feeKind, qty, unitCents, listCents, persFeeCents, customPrice: kind === "product" && it.customPrice ? 1 : 0,
+      taxable: taxable ? 1 : 0, lineCents: qty * (unitCents + persFeeCents),
+    });
+  }
+  const now = new Date().toISOString();
+  const editable = "EXISTS (SELECT 1 FROM estimates WHERE id = ? AND status IN ('draft', 'changes'))";
+  const stmts = [
+    db.prepare(`DELETE FROM estimate_items WHERE estimateId = ? AND ${editable}`).bind(row.id, row.id),
+    ...lines.map((l, i) => db.prepare(`INSERT INTO estimate_items (estimateId, position, kind, productId, name, type, size, configJson, personalized,
+        persName, feeKind, qty, unitPriceCents, listUnitCents, personalizationFeeCents, customPrice, taxable, lineTotalCents)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${editable}`)
+      .bind(row.id, i, l.kind, l.productId, l.name, l.type, l.size, l.configJson, l.personalized, l.persName, l.feeKind, l.qty,
+        l.unitCents, l.listCents, l.persFeeCents, l.customPrice, l.taxable, l.lineCents, row.id)),
+    db.prepare("UPDATE estimates SET updatedAt = ? WHERE id = ? AND status IN ('draft', 'changes')").bind(now, row.id),
+  ];
+  const res = await db.batch(stmts);
+  const last = res && res[res.length - 1];
+  if (last && last.meta && Number(last.meta.changes) === 0) return { error: "This quote was sent or answered meanwhile. Reload it to see where it stands." };
+  return { ok: true, lines: lines.length };
+}
+
+// Sends a quote (or sends it again): status sent, sentAt / sentTo, one more send, and the tax it goes out with
+// (taxMode / taxRateBps; worked out now when not given). Its prices are FROZEN from here: nothing reprices its lines,
+// and the order it becomes takes them as they are. The link's token is made on the first send (or `token`, when the
+// caller made one) and kept after that, so an earlier email's link still works. { ok, token, sendCount, taxMode,
+// taxRateBps } or { error } with nothing changed.
+export async function markEstimateSent(db, id, { sentTo, token, taxMode, taxRateBps } = {}) {
+  const row = await estimateRow_(db, id);
+  if (!row) return { error: ESTIMATE_NOT_FOUND_ };
+  if (!["draft", "sent", "changes"].includes(row.status)) return { error: estimateLocked_(row) };
+  const count = await db.prepare("SELECT count(*) AS n FROM estimate_items WHERE estimateId = ?").bind(row.id).first();
+  if (!(Number(count && count.n) > 0)) return { error: "Add a line to the quote before sending it." };
+  if (estimateExpired(row, Date.now(), await estimateZone_(db))) return { error: "This quote's expiry date has passed. Change it before sending." };
+  const tax = taxMode !== undefined && taxRateBps !== undefined
+    ? { taxMode: taxMode_(taxMode), taxRateBps: Math.max(0, Math.round(Number(taxRateBps) || 0)) }
+    : await estimateTaxNow_(db, row);
+  // 32 hex characters (122 random bits), as an invoice's: unguessable.
+  const newToken = typeof token === "string" && ESTIMATE_LINK_RE_.test(token) ? token : crypto.randomUUID().replace(/-/g, "").toLowerCase();
+  const now = new Date().toISOString();
+  const r = await db.prepare(`UPDATE estimates SET status = 'sent', token = COALESCE(token, ?), sentAt = ?, sentTo = ?, sendCount = sendCount + 1,
+      taxMode = ?, taxRateBps = ?, updatedAt = ? WHERE id = ? AND status IN ('draft', 'sent', 'changes')`)
+    .bind(newToken, now, String(sentTo == null ? "" : sentTo).trim().slice(0, 200), tax.taxMode, tax.taxRateBps, now, row.id).run();
+  if (!(r && r.meta && Number(r.meta.changes) > 0)) return { error: "This quote was answered or cancelled meanwhile. Reload it to see where it stands." };
+  const after = await db.prepare("SELECT token, sendCount FROM estimates WHERE id = ?").bind(row.id).first();
+  return { ok: true, token: after.token, sendCount: Number(after.sendCount) || 1, ...tax };
+}
+
+// The first time the customer opens the link.
+export async function markEstimateViewed(db, token) {
+  const t = typeof token === "string" ? token.trim() : "";
+  if (!ESTIMATE_LINK_RE_.test(t)) return;
+  try { await db.prepare("UPDATE estimates SET viewedAt = ? WHERE token = ? AND viewedAt IS NULL").bind(new Date().toISOString(), t).run(); }
+  catch (e) { if (!noEstimatesYet_(e)) throw e; }
+}
+
+// Why the customer can't answer this quote now, in words for the customer; null when they can.
+function estimateAnswerRefused_(row, timeZone) {
+  if (row.status === "cancelled") return "This quote was cancelled.";
+  if (row.status === "accepted" || row.status === "converted") return "This quote has already been accepted.";
+  if (row.status === "draft" || !row.sentAt) return "This quote hasn't been sent yet.";
+  if (estimateExpired(row, Date.now(), timeZone)) return `This quote expired on ${row.expiresOn}.`;
+  return null;
+}
+// The customer's answer through the link: accept (status accepted — the caller then makes the order with
+// convertEstimateToOrder_) or ask for changes with a note (status changes; asking again replaces the note).
+// Refused when the quote isn't sent, is expired (the business's calendar day after expiresOn), cancelled,
+// accepted or converted — and an accept while the customer's own change request is open, since staff may be
+// revising it. { ok, status, id } or { error } in words for the customer.
+export async function respondToEstimate(db, token, { accept, note } = {}) {
+  const t = typeof token === "string" ? token.trim() : "";
+  let row = null;
+  try { row = ESTIMATE_LINK_RE_.test(t) ? await db.prepare("SELECT * FROM estimates WHERE token = ?").bind(t).first() : null; }
+  catch (e) { if (!noEstimatesYet_(e)) throw e; }
+  if (!row) return { error: "This quote link isn't valid." };
+  const zone = await estimateZone_(db);
+  const refused = estimateAnswerRefused_(row, zone);
+  if (refused) return { error: refused };
+  const now = new Date().toISOString();
+  if (accept) {
+    if (row.status === "changes") return { error: "You asked for changes to this quote. The shop will send you a revised one." };
+    const r = await db.prepare("UPDATE estimates SET status = 'accepted', acceptedAt = ?, respondedAt = ?, updatedAt = ? WHERE id = ? AND status = 'sent'")
+      .bind(now, now, now, row.id).run();
+    if (!(r && r.meta && Number(r.meta.changes) > 0)) {
+      const again = await db.prepare("SELECT * FROM estimates WHERE id = ?").bind(row.id).first();
+      return { error: (again && estimateAnswerRefused_(again, zone)) || "This quote changed meanwhile. Open the link again to see it." };
+    }
+    return { ok: true, status: "accepted", id: Number(row.id) };
+  }
+  const text = String(note == null ? "" : note).trim().slice(0, 2000);
+  if (!text) return { error: "Say what you'd like changed." };
+  const r = await db.prepare("UPDATE estimates SET status = 'changes', customerNote = ?, respondedAt = ?, updatedAt = ? WHERE id = ? AND status IN ('sent', 'changes')")
+    .bind(text, now, now, row.id).run();
+  if (!(r && r.meta && Number(r.meta.changes) > 0)) {
+    const again = await db.prepare("SELECT * FROM estimates WHERE id = ?").bind(row.id).first();
+    return { error: (again && estimateAnswerRefused_(again, zone)) || "This quote changed meanwhile. Open the link again to see it." };
+  }
+  return { ok: true, status: "changes", id: Number(row.id) };
+}
+
+// Records the order a quote became (status converted). Answers { ok, orderId } again for the same order, so a
+// repeated conversion is harmless; { error, orderId } when it is already another order; { error } when cancelled.
+export async function setEstimateConverted(db, id, orderId) {
+  const row = await estimateRow_(db, id);
+  if (!row) return { error: ESTIMATE_NOT_FOUND_ };
+  const oid = String(orderId == null ? "" : orderId);
+  if (!oid) return { error: "There's no order to link the quote to." };
+  const already = (r) => r.orderId ? (r.orderId === oid ? { ok: true, orderId: oid } : { error: `This quote is already order ${r.orderId}.`, orderId: r.orderId }) : null;
+  if (already(row)) return already(row);
+  if (row.status === "cancelled") return { error: "This quote was cancelled." };
+  const now = new Date().toISOString();
+  const r = await db.prepare("UPDATE estimates SET status = 'converted', orderId = ?, convertedAt = ?, updatedAt = ? WHERE id = ? AND orderId IS NULL AND status <> 'cancelled'")
+    .bind(oid, now, now, row.id).run();
+  if (r && r.meta && Number(r.meta.changes) > 0) return { ok: true, orderId: oid };
+  const again = await db.prepare("SELECT * FROM estimates WHERE id = ?").bind(row.id).first();
+  return (again && already(again)) || { error: "This quote was cancelled." };
+}
+
+// Cancels a quote that hasn't become an order: its link then says so. { ok, before } (the quote as it was) or { error }.
+export async function cancelEstimate(db, id) {
+  const row = await estimateRow_(db, id);
+  if (!row) return { error: ESTIMATE_NOT_FOUND_ };
+  if (row.status === "converted" || row.orderId) return { error: "This quote is already an order. Void the order instead." };
+  if (row.status === "cancelled") return { error: "This quote is already cancelled." };
+  const now = new Date().toISOString();
+  const r = await db.prepare("UPDATE estimates SET status = 'cancelled', cancelledAt = ?, updatedAt = ? WHERE id = ? AND status NOT IN ('converted', 'cancelled') AND orderId IS NULL")
+    .bind(now, now, row.id).run();
+  if (!(r && r.meta && Number(r.meta.changes) > 0)) return { error: "This quote became an order meanwhile. Reload it to see where it stands." };
+  return { ok: true, before: parseEstimate_(row, await estimateZone_(db)) };
+}
+
+// { orderId: { id, number } } for the orders a loader just read that were made from a quote; {} without 0109.
+async function estimatesByOrder_(db, sub, binds) {
+  try {
+    const { results } = await db.prepare(`SELECT id, number, orderId FROM estimates WHERE orderId IN (${sub})`).bind(...binds).all();
+    return Object.fromEntries((results || []).map(r => [r.orderId, { id: Number(r.id), number: r.number || "" }]));
+  } catch (e) { if (noEstimatesYet_(e)) return {}; throw e; }
+}
+// The quote an order was made from ({ id, number }), or null — for "From quote Q-00012" on the order.
+async function estimateOfOrder_(db, orderId) {
+  try {
+    const r = await db.prepare("SELECT id, number FROM estimates WHERE orderId = ? LIMIT 1").bind(String(orderId)).first();
+    return r ? { id: Number(r.id), number: r.number || "" } : null;
+  } catch (e) { if (noEstimatesYet_(e)) return null; throw e; }
 }
 
 // Atomic insert: order header + all items in one batch.
@@ -10955,8 +11550,15 @@ export async function insertOrder(db, order, pricedItems, opts = {}) {
     orderCustomer_(db, order, opts),
   ]);
   // opts.taxExempt: an order from another store (importOrdersCsv), whose sales tax that store charged — none is added here.
-  const taxExempt = opts.taxExempt || (orgRow && orgRow.taxExempt) || customer.exempt ? 1 : 0;
-  const orderRateBps = Number(taxSettings.rateBps) || 0;
+  const exemptNow = opts.taxExempt || (orgRow && orgRow.taxExempt) || customer.exempt ? 1 : 0;
+  // opts.taxRateBps: a rate fixed in advance, already allowing for any exemption — a sent quote's (convertEstimateToOrder_
+  // in orders.js), whose customer accepted a total worked out at that rate. Today's rate and exemptions don't change
+  // it. It is marked exempt only when it charges nothing and the shop or customer is exempt now, so the sales-tax
+  // report files it with the exempt sales rather than as taxable sales that took no tax.
+  const fixedRate = opts.taxRateBps === undefined || opts.taxRateBps === null || !Number.isFinite(Number(opts.taxRateBps)) ? null
+    : Math.max(0, Math.round(Number(opts.taxRateBps)));
+  const taxExempt = fixedRate === null ? exemptNow : (fixedRate === 0 && exemptNow ? 1 : 0);
+  const orderRateBps = fixedRate === null ? Number(taxSettings.rateBps) || 0 : fixedRate;
   // Tax in the listed prices, or added to them: today's setting, kept on the order (migrations/0057).
   const mode = taxMode_(order.taxMode || taxSettings.taxMode);
   const outOfState = isOutOfState(stateOf_(order.shippingAddress), taxSettings.jurisdiction);
@@ -11410,7 +12012,7 @@ const trackingCutoff_ = (now = new Date()) => new Date(now.getTime() - TRACKING_
 // Shipped orders still waiting on a delivery, with a tracking number to look up
 // (the order's own, else its site-bought label's) and the carrier to ask. Least recently looked up
 // first (never looked up before all), then oldest shipment: with more waiting than one morning's
-// lookups, each still gets its turn (orders.trackingCheckedAt, migrations/0109; markTrackingChecked).
+// lookups, each still gets its turn (orders.trackingCheckedAt, migrations/0110; markTrackingChecked).
 export async function getShippedAwaitingDelivery(db, limit = 40, { now = new Date() } = {}) {
   const { results } = await db.prepare(
     `SELECT * FROM (
@@ -11449,7 +12051,7 @@ export async function getLabeledAwaitingShipment(db, limit = 40, { now = new Dat
     shippingMethod: r.shippingMethod || "", paid: !!r.paid, tracking: r.tracking, labelCarrier: r.labelCarrier || "" }));
 }
 
-// Stamps an order's tracking lookup (migrations/0109), whatever it found — a lookup that failed too, so
+// Stamps an order's tracking lookup (migrations/0110), whatever it found — a lookup that failed too, so
 // one tracking number that always errors can't hold the front of the queue.
 export async function markTrackingChecked(db, orderId, at = new Date().toISOString()) {
   await db.prepare("UPDATE orders SET trackingCheckedAt = ? WHERE orderId = ?").bind(at, orderId).run();

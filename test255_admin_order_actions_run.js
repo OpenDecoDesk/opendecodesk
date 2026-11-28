@@ -470,9 +470,9 @@ const pause = (ms) => new Promise(r => setTimeout(r, ms));
     samLines.map(l => l.productId + ":" + l.size + ":" + l.qty).join() === "cap:OSFA:2,tee:L:1");
   {
     const cap = w.createLocalSale("acme"); await wait(() => d.getElementById("localSaleForm"));
-    for (let i = 0; i < 25; i++) d.getElementById("lsAddLine").click();
-    ok("at most 20 items: the add button goes and says why", d.querySelectorAll("#localSaleForm .ls-line").length === 20 && d.getElementById("lsAddLine").style.display === "none" &&
-      d.getElementById("lsLineLimit").style.display === "" && /20 items is the most/.test(d.getElementById("lsLineLimit").textContent));
+    for (let i = 0; i < 105; i++) d.getElementById("lsAddLine").click();
+    ok("at most 100 items (bulk sales, migrations/0109): the add button goes and says why", d.querySelectorAll("#localSaleForm .ls-line").length === 100 && d.getElementById("lsAddLine").style.display === "none" &&
+      d.getElementById("lsLineLimit").style.display === "" && /100 items is the most/.test(d.getElementById("lsLineLimit").textContent));
     d.getElementById("localSaleForm").querySelector(".admin-pass-cancel").click(); await cap;
   }
 

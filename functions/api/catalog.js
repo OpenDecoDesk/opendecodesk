@@ -151,6 +151,16 @@ function normImageUrl(url){
   return url;
 }
 
+// A product's quantity breaks as the shop page gets them. db.js validated them when they were saved
+// (normalizeQtyBreaks_); this only keeps the two fields the page reads, in order, so an entry cached before
+// migrations/0109 (no qtyBreaks at all) or a malformed one reads as "no breaks" rather than breaking the page.
+function clientQtyBreaks_(list){
+  if(!Array.isArray(list)) return [];
+  return list.map(b => ({ minQty: Number(b && b.minQty), off: Number(b && b.off) }))
+    .filter(b => Number.isInteger(b.minQty) && b.minQty >= 2 && Number.isFinite(b.off) && b.off > 0)
+    .sort((a, b) => a.minQty - b.minQty).slice(0, 6);
+}
+
 // Maps a stored product (productId/pricingMode/flatPrice/sizePricing) to the
 // shape storefront.js's rendering expects (id, and sizePricing OR flatPrice —
 // no pricingMode field).
@@ -167,6 +177,9 @@ function toClientProduct(p){
   } else {
     out.sizePricing = p.sizePricing;
   }
+  // Quantity breaks (migrations/0109): [{ minQty, off }] in dollars, fewest pieces first; [] when none. The shop page
+  // shows them as a table and the cart mirrors them; the order is priced by the server (priceItem's breakQty).
+  out.qtyBreaks = clientQtyBreaks_(p.qtyBreaks);
   // Only said when it isn't (the cart's tax estimate skips the line); taxable is the default.
   if(p.taxable === false) out.taxable = false;
   // Sold as files (migrations/0086): no delivery, an "Instant download" tag.

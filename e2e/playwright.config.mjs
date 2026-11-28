@@ -6,6 +6,11 @@ import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.E2E_PORT || 8897);
+// Specs that change a setting for the whole install (the sales tax, a feature switch): each runs alone, one after
+// another, once every other spec has finished, so no other test reads that setting while it is changed.
+const ALONE = ["gap-customers-tax-merge", "gap-quotes-tax", "gap-quotes-switch"];
+const ALONE_RE = (name) => new RegExp("specs[\\\\/]" + name + "\\.spec\\.mjs$");
+const AFTER_SPECS = ALONE.map(ALONE_RE);
 
 export default defineConfig({
   testDir: here,
@@ -40,8 +45,16 @@ export default defineConfig({
     {
       name: "chromium",
       testMatch: /specs[\\/].*\.spec\.mjs$/,
+      testIgnore: AFTER_SPECS,
       dependencies: ["setup"],
       use: { ...devices["Desktop Chrome"], storageState: path.join(here, ".auth", "owner.json") },
     },
+    // The specs in ALONE, each its own project, each waiting for the one before it.
+    ...ALONE.map((name, i) => ({
+      name: "alone-" + name,
+      testMatch: ALONE_RE(name),
+      dependencies: [i === 0 ? "chromium" : "alone-" + ALONE[i - 1]],
+      use: { ...devices["Desktop Chrome"], storageState: path.join(here, ".auth", "owner.json") },
+    })),
   ],
 });

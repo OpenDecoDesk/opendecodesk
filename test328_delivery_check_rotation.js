@@ -1,7 +1,7 @@
 // The daily delivery check takes turns (review round 2). Both of its steps — labels the carrier hasn't scanned yet,
 // and shipped orders waiting on a delivery — took the OLDEST first, every morning, with at most 40 lookups: with
 // more than that waiting, the same oldest ones were looked up every day and the newer ones never were; and the
-// pickup step could use nearly all 40, leaving the deliveries none. Now (orders.trackingCheckedAt, migrations/0109):
+// pickup step could use nearly all 40, leaving the deliveries none. Now (orders.trackingCheckedAt, migrations/0110):
 //   - each step takes the ones looked up longest ago first (never-looked-up first), and every lookup is stamped,
 //     a failed one too, as blank shipments already do;
 //   - the pickup step gets at most half of the run's lookups;
@@ -60,8 +60,8 @@ const stamp = (d1, id) => d1.q("SELECT trackingCheckedAt AS t FROM orders WHERE 
 
 (async () => {
   console.log("=== The column ===");
-  ok("migrations/0109 adds orders.trackingCheckedAt, and schema.sql has it", /ALTER TABLE orders ADD COLUMN trackingCheckedAt TEXT;/.test(read("migrations/0109_order_tracking_checked.sql")) &&
-    /\n  trackingCheckedAt   TEXT\s+-- migrations\/0109/.test(read("schema.sql")));
+  ok("migrations/0110 adds orders.trackingCheckedAt, and schema.sql has it", /ALTER TABLE orders ADD COLUMN trackingCheckedAt TEXT;/.test(read("migrations/0110_order_tracking_checked.sql")) &&
+    /\n  trackingCheckedAt   TEXT\s+-- migrations\/0110/.test(read("schema.sql")));
 
   console.log("\n=== Shipped orders take turns ===");
   {

@@ -32,7 +32,7 @@
 import { classifyHost } from "../_lib/hostConfig.js";
 import { getCatalogData, getCatalogShop } from "../_lib/catalogCache.js";
 import { jsonResponse } from "../_lib/http.js";
-import { getReadyToShipByOrg, getBlankReadyByOrg, getDraftCatalogShop, verifyPreviewToken } from "../_lib/db.js";
+import { getReadyToShipByOrg, getBlankReadyByOrg, getDraftCatalogShop, verifyPreviewToken, pickTimeZone, localDayEndInstant, timeZoneShortName } from "../_lib/db.js";
 
 // ---- The shop page's stock, kept 30 seconds ----
 // Every view of a shop page needs the shop's finished stock (getReadyToShipByOrg), which of its digital products have
@@ -272,6 +272,19 @@ async function adminScriptVersion(env, url){
   return v && v !== "dev" ? "desktop-" + v : "";
 }
 
+// When a shop's ordering closes: 11:59:59 pm on its deadline day in the business's time zone (Global settings →
+// Region, else the TIMEZONE variable, else UTC), the same moment order placement refuses orders from (orders.js).
+// orderClosesAt is that moment (ISO), orderTimeZone the zone (the storefront counts "days left" on its calendar),
+// orderZoneLabel its short name then ("GMT+9", "UTC"). Worked out from the cached settings alone, so every shopper — and
+// every request — gets the same answer. Nothing for no deadline, nor from a settings entry cached before it carried
+// the zone: the storefront then keeps its old end-of-day check until the entry is rebuilt.
+function orderClosing_(deadline, locale, env){
+  if(!deadline || !locale || typeof locale.timeZone !== "string") return {};
+  const zone = pickTimeZone(locale.timeZone, env);
+  const at = localDayEndInstant(deadline, zone);
+  return at ? { orderClosesAt: at, orderTimeZone: zone, orderZoneLabel: timeZoneShortName(at, zone) } : {};
+}
+
 export async function onRequestGet(context){
   const { request, env } = context;
   const url = new URL(request.url);
@@ -458,6 +471,7 @@ export async function onRequestGet(context){
       // the order still goes through, just without a payment selection.
       enabledPayments,
       orderDeadline: org.orderDeadline || null,
+      ...orderClosing_(org.orderDeadline, catalogData.locale, env),
       closedMessage: org.closedMessage || null,
       allowOrdersAfterDeadline: org.allowOrdersAfterDeadline !== false,
       // For the storefront's "Prices include x% <state> sales tax" disclosure.

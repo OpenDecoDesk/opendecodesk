@@ -9775,7 +9775,8 @@ function wizScreen_(step){
       return { title: "Is there an order deadline?", help: "For a one-time order window. Leave it open if the shop takes orders any time.",
         html: radio("wizDl", "none", "No deadline", !d) + radio("wizDl", "date", "Orders close on…", !!d) +
           `<div class="wiz-inline" id="wizDlBox"${d ? "" : " hidden"}><input type="date" id="wizDlDate" class="wiz-input wiz-short" value="${escapeHtml(d)}">
-            ${check("wizLate", "late", "Keep taking late orders after it", o.allowOrdersAfterDeadline !== false)}</div>`,
+            ${check("wizLate", "late", "Keep taking late orders after it", o.allowOrdersAfterDeadline !== false)}
+            <div class="wiz-note">${deadlineCloseNote_()}</div></div>`,
         wire: (root) => root.querySelectorAll('input[name="wizDl"]').forEach(r => r.onchange = () => { root.querySelector("#wizDlBox").hidden = picked("wizDl")[0] !== "date"; }),
         save: async () => {
           const date = picked("wizDl")[0] === "date" ? val("#wizDlDate") : "";
@@ -12315,6 +12316,14 @@ function drawOrgDeliveryList_(){
   };
 }
 
+// When an order deadline ends, said by the date in the shop form and the setup wizard: 11:59 pm on that day in the
+// business's time zone (Global settings → Region) — the moment the storefront and the server close the shop
+// (db.js localDayEndInstant). Before the zone is known (an older server), it says whose zone without naming it.
+function deadlineCloseNote_(){
+  const zone = adminTimeZone ? escapeHtml(adminTimeZone.replace(/_/g, " ")) : "";
+  return zone ? `Orders close at 11:59 pm on that day, ${zone} time (Global settings → Region).`
+    : "Orders close at 11:59 pm on that day, in the business's time zone (Global settings → Region).";
+}
 function renderOrgForm(app, org){
   const isEdit = !!org;
   if (isEdit) adminSetHash("catalog/orgs/" + encodeURIComponent(org.orgId) + "/edit");
@@ -12422,6 +12431,7 @@ function renderOrgForm(app, org){
         <label style="margin-top:16px;">Order deadline (optional)
           <input type="date" id="orgFormOrderDeadline" value="${escapeHtml(deadline)}">
         </label>
+        <div class="admin-note" id="orgFormDeadlineClose" style="margin-top:4px;">${deadlineCloseNote_()}</div>
         <label style="margin-top:8px;">Text shown when closed (optional)
           <input type="text" id="orgFormClosedMessage" value="${escapeHtml(closedMessage)}" placeholder="Ordering for this period has closed.">
         </label>

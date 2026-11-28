@@ -3848,10 +3848,15 @@ export async function buildLocaleSettings(db, p) {
 export async function resolveTimeZone(env) {
   let saved = "";
   try { saved = (await getLocaleSettings(env && env.DB)).timeZone; } catch (e) { /* fall through */ }
-  const fromEnv = env && env.TIMEZONE ? String(env.TIMEZONE).trim() : "";
-  const tz = saved || (isValidTimeZone(fromEnv) ? fromEnv : DEFAULT_TIME_ZONE);
+  const tz = pickTimeZone(saved, env);
   _shopTimeZone_ = tz;   // what shopTime_ writes times in from now on
   return tz;
+}
+// resolveTimeZone's choice from a saved Region zone already in hand (the storefront catalog carries it): the saved
+// one, else the TIMEZONE variable, else UTC.
+export function pickTimeZone(saved, env) {
+  const fromEnv = env && env.TIMEZONE ? String(env.TIMEZONE).trim() : "";
+  return (typeof saved === "string" && saved) || (isValidTimeZone(fromEnv) ? fromEnv : DEFAULT_TIME_ZONE);
 }
 // The install's time zone as last resolved (resolveTimeZone), for shopTime_'s messages; "" until then.
 let _shopTimeZone_ = "";
@@ -3867,6 +3872,40 @@ export function dateInTimeZone(date, timeZone) {
 // Today's date where the business is — what "not in the future" and "overdue" are measured against.
 export async function localToday(env, now) {
   return dateInTimeZone(now || new Date(), await resolveTimeZone(env));
+}
+// The last moment of a calendar day ("YYYY-MM-DD") in a time zone, as an ISO time: 11:59:59.999 pm there, the
+// moment before the next day starts. When a shop's order deadline passes — on the storefront and at order placement
+// alike. null for anything that isn't a day; an unknown zone counts as UTC. Clock changes are allowed for: the day's
+// own offset is used (a winter day in New York ends at 04:59:59.999Z, a summer one at 03:59:59.999Z), and in a zone
+// whose clocks skip midnight the day ends when the calendar turns over.
+export function localDayEndInstant(day, timeZone) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day == null ? "" : day).slice(0, 10));
+  if (!m) return null;
+  const tz = isValidTimeZone(timeZone) ? timeZone.trim() : DEFAULT_TIME_ZONE;
+  const fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+  // How far the zone's wall clock is ahead of UTC at moment t (ms; negative west of UTC).
+  const offsetAt = (t) => {
+    const p = {};
+    for (const x of fmt.formatToParts(new Date(t))) p[x.type] = x.value;
+    return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second) - Math.floor(t / 1000) * 1000;
+  };
+  const want = Date.UTC(+m[1], +m[2] - 1, +m[3] + 1);   // the next day's midnight, as if the zone were UTC
+  if (!Number.isFinite(want)) return null;
+  const nextDay = new Date(want).toISOString().slice(0, 10);
+  // Next midnight by the offset at `want`, then by the offset at that first guess; normally the two agree. Where the
+  // clocks jump at midnight they don't, and the day ends at the earlier one that is already on the next day.
+  const first = want - offsetAt(want), second = want - offsetAt(first);
+  const starts = [first, second].filter(t => dateInTimeZone(new Date(t), tz) >= nextDay).sort((a, b) => a - b);
+  const start = starts.length ? starts[0] : Math.max(first, second);
+  return new Date(start - 1).toISOString();
+}
+// A time zone's short name at a moment, for a shopper: New York's winter abbreviation, "GMT+9", "UTC". "" if the zone isn't known.
+export function timeZoneShortName(when, timeZone) {
+  if (!isValidTimeZone(timeZone)) return "";
+  try {
+    const part = new Intl.DateTimeFormat("en-US", { timeZone: timeZone.trim(), timeZoneName: "short" }).formatToParts(new Date(when)).find(x => x.type === "timeZoneName");
+    return part ? part.value : "";
+  } catch (e) { return ""; }
 }
 
 // ---- Business profile -----------------------------------------------------------------------
@@ -12795,7 +12834,9 @@ async function catalogSiteParts_(db) {
   return {
     globalSettings: { ...baseSettings, salesTax, rushFee },
     business: publicBusinessProfile(business),   // name, contact and payment details shown to visitors
-    locale: { country: locale.country },         // address format the storefront's forms use (Region)
+    // Region: the address format the storefront's forms use, and the saved time zone ("" = none saved), in which a
+    // shop's order deadline ends (functions/api/catalog.js orderClosesAt).
+    locale: { country: locale.country, timeZone: locale.timeZone || "" },
     features,                                    // which optional parts of the site are on (Features)
     // The storefront's sections, in order (migrations/0056): key + heading only.
     categories: categories.map(c => ({ key: c.key, label: c.plural || c.name })),

@@ -53,7 +53,7 @@ import {
   getAllOrgs, getOrgById, createOrg, updateOrg, cleanDeliveryOptions, setOrgDeliveryOptions, defaultDeliveryOptions, cleanShippingAddress, stagePrereqError, stageTimeError, shopTime_, ORDER_DATE_FIELDS, orderDatesError, setOrderDates, whyNotCompletable_, getSystemIssues, clearSystemIssues,
   getProductsByOrg, getProductsByIds, priceLookups, productShipWeightOz, createProduct, updateProduct, setProductVisible,
   getGlobalSettings, setGlobalSettings, getMachineSettings, setMachineSettings, getPayOnDeliveryRule, setOrderPayOnDelivery,
-  getShipFromAddress, setShipFromAddress, shipFromMissing, getBusinessProfile, setBusinessProfile, getLocaleSettings, setLocaleSettings, FEATURES, getFeatures, setFeatures, resolveTimeZone, setOrdersCompleted, getShippedAwaitingDelivery,
+  getShipFromAddress, setShipFromAddress, shipFromMissing, getBusinessProfile, setBusinessProfile, getLocaleSettings, setLocaleSettings, FEATURES, getFeatures, setFeatures, resolveTimeZone, localDayEndInstant, setOrdersCompleted, getShippedAwaitingDelivery,
   getBoxPresets, setBoxPresets,
   addShippingPaidAmount, setShippingPaidAmount,
   getAllInventory, createInventoryItem, updateInventoryItem, deleteInventoryItem,
@@ -5211,7 +5211,8 @@ async function handleOrdersPost_(context, listBefore = null) {
       const changes = {};
       for (const k of Object.keys(locale)) if (locale[k] !== before[k]) changes[k] = { from: before[k], to: locale[k] };
       audit({ orgId: null, orderId: null, action: "settings.locale_set", detail: { changes } });
-      // The storefront reads the country (its address form) from the cached catalog — refresh it.
+      // The storefront reads the country (its address form) and the time zone (when a shop's deadline ends) from the
+      // cached catalog — refresh it.
       try { await bumpCatalogVersion(env.DB); invalidateCatalogVersionCache(); } catch (e) { console.error("catalog version bump failed:", e); }
       return jsonResponse({ status: "ok", locale, effectiveTimeZone: await resolveTimeZone(env), envTimeZone: env.TIMEZONE ? String(env.TIMEZONE) : "" });
     }
@@ -8081,9 +8082,9 @@ async function handleOrdersPost_(context, listBefore = null) {
     return jsonResponse({ status: "error", message: "This shop is not currently accepting orders." }, 403);
   }
   if (orgRow.orderDeadline && orgRow.allowOrdersAfterDeadline === false) {
-    // End of the deadline day at UTC-12 — the latest "end of day" anywhere,
-    // so the server never closes earlier than the customer's own clock does.
-    const closesAt = Date.parse(String(orgRow.orderDeadline).slice(0, 10) + "T23:59:59-12:00");
+    // The end of the deadline day in the business's time zone (Global settings → Region): 11:59:59 pm there, the
+    // moment the storefront's banner names and its catalog closes (catalog.js orderClosing_), with no grace period.
+    const closesAt = Date.parse(localDayEndInstant(orgRow.orderDeadline, await resolveTimeZone(env)) || "");
     if (Number.isFinite(closesAt) && Date.now() > closesAt) {
       return jsonResponse({ status: "error", message: orgRow.closedMessage || "Ordering for this shop has closed." }, 403);
     }

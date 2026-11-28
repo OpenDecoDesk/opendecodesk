@@ -1183,18 +1183,43 @@ function renderStorefrontOff(app, r){
   `;
 }
 
-// Returns an HTML string for the order deadline banner, or "" if no deadline.
-// urgency: >7 days = normal, 1-7 days = urgent, 0 = "closes today", past = "closed".
-function deadlineBannerHtml(org){
+// When the shop stops taking orders (ms): the catalog's orderClosesAt — 11:59:59 pm on the deadline day in the
+// business's time zone, the moment the server refuses orders from (catalog.js orderClosing_). A catalog cached before
+// it was sent has none: then the end of the deadline day on this computer's clock, as before. NaN for no deadline.
+function orderClosesAtMs_(org){
+  if(!org || !org.orderDeadline) return NaN;
+  const at = org.orderClosesAt ? Date.parse(org.orderClosesAt) : NaN;
+  return Number.isFinite(at) ? at : new Date(String(org.orderDeadline).slice(0, 10) + "T23:59:59").getTime();
+}
+// Today (YYYY-MM-DD) on the business's calendar when the catalog names its zone, else on this computer's.
+function shopToday_(org, now){
+  if(org && org.orderClosesAt && org.orderTimeZone){
+    try{
+      const parts = new Intl.DateTimeFormat("en-US", { timeZone: org.orderTimeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
+      const get = (t) => (parts.find(p => p.type === t) || {}).value;
+      return get("year") + "-" + get("month") + "-" + get("day");
+    }catch(e){ /* a zone this browser doesn't know: this computer's calendar */ }
+  }
+  return now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0") + "-" + String(now.getDate()).padStart(2, "0");
+}
+
+// Returns an HTML string for the order deadline banner, or "" if no deadline. `now` (a Date) is for the tests.
+// urgency: >7 days = normal, 1-7 days = urgent, 0 = "closes today", past = "closed". Days are counted on the
+// business's calendar, and the closing time is named in its zone ("at 11:59 pm" and the zone's short name).
+function deadlineBannerHtml(org, now){
   const deadline = org && org.orderDeadline;
   if(!deadline) return "";
+  now = now || new Date();
   const accent = org.accent;
-  const closeDate = new Date(String(deadline).slice(0, 10) + "T23:59:59");
-  const now = new Date();
-  const diffMs = closeDate - now;
-  const diffDays = Math.ceil(diffMs / 86400000);
+  const day = String(deadline).slice(0, 10);
+  const diffMs = orderClosesAtMs_(org) - now.getTime();
+  const [y, m, d] = day.split("-").map(Number);
+  const [ty, tm, td] = shopToday_(org, now).split("-").map(Number);
+  const diffDays = Math.round((Date.UTC(y, m - 1, d) - Date.UTC(ty, tm - 1, td)) / 86400000);
   const accentStyle = accent ? ` style="${orgAccentVars(accent)}"` : "";
-  const formatted = closeDate.toLocaleDateString("en-US", {month:"long", day:"numeric", year:"numeric"});
+  // The deadline is a calendar day: written as that day wherever the shopper is.
+  const formatted = new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString("en-US", {month:"long", day:"numeric", year:"numeric", timeZone:"UTC"});
+  const at = org.orderClosesAt && org.orderZoneLabel ? " at 11:59 pm " + escapeHtml(org.orderZoneLabel) : "";
   if(diffMs < 0){
     const closedMsg = escapeHtml((org.closedMessage || "").trim() || "Ordering for this period has closed.");
     if(org.allowOrdersAfterDeadline !== false){
@@ -1204,12 +1229,12 @@ function deadlineBannerHtml(org){
     }
     return `<div class="deadline-banner closed"${accentStyle}><span class="deadline-badge">Closed ${formatted}</span> ${closedMsg}</div>`;
   }
-  if(diffDays === 0){
-    return `<div class="deadline-banner urgent"${accentStyle}><span class="deadline-badge">Today</span> Ordering closes today — submit your order now.</div>`;
+  if(diffDays <= 0){
+    return `<div class="deadline-banner urgent"${accentStyle}><span class="deadline-badge">Today</span> Ordering closes today${at} — submit your order now.</div>`;
   }
   const urgency = diffDays <= 7 ? " urgent" : "";
   const label = diffDays === 1 ? "1 day left" : diffDays + " days left";
-  return `<div class="deadline-banner${urgency}"${accentStyle}><span class="deadline-badge">${label}</span> Ordering closes ${formatted}.</div>`;
+  return `<div class="deadline-banner${urgency}"${accentStyle}><span class="deadline-badge">${label}</span> Ordering closes ${formatted}${at}.</div>`;
 }
 
 function renderOrgPage(app, orgId, org){
@@ -1283,8 +1308,8 @@ function renderOrgPage(app, orgId, org){
 
   const bannerHtml = deadlineBannerHtml(org);
 
-  const deadlinePast = org.orderDeadline &&
-    new Date(String(org.orderDeadline).slice(0, 10) + "T23:59:59") < new Date();
+  // Past the moment the server stops taking orders (orderClosesAtMs_), the same for every shopper.
+  const deadlinePast = !!org.orderDeadline && orderClosesAtMs_(org) < Date.now();
   const ordersBlocked = deadlinePast && org.allowOrdersAfterDeadline === false;
 
   // The shop's fundraiser (migrations/0110), as the catalog words it ("$2.00 of every item supports …"); only sent when

@@ -876,7 +876,7 @@ The customer types the code and presses **Apply**; the totals show the discount 
 checks the code again. The order is checked once more when it is placed, and the confirmation and the
 order-received email show the discount. With more than one code allowed (Global settings → Discount codes)
 there is an **Add another code** link, each code has a ×, and a free-shipping code shows as "Free shipping
-(CODE)". Making codes is on the Discount codes page ([operations.md](operations.md#discount-codes)).
+(CODE)". Making codes is on Marketing → Discount codes ([operations.md](operations.md#discount-codes)).
 
 ## Gift cards at checkout
 

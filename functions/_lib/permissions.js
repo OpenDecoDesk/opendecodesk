@@ -36,8 +36,8 @@ export const PERMISSION_AREAS = [
     { hash: "customers", label: "Customers", fns: [["customers.records", "Customer records"]] } ] },
   { key: "quotes", label: "Quotes", items: [
     { hash: "quotes", label: "Quotes", fns: [["quotes.estimates", "Quotes"]] } ] },
-  { key: "discounts", label: "Discount codes", items: [
-    { hash: "discounts", label: "Discount codes", fns: [["discounts.codes", "Discount codes"], ["discounts.campaigns", "Email campaigns"]] } ] },
+  { key: "discounts", label: "Marketing", items: [
+    { hash: "discounts", label: "Marketing", fns: [["discounts.codes", "Discount codes"], ["discounts.campaigns", "Email campaigns"]] } ] },
   { key: "giftcards", label: "Gift cards", items: [
     { hash: "giftcards", label: "Gift cards", fns: [["giftcards.cards", "Gift cards: issue, look up, adjust and void"]] } ] },
   { key: "runorder", label: "Run Order", items: [

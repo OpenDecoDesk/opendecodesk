@@ -84,7 +84,7 @@ async function findRow(page, code) {
   return row;
 }
 const listShown = async (page) => {
-  await expect(page).toHaveTitle(/ — Discount codes \(Admin\)$/);
+  await expect(page).toHaveTitle(/ — Marketing \(Admin\)$/);
   await expect(page.locator("#dcPage #dcQ")).toBeVisible();
 };
 const dialog = (page) => page.locator(".admin-modal");

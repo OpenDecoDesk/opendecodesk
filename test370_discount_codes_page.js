@@ -143,7 +143,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   w.renderAdminNav();
   { const row = hashes(rowButtons());
     const btn = rowButtons().find(b => b.dataset.h === "discounts");
-    ok("an admin's top buttons have “Discount codes”, once", row.filter(h => h === "discounts").length === 1 && !!btn && btn.textContent === "Discount codes");
+    ok("an admin's top buttons have “Marketing” (the Discount codes page), once", row.filter(h => h === "discounts").length === 1 && !!btn && btn.textContent === "Marketing");
     ok("…right after Quotes", row[row.indexOf("discounts") - 1] === "quotes");
     ok("…a button that goes to #discounts like the others", btn.dataset.adminAction === "navGo" && btn.type === "button"); }
   ok("(the built-in roles) Admin and Manager have Full on Discount codes, Back office Read, Production none",
@@ -190,7 +190,7 @@ process.on("unhandledRejection", (e) => { console.error(e); ok("nothing in the t
   reset();
   w.location.hash = "#home"; await idle();
   await go();
-  ok("#discounts draws “Discount codes”, the tab's title too", text(q("#app h1")) === "Discount codes" && /Discount codes \(Admin\)$/.test(d.title) && hashNow() === "discounts");
+  ok("#discounts draws “Marketing”, the browser tab's title too, with its Discount codes tab on", text(q("#app h1")) === "Marketing" && /Marketing \(Admin\)$/.test(d.title) && hashNow() === "discounts" && text(q(".dc-tab.on")) === "Discount codes");
   ok("…lit in the menu", w.adminNavActive_() === "discounts" && rowButtons().find(b => b.dataset.h === "discounts").classList.contains("active"));
   ok("it asked for the first page: every status, every shop, 50 at a time", same(of("listDiscountCodes"), [{ action: "listDiscountCodes", q: "", org: "", status: "all", limit: 50, offset: 0 }]));
   ok("with none at all: “No discount codes yet. Make one with “+ New code”.”, no count, no pager", text(id("dcBody")) === "No discount codes yet. Make one with “+ New code”." && id("dcCount").textContent === "" && id("dcPager").innerHTML === "");

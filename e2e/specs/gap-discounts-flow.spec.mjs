@@ -41,7 +41,7 @@ const codeById = async (api, id) => (await api("getDiscountCode", { id })).code;
 const codesPage = async (page, q = TAG) => {
   await openAdmin(page, "discounts");
   await expect(page.locator("#dcPage")).toBeVisible();
-  await expect(page).toHaveTitle(/Discount codes/);
+  await expect(page).toHaveTitle(/Marketing/);
   const listed = answerOf(page, "listDiscountCodes");
   await page.locator("#dcQ").fill(q);
   await listed;

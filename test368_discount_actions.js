@@ -36,8 +36,8 @@ const ordersJs = read("functions/api/orders.js");
   console.log("=== The permission (functions/_lib/permissions.js) and orders.js's lists ===");
   {
     const at = roles.PERMISSION_AREAS.findIndex(a => a.key === "discounts");
-    ok("there is a Discount codes area with one page (#discounts): discounts.codes \"Discount codes\", and its Email campaigns tab's discounts.campaigns (migrations/0117)",
-      at >= 0 && same(roles.PERMISSION_AREAS[at], { key: "discounts", label: "Discount codes", items: [{ hash: "discounts", label: "Discount codes", fns: [["discounts.codes", "Discount codes"], ["discounts.campaigns", "Email campaigns"]] }] }));
+    ok("there is a Marketing area with one page (#discounts): discounts.codes \"Discount codes\", and its Email campaigns tab's discounts.campaigns (migrations/0117)",
+      at >= 0 && same(roles.PERMISSION_AREAS[at], { key: "discounts", label: "Marketing", items: [{ hash: "discounts", label: "Marketing", fns: [["discounts.codes", "Discount codes"], ["discounts.campaigns", "Email campaigns"]] }] }));
     ok("…placed right after Quotes", at > 0 && roles.PERMISSION_AREAS[at - 1].key === "quotes");
     ok("the function is on the Roles screen's list once", roles.PERM_FUNCTIONS.filter(f => f === "discounts.codes").length === 1);
     const perm = (a) => roles.ACTION_PERM[a];

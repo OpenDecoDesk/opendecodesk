@@ -2447,7 +2447,8 @@ async function checkNet30_(){
   if(!org || org.preview || !el || org.net30Offered !== true) return;
   const email = el.value.trim(), key = net30Key_(org.orgId, email);
   if(key === net30_.key) return;
-  const before = net30Offered_(org);
+  // What the select shows now (net30Offered_ can't say: the box already holds the new address, so it is never true here).
+  const before = !!document.querySelector('#custPaymentMethod option[value="' + NET30_METHOD_ + '"]');
   const seq = ++net30Seq_;
   if(!net30EmailOk_(email)){ net30_ = { key, ok: false, termsDays: null }; if(before) renderTicket(org, currentOrgId); return; }
   let r;

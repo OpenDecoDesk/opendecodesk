@@ -11874,16 +11874,20 @@ function renderRolesTab_(){
   const chips = (d.roles || []).map(r => { const on = !!(draft && draft.key === r.key);
       return `<button type="button" class="admin-btn role-chip${on ? "" : " admin-btn-secondary"}" aria-pressed="${on}" data-key="${escapeHtml(r.key)}" data-admin-action="roleSelect_">${escapeHtml(r.name)} <span class="perm-count">· ${r.userCount} ${r.userCount === 1 ? "user" : "users"}</span></button>`; }).join("")
     + (draft && !draft.key ? `<button type="button" class="admin-btn role-chip" aria-pressed="true">${escapeHtml(draft.name || "New role")}</button>` : "");
-  const menuHtml = (m) => {
-    const mOn = p.menus[m.key] !== false;
-    const items = m.items.map(it => {
-      const iOn = mOn && p.items[it.hash] !== false && it.fns.some(([fn]) => roleFnOn_(p, fn));
-      const fns = !iOn ? "" : it.fns.map(([fn, label]) => `
+  const fnRow = ([fn, label]) => `
         <div class="perm-fn"><span class="perm-fn-label">${escapeHtml(label)}</span>
           <span class="perm-seg" role="radiogroup" aria-label="${escapeHtml(label)}">${ROLE_LEVELS_.map(([lvl, name]) => {
             const over = ADMIN_LEVEL_RANK_[lvl] > ADMIN_LEVEL_RANK_[myLevel(fn)];
             return `<label class="${lvl === "full" ? "perm-full" : ""}" title="${over ? "More than your own role has" : ""}"><input type="radio" name="perm-${escapeHtml(fn)}" value="${lvl}" ${(p.fns[fn] || "none") === lvl ? "checked" : ""} ${dis || (over ? "disabled" : "")} data-fn="${escapeHtml(fn)}" data-admin-change="roleSetLevel_" /><span>${name}</span></label>`;
-          }).join("")}</span></div>`).join("");
+          }).join("")}</span></div>`;
+  // Functions of no menu item (Money, costs and margins): their own rows, which no menu or item switch turns off.
+  const everywhereHtml = (d.everywhere || []).length ? `<div class="perm-menu perm-everywhere"><div class="perm-menu-head"><span class="perm-switch" style="cursor:default;">Everywhere</span><span class="perm-off">on every screen, whatever is hidden below</span></div>
+    <div class="perm-item">${d.everywhere.map(fnRow).join("")}</div></div>` : "";
+  const menuHtml = (m) => {
+    const mOn = p.menus[m.key] !== false;
+    const items = m.items.map(it => {
+      const iOn = mOn && p.items[it.hash] !== false && it.fns.some(([fn]) => roleFnOn_(p, fn));
+      const fns = !iOn ? "" : it.fns.map(fnRow).join("");
       return `<div class="perm-item"><div class="perm-item-head"><label class="perm-switch"><input type="checkbox" ${iOn ? "checked" : ""} ${dis} data-item="${escapeHtml(it.hash)}" data-admin-change="roleSetItem_" /> ${escapeHtml(it.label)}</label>${iOn ? "" : `<span class="perm-off">hidden</span>`}</div>${fns}</div>`;
     }).join("");
     const anyOn = mOn && m.items.some(it => p.items[it.hash] !== false && it.fns.some(([fn]) => roleFnOn_(p, fn)));
@@ -11906,6 +11910,7 @@ function renderRolesTab_(){
         <label class="role-field" for="roleRank">Rank (1–${Math.max(1, myRank - 1)})<input type="number" id="roleRank" min="1" max="${Math.max(1, myRank - 1)}" step="1" value="${draft.rank}" ${dis} data-admin-input="roleDraftRank_" style="width:90px;" /></label>
         <div class="admin-note" style="flex:1;min-width:220px;">${draft.locked ? "Admin always has everything and can't be changed." : !draft.canEdit ? "This role ranks at or above yours, so you can see it but not change it." : "Only someone whose role ranks above this one can change it, or give it to someone." + (draft.builtIn ? " A built-in role can be changed but not deleted." : "")}</div>
       </div>
+      ${everywhereHtml}
       ${(d.areas || []).map(menuHtml).join("")}
       ${!editable ? "" : `<div class="admin-actions" style="margin-top:12px;">
         <button type="button" class="admin-btn" data-admin-action="roleSave_">${draft.key ? "Save role" : "Add role"}</button>
@@ -18288,15 +18293,35 @@ async function showPriceImpact_(rules, opts){
     }
     rows.sort((a, b) => a.blank.localeCompare(b.blank) || a.shop.localeCompare(b.shop) || a.product.localeCompare(b.product));
   };
-  try { await load(); } catch (e) { body.textContent = e.message; return; }
   const canApply = adminCan_("catalog.brandApprovals", "edit");
+  // The rule as saved: the server applies only its prices (orders.js applyRulePrices), whatever this window shows.
+  let saved = rules;
+  try { await load(); if (canApply || opts.canEdit) saved =(await hoopApi_({ action: "getBrandRules" })).rules || rules; } catch (e) { body.textContent = e.message; return; }
+  // Two rules the same for applying: the general rule and each brand's, as db.js cleans them (2 decimals, by brand).
+  const k = (b) => String(b == null ? "" : b).toLowerCase().replace(/[®™©]/g, "").replace(/[^a-z0-9]+/g, "");
+  const u = (r) => r && r.add !== "" && r.add != null && Number.isFinite(Number(r.add)) ? [Math.round(Number(r.add) * 100) / 100, r.unit === "pct" ? "pct" : "amount"] : null;
+  const ruleSig_ = (x) => JSON.stringify([u(x && x.priceRule), ((x && x.brandPrices) || []).map(b => [k(b.brand), u(b)]).filter(e => e[0] && e[1]).map(e => JSON.stringify(e)).sort()]);
+  const ruleChanged = () => ruleSig_(edit) !== ruleSig_(saved);
+  // The brands whose own rule differs here from the saved one ("" stands for none), and whether the general rule does.
+  const brandRuleSig_ = (x, b) => JSON.stringify(u(((x && x.brandPrices) || []).find(y => k(y.brand) === b)));
+  const changedBrands_ = () => new Set([...edit.brandPrices, ...((saved && saved.brandPrices) || [])].map(b => k(b.brand)).filter(b => b && brandRuleSig_(edit, b) !== brandRuleSig_(saved, b)));
+  // Saves the price rules changed here (Apply and Save this rule) onto the brand rules as saved NOW (read again), so a
+  // change made elsewhere since the window opened — another brand's rule, a restricted brand — isn't undone.
+  const saveChangedRules_ = async () => {
+    const now = (await hoopApi_({ action: "getBrandRules" })).rules;
+    const mine = changedBrands_(), generalChanged = JSON.stringify(u(edit.priceRule)) !== JSON.stringify(u(saved && saved.priceRule));
+    const brandPrices = (now.brandPrices || []).filter(b => !mine.has(k(b.brand))).concat(edit.brandPrices.filter(b => mine.has(k(b.brand)) && u(b)));
+    return (await hoopApi_({ action: "updateBrandRules", rules: Object.assign({}, now, { priceRule: generalChanged ? edit.priceRule : now.priceRule, brandPrices }) })).rules;
+  };
   let rounding = "none";
   const brands = [...new Set([...rows.map(r => r.brand).filter(Boolean), ...edit.brandPrices.map(b => b.brand)])].sort((a, b) => a.localeCompare(b));
   const money = (v) => adminMoneyOr_(v);
-  // MAP + the rule, rounded up as chosen (rounding only ever goes up, so it never lands under the rule).
+  // MAP + the rule, rounded up as chosen (rounding only ever goes up, so it never lands under the rule). Worked out in
+  // cents exactly as the server checks it (db.js priceRuleMinCents_).
   const after = (r) => {
     const rule = priceRuleFor_(edit, r.brand); if (!rule) return null;
-    let cents = Math.round((rule.unit === "pct" ? r.map * (1 + rule.add / 100) : r.map + Number(rule.add)) * 100);
+    const mapC = Math.round(r.map * 100);
+    let cents = rule.unit === "pct" ? Math.round(mapC * (1 + rule.add / 100)) : mapC + Math.round(Number(rule.add) * 100);
     if (rounding === "whole") cents = Math.ceil(cents / 100) * 100; else if (rounding === "99") cents = Math.ceil((cents + 1) / 100) * 100 - 1;
     return cents / 100;
   };
@@ -18316,7 +18341,11 @@ async function showPriceImpact_(rules, opts){
     }
     body.querySelector("#piSummary").textContent = rows.length ? `${rows.length} price${rows.length === 1 ? "" : "s"} on blanks with a MAP: ${up} would go up, ${down} would go down.` : "";
     const apply = body.querySelector("#piApply");
-    if (apply) { const n = picked().length; apply.disabled = !n; apply.textContent = n ? `Apply ${n} price${n === 1 ? "" : "s"}…` : "Apply these prices"; }
+    if (apply) { const n = picked().length, blocked = ruleChanged() && !opts.canEdit; apply.disabled = !n || blocked; apply.textContent = n ? `Apply ${n} price${n === 1 ? "" : "s"}…` : "Apply these prices";
+      // Only the saved rule's prices can be applied: a rule changed here is saved first, by someone who may save it.
+      const note = body.querySelector("#piRuleNote");
+      if (note) note.textContent = !ruleChanged() ? "" : opts.canEdit ? "The rule as changed here is saved first when you apply these prices."
+        : "Apply sets the saved price rule's prices, and your role can't change the rule: set it back as it was to apply them."; }
     body.querySelector("#piTable").innerHTML = html || `<tr><td colspan="${canApply ? 7 : 6}" class="admin-empty" style="padding:10px;">${rows.length ? "No price would change." : "No product is linked to a blank with a MAP."}</td></tr>`;
   };
   body.style.color = "var(--ink,#111)";
@@ -18337,6 +18366,7 @@ async function showPriceImpact_(rules, opts){
       <tbody id="piTable"></tbody></table></div>
     ${noMap ? `<div style="font-size:11px;color:#888;margin-top:4px;">${noMap} price${noMap === 1 ? "" : "s"} on blanks with no MAP aren't listed — the rule doesn't apply to them.</div>` : ""}
     <div id="piDone" style="font-size:12px;margin-top:8px;"></div>
+    ${canApply ? `<div id="piRuleNote" style="font-size:12px;color:#555;margin-top:6px;"></div>` : ""}
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap;">
       <button type="button" class="admin-btn" id="piClose" style="background:#fff;color:var(--ink,#222);border:1px solid #ccc;">Close</button>
       ${opts.canEdit ? `<button type="button" class="admin-btn" id="piSave" style="background:#fff;color:var(--ink,#222);border:1px solid #ccc;">Save this rule</button>` : ""}
@@ -18358,12 +18388,23 @@ async function showPriceImpact_(rules, opts){
   if (all) all.onchange = () => { rows.filter(changing).forEach(r => all.checked ? unticked.delete(keyOf(r)) : unticked.add(keyOf(r))); drawTable(); };
   const applyBtn = body.querySelector("#piApply");
   if (applyBtn) applyBtn.onclick = async () => {
-    const list = picked();
-    if (!list.length) return;
+    let list = picked();
+    const changed = ruleChanged();
+    if (!list.length || (changed && !opts.canEdit)) return;
     const shops = [...new Set(list.map(r => r.org))];
-    if (!(await askConfirm_(`Apply ${list.length} new price${list.length === 1 ? "" : "s"} in ${shops.length} shop${shops.length === 1 ? "" : "s"}?\n\nEach product's price is set to its After price. Shoppers see the new prices when each shop is published.`, { confirmLabel: "Apply prices" }))) return;
+    if (!(await askConfirm_(`Apply ${list.length} new price${list.length === 1 ? "" : "s"} in ${shops.length} shop${shops.length === 1 ? "" : "s"}?\n\nEach product's price is set to its After price.${changed ? " The price rule as changed here is saved first." : ""} Shoppers see the new prices when each shop is published.`, { confirmLabel: "Apply prices" }))) return;
     applyBtn.disabled = true;
     try {
+      // The server sets only the saved rule's prices, so a rule changed here is saved first, and the ticked prices are
+      // worked out again from the rule as it was saved (only those: a price another change makes differ isn't added).
+      if (changed) {
+        const saved_ = await saveChangedRules_();
+        rules = saved = saved_;
+        edit.priceRule = saved_.priceRule ? { ...saved_.priceRule } : null; edit.brandPrices = (saved_.brandPrices || []).map(b => ({ ...b }));
+        if (opts.onSaved) opts.onSaved(saved_);
+        const keys = new Set(list.map(keyOf));
+        list = picked().filter(r => keys.has(keyOf(r)));
+      }
       const r = await hoopApi_({ action: "applyRulePrices", changes: list.map(x => ({ org: x.org, productId: x.productId, group: x.group, size: x.size, price: after(x) })) });
       unticked.clear();
       await load(); drawTable();
@@ -18384,8 +18425,8 @@ async function showPriceImpact_(rules, opts){
   if (save) save.onclick = async () => {
     save.disabled = true; readRules();
     try {
-      const r = await hoopApi_({ action: "updateBrandRules", rules: Object.assign({}, rules, { priceRule: edit.priceRule, brandPrices: edit.brandPrices }) });
-      showToast("Price rule saved."); close(); if (opts.onSaved) opts.onSaved(r.rules);
+      const savedNow = await saveChangedRules_();
+      showToast("Price rule saved."); close(); if (opts.onSaved) opts.onSaved(savedNow);
     } catch (e) { save.disabled = false; showToast(e.message, true); }
   };
   drawTable();

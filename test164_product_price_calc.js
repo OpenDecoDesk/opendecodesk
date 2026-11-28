@@ -152,8 +152,17 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   const ctS = pickOf("Color tee", "S"); ctS.checked = false; ctS.dispatchEvent(new w.Event("change", { bubbles: true })); await new Promise(r => setTimeout(r, 30));
   const nPick = d.querySelectorAll(".pi-pick:checked").length;
   ok("the Apply button counts the ticked prices", new RegExp(`Apply ${nPick} prices`).test(text(d.getElementById("piApply"))) && nPick > 1);
+  ok("…and the window says the rule changed here is saved first (the server applies only the saved rule's prices)", /saved first/.test(text(d.getElementById("piRuleNote"))) &&
+    JSON.parse(d1.q("SELECT value FROM global_settings WHERE key='brandRules'")[0].value).brandPrices.length === 1);
+  // Meanwhile, elsewhere: another brand's rule saved after the window opened (no product of it here).
+  { const now = (await call({ action: "getBrandRules" })).body.rules;
+    await call({ action: "updateBrandRules", rules: Object.assign({}, now, { brandPrices: now.brandPrices.concat([{ brand: "Zed Mills", add: 1, unit: "amount" }]) }) }); }
   d.getElementById("piApply").click();
   await until(() => /Applied/.test(text(d.getElementById("piDone"))));
+  const brandPricesNow = () => JSON.parse(d1.q("SELECT value FROM global_settings WHERE key='brandRules'")[0].value).brandPrices.map(b => b.brand).join();
+  ok("Apply saved the rule as changed in the window first (the brand's own rule gone), then applied its prices",
+    !/Acme/.test(brandPricesNow()) && d1.q("SELECT 1 FROM audit_log WHERE action='settings.brand_rules_set'").length >= 2 && !text(d.getElementById("piRuleNote")));
+  ok("…onto the rules as saved now: the other brand's rule saved since the window opened is kept", brandPricesNow() === "Zed Mills");
   const after = (id) => (lib.getProductsByOrg(d1, "acme")).then(ps => ps.find(p => p.productId === id));
   const t1 = await after("tee"), c1 = await after("ctee");
   ok("Apply sets each ticked price to its After price (tee M $18 + 10% → $19.99, L $20 + 10% → $22.99)", t1.sizePricing.M === 19.99 && t1.sizePricing.L === 22.99 && t1.pricesReviewedAt);
@@ -166,19 +175,26 @@ const ok = (d, c) => { console.log(d + ":", !!c); c ? pass++ : fail++; };
   pubBtn.click(); await until(() => /published/.test(text(d.querySelector(".pi-publish"))));
   ok("…which publishes it", d1.q("SELECT 1 FROM catalog_snapshots WHERE orgId='acme'").length === 1);
   let ap = await call({ action: "applyRulePrices", changes: [{ org: "acme", productId: "tee", size: "XL", price: 30 }] });
-  ok("the server won't add a size the product doesn't sell", ap.status === 200 && !ap.body.prices && /doesn't sell that size/.test(ap.body.skipped[0]));
+  ok("the server won't add a size the product doesn't sell (nothing is written)", ap.status === 400 && /Plain tee XL: the product doesn't sell that size/.test(ap.body.message));
   d1._raw.exec(`UPDATE products SET colorGroupsJson='[{"key":"g1","label":"Heathers","colors":["Heather"],"sizePricingCents":{"S":2100,"M":2100,"L":2300}}]' WHERE productId='ctee'`);
-  ap = await call({ action: "applyRulePrices", changes: [{ org: "acme", productId: "ctee", group: "Heathers", size: "L", price: 24.99 }, { org: "acme", productId: "ctee", group: "Nope", size: "L", price: 1 }] });
-  ok("a color price group's price is set by its label; an unknown group stops that product's changes", ap.body.skipped.some(t => /no such color price group/.test(t)) &&
+  // The saved rule is now MAP + 10% (the window saved it): Heather L's MAP $20 → $22, or $22.99 rounded up to .99.
+  ap = await call({ action: "applyRulePrices", changes: [{ org: "acme", productId: "ctee", group: "Heathers", size: "L", price: 22.99 }, { org: "acme", productId: "ctee", group: "Nope", size: "L", price: 1 }] });
+  ok("a color price group's price is set by its label; an unknown group refuses the request and nothing is written", ap.status === 400 && /no such color price group/.test(ap.body.message) &&
     (await after("ctee")).colorGroups[0].sizePricing.L === 23);
-  ap = await call({ action: "applyRulePrices", changes: [{ org: "acme", productId: "ctee", group: "Heathers", size: "L", price: 24.99 }] });
-  ok("…and a group price on its own is applied", ap.body.prices === 1 && (await after("ctee")).colorGroups[0].sizePricing.L === 24.99);
+  ap = await call({ action: "applyRulePrices", changes: [{ org: "acme", productId: "ctee", group: "Heathers", size: "L", price: 22.99 }] });
+  ok("…and a group price on its own is applied", ap.body.prices === 1 && (await after("ctee")).colorGroups[0].sizePricing.L === 22.99);
+  ap = await call({ action: "applyRulePrices", changes: [{ org: "acme", productId: "tee", size: "S", price: 5 }, { org: "acme", productId: "tee", size: "M", price: 19.99 }] });
+  ok("a price that isn't the saved rule's is refused, naming the product and the rule's price, and nothing is written", ap.status === 400 &&
+    /Plain tee S: \$5\.00 isn't the saved price rule's price \(\$19\.80/.test(ap.body.message) && (await after("tee")).sizePricing.S === 19.99);
+  ap = await call({ action: "applyRulePrices", changes: [{ org: "acme", productId: "tee", size: "S", price: 20 }] });
+  ok("…the rule's price rounded up to the next whole dollar is one ($19.80 → $20)", ap.status === 200 && ap.body.prices === 1 && (await after("tee")).sizePricing.S === 20);
+  ap = await call({ action: "applyRulePrices", changes: [{ org: "acme", productId: "loose", size: "S", price: 20 }] });
+  ok("…a product with no blank with a MAP has no rule price to apply", ap.status === 400 && /No blank S: no price rule applies to it/.test(ap.body.message));
   ap = await call({ action: "applyRulePrices", changes: [{ org: "acme", productId: "tee", size: "S", price: -2 }] });
   ok("…or take a price that isn't one", ap.status === 400);
   d.getElementById("piSave").click();
-  await until(() => JSON.parse(d1.q("SELECT value FROM global_settings WHERE key='brandRules'")[0].value).brandPrices.length === 0);
-  ok("Save this rule saves it (the brand's own rule removed)", !JSON.parse(d1.q("SELECT value FROM global_settings WHERE key='brandRules'")[0].value).brandPrices.length &&
-    !d.querySelector("#piBody"));
+  await until(() => !d.querySelector("#piBody"));
+  ok("Save this rule saves it and closes (the brand's own rule still gone, the other brand's kept)", brandPricesNow() === "Zed Mills" && !d.querySelector("#piBody"));
 
   console.log("\n=== No blank linked ===");
   await open("loose");

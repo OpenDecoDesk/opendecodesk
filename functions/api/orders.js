@@ -119,7 +119,7 @@ import {
   writeOffBlanks, getBlankMovements, markBlankPricesChecked, setBlankArchived, getBlankVendorPriceHistory, getProductPriceChanges, confirmProductPrices, getBlankPriceReminder, getBlanksNeedingPriceCheck, getBlankProductUses, recomputeBlankAverageCosts, planVendorBlanks, applyVendorBlanks, cleanColorGroups_, suggestColorGroups, listVendorConnections, getVendorConnectionRow, saveVendorConnection, setVendorConnectionStatus, deleteVendorConnection, linkBlanksToVendorConnection, receiveBlanksOnce, receiptGroupForKey, receiptEntryId, setBlankCounts,
   getSiteSetting, setSiteDomain,
   getPublishedOrg, setOrgReady, getShopWizard, saveShopWizard, deleteShopWizard, listShopWizards, setProductLinksFromBlank, publishShop, getPublishState, getDraftCatalogShop, signPreviewToken,
-  planDiscardShopChanges, discardShopChanges, applyProductPrices,
+  planDiscardShopChanges, discardShopChanges, applyProductPrices, priceRuleFor_, priceRuleMinCents_,
   getBrandRules, setBrandRules, DEFAULT_BRAND_RULES, brandRuleFor_, listBrandApprovals, addBrandApproval, revokeBrandApproval, getBrandApproval,
   nextSupplierPoNumber, insertSupplierOrder, claimSupplierOrderRetry, setSupplierOrderResult, getSupplierOrder, listSupplierOrders, markItemsBlankOrdered, cancelSupplierOrder, getInventoryValuation, getInventoryValuations, getCogsReport, planBlankCatchUp, applyBlankCatchUp, planTransferCatchUp, applyTransferCatchUp, voidInventoryMovement, getInventoryMovementById, restoreInventoryMovement, getInventoryRestoreBlocker, removeBlankColorImages, analyzePricing, planProductPreview, getPricingSettingsView, pricingBelowTargetForBlanks, setPricingSettings, getShopRate, computeShopRate, setShopRate,
   voidOrder, voidPayment, getClosedPeriods, isMonthClosed, closePeriod, reopenPeriod, monthOf,
@@ -5011,7 +5011,8 @@ async function handleOrdersPost_(context, listBefore = null) {
       catch (e) { if (e && e.status === 400) return jsonResponse({ status: "error", message: e.message }, 400); throw e; }
       audit({ orgId: null, orderId: null, action: "settings.shop_rate_set", detail: { overheadPerHourCents: r.overheadPerHourCents, ratePerHourCents: r.ratePerHourCents, hours: r.hours, period: r.period.key } });
       const all = await analyzePricing(env.DB);
-      const below = all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems }));
+      // Through belowFor_ as the other pricing saves: Shop rate Edit without Money, costs and margins hears no margins.
+      const below = belowFor_(all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems })));
       return jsonResponse({ status: "ok", shopRate: shopRateView_(r), input: await getShopRate(env.DB), belowTarget: below });
     }
     if (body.action === "updatePricingSettings") {
@@ -5317,7 +5318,7 @@ async function handleOrdersPost_(context, listBefore = null) {
       audit({ orgId: null, orderId: null, action: "settings.sales_tax_set",
         detail: { from: { rateBps: before.rateBps, jurisdiction: before.jurisdiction, taxMode: before.taxMode }, to: { rateBps: salesTax.rateBps, jurisdiction, taxMode: salesTax.taxMode } } });
       const all = await analyzePricing(env.DB).catch(() => ({ products: [] }));
-      const belowTarget = all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems }));
+      const belowTarget = belowFor_(all.products.filter(p => p.visible && p.belowTarget).map(p => ({ orgId: p.orgId, productId: p.productId, name: p.name, problems: p.problems })));
       return jsonResponse({ status: "ok", salesTax: { ...salesTax, ratePercent: salesTax.rateBps / 100 }, belowTarget });
     }
 
@@ -7508,12 +7509,31 @@ async function handleOrdersPost_(context, listBefore = null) {
     const byProduct = new Map();
     for (const c of list) { const k = String(c.org || "") + "\u0001" + String(c.productId || ""); (byProduct.get(k) || byProduct.set(k, []).get(k)).push(c); }
     // A dry run of every product first (applyProductPrices writes only when its own list is clean), then the real one.
+    // Each price must be the one the SAVED price rule gives (MAP + the brand's rule, else the general one, worked out
+    // here from the product's MAP as the window does), or that rounded up as the window offers: to the next whole
+    // dollar or to .99. Brand approvals Edit applies the rule; it isn't a way to set any price (that's Products Edit).
+    const rules = await getBrandRules(env.DB);
+    const orgsAsked = [...new Set([...byProduct.keys()].map(k => k.split("\u0001")[0]))];
+    const analysis = await analyzePricing(env.DB, orgsAsked.length === 1 ? { orgId: orgsAsked[0] } : {});
+    const productOf = new Map(analysis.products.map(p => [p.orgId + "\u0001" + p.productId, p]));
+    const groupKey = (g) => { const x = String(g || ""); return x === "Standard" ? "" : x; };   // "Standard" = the product's own prices
     const problems = [];
     for (const [k, cs] of byProduct) {
-      const [org, productId] = k.split("\u0001");
-      const row = await env.DB.prepare("SELECT * FROM products WHERE orgId=? AND productId=?").bind(org, productId).first();
-      if (!row) { problems.push(`${productId || "?"}: no such product`); continue; }
-      for (const c of cs) { const n = Number(c.price); if (!Number.isFinite(n) || n < 0 || n > 10000) problems.push(`${row.name || productId}: not a price`); }
+      const productId = k.split("\u0001")[1];
+      const p = productOf.get(k);
+      if (!p) { problems.push(`${productId || "?"}: no such product`); continue; }
+      for (const c of cs) {
+        const n = Number(c.price), group = groupKey(c.group), size = String(c.size || "");
+        const where = `${p.name || productId}${group ? " " + group : ""}${size ? " " + size : ""}`;
+        if (!Number.isFinite(n) || n < 0 || n > 10000) { problems.push(`${where}: not a price`); continue; }
+        const row = p.rows.find(r => groupKey(r.group) === group && String(r.size || "") === size);
+        if (!row) { problems.push(`${where}: ${p.rows.some(r => groupKey(r.group) === group) ? "the product doesn't sell that size" : "no such color price group"}`); continue; }
+        const rule = row.map != null ? priceRuleFor_(rules, row.mapBrand) : null;
+        if (!rule) { problems.push(`${where}: no price rule applies to it (no blank with a MAP, or no rule)`); continue; }
+        const base = priceRuleMinCents_(Math.round(row.map * 100), rule);
+        const allowed = [base, Math.ceil(base / 100) * 100, Math.ceil((base + 1) / 100) * 100 - 1];
+        if (!allowed.includes(Math.round(n * 100))) problems.push(`${where}: $${n.toFixed(2)} isn't the saved price rule's price ($${(base / 100).toFixed(2)}, or that rounded up). Reload the price impact and try again`);
+      }
     }
     if (problems.length) return jsonResponse({ status: "error", message: problems.slice(0, 5).join("; ") }, 400);
     const done = [], skipped = [];

@@ -392,6 +392,51 @@ test.describe("roles in the page", () => {
     }
   });
 
+  // Money, costs and margins applies on every screen, so it is a row of its own, not the Home item's: hiding Home
+  // (its menu or its item) leaves it as it was, and the role's users keep seeing costs.
+  test("Money, costs and margins is its own row, and hiding Home doesn't turn it off", async ({ page, api }) => {
+    const role = (await api("saveRole", { name: "Costs role " + slug("c").slice(-5), rank: 15,
+      permissions: { fns: { "home.counts": "read", "costs.view": "read", "catalog.products": "read" } } }, USERS)).role;
+    let C = null;
+    try {
+      await openAdmin(page, "users");
+      await page.getByRole("tab", { name: "Roles and permissions" }).click();
+      await page.locator(".role-chip", { hasText: role.name }).click();
+      await expect(page.locator("#roleName")).toHaveValue(role.name);
+      const everywhere = page.locator(".perm-everywhere");
+      await expect(everywhere).toContainText("Everywhere");
+      const costs = everywhere.getByRole("radiogroup", { name: "Money, costs and margins (everywhere)" });
+      await expect(costs.getByRole("radio", { name: "Read" })).toBeChecked();
+      // Home's own menu has only the order counts now.
+      const home = page.locator(".perm-menu", { has: page.locator('input[data-menu="home"]') });
+      await expect(home).toContainText("Order counts by step");
+      await expect(home).not.toContainText("Money, costs and margins");
+      await page.locator('.perm-menu-head input[data-menu="home"]').uncheck();
+      await expect(home).toContainText("hidden");
+      await expect(costs.getByRole("radio", { name: "Read" })).toBeChecked();
+      await page.getByRole("button", { name: "Save role" }).click();
+      await expect(toast(page)).toContainText("Role saved.");
+      const saved = await roleByKey(api, role.key);
+      expect(saved.permissions.menus.home).toBe(false);
+      expect(saved.permissions.fns["home.counts"]).toBe("none");
+      expect(saved.permissions.fns["costs.view"]).toBe("read");
+
+      // Its user: no Home, but Money, costs and margins, and the server lets them read costs.
+      C = await makeUser(api, role.key, "Cory Costs");
+      const c = await signedIn(C);
+      try {
+        const me = await c.call("me");
+        expect(me.data.permissions["home.counts"]).toBe("none");
+        expect(me.data.permissions["costs.view"]).toBe("read");
+        const r = await callApi(c.ctx, "analyzePricing", {}, { allowError: true, withStatus: true });
+        expect(r.status).toBe(200);
+        expect(Array.isArray(r.data.products)).toBe(true);
+      } finally { await c.ctx.dispose(); }
+    } finally {
+      await cleanUp(api, [C && C.id], [role.key]);
+    }
+  });
+
   test("a role someone holds can't be deleted, even by the owner, until they have another", async ({ page, api }) => {
     const role = (await api("saveRole", { name: "Held role " + slug("h").slice(-5), rank: 15, permissions: { fns: { "home.counts": "read" } } }, USERS)).role;
     let H = null;

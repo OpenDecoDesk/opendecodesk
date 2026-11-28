@@ -105,6 +105,8 @@ test("a read-only role exists and Roles and permissions shows it at Read everywh
   if (!roles.roles.some(r => r.name === "Read only")) {
     const fns = {};
     for (const m of roles.areas) for (const it of m.items) for (const [fn] of it.fns) fns[fn] = "read";
+    // …and the functions of no menu item (Money, costs and margins), listed apart.
+    for (const [fn] of roles.everywhere || []) fns[fn] = "read";
     await callApi(ctx, "saveRole", { name: "Read only", rank: 10, permissions: { menus: {}, items: {}, fns } }, { path: "/api/admin-users" });
   }
   await ctx.dispose();

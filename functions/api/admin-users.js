@@ -51,7 +51,7 @@ import {
 import { insertAuditLog, listUsers, getUserById, getUserByEmail, insertUser, updateUser, setUserRoleAndStatus, deleteUserSessions,
   listRoles, getRoleRow, insertRole, updateRole, deleteRole, roleInUse, getUserPrefs, saveUserPrefs, resolveTimeZone } from "../_lib/db.js";
 import { resolveRole } from "../_lib/adminAuth.js";
-import { PERMISSION_AREAS, PERM_FUNCTIONS, DEFAULT_ROLES, normalizePermissions, effectivePermissions, effectiveLevel, permRank } from "../_lib/permissions.js";
+import { PERMISSION_AREAS, EVERYWHERE_FNS, PERM_FUNCTIONS, DEFAULT_ROLES, normalizePermissions, effectivePermissions, effectiveLevel, permRank } from "../_lib/permissions.js";
 
 const ROLE_NAME_MAX = 40;
 
@@ -188,7 +188,8 @@ export async function onRequestPost(context){
       let rows;
       try{ rows = await listRoles(env.DB); }
       catch(e){ if(!/no such table: roles/i.test(String(e && e.message))) throw e; rows = Object.values(DEFAULT_ROLES).map(r => ({ ...r, userCount: 0 })); }
-      return jsonResponse({status:"ok", roles: rows.map(r => roleView(r)), areas: PERMISSION_AREAS, myRank, myLevels, myRole: myRole ? myRole.key : ""});
+      // everywhere: the functions of no menu item (Money, costs and margins), shown as their own rows.
+      return jsonResponse({status:"ok", roles: rows.map(r => roleView(r)), areas: PERMISSION_AREAS, everywhere: EVERYWHERE_FNS, myRank, myLevels, myRole: myRole ? myRole.key : ""});
     }
     if(action === "saveRole"){
       const name = typeof body.name === "string" ? body.name.trim().replace(/\s+/g, " ") : "";

@@ -19,7 +19,7 @@ export const permRank = (lvl) => lvl === "full" ? 3 : lvl === "edit" ? 2 : lvl =
 // Menus → items (nav hash) → functions [key, label]. Order is the order the Roles screen shows.
 export const PERMISSION_AREAS = [
   { key: "home", label: "Home", items: [
-    { hash: "home", label: "Home", fns: [["home.counts", "Order counts by step"], ["costs.view", "Money, costs and margins (everywhere)"]] } ] },
+    { hash: "home", label: "Home", fns: [["home.counts", "Order counts by step"]] } ] },
   { key: "orders", label: "Orders", items: [
     { hash: "orders", label: "Orders", fns: [
       ["orders.details", "Order details, items and notes"],
@@ -82,11 +82,21 @@ export const PERMISSION_AREAS = [
 ];
 // Always there for everyone signed in: their own account.
 export const ALWAYS_ITEMS = ["security", "password"];
+// Functions of no menu item: they apply on every screen, so no menu or item switch turns them off (the Roles screen
+// shows them as their own rows). Money, costs and margins was the Home item's until 2026-11: hiding Home took costs
+// away from Products, Blanks, Orders and the rest.
+export const EVERYWHERE_FNS = [["costs.view", "Money, costs and margins (everywhere)"]];
 
 export const PERM_FUNCTIONS = [];
 export const ITEM_OF_FN = Object.create(null);
 export const MENU_OF_ITEM = Object.create(null);
 for (const m of PERMISSION_AREAS) for (const it of m.items) { MENU_OF_ITEM[it.hash] = m.key; for (const [k] of it.fns) { PERM_FUNCTIONS.push(k); ITEM_OF_FN[k] = it.hash; } }
+for (const [k] of EVERYWHERE_FNS) PERM_FUNCTIONS.push(k);
+const isEverywhere_ = (fn) => EVERYWHERE_FNS.some(([k]) => k === fn);
+// A role saved before costs.view left Home has no `costsApart` mark: there, Home hidden (its item or its menu) still
+// means no costs, as it did when the role was saved, so no existing role gains cost access from the move. Saving
+// the role again (normalizePermissions) writes the level it then has, with the mark.
+const homeHidesCosts_ = (p) => !p.costsApart && ((p.menus || {})[MENU_OF_ITEM.home] === false || (p.items || {}).home === false);
 
 // Which function, at which level, each /api/orders action needs. Listed per function so the
 // level a button needs is easy to read: read = looks, edit = adds or changes, full = deletes, voids,
@@ -286,10 +296,10 @@ const PRODUCTION_FNS = only_({
 });
 // rank: who may change whom (admin-users.js): only a higher rank lowers, raises or edits a lower one.
 export const DEFAULT_ROLES = {
-  admin:      { key: "admin", name: "Admin", rank: 100, builtIn: true, locked: true, permissions: { menus: {}, items: {}, fns: all_("full") } },
-  manager:    { key: "manager", name: "Manager", rank: 75, builtIn: true, locked: false, permissions: { menus: {}, items: {}, fns: MANAGER_FNS } },
-  staff:      { key: "staff", name: "Back office", rank: 50, builtIn: true, locked: false, permissions: { menus: {}, items: {}, fns: STAFF_FNS } },
-  production: { key: "production", name: "Production", rank: 25, builtIn: true, locked: false, permissions: { menus: {}, items: {}, fns: PRODUCTION_FNS } },
+  admin:      { key: "admin", name: "Admin", rank: 100, builtIn: true, locked: true, permissions: { menus: {}, items: {}, fns: all_("full"), costsApart: true } },
+  manager:    { key: "manager", name: "Manager", rank: 75, builtIn: true, locked: false, permissions: { menus: {}, items: {}, fns: MANAGER_FNS, costsApart: true } },
+  staff:      { key: "staff", name: "Back office", rank: 50, builtIn: true, locked: false, permissions: { menus: {}, items: {}, fns: STAFF_FNS, costsApart: true } },
+  production: { key: "production", name: "Production", rank: 25, builtIn: true, locked: false, permissions: { menus: {}, items: {}, fns: PRODUCTION_FNS, costsApart: true } },
 };
 
 // A permissions object as stored → a clean one: only known keys and levels; anything unknown is off.
@@ -302,14 +312,17 @@ export function normalizePermissions(p) {
     if (src.menus && src.menus[m.key] === false) menus[m.key] = false;
     for (const it of m.items) if (src.items && src.items[it.hash] === false) items[it.hash] = false;
   }
-  return { menus, items, fns };
+  if (homeHidesCosts_(src)) for (const [k] of EVERYWHERE_FNS) fns[k] = "none";
+  return { menus, items, fns, costsApart: true };
 }
 
-// The level a role really has for a function: none when its menu or item is switched off.
+// The level a role really has for a function: none when its menu or item is switched off. A function of no item
+// (EVERYWHERE_FNS) is its own level whatever is hidden.
 export function effectiveLevel(role, fn) {
   if (!role) return "none";
   if (role.locked && role.key === "admin") return "full";
   const p = role.permissions || {};
+  if (isEverywhere_(fn)) { const lvl = homeHidesCosts_(p) ? "none" : (p.fns || {})[fn]; return PERM_LEVELS.includes(lvl) ? lvl : "none"; }
   const item = ITEM_OF_FN[fn];
   if (!item) return "none";
   if ((p.menus || {})[MENU_OF_ITEM[item]] === false || (p.items || {})[item] === false) return "none";

@@ -9,7 +9,8 @@
 // the rounding change; a blank's MAP changed on Inventory → Blanks showing in After; Apply with Cancel (nothing
 // changes) and with Apply prices (the saved prices, the shop page before and after Publish); Close without saving; Save
 // this rule; and the role limits (Manager may apply but not save the rule; Read only only looks, and the server
-// refuses it the apply). The product form's price calculator, which starts from the saved rule, is checked once too.
+// refuses it the apply). The server applies only the SAVED rule's prices: Apply saves a rule changed in the window
+// first, and a Manager, who can't save it, can apply only once the rule shown is the saved one. The product form's price calculator, which starts from the saved rule, is checked once too.
 //
 // The approval box shows on a product linked to a blank of a restricted brand: adding an approval (the supplier's file
 // is required), for this product and another of the shop, then revoking it.
@@ -124,24 +125,34 @@ test("the price impact window follows the rule typed in it, applies the ticked p
     expect(await figures(L)).toEqual(["$23.00", "$24.00", "+$1.00"]);
     await dlg.getByRole("checkbox", { name: "Only prices that would change" }).uncheck();
 
-    // Only this test's S, M and the cap ticked (L left as it is): Apply 3 prices in 2 shops.
+    // Only this test's S, M and the cap ticked (L left as it is): Apply 3 prices in 2 shops. The server applies only the
+    // saved rule's prices, so the rule typed here is saved first, and the window says so.
     await tickOnly(dlg, [S, M, C]);
+    await expect(dlg.locator("#piRuleNote")).toHaveText("The rule as changed here is saved first when you apply these prices.");
     const apply = dlg.getByRole("button", { name: "Apply 3 prices…" });
     await apply.click();
     const ask = page.getByRole("dialog", { name: "Apply 3 new prices in 2 shops?" });
-    await expect(ask).toContainText("Shoppers see the new prices when each shop is published.");
-    // Cancel: nothing is applied.
+    await expect(ask).toContainText("The price rule as changed here is saved first. Shoppers see the new prices when each shop is published.");
+    // Cancel: nothing is applied, and the rule isn't saved.
     await ask.getByRole("button", { name: "Cancel" }).click();
     await expect(ask).toHaveCount(0);
     expect(await pricesOf(api, d.shopA)).toEqual({ S: 20, M: 21, L: 23 });
     expect(await pricesOf(api, d.shopB)).toEqual({ flat: 18 });
-    // Apply prices.
+    expect(await brandPriceOf(api, d.brand)).toBeNull();
+    // Apply prices: the rule is saved, then its prices applied.
     await apply.click();
     await page.getByRole("dialog", { name: "Apply 3 new prices in 2 shops?" }).getByRole("button", { name: "Apply prices" }).click();
     const done = dlg.locator("#piDone");
     await expect(done).toContainText("Applied 3 prices in 2 shops. They're drafts until published:");
     expect(await pricesOf(api, d.shopA)).toEqual({ S: 22, M: 22, L: 23 });
     expect(await pricesOf(api, d.shopB)).toEqual({ flat: 22 });
+    expect(await brandPriceOf(api, d.brand)).toEqual({ brand: d.brand, add: 12, unit: "amount" });
+    await expect(dlg.locator("#piRuleNote")).toHaveText("");
+    // A price that isn't the saved rule's is refused by the server, naming the product, and nothing changes.
+    const wrong = await api("applyRulePrices", { changes: [{ org: d.shopA.orgId, productId: d.shopA.products[0].productId, group: "", size: "L", price: 1 }] }, { allowError: true, withStatus: true });
+    expect(wrong.status).toBe(400);
+    expect(wrong.data.message).toContain(d.tee + " L: $1.00 isn't the saved price rule's price ($24.00, or that rounded up).");
+    expect(await pricesOf(api, d.shopA)).toEqual({ S: 22, M: 22, L: 23 });
     // The window reloads: the applied rows are at their After price; L still would change, ticked again.
     expect(await figures(S)).toEqual(["$22.00", "$22.00", "$0.00"]);
     expect(await figures(C)).toEqual(["$22.00", "$22.00", "$0.00"]);
@@ -160,10 +171,11 @@ test("the price impact window follows the rule typed in it, applies the ticked p
     await shopper.goto(shopUrl(d.shopA.subdomain) + "/");
     await expect(shopCard(shopper, d.tee)).toContainText("from $20.00");
 
-    // Closed without "Save this rule": the rule typed in the window wasn't kept.
+    // A rule typed afterwards and closed without "Save this rule" or Apply isn't kept: still the one Apply saved.
+    await rule.amount.fill("13");
     await dlg.getByRole("button", { name: "Close" }).first().click();
     await expect(dlg).toHaveCount(0);
-    expect(await brandPriceOf(api, d.brand)).toBeNull();
+    expect(await brandPriceOf(api, d.brand)).toEqual({ brand: d.brand, add: 12, unit: "amount" });
   } finally {
     await dropBrand(api, d.brand);
   }
@@ -230,9 +242,29 @@ test("a Manager may apply the window's prices but not save its rule; Read only o
     let dlg = await openImpact(manager);
     await expect(dlg.getByRole("button", { name: "Save this rule" })).toHaveCount(0);
     await brandRule(dlg, d.brand).amount.fill("12");
-    const S = piRow(dlg, d.tee, "S");
+    let S = piRow(dlg, d.tee, "S");
     expect(await figures(S)).toEqual(["$20.00", "$22.00", "+$2.00"]);
     await tickOnly(dlg, [S]);
+    // The server applies only the saved rule's prices, and a Manager can't save the rule: Apply stays off, and says why.
+    await expect(dlg.getByRole("button", { name: "Apply 1 price…" })).toBeDisabled();
+    await expect(dlg.locator("#piRuleNote")).toHaveText("Apply sets the saved price rule's prices, and your role can't change the rule: set it back as it was to apply them.");
+    // …nor does the server take that price from a Manager while the rule isn't saved.
+    const mctx = await apiContext("manager", testInfo.workerIndex);
+    try {
+      const r = await callApi(mctx, "applyRulePrices", { changes: [{ org: d.shopA.orgId, productId: d.shopA.products[0].productId, group: "", size: "S", price: 22 }] }, { allowError: true, withStatus: true });
+      expect(r.status).toBe(400);
+      expect(r.data.message).toContain(d.tee + " S: ");
+    } finally { await mctx.dispose(); }
+    expect(await pricesOf(api, d.shopA)).toEqual({ S: 20, M: 21, L: 23 });
+    await dlg.getByRole("button", { name: "Close" }).first().click();
+    // Once the owner saves the brand's rule (MAP + $12), the window opens with it and the Manager applies its prices.
+    const { rules } = await api("getBrandRules");
+    await api("updateBrandRules", { rules: { ...rules, brandPrices: [...(rules.brandPrices || []), { brand: d.brand, add: 12, unit: "amount" }] } });
+    dlg = await openImpact(manager);
+    await expect(brandRule(dlg, d.brand).amount).toHaveValue("12");
+    S = piRow(dlg, d.tee, "S");
+    await tickOnly(dlg, [S]);
+    await expect(dlg.locator("#piRuleNote")).toHaveText("");
     await dlg.getByRole("button", { name: "Apply 1 price…" }).click();
     await manager.getByRole("dialog", { name: "Apply 1 new price in 1 shop?" }).getByRole("button", { name: "Apply prices" }).click();
     await expect(dlg.locator("#piDone")).toContainText("Applied 1 price in 1 shop.");
